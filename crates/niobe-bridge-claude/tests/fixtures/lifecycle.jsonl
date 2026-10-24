@@ -1,0 +1,7 @@
+{"type":"system","subtype":"init","cwd":"/repo","session_id":"3a1b5c7d-2e4f-4a60-8b9c-0d1e2f3a4b5c","model":"claude-sonnet-5-5","permissionMode":"default","apiKeySource":"none","claude_code_version":"2.1.292","uuid":"11111111-2222-4333-8444-555555555555"}
+{"type":"command_lifecycle","uuid":"6a7b8c9d-0e1f-4a2b-8c3d-4e5f6a7b8c9d","state":"queued"}
+{"type":"command_lifecycle","uuid":"6a7b8c9d-0e1f-4a2b-8c3d-4e5f6a7b8c9d","state":"started"}
+{"type":"assistant","message":{"model":"claude-sonnet-5-5","id":"msg_01LifecycleFixture0001","type":"message","role":"assistant","content":[{"type":"tool_use","id":"toolu_lifecycle_bash","name":"Bash","input":{"command":"git status --short"}}],"stop_reason":"tool_use","usage":{"input_tokens":3,"output_tokens":40,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}},"session_id":"3a1b5c7d-2e4f-4a60-8b9c-0d1e2f3a4b5c"}
+{"type":"system","subtype":"permission_check_status","tool_use_id":"toolu_lifecycle_bash","status":"checking","uuid":"22222222-3333-4444-8555-666666666666","session_id":"3a1b5c7d-2e4f-4a60-8b9c-0d1e2f3a4b5c"}
+{"type":"system","subtype":"permission_check_status","tool_use_id":"toolu_lifecycle_bash","status":"done","uuid":"33333333-4444-4555-8666-777777777777","session_id":"3a1b5c7d-2e4f-4a60-8b9c-0d1e2f3a4b5c"}
+{"type":"command_lifecycle","uuid":"6a7b8c9d-0e1f-4a2b-8c3d-4e5f6a7b8c9d","state":"completed"}

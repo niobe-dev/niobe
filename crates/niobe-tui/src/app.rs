@@ -15,22 +15,30 @@
 //! are neither queued nor shown again after a restart.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
+use niobe_core::attention::Attention;
+use niobe_core::catch_up::{CatchUp, Mark};
 use niobe_core::diff::Hunk;
 use niobe_core::event::{
-    AgentId, AgentOutcome, Backend, Event, Mode, PermissionDecision, SlashCommand, ToolCallId,
-    ToolOutcome, UsageWindow,
+    AgentId, AgentOutcome, Backend, Billing, CompactTrigger, Event, Mode, PermissionDecision,
+    SlashCommand, TokenCounts, ToolCallId, ToolOutcome, UsageWindow, UsageWindows,
 };
 use niobe_core::permission::{Allowlist, Rule};
 use niobe_core::session::{DecisionRecord, SessionState, TestRunRecord};
 use ratatui_textarea::{Input, TextArea, WrapMode};
+use unicode_segmentation::UnicodeSegmentation;
 
 use ratatui::style::Style;
 
+use crate::alert::{Alert, Alerts};
 use crate::clock::{Clock, LocalTime, Stamp};
+use crate::history::{Browser, Listed, Newer, PromptRow, Recall, SessionRow, Target, View};
+use crate::images::{Attachments, DraftId, Fetched, Source, image_path};
 use crate::prices::Prices;
+use crate::proposed::Proposed;
 use crate::theme::{Depth, Theme};
+use crate::trust;
 
 /// Where the session is running, for the pane title and the Changes pane.
 ///
@@ -47,7 +55,7 @@ pub struct Repo {
     pub branch: Option<String>,
     /// Whether a read of the repository has finished.
     ///
-    /// Until one has, the working tree and the commits below are empty because
+    /// Until one has, the working tree below is empty because
     /// nobody has looked, which is not the same as the repository having
     /// nothing to report — and a `+0 −0` standing in for the difference would
     /// be the pane's first invented figure. The name and the branch are read
@@ -63,13 +71,15 @@ pub struct Repo {
     /// What the working tree has changed against the last commit, one entry per
     /// file, in the order the repository reported them.
     pub working: Vec<WorkingFile>,
-    /// The commits made since the session started, newest first.
-    pub commits: Vec<Commit>,
     /// Every file under the directory the session runs in that the repository
     /// has or would take — committed, staged, or new and not ignored — by the
     /// path the agent names it by, relative to that directory. What `@`
     /// completes a file from.
     pub files: Vec<String>,
+    /// When the read this came from began, where it came from one. What the
+    /// shell compares a turn's end with: only a read that began after the
+    /// turn ended says what the turn left behind.
+    pub began: Option<Instant>,
 }
 
 /// One file the working tree has changed, measured from the repository.
@@ -88,24 +98,10 @@ pub struct WorkingFile {
     pub added: Option<u64>,
     /// Lines removed, on the same terms as [`WorkingFile::added`].
     pub removed: Option<u64>,
-}
-
-/// A commit made while the session has been running.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Commit {
-    /// The hash, shortened the way the repository shortens it.
-    pub hash: String,
-    /// The first line of the message.
-    pub subject: String,
-    /// When it was committed, where the repository dated it. The pane draws
-    /// how long ago that was; a commit with no date carries no age rather than
-    /// one counted from the moment it was read.
-    pub at: Option<SystemTime>,
-    /// Whether the branch's upstream already has it. A branch with no upstream
-    /// has nowhere to have pushed it, so nothing there is pushed; `None` is a
-    /// branch that names an upstream the repository cannot find, where the
-    /// answer is not known rather than no.
-    pub pushed: Option<bool>,
+    /// Whether it is a file the repository does not track yet. Its lines are
+    /// counted the way git counts a file once it is added, or not at all
+    /// where it was too large to read; it removed none.
+    pub new: bool,
 }
 
 /// A pane of the right-hand stack that scrolls and holds folding sections.
@@ -115,9 +111,10 @@ pub struct Commit {
 /// rather than inferred at each call site.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pane {
-    /// What the session changed: the working tree, the commits, the files.
+    /// What the repository has not committed yet: the branch and the working
+    /// tree.
     Changes,
-    /// What the session is doing: its sub-agents, decisions and tools.
+    /// What the session is doing: its sub-agents and tools.
     Activity,
 }
 
@@ -148,25 +145,14 @@ impl Focus {
 }
 
 /// A section of the Changes or Activity pane, which folds on its own.
-///
-/// Each names one claim about the work, and two of them are claims about the
-/// same files made by different parties — which is why they are never one
-/// section: [`Section::WorkingTree`] is what the repository measured, and
-/// [`Section::Edited`] is what this session's own edit tools reported, a floor
-/// where a tool did not say how much it changed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Section {
-    /// What the repository says the working tree has changed.
+    /// What the repository says the working tree has changed: every
+    /// uncommitted change, whoever made it.
     WorkingTree,
-    /// The commits made since the session started.
-    Commits,
-    /// What this session's edit tools said they changed.
-    Edited,
-    /// What the session's latest test run reported.
-    Tests,
     /// The sub-agents the session spawned, running and finished.
     SubAgents,
-    /// The decisions the session recorded.
+    /// The decisions the agent's replies stated, as it tells them.
     Decisions,
     /// The tools it called, and how often.
     Tools,
@@ -174,11 +160,8 @@ pub enum Section {
 
 impl Section {
     /// Every section, in the order the panes draw them.
-    pub const ALL: [Section; 7] = [
+    pub const ALL: [Section; 4] = [
         Section::WorkingTree,
-        Section::Commits,
-        Section::Edited,
-        Section::Tests,
         Section::SubAgents,
         Section::Decisions,
         Section::Tools,
@@ -187,9 +170,7 @@ impl Section {
     /// The pane this section is drawn in.
     pub fn pane(self) -> Pane {
         match self {
-            Section::WorkingTree | Section::Commits | Section::Edited | Section::Tests => {
-                Pane::Changes
-            }
+            Section::WorkingTree => Pane::Changes,
             Section::SubAgents | Section::Decisions | Section::Tools => Pane::Activity,
         }
     }
@@ -293,17 +274,55 @@ pub struct SelectedProfile {
     pub name: String,
     /// The backend the profile runs.
     pub backend: Backend,
-    /// The models the profile offers, in the order it names them. Empty where
-    /// it names none, and the shell then has nothing to offer: a model id
-    /// invented here would be one the backend never heard of.
+    /// The models the profile narrows the backend's list to, in the order it
+    /// names them, and what is offered where the backend lists none. Empty
+    /// where it names none, and the shell then offers what the backend lists:
+    /// a model id invented here would be one the backend never heard of.
     pub models: Vec<String>,
+    /// How the profile says its account is billed, where it says. Read before
+    /// the backend has said, so that a profile known to be metered is not
+    /// drawn plan windows while the first reply is awaited.
+    pub billing: Option<Billing>,
 }
+
+/// The plan's usage windows, as the Usage pane draws them.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PlanWindows {
+    /// Nothing to draw: the account is metered, or nothing was reported and
+    /// nothing is coming.
+    None,
+    /// What this session's backend last reported.
+    Reported(UsageWindows),
+    /// What an earlier session under the same profile recorded, or what this
+    /// session's own record held before it was resumed, dated `at`, until
+    /// this session's backend reports. A window whose reset has come
+    /// around since holds a level that is not a number rather than its
+    /// stale one, since nothing has measured it since: see
+    /// [`App::plan_windows`].
+    Carried {
+        /// The levels, with every window that has reset since unmeasured.
+        windows: UsageWindows,
+        /// When they were recorded.
+        at: Stamp,
+    },
+    /// Nothing reported and nothing recorded, on a session whose first reply
+    /// has not come in: the backend reports the windows with it.
+    Awaited,
+}
+
+/// How long the seven-day window is. It comes back at the same moment every
+/// week, so a recorded reset that has passed names the next one by whole
+/// weeks; the five-hour window starts again only with the next request, so it
+/// names none.
+const SEVEN_DAYS: u64 = 7 * 86_400;
 
 /// A permission prompt the shell is waiting on the operator to answer.
 ///
-/// What the backend said, and nothing derived: the question shows the tool,
-/// what it would run on and the whole of its arguments, because approving a
-/// call whose arguments were summarised away is approving something else.
+/// What the backend said: the question shows the tool, what it would run on
+/// and the whole of its arguments, because approving a call whose arguments
+/// were summarised away is approving something else. The one thing derived is
+/// the lines of a proposed change, worked out once here rather than with
+/// every frame the question is drawn in.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ask {
     /// The call being gated, which the answer is addressed by.
@@ -315,6 +334,13 @@ pub struct Ask {
     /// The one thing the call acts on, where the backend could name it. A
     /// prompt without one can only be answered for the whole tool.
     pub target: Option<String>,
+    /// What the call would do, where the backend read it out of the
+    /// arguments; `None` leaves the arguments to be shown by key.
+    pub proposed: Option<Proposed>,
+    /// Why the backend asked, in its words, where it said. Drawn under the
+    /// tool's name: it is what tells a call that looks routine from the
+    /// reason it was stopped on.
+    pub reason: Option<String>,
     /// The turn the call belongs to, counted in prompts sent this session,
     /// which is what the question says it is blocking. Zero where the session
     /// has no prompt on record, as one attached to a turn already running.
@@ -325,11 +351,26 @@ pub struct Ask {
     pub agent: Option<AgentId>,
 }
 
+/// What the operator has already been called back for: the questions waiting
+/// when the loop last asked, and whether a turn sent from here was running.
+#[derive(Debug, Clone, Default)]
+struct Called {
+    asks: BTreeSet<ToolCallId>,
+    working: bool,
+}
+
 impl Ask {
     /// Whether this prompt can be given `answer`. A standing answer about the
-    /// target needs a target to be about.
+    /// target needs a target to be about, and a standing answer is offered
+    /// only where its rule can be written into a config and read back — and
+    /// never to a plan, which it would let go ahead unread every time after.
     pub fn offers(&self, answer: Answer) -> bool {
-        answer != Answer::AlwaysTarget || self.target.is_some()
+        let plan = self.proposed.as_ref().is_some_and(Proposed::is_plan);
+        match answer {
+            Answer::Once | Answer::No => true,
+            Answer::AlwaysTool => !plan && self.tool_rule().is_some(),
+            Answer::AlwaysTarget => !plan && self.target_rule().is_some(),
+        }
     }
 
     /// The answers this prompt offers, in the order they are numbered.
@@ -340,17 +381,20 @@ impl Ask {
             .collect()
     }
 
-    /// The standing rule "always this tool".
-    pub fn tool_rule(&self) -> Rule {
-        Rule::tool(self.tool.clone())
+    /// The standing rule "always this tool", where its name can be written
+    /// down and read back as itself.
+    pub fn tool_rule(&self) -> Option<Rule> {
+        Some(Rule::tool(self.tool.clone())).filter(Rule::reads_back)
     }
 
     /// The standing rule "always this tool, on this target", where the prompt
-    /// has a target to write one about.
+    /// has a target to write one about and the rule reads back as itself —
+    /// not for an empty target, which would be written as no rule at all.
     pub fn target_rule(&self) -> Option<Rule> {
         self.target
             .as_ref()
             .map(|target| Rule::targeted(self.tool.clone(), target.clone()))
+            .filter(Rule::reads_back)
     }
 }
 
@@ -377,6 +421,43 @@ impl Answer {
     ];
 }
 
+/// Something the operator opened over the session that takes the keyboard
+/// from the composer, and from a question waiting under it, until it closes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Overlay {
+    /// A menu from the bar.
+    Menu,
+    /// A sheet: the shortcuts, the settings, the permissions and the like.
+    Sheet,
+    /// The Memory view.
+    Memory,
+    /// The MCP view.
+    Mcp,
+    /// The history dialog.
+    History,
+    /// A list to pick from: the models, the efforts, the themes.
+    List,
+    /// The search in the transcript.
+    Search,
+    /// One tool call read whole.
+    Detail,
+}
+
+impl Overlay {
+    /// Every overlay there is.
+    #[cfg(test)]
+    const ALL: [Overlay; 8] = [
+        Overlay::Menu,
+        Overlay::Sheet,
+        Overlay::Memory,
+        Overlay::Mcp,
+        Overlay::History,
+        Overlay::List,
+        Overlay::Search,
+        Overlay::Detail,
+    ];
+}
+
 /// Where the keyboard is while a prompt is waiting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AskFocus {
@@ -390,17 +471,155 @@ pub enum AskFocus {
     Deferred,
 }
 
-/// The models the operator is choosing between.
-///
-/// The list is the profile's, in the order it names them: the shell knows no
-/// backend and so knows no models of its own, and offering an id the backend
-/// would refuse is worse than offering nothing.
+/// A list the operator is choosing one of: what it is for, what it offers and
+/// where the cursor is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Picker {
-    /// The models offered.
-    pub models: Vec<String>,
+    /// What choosing does.
+    pub purpose: Purpose,
+    /// What is offered, in the order it is drawn.
+    pub options: Vec<Choice>,
     /// Which one the cursor is on.
     pub at: usize,
+    /// How many more the backend offers than the list holds, where the
+    /// profile narrowed it: the list says so, rather than reading as all
+    /// there is.
+    pub more: usize,
+}
+
+/// One row of a [`Picker`]: what choosing it sends, and what it is called and
+/// for where the backend said.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Choice {
+    /// What choosing sends, exactly as the backend takes it.
+    pub value: String,
+    /// What the backend calls it, where that is not the value itself.
+    pub name: Option<String>,
+    /// What it is for, in the backend's words.
+    pub note: Option<String>,
+}
+
+impl Choice {
+    /// A row that is its value and nothing more.
+    pub fn plain(value: impl Into<String>) -> Self {
+        Self {
+            value: value.into(),
+            name: None,
+            note: None,
+        }
+    }
+}
+
+/// What a [`Picker`] chooses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Purpose {
+    /// The model the session runs on. The list is the backend's, as it said
+    /// it offers them; where the profile names models, only those, in its
+    /// order; and where the backend has listed none, the profile's. The shell
+    /// knows no models of its own, and offering an id the backend would refuse
+    /// is worse than offering nothing.
+    Model,
+    /// How hard the model works on a turn, sent as the backend's `/effort`.
+    Effort,
+    /// The palette the shell is drawn in.
+    Theme,
+    /// A tool call of the conversation, to read whole. A choice's value is
+    /// where the call is in the order the calls started.
+    Call,
+    /// A sub-agent, whose entries alone the transcript is narrowed to. A
+    /// choice's value is the agent's id.
+    Agent,
+    /// A prompt sent from here, to put the files back as they were before.
+    /// A choice's value is where the prompt is among those sent.
+    Rewind,
+}
+
+/// The Shortcuts sheet's rows on what a typed command does: the names that
+/// open the shell's own view rather than reach the backend, each beside the
+/// menu item it opens, and the hold on a command the backend did not list.
+fn typed_rows() -> [String; 3] {
+    let own = crate::menu::TYPED
+        .iter()
+        .filter(|typed| !typed.backend)
+        .filter_map(|typed| {
+            crate::menu::label(typed.action).map(|label| format!("/{} {label}", typed.name))
+        })
+        .collect::<Vec<_>>()
+        .join(" · ");
+    [
+        "Typed as a prompt, these open the shell's own:".to_owned(),
+        own,
+        "A command the backend does not list is held once: Enter again sends it.".to_owned(),
+    ]
+}
+
+/// The command `text` opens with where it is a word the backend did not
+/// list among `listed`, which must not be empty. A word with a `/` inside it
+/// is a path, not a command.
+fn unlisted_command<'a>(text: &'a str, listed: &[SlashCommand]) -> Option<&'a str> {
+    if listed.is_empty() {
+        return None;
+    }
+    let word = text
+        .trim_start()
+        .strip_prefix('/')?
+        .split_whitespace()
+        .next()?;
+    let command_like = word
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ':'));
+    (command_like && !listed.iter().any(|command| command.name == word)).then_some(word)
+}
+
+/// The most characters of a prompt the rewind list names it by.
+const REWIND_LABEL: usize = 60;
+
+/// The effort levels offered, in the order the `claude` CLI's `/effort`
+/// lists them in its argument hint (Claude Code 2.1.287). Its `auto` and
+/// `ultracode` are left out: they are switches of their own rather than a
+/// level, and a list of levels with them in would read as a scale they are
+/// not on.
+pub const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+
+/// Something the shell has to say that takes more than a line: what it is
+/// running under, the keys it answers to. It holds the keyboard until it is
+/// closed, and changes nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Sheet {
+    /// What it is about, on its top edge.
+    pub title: String,
+    /// What it says, a row each; a row is wrapped to the sheet's width.
+    pub rows: Vec<String>,
+    /// What `o` opens, where there is something to open.
+    pub link: Option<String>,
+    /// How many wrapped lines are scrolled off its top.
+    pub scroll: usize,
+}
+
+/// Files outside the session the shell can name or have opened, found by the
+/// binary: the shell touches no filesystem.
+///
+/// A file is handed over to be opened only where it is a regular file and not
+/// a link. A repository decides what its own files are, and a config file
+/// linked to something the desktop runs rather than shows would be run by the
+/// key that was meant to show it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Places {
+    /// The config files the session was read from, lowest precedence first,
+    /// whether or not each is there.
+    pub config_files: Vec<ConfigFile>,
+}
+
+/// A config file the session looked for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigFile {
+    /// Where it is, or would be.
+    pub path: String,
+    /// Whether there was a file there to read.
+    pub exists: bool,
+    /// Whether it may be handed to the desktop to open: a regular file, not
+    /// a link.
+    pub openable: bool,
 }
 
 /// What a transcript entry is, which decides its glyph and its colour.
@@ -421,6 +640,30 @@ pub enum EntryKind {
     Notice,
     /// The rule drawn where a turn ended, with what the turn spent on it.
     Turn(TurnRule),
+    /// The row drawn where the backend compacted the conversation, with how
+    /// much it held before and after.
+    Compacted(CompactionRow),
+}
+
+/// What the row a compaction leaves in the transcript says about it.
+///
+/// `before` and `after` are measured prompt sizes, and each is `None` until
+/// something measured it: the backend's count of the conversation it
+/// compacted, and the size of the first request the session's own agent sent
+/// after it. `floor` is what the backend said it left, which that request
+/// measures more than, and is what the row shows until it does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CompactionRow {
+    /// Who started it.
+    pub trigger: CompactTrigger,
+    /// Every prompt token the conversation held before it.
+    pub before: Option<u64>,
+    /// What the backend said the conversation holds after it, without the
+    /// system prompt and tools a request sends beside it. `None` where it did
+    /// not say.
+    pub floor: Option<u64>,
+    /// Every prompt token of the next request, which carries what is left.
+    pub after: Option<u64>,
 }
 
 /// What the rule under a finished turn says about it.
@@ -444,6 +687,17 @@ pub struct TurnRule {
     pub five_hour_points: Option<u64>,
     /// How long it ran, from the prompt that opened it to its end.
     pub took: Option<Duration>,
+    /// How many sub-agents it spawned.
+    pub agents: u64,
+    /// How many tool calls the transcript shows it making, its sub-agents'
+    /// included.
+    pub calls: u64,
+    /// Whether it was cut off rather than ended by the backend: the session
+    /// failed under it, or the process running it stopped.
+    pub cut: bool,
+    /// What started the compaction of the conversation it ran, where it ran
+    /// one.
+    pub compacted: Option<CompactTrigger>,
 }
 
 impl EntryKind {
@@ -457,6 +711,7 @@ impl EntryKind {
             Self::Failure => "!",
             Self::Notice => "·",
             Self::Turn(_) => "─",
+            Self::Compacted(_) => "⇣",
         }
     }
 
@@ -467,7 +722,7 @@ impl EntryKind {
             Self::Agent | Self::SubAgent => theme.agent,
             Self::Tool => theme.tool,
             Self::Failure => theme.del,
-            Self::Notice | Self::Turn(_) => theme.dim,
+            Self::Notice | Self::Turn(_) | Self::Compacted(_) => theme.dim,
         }
     }
 }
@@ -483,6 +738,12 @@ pub struct Entry {
     /// on a tool call's own entry, whose figures are its [`Entry::calls`].
     pub meta: String,
     /// The body, wrapped at draw time.
+    ///
+    /// Once the entry is not streaming, its body is written again only
+    /// together with something else about the entry — its meta, its
+    /// streaming flag — or to text of another length: the transcript keeps a
+    /// finished entry's layout by its body's length, so that a frame does not
+    /// read the whole of a long reply to learn it has not changed.
     pub body: String,
     /// Whether more of this entry is still arriving.
     pub streaming: bool,
@@ -506,14 +767,16 @@ pub struct Entry {
     /// `None` for the session's own and for everything that is not the
     /// agents'.
     ///
-    /// Named by the shortest part of the name the Activity pane lists it by
-    /// that tells it apart from every other agent the session spawned: two
-    /// reviewers spawned as `deep-reasoner: Review catalog/fetch.py` and
-    /// `deep-reasoner: Review catalog/cache.py` are `…fetch.py` and
-    /// `…cache.py`, which a row cut short still tells apart. It is worked out
-    /// again whenever an agent is spawned, because a new one can make an
-    /// older one's name ambiguous.
+    /// Named by its tag: a word of the kind of agent it was asked to be that
+    /// no other kind shares, numbered where two agents would read alike —
+    /// see [`crate::tags`]. It is worked out again whenever an agent is
+    /// spawned, because a new one can take an older one's word.
     pub agent: Option<String>,
+    /// How much the entry asks of the operator: the highest of the events
+    /// that built it, as [`Attention::of`] reads each, or what the shell
+    /// says it is for an entry of its own. What the transcript hides, where
+    /// it is asked to show only what is notable.
+    pub attention: Attention,
 }
 
 /// One tool call as the transcript shows it: what it does, how it ended and
@@ -557,10 +820,43 @@ pub struct Call {
     /// output held the whole run, and otherwise that it ran and whether it is
     /// known to have failed. `None` for every call that was not one.
     pub tested: Option<TestRunRecord>,
-    /// Whether the session ended while the call was running, so that no end
-    /// will arrive for it. It is not running, and it did not fail: the
-    /// backend that was running it is gone.
+    /// Whether what the call does runs the tests, read from it as it starts
+    /// so the transcript can draw a run in progress as one.
+    pub testing: bool,
+    /// How long the last run of the same command took in this session, where
+    /// it ran to the end and its counts were read: what this run's progress
+    /// is drawn against while it runs. A run that stopped short is nothing to
+    /// measure by, and the backend reports no progress of its own.
+    pub last_run: Option<Duration>,
+    /// Whether the session, or the turn it ran in, ended while the call was
+    /// running, so that no end will arrive for it. It is not running, and it
+    /// did not fail: the backend that was running it is gone, or has said the
+    /// turn is over without reporting it.
     pub interrupted: bool,
+    /// Who let it through, where this shell can say; `None` while it runs
+    /// and where it cannot.
+    pub gate: Option<Gate>,
+    /// Whether a question about it is waiting on the operator, so it has not
+    /// started running: what it is doing is waiting, and a test run is not
+    /// drawn as one until it is allowed.
+    pub asked: bool,
+    /// Whether the file it changed is one of the notes the agent keeps for
+    /// itself rather than the project's, as the backend said: drawn as the
+    /// agent updating its memory, with the diff behind Ctrl+T.
+    pub memory: bool,
+    /// The programs an agent's shell call ran, `cargo test · tail`: what its
+    /// row says in place of the command, which the operator reads behind
+    /// Ctrl+T. `None` for a call that ran no command, and for one the
+    /// operator ran, whose command is what they typed.
+    pub programs: Option<String>,
+    /// The whole command an agent's shell call ran, where the backend
+    /// reported it at the call's end. `None` before then, where it was not
+    /// reported, and for every call [`Call::programs`] is `None` for.
+    pub command: Option<String>,
+    /// What the operator wrote in place of letting the call run, where they
+    /// refused it at the prompt with words of their own: drawn whole under
+    /// its row, since it is what the agent was told to do instead.
+    pub answer: Option<String>,
     /// When it started running: its start, or the moment it was allowed
     /// where it waited on a question first, so that the time the operator
     /// took to answer is not read as the time the tool took.
@@ -569,8 +865,9 @@ pub struct Call {
 
 impl Call {
     /// A call that has just started, at `at`.
-    fn started(what: String, at: Option<Stamp>) -> Self {
+    pub(crate) fn started(what: String, at: Option<Stamp>) -> Self {
         Self {
+            testing: niobe_core::test_run::is_test_run(&what),
             what,
             outcome: None,
             bytes: None,
@@ -581,7 +878,14 @@ impl Call {
             change: None,
             printed: None,
             tested: None,
+            last_run: None,
             interrupted: false,
+            gate: None,
+            asked: false,
+            memory: false,
+            programs: None,
+            command: None,
+            answer: None,
             started: at,
         }
     }
@@ -596,6 +900,12 @@ impl Call {
             (Some(started), Some(at)) => at.since(started).filter(|took| *took >= TIMED),
             _ => None,
         };
+    }
+
+    /// When it started running, where the shell had a clock at the time:
+    /// what a run in progress is timed from.
+    pub fn began(&self) -> Option<Stamp> {
+        self.started
     }
 
     /// Whether the call is still running.
@@ -616,8 +926,13 @@ impl Call {
 /// them under the call.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Printed {
-    /// How many lines it printed above the ones kept.
+    /// How many lines it printed above the ones kept, as far as what reached
+    /// the shell holds them: all of them, unless `cut`.
     pub above: usize,
+    /// Whether only the end of what it printed reached the shell, so that
+    /// `above` is a floor: the lines before that end were not kept, and are
+    /// not counted.
+    pub cut: bool,
     /// The last lines, as they would read on a terminal: a line a carriage
     /// return rewrote is what it was rewritten to, and nothing that would
     /// move a terminal's cursor or change its colours is left in.
@@ -630,8 +945,13 @@ impl Printed {
     /// session store.
     const LINES: usize = 12;
 
-    /// The end of `output`.
-    fn of(output: &str) -> Self {
+    /// The end of `output`, which is what was kept of `bytes` printed in
+    /// all.
+    fn of(output: &str, bytes: u64) -> Self {
+        // Unequal as well where what it printed was not all text, whose
+        // reading replaced the bytes that were not: a floor is still true.
+        let cut = !u64::try_from(output.len()).is_ok_and(|kept| kept == bytes);
+        let output = without_sequences(output);
         let lines: Vec<&str> = output.lines().collect();
         let above = lines.len().saturating_sub(Self::LINES);
         let tail = lines
@@ -639,18 +959,69 @@ impl Printed {
             .skip(above)
             .map(|line| terminal_line(line))
             .collect();
-        Self { above, tail }
+        Self { above, cut, tail }
     }
 }
 
-/// A line of output as a terminal would have left it: what follows the last
-/// carriage return, tabs as spaces, and no control characters.
+/// `output` with its terminal sequences taken out whole: colours and cursor
+/// moves (`ESC [ … <final>`) and titles and links (`ESC ] … BEL` or `ESC ]
+/// … ESC \\`). Dropping only the escape byte, as a filter of control
+/// characters does, would leave the rest of each sequence drawn as text.
+fn without_sequences(output: &str) -> std::borrow::Cow<'_, str> {
+    if !output.contains('\x1b') {
+        return std::borrow::Cow::Borrowed(output);
+    }
+    let mut plain = String::with_capacity(output.len());
+    let mut chars = output.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\x1b' {
+            plain.push(c);
+            continue;
+        }
+        match chars.next() {
+            // Parameters and intermediates run up to the final byte.
+            Some('[') => {
+                for c in chars.by_ref() {
+                    if ('@'..='~').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            // A string, ended by BEL or by ESC and a backslash.
+            Some(']') => {
+                while let Some(c) = chars.next() {
+                    if c == '\x07' || (c == '\x1b' && chars.next_if_eq(&'\\').is_some()) {
+                        break;
+                    }
+                }
+            }
+            // Any other escape is two characters long.
+            Some(_) | None => {}
+        }
+    }
+    std::borrow::Cow::Owned(plain)
+}
+
+/// A line of output as a terminal would have left it: each carriage return
+/// takes the cursor back to the start of the line and what follows is written
+/// over what was there — `abcdef\rXY` reads `XYcdef`, and a progress bar that
+/// ends on a bare `\r` keeps its last bar — with tabs as spaces and no control
+/// characters.
 fn terminal_line(line: &str) -> String {
-    let shown = line.rsplit('\r').next().unwrap_or(line);
-    crate::text::expand_tabs(shown)
-        .chars()
-        .filter(|c| !c.is_control())
-        .collect()
+    let mut shown: Vec<char> = Vec::new();
+    for pass in line.split('\r') {
+        let written: Vec<char> = crate::text::expand_tabs(pass)
+            .chars()
+            .filter(|c| !c.is_control())
+            .collect();
+        for (at, c) in written.into_iter().enumerate() {
+            match shown.get_mut(at) {
+                Some(cell) => *cell = c,
+                None => shown.push(c),
+            }
+        }
+    }
+    shown.into_iter().collect()
 }
 
 /// The shortest time between a call's start and its end that this shell can
@@ -724,8 +1095,9 @@ impl Change {
         }
     }
 
-    /// Whether the change has more rows than [`crate::hunks::MAX_ROWS`], and
-    /// so is drawn cut unless the diffs are open.
+    /// Whether the change has more than one row over
+    /// [`crate::hunks::MAX_ROWS`], and so is drawn cut unless the diffs are
+    /// open.
     pub fn is_cut(&self) -> bool {
         self.cut
     }
@@ -770,13 +1142,15 @@ pub enum Gate {
 /// started, what its backend reported about it since, and how it ended if it
 /// has.
 ///
-/// A finished agent is kept rather than dropped. What a session spawned and
-/// how it went is the record the operator reads the pane for; a list of only
-/// what is running now would erase the failure the moment it mattered most.
+/// A finished agent is kept rather than dropped: the transcript's rows name it
+/// by a tag worked out among every agent the session spawned, and the
+/// Activity pane lists the ones still running.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubAgent {
     /// The agent, as the backend named it.
     pub id: AgentId,
+    /// The kind of agent it was asked to be, where the backend said.
+    pub kind: Option<String>,
     /// What it was spawned to do.
     pub label: String,
     /// When it was spawned, where the shell had a clock at the time.
@@ -796,16 +1170,43 @@ pub struct SubAgent {
     pub latest: Option<String>,
 }
 
+impl SubAgent {
+    /// Whether it is still running: it has not finished, and the session did
+    /// not end under it.
+    pub fn is_running(&self) -> bool {
+        self.outcome.is_none() && !self.interrupted
+    }
+
+    /// What it was spawned to do, without the kind of agent it was asked to
+    /// be where its label opens with that.
+    pub fn task(&self) -> &str {
+        crate::tags::task(self.named())
+    }
+
+    fn named(&self) -> crate::tags::Named<'_> {
+        crate::tags::Named {
+            kind: self.kind.as_deref(),
+            label: &self.label,
+        }
+    }
+}
+
 /// What a running turn is doing, for the line that shows the session is at
 /// work between one event and the next.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Activity {
     /// How long the turn has run, by the clock the event loop hands in.
     pub elapsed: Duration,
-    /// What it is doing now: `thinking`, `writing`, `running <tool>  <what>`
-    /// or `waiting on you`.
+    /// What it is doing now: `thinking`, `writing`, `running <tool>  <what>`,
+    /// `compacting context` or `waiting on you`.
     pub doing: String,
+    /// Whether the backend is compacting the conversation, which the line
+    /// draws apart from a turn at work on the prompt.
+    pub compacting: bool,
 }
+
+/// What the working line says while the backend compacts the conversation.
+const COMPACTING: &str = "compacting context";
 
 /// Whether a turn is running, and how long the session has been that way.
 ///
@@ -826,6 +1227,11 @@ pub struct Pulse {
 #[derive(Debug)]
 pub struct App {
     repo: Repo,
+    /// How long the last run of each test command took, by what the call
+    /// does, where it ran to the end and its counts were read.
+    test_times: BTreeMap<String, Duration>,
+    /// The repository's files, indexed for the list under an `@` word.
+    mention_index: crate::mention::Files,
     /// Sections the operator has folded away, in whichever pane they belong
     /// to. One set, because a section is in exactly one pane.
     folded: std::collections::BTreeSet<Section>,
@@ -840,12 +1246,41 @@ pub struct App {
     /// Where the way back down to the newest line was drawn last frame, while
     /// the transcript is scrolled back.
     jump: Option<ratatui::layout::Rect>,
+    /// Whether the last frame drew the top row of the question waiting, which
+    /// says who asks and what is asked. `true` until a frame says otherwise.
+    question_top_drawn: bool,
+    /// Whether the last frame was too small to draw the shell, and so drew
+    /// no question at all. `false` until a frame says otherwise.
+    too_small: bool,
+    /// Where the last frame drew the transcript's lines, and how many of them
+    /// are the session's rather than the question waiting at their end: the
+    /// mouse selects and opens links only on those.
+    transcript_drawn: Option<(ratatui::layout::Rect, usize)>,
+    /// The cell the left button went down on over the transcript, until it
+    /// comes up again.
+    pressed: Option<crate::select::Point>,
+    /// The run of the transcript the operator dragged over, marked until the
+    /// next click or key.
+    selection: Option<crate::select::Selection>,
+    /// What the operator asked of the desktop and the loop has not handed
+    /// over yet.
+    handoffs: Vec<crate::desktop::Handoff>,
     profile: Option<SelectedProfile>,
+    /// The plan's windows as an earlier session recorded them, and when: what
+    /// the Usage pane shows until this session's backend reports its own.
+    carried_windows: Option<(UsageWindows, std::time::SystemTime)>,
+    /// When the windows the fold holds were reported, where the event that
+    /// reported them was folded in at a known moment.
+    windows_at: Option<Stamp>,
+    /// Whether the windows the fold holds were read back from this session's
+    /// record rather than reported since it was taken up again: a level from
+    /// days ago, which is drawn dated as a carried one is.
+    windows_recorded: bool,
     theme: Theme,
     /// How many colours the terminal draws, which every theme is drawn at.
     depth: Depth,
-    /// Whether the desktop moves while a turn is running.
-    effects: bool,
+    /// The keys the F-key bar's actions were given instead of their own.
+    keymap: niobe_core::Keymap,
     session: SessionState,
     entries: Vec<Entry>,
     /// Where each running call is drawn: its entry, and its place among the
@@ -859,9 +1294,29 @@ pub struct App {
     /// between it and the next call: see [`Entry::calls`] for what breaks a
     /// run.
     run: Option<usize>,
+    /// The session's reply whose deltas are still coming in, by its place:
+    /// what the rest of them, and the message that finishes it, land in.
+    /// Held rather than looked for from the end, because a prompt sent while
+    /// it streams is drawn under it before it has finished.
+    reply: Option<usize>,
+    /// The row of the last compaction, while the request after it has not
+    /// yet said how much the conversation holds now.
+    compaction: Option<usize>,
     /// Whether a run of calls is drawn as its group row alone, rather than
     /// with a row for each call under it.
     calls_folded: bool,
+    /// Whether the sub-agents' rows are drawn together under each agent
+    /// rather than interleaved as they happened.
+    by_agent: bool,
+    /// The one sub-agent whose entries alone the transcript draws, where the
+    /// operator narrowed it to one.
+    only_agent: Option<AgentId>,
+    /// Whether the transcript leaves its routine entries out, drawing each
+    /// run of them as a row that says how many.
+    notable_only: bool,
+    /// Whether the Activity pane counts calls per tool rather than per kind
+    /// of work.
+    tools_by_name: bool,
     diffs_open: bool,
     /// How each call the operator or a rule let through was allowed, until
     /// the call ends and its entry takes the answer.
@@ -877,15 +1332,16 @@ pub struct App {
     /// business, so they are kept here rather than widening the shared state —
     /// and the event model, which carries no time — for a pane.
     agents: Vec<SubAgent>,
-    /// When each decision in [`SessionState::decisions`] was recorded, in the
-    /// same order, so a pane reads the two together and cannot pair a decision
-    /// with another one's time.
+    /// When each decision in [`SessionState::decisions`] was stated, in the
+    /// same order, so a pane reads the two together and cannot pair a
+    /// decision with another one's time.
     decided_at: Vec<Option<Stamp>>,
-    /// When the call that ran [`SessionState::test_run`] finished, which is
-    /// what the run's age is counted from. Kept beside it for the reason
-    /// [`App::decided_at`] is.
-    tested_at: Option<Stamp>,
     composer: TextArea<'static>,
+    /// Whether the composer has been drawn in a box too short for all of its
+    /// rows since its first row was last put back at the top. The editor keeps
+    /// the row it scrolled to after the box has room again, which would leave
+    /// the prompt's opening rows out of sight above an empty row.
+    composer_scrolled: bool,
     /// First transcript line drawn, in wrapped lines.
     scroll: usize,
     /// Whether the transcript sticks to the newest line as it grows.
@@ -898,6 +1354,10 @@ pub struct App {
     /// Whether the last key was an Esc that did nothing else, which makes a
     /// digit pressed next the F-key of that number.
     escaped: bool,
+    /// The letter that opened the menu after an Esc, and when, until the key
+    /// after it: a second letter that follows too closely to have been chosen
+    /// is a prompt being typed, not an item.
+    menu_from_esc: Option<(char, Option<Instant>)>,
     /// The search through the transcript, while it is open.
     find: Option<Find>,
     /// The word the operator closed the list under — of files for an `@`
@@ -911,6 +1371,40 @@ pub struct App {
     /// Whether a [`crate::shell::Shell`] is there to run the operator's
     /// commands. Without one, `!` is a character like any other.
     runs_commands: bool,
+    /// Whether the shell was handed a record of the repository's sessions it
+    /// can open another of in place of this one.
+    remembers: bool,
+    /// What the last load of the repository's earlier sessions found; `None`
+    /// until one has landed.
+    past: Option<crate::history::Past>,
+    /// How many loads have landed, which is what tells the history dialog's
+    /// rows from those of an earlier load.
+    past_loads: u64,
+    /// The prompts sent in the conversations this shell has cleared, oldest
+    /// first, which Up and the history dialog still go back to: each is a
+    /// session of its own now, and one the operator wrote.
+    cleared_prompts: Vec<PromptRow>,
+    /// The history dialog's rows, built once for what they are built from;
+    /// `None` until the dialog or a walk first asks for them. Built where
+    /// they are asked for, which a frame does through `&self`.
+    history_index: std::cell::RefCell<Option<crate::history::Index>>,
+    /// Whether a load has been asked for that the loop has not passed on.
+    history_wanted: bool,
+    /// The number this session is recorded under, once it is.
+    recorded_as: Option<String>,
+    /// A walk back through earlier prompts with Up and Down, while one is on.
+    recall: Option<Recall>,
+    /// The draft the walk on set aside, which its images belong to.
+    walk_draft: DraftId,
+    /// Drafts a walk set aside and an edit ended it before giving them back,
+    /// newest last, each with what its images belong to: each comes back to
+    /// the composer after a prompt is sent.
+    drafts: Vec<(DraftId, String)>,
+    /// The history dialog, while it is open.
+    browser: Option<Browser>,
+    /// The session the operator chose to open in place of this one, which
+    /// the loop hands back as it ends.
+    opening: Option<Target>,
     /// Whether the terminal tells Shift+Enter from Enter, which decides the
     /// key the bar names for a new line.
     reports_shift_enter: bool,
@@ -937,6 +1431,31 @@ pub struct App {
     /// calls of the same turn and answering them out of order would put the
     /// wrong arguments in front of the operator.
     asks: VecDeque<Ask>,
+    /// What the shell sends to call the operator back, and what it has
+    /// already called them back for.
+    alerts: Alerts,
+    /// Whether the backend was asked to state its decisions, which is what an
+    /// empty Decisions section means: none stated, or none asked for.
+    decisions_asked: bool,
+    called: Called,
+    /// The session as it stood at the operator's last key, which what is
+    /// shown when they come back is counted from; and as it stood when they
+    /// were last shown what happened, which `c` counts from.
+    looked: Mark,
+    caught_up: Mark,
+    /// Whether an event has been folded in since `looked` was taken.
+    looked_stale: bool,
+    /// Whether `looked` was read from the session's record, and whether the
+    /// next key is the first since the session was taken up again, which is
+    /// one back from away however soon it comes.
+    looked_recorded: bool,
+    returned: bool,
+    /// When the operator last pressed a key, or the shell first ticked.
+    last_key: Option<Instant>,
+    /// How long with no key is away, and whether the first key back shows
+    /// what happened of itself.
+    away_after: Duration,
+    catch_up_automatic: bool,
     /// Which of the front prompt's options Enter would give. Every prompt
     /// starts on the first, so Enter means the same thing whichever prompt it
     /// lands on.
@@ -949,6 +1468,11 @@ pub struct App {
     /// came to the front, or when a key last reached it that was not taken
     /// as an answer. `None` where no clock was handed in.
     ask_quiet_since: Option<Instant>,
+    /// Since when the keyboard has been quiet after a question that had it
+    /// was taken away rather than answered, until a key comes after
+    /// [`ASK_QUIET`] of quiet. `None` otherwise, or where no clock was handed
+    /// in.
+    withdrawn_quiet_since: Option<Instant>,
     /// When the key being handled was read, where the event loop said.
     arrival: Option<Arrival>,
     /// The standing answers this session starts with, plus the ones made in
@@ -958,8 +1482,71 @@ pub struct App {
     learned: Vec<Rule>,
     /// Events the operator produced that have not been handed out to be kept.
     produced: Vec<Event>,
-    /// The model list the operator opened, while it is open.
+    /// The images attached to prompts, and the ones asked for.
+    images: Attachments,
+    /// The list the operator opened — of models, effort levels or themes —
+    /// while it is open.
     picking: Option<Picker>,
+    /// The menu the operator opened, while it is open.
+    menu: Option<crate::menu::Open>,
+    /// Where the last frame drew the open menu's list, border included, so a
+    /// click can tell which item it landed on.
+    menu_list: Option<ratatui::layout::Rect>,
+    /// Where the last frame drew the menu bar and the F-key bar.
+    bars: Option<(ratatui::layout::Rect, ratatui::layout::Rect)>,
+    /// What the shell is saying at more length than a hint, while it is up.
+    sheet: Option<Sheet>,
+    /// The Memory view, while it is open.
+    memory: Option<crate::memory::View>,
+    /// Whether the Memory view wants what the agent is given read, which the
+    /// loop does once and hands back.
+    memory_wanted: bool,
+    /// Whether the project overview has been opened since the binary was
+    /// last asked to write it.
+    overview_wanted: bool,
+    /// The MCP view, while it is open.
+    mcp: Option<crate::mcp::View>,
+    /// One tool call read whole, while it is open.
+    detail: Option<crate::detail::Detail>,
+    /// Every tool call of the conversation, in the order they started, with
+    /// what the view of one shows: the transcript keeps what a row draws,
+    /// and this the arguments and the output the row was drawn from.
+    recorded: Vec<(ToolCallId, crate::detail::Recorded)>,
+    /// Where in `recorded` each call drawn in the transcript is, by the
+    /// entry it is drawn in and its place among that entry's calls.
+    call_at: BTreeMap<(usize, usize), usize>,
+    /// The MCP servers the operator asked to be reconnected that the loop has
+    /// not handed to the backend yet, oldest first.
+    mcp_reconnects: Vec<String>,
+    /// The server a reconnect was asked of that the backend has not answered
+    /// for: the hint says so until its answer arrives or a key replaces it.
+    reconnecting: Option<String>,
+    /// Every prompt the loop handed to the backend, oldest first, by its
+    /// first line: F6 puts the files back as they were before one of them,
+    /// named to the backend by where it is in this list.
+    sent: Vec<String>,
+    /// Where in `sent` the conversation in front of the model starts: a
+    /// prompt before a clear belongs to a conversation the backend has put
+    /// away, with whatever it kept of the files.
+    sent_since: usize,
+    /// A prompt opening with a command the backend did not list, held back
+    /// once: Enter on it again sends it.
+    unlisted_held: Option<String>,
+    /// The prompts the operator asked to have the files put back to before,
+    /// that the loop has not handed to the backend yet, oldest first.
+    rewinds: Vec<usize>,
+    /// The hint said while a rewind is waiting on the backend's answer, which
+    /// the answer replaces where no key has already.
+    rewinding: Option<String>,
+    /// The panes of the right-hand stack the operator hid.
+    hidden: BTreeSet<crate::menu::SidePane>,
+    /// The files outside the session the shell can name or have opened.
+    places: Places,
+    /// The question whether to trust the repository's config, while it is
+    /// up. A shell asking it has no session behind it: it ends on the answer.
+    trusting: Option<trust::Asking>,
+    /// How that question was answered, once it has been.
+    trusted: Option<trust::Answer>,
     /// The most this session may spend, where the operator set a budget.
     budget_usd: Option<f64>,
     /// What values the tokens a backend reported no cost for. Supplied by
@@ -969,14 +1556,34 @@ pub struct App {
     /// Whether the budget warning has already been given, so that it is said
     /// once rather than on every usage record after the line is crossed.
     budget_warned: bool,
+    /// The working tree a running turn began on, held until a read after
+    /// the turn's end can be compared with it. `None` between turns.
+    tree_watch: Option<TreeWatch>,
+    /// The files the running turn's edit calls changed, by the path each
+    /// call named.
+    turn_edits: BTreeSet<String>,
+    /// How many of the session's ended turns have been judged for a spike,
+    /// from the first time the event loop asked. `None` until then: the turns
+    /// a session read back holds were spent before this run looked.
+    spikes_judged: Option<usize>,
     /// Whether a backend is listening. The shell holds no backend handle; this
     /// is the one bit of it the transcript needs, so that a prompt with nowhere
     /// to go says so instead of looking sent.
     attached: bool,
+    /// The mode the session was in before each mode change handed out to the
+    /// backend that it has not yet taken or refused, oldest first: what the
+    /// session goes back to if the backend will not take the change.
+    modes_before: VecDeque<Option<Mode>>,
     /// Whether a prompt was sent to the backend from this process. A turn the
     /// fold says is running may be one read back from a record, which nothing
     /// is working on now; only one sent from here can be shown as working.
     sent_here: bool,
+    /// Whether the first prompt of the session never reached the backend,
+    /// which leaves it out of the session's caption: nothing was asked.
+    first_prompt_unsent: bool,
+    /// Whether an event has come in through [`App::apply`] rather than from
+    /// the operator.
+    heard: bool,
     /// The timezone a moment an event names is read in. `None` until the
     /// event loop hands over the one it read: a fold with no clock behind it
     /// has no local times to draw, which is what a shell drawn in a test has.
@@ -990,9 +1597,20 @@ pub struct App {
     /// no time at all, rather than the moment the log was parsed.
     at: Option<Stamp>,
     /// When the running turn's first prompt was folded in, by the clock it
-    /// was stamped with: what a turn's duration is counted from. `None`
-    /// between turns, and for a turn whose prompt came with no time.
+    /// was stamped with: what a turn's duration is counted from. Between
+    /// turns, the last turn's end where a prompt sent during it waits to run
+    /// as a turn of its own, and `None` otherwise; `None` too for a turn
+    /// whose prompt came with no time.
     turn_began_at: Option<Stamp>,
+    /// How many sub-agents had been spawned, and how many entries the
+    /// transcript held, when the running turn's first prompt was folded in —
+    /// or, for a turn the fold did not see a prompt open, when the last turn
+    /// ended: what the turn's rule counts its agents and calls from.
+    turn_began_with: (usize, usize),
+    /// Whether a prompt was sent while the running turn ran. The CLI can
+    /// queue one as a turn of its own, which then begins where this one
+    /// ends, with no prompt of its own folded in to mark it.
+    prompt_queued: bool,
     /// The failure entry that stands for the run of events the journal has
     /// refused since it last kept one, while it keeps refusing.
     unsaved: Option<Unsaved>,
@@ -1019,9 +1637,27 @@ pub struct App {
     should_quit: bool,
     /// Whether the operator pressed Ctrl+Z since the loop last asked.
     suspend: bool,
+    /// Whether the operator asked the running turn to stop since the loop
+    /// last asked.
+    interrupt: bool,
+    /// The turn a stop was asked for, counted as the turns that had ended
+    /// before it, so a second Ctrl+C in the same turn leads to a quit and one
+    /// in the next turn stops that turn.
+    stop_asked_in: Option<usize>,
+    /// The Ctrl+C that asked for a second one to quit, while the key after it
+    /// has not been pressed and its window has not run out.
+    quit_asked: Option<QuitAsked>,
 }
 
-/// A search through the transcript, from `/` on an empty composer to Esc.
+/// A Ctrl+C that would quit the session had it been the second.
+#[derive(Debug, Clone, Copy)]
+struct QuitAsked {
+    /// When it was pressed, where the shell had read a clock or been told
+    /// when the key arrived.
+    at: Option<Instant>,
+}
+
+/// A search through the transcript, from Ctrl+F to Esc.
 #[derive(Debug)]
 struct Find {
     /// What is being looked for, edited like the composer.
@@ -1029,12 +1665,12 @@ struct Find {
     /// Where the view was when the search opened — the first line drawn and
     /// whether it followed the tail — which is where Esc puts it back.
     from: (usize, bool),
-    /// Every place the query was found by the last draw, top to bottom.
-    found: Vec<crate::find::Found>,
-    /// Which of them is the one stepped to. `None` until a draw has found
-    /// the query at all, and after every edit of it, when the draw picks the
+    /// Which of the places the last draw found the query is the one stepped
+    /// to: its number among them, and which match it is, which is what keeps
+    /// it when lines above it come and go. `None` until a draw has found the
+    /// query at all, and after every edit of it, when the draw picks the
     /// match nearest where the view was.
-    current: Option<usize>,
+    current: Option<(usize, crate::find::Which)>,
     /// Whether the view has been moved to the current match since it last
     /// changed. Kept so the view is moved once per step rather than every
     /// frame, which would undo the operator scrolling away from it.
@@ -1042,18 +1678,19 @@ struct Find {
 }
 
 impl Find {
-    /// Steps to the next match down the transcript, or up it, going round at
-    /// either end.
-    fn step(&mut self, down: bool) {
-        let count = self.found.len();
-        let Some(at) = self.current.filter(|_| count > 0) else {
+    /// Steps to the next of `found` down the transcript, or up it, going
+    /// round at either end.
+    fn step(&mut self, found: &[crate::find::Found], down: bool) {
+        let count = found.len();
+        let Some((at, _)) = self.current.filter(|_| count > 0) else {
             return;
         };
-        self.current = Some(if down {
+        let at = if down {
             (at + 1) % count
         } else {
             (at + count - 1) % count
-        });
+        };
+        self.current = found.get(at).map(|found| (at, found.which));
         self.revealed = false;
     }
 }
@@ -1067,6 +1704,69 @@ enum Scroll {
     Down(usize),
     Head,
     Tail,
+}
+
+/// What the shell holds of the working tree across one turn, to name what
+/// the turn changed that no edit call reported.
+#[derive(Debug, Clone)]
+struct TreeWatch {
+    /// How many turns had ended when this one began.
+    ended_before: usize,
+    /// When the shell asked for the tree the turn began on.
+    asked: Instant,
+    /// That tree, once a read that began after `asked` came back.
+    before: Option<Vec<WorkingFile>>,
+    /// When the shell asked for the tree the turn ended on, once it has.
+    ended: Option<Instant>,
+}
+
+/// How many files a notice of changes outside the edit tools names before it
+/// counts the rest.
+const OUTSIDE_LISTED: usize = 8;
+
+/// A file a turn changed that no edit call reported.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Outside {
+    /// Changed, or changed again, as the working tree now counts it.
+    Changed(WorkingFile),
+    /// Put back as the last commit holds it.
+    Restored(String),
+}
+
+/// The files whose counts differ between `before` and `after` — changed,
+/// newly changed, or put back as committed — that no path in `edited` names.
+fn changed_outside(
+    before: &[WorkingFile],
+    after: &[WorkingFile],
+    edited: &BTreeSet<String>,
+) -> Vec<Outside> {
+    let counts = |file: &WorkingFile| (file.added, file.removed, file.new);
+    let was: BTreeMap<&str, _> = before
+        .iter()
+        .map(|f| (f.path.as_str(), counts(f)))
+        .collect();
+    let now: BTreeSet<&str> = after.iter().map(|f| f.path.as_str()).collect();
+    let unedited = |path: &str| !edited.iter().any(|named| same_file(path, named));
+    let moved = after
+        .iter()
+        .filter(|file| was.get(file.path.as_str()) != Some(&counts(file)))
+        .filter(|file| unedited(&file.path))
+        .cloned()
+        .map(Outside::Changed);
+    let restored = before
+        .iter()
+        .filter(|file| !now.contains(file.path.as_str()) && unedited(&file.path))
+        .map(|file| Outside::Restored(file.path.clone()));
+    moved.chain(restored).collect()
+}
+
+/// Whether the repository's `listed` path and the path an edit call
+/// `named` are one file: the call may name it from the directory the
+/// session runs in, below the repository's root, or absolutely.
+fn same_file(listed: &str, named: &str) -> bool {
+    listed == named
+        || named.ends_with(&format!("/{listed}"))
+        || listed.ends_with(&format!("/{named}"))
 }
 
 /// The share of a budget at which the shell says so.
@@ -1083,9 +1783,87 @@ const BUDGET_WARNING: f64 = 0.8;
 /// the question before answering it.
 pub const ASK_QUIET: Duration = Duration::from_millis(500);
 
+/// How soon after a letter opened a menu, with Esc before it, a second letter
+/// reads as the operator typing a prompt: an item is picked by looking at the
+/// menu, which takes longer than the keys of a word do.
+const TYPING_AFTER_ESC: Duration = Duration::from_millis(350);
+
+/// What the transcript says under a prompt sent with no backend attached,
+/// live and when the [`Event::PromptNotSent`] it was kept as is read back.
+const NOT_ATTACHED: &str = "This session is not attached to a backend, so the prompt above was \
+     not sent. `niobe profiles` shows which profiles are defined and which backend each one runs.";
+
+/// What the bar says when a key reached a prompt whose top is off screen.
+const TOP_OFF_SCREEN_HINT: &str =
+    "Not taken as an answer: the top of the question is off screen. Ctrl+T cuts it to fit";
+
+/// What the shell says when a key reached a prompt the window is too small
+/// to draw.
+const TOO_SMALL_HINT: &str = "Not taken as an answer: the window is too small to show the question";
+
+/// What the bar says when the question that had the keyboard was taken away
+/// rather than answered.
+const QUESTION_WITHDRAWN_HINT: &str = "The question was withdrawn before it was answered";
+
+/// What the bar says when an Enter typed on through a withdrawn question was
+/// not taken as a send.
+const WITHDRAWN_NOT_SENT_HINT: &str =
+    "Not sent: the question being answered was withdrawn. Press Enter again to send";
+
+/// The most the composer holds, in bytes.
+///
+/// Its editor lays out the whole of what it holds again after every edit, so
+/// what a key costs grows with the prompt: on one line of a megabyte, a key
+/// took 90 ms in an optimised build. This much keeps a key, and the frame
+/// drawn after it, inside 16 ms. Text that would take the composer past it
+/// is refused whole and the bar says so; longer text goes in a file the
+/// prompt names with `@`.
+pub const COMPOSER_CAP: usize = 64 * 1024;
+
+/// What the bar says when text was refused for taking the composer past
+/// [`COMPOSER_CAP`].
+const TOO_LONG_HINT: &str =
+    "Not added: a prompt holds at most 64 KB. Put longer text in a file and name it with @";
+
 /// What the bar says when keys reached a prompt too soon to answer it.
 const TOO_SOON_HINT: &str =
     "Not taken as an answer: typed as the question came up, or pasted. Press the key again";
+
+/// What the trust question says when a key was typed at it: the letters go
+/// nowhere, and the Enter that would have sent them answers nothing.
+const TYPED_AT_TRUST_HINT: &str = "Not taken as an answer: typed at the question. Choose with \
+     ↑↓ or 1/2, pause, then press Enter";
+
+/// What the trust question says when an Enter came straight after trusting
+/// was chosen, as the one that sends a prompt of `1` does: it answers
+/// nothing, and the cursor is back on "not now".
+const HASTY_AT_TRUST_HINT: &str = "Not taken as an answer: Enter came straight after choosing, \
+     as it does at the end of a typed prompt. Choose again, pause, then press Enter";
+
+/// What a permission question says when a key that answers nothing was typed
+/// at it: the key went into the prompt behind it, and the question waits.
+const TYPED_AT_QUESTION_HINT: &str =
+    "Typed into the prompt, not taken as an answer: Esc to answer the question first";
+
+/// What the bar says when an image was asked for while the composer holds a
+/// command for `sh`, which takes text and nothing else.
+const NO_IMAGE_IN_A_COMMAND_HINT: &str =
+    "No image attached: a ! command goes to sh, which takes text. Esc leaves ! mode";
+
+/// What the bar says when a prompt chosen from the history took the composer
+/// out of `!` mode.
+const LEFT_BANG_FOR_HISTORY_HINT: &str =
+    "Left ! mode: a prompt from the history goes to the agent, not to sh";
+
+/// What the bar says when Enter was refused because an image for the prompt
+/// is still being read.
+const IMAGE_STILL_READING_HINT: &str =
+    "Not sent: an image for this prompt is still being read. Press Enter once it is attached";
+
+/// What the bar says when a click on the menus or the F-key bar was refused
+/// because a question waits.
+const QUESTION_FIRST_HINT: &str =
+    "The menus open once the question is answered; F10 and Esc still quit and stop";
 
 /// When a key reached the shell, as the event loop read it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1115,6 +1893,8 @@ impl App {
         paint_composer(&mut composer, &theme);
 
         Self {
+            test_times: BTreeMap::new(),
+            mention_index: crate::mention::Files::new(&repo.files),
             repo,
             folded: std::collections::BTreeSet::new(),
             changes: Scroller::default(),
@@ -1122,33 +1902,63 @@ impl App {
             focus: Focus::Session,
             session_area: None,
             jump: None,
+            question_top_drawn: true,
+            too_small: false,
+            transcript_drawn: None,
+            pressed: None,
+            selection: None,
+            handoffs: Vec::new(),
             profile: None,
+            carried_windows: None,
+            windows_at: None,
+            windows_recorded: false,
             theme,
             depth: Depth::default(),
-            effects: true,
+            keymap: niobe_core::Keymap::default(),
             session: SessionState::new(),
             entries: Vec::new(),
             tool_entries: BTreeMap::new(),
             agent_entries: BTreeMap::new(),
             run: None,
+            reply: None,
+            compaction: None,
             calls_folded: false,
+            by_agent: false,
+            only_agent: None,
+            notable_only: false,
+            tools_by_name: false,
             diffs_open: false,
             answered: BTreeMap::new(),
             just_ended: None,
             agents: Vec::new(),
             decided_at: Vec::new(),
-            tested_at: None,
             composer,
+            composer_scrolled: false,
             scroll: 0,
             follow: true,
             transcript_lines: 0,
             viewport_lines: 0,
             hint: None,
             escaped: false,
+            menu_from_esc: None,
             find: None,
             offer_closed: None,
             offer_selected: 0,
             runs_commands: false,
+            remembers: false,
+            past: None,
+            past_loads: 0,
+            cleared_prompts: Vec::new(),
+            history_index: std::cell::RefCell::new(None),
+            // Asked for as the shell opens, so Up has earlier sessions'
+            // prompts by the time anyone presses it.
+            history_wanted: true,
+            recorded_as: None,
+            recall: None,
+            walk_draft: DraftId::default(),
+            drafts: Vec::new(),
+            browser: None,
+            opening: None,
             reports_shift_enter: false,
             shell_mode: false,
             commands: Vec::new(),
@@ -1157,25 +1967,68 @@ impl App {
             stopping: BTreeSet::new(),
             commands_started: 0,
             ask_quiet_since: None,
+            withdrawn_quiet_since: None,
             arrival: None,
             asks: VecDeque::new(),
+            alerts: Alerts::none(),
+            decisions_asked: true,
+            called: Called::default(),
+            looked: Mark::default(),
+            caught_up: Mark::default(),
+            looked_stale: false,
+            looked_recorded: false,
+            returned: false,
+            last_key: None,
+            away_after: AWAY_AFTER,
+            catch_up_automatic: true,
             ask_selected: 0,
             ask_focus: AskFocus::Choosing,
             ask_draft: String::new(),
             allowed: Allowlist::new(),
             learned: Vec::new(),
             produced: Vec::new(),
+            images: Attachments::default(),
             picking: None,
+            menu: None,
+            menu_list: None,
+            bars: None,
+            sheet: None,
+            memory: None,
+            memory_wanted: false,
+            overview_wanted: false,
+            mcp: None,
+            detail: None,
+            recorded: Vec::new(),
+            call_at: BTreeMap::new(),
+            mcp_reconnects: Vec::new(),
+            sent: Vec::new(),
+            sent_since: 0,
+            rewinds: Vec::new(),
+            rewinding: None,
+            unlisted_held: None,
+            reconnecting: None,
+            hidden: BTreeSet::new(),
+            places: Places::default(),
+            trusting: None,
+            trusted: None,
             budget_usd: None,
             prices: None,
             budget_warned: false,
+            spikes_judged: None,
+            tree_watch: None,
+            turn_edits: BTreeSet::new(),
             attached: false,
+            modes_before: VecDeque::new(),
             sent_here: false,
+            first_prompt_unsent: false,
+            heard: false,
             clock: None,
             now: None,
             at: None,
             unsaved: None,
             turn_began_at: None,
+            turn_began_with: (0, 0),
+            prompt_queued: false,
             turns_took: Some(Duration::ZERO),
             last_folded_at: None,
             working_since: None,
@@ -1184,33 +2037,268 @@ impl App {
             held: None,
             should_quit: false,
             suspend: false,
+            interrupt: false,
+            stop_asked_in: None,
+            quit_asked: None,
         }
     }
 
     /// Folds one event in: the session totals the panes read, and the
     /// transcript entry it produces, if it produces one.
     pub fn apply(&mut self, event: &Event) {
+        self.heard = true;
+        self.fold_event(event);
+    }
+
+    /// Whether anything has come in that the shell did not produce itself:
+    /// the backend has said something — or a record of one was read back.
+    pub fn heard(&self) -> bool {
+        self.heard
+    }
+
+    /// Folds one event in, from wherever it came.
+    fn fold_event(&mut self, event: &Event) {
+        self.looked_stale = true;
         let turns = self.session.turns().len();
-        if matches!(event, Event::UserMessage { .. }) && !self.session.turn_running() {
-            self.turn_began_at = self.at;
+        if matches!(event, Event::UserMessage { .. }) {
+            match self.session.turn_running() {
+                true => self.prompt_queued = true,
+                false => {
+                    self.turn_began_at = self.at;
+                    self.turn_began_with = (self.agents.len(), self.entries.len());
+                }
+            }
         }
         self.session.apply(event);
-        self.last_folded_at = self.at;
+        // The fold carries no times, so when each decision was stated is kept
+        // here: the ones the event added get this moment, and a clear that
+        // started them over drops theirs.
+        self.decided_at
+            .resize(self.session.decisions().len(), self.at);
+        self.reconnect_answered(event);
+        self.rewind_answered(event);
+        if matches!(event, Event::UsageWindows(_)) {
+            self.windows_at = self.at;
+            self.windows_recorded = false;
+        }
+        // A session left is recorded when the process stopped, or when the
+        // session is taken up again after one was killed: the turn it cuts
+        // ended with the last thing that happened in it, and the time between
+        // is time nothing ran.
+        let ended_at = if let Event::SessionLeft = event {
+            self.last_folded_at
+        } else {
+            self.at
+        };
+        self.last_folded_at = ended_at;
         let ended = self.just_ended.take();
+        let (from, reply) = (self.entries.len(), self.reply);
         self.fold_into_transcript(event, ended);
+        self.raise(event, from, reply, ended);
         if self.session.turns().len() > turns {
-            self.rule_turn();
+            self.rule_turn(ended_at);
         }
     }
 
+    /// Raises every entry `event` put in the transcript or added to — the
+    /// entries from `from` on, and the one it went into — to what it asks of
+    /// the operator. `reply` is the reply that was streaming before it, and
+    /// `ended` the call that ended with the event before it.
+    fn raise(
+        &mut self,
+        event: &Event,
+        from: usize,
+        reply: Option<usize>,
+        ended: Option<(usize, usize, Option<Gate>)>,
+    ) {
+        let level = Attention::of(event);
+        if level == Attention::Routine {
+            return;
+        }
+        // A conversation started over drew its entries again from the top.
+        let from = match from > self.entries.len() {
+            true => 0,
+            false => from,
+        };
+        let into = self.went_into(event, reply, ended);
+        for at in (from..self.entries.len()).chain(into) {
+            if let Some(entry) = self.entries.get_mut(at) {
+                entry.attention = entry.attention.max(level);
+            }
+        }
+    }
+
+    /// The entry already in the transcript that `event` went into, where it
+    /// went into one rather than adding its own.
+    fn went_into(
+        &self,
+        event: &Event,
+        reply: Option<usize>,
+        ended: Option<(usize, usize, Option<Gate>)>,
+    ) -> Option<usize> {
+        match event {
+            Event::AssistantMessage { agent: None, .. } => reply,
+            Event::FileChange { .. } | Event::TestRun { .. } => ended.map(|(at, _, _)| at),
+            // A question a standing rule answers asked nobody: the rules
+            // answer it after it is folded in, so it is read off them here.
+            Event::PermissionRequest {
+                id, tool, target, ..
+            } => match self.allowed.allows(tool, target.as_deref()) {
+                true => None,
+                false => self.tool_entries.get(id).map(|&(at, _)| at),
+            },
+            Event::SessionMeta(_)
+            | Event::UserMessage { .. }
+            | Event::PromptNotSent { .. }
+            | Event::Titled { .. }
+            | Event::AssistantDelta { .. }
+            | Event::AssistantMessage { agent: Some(_), .. }
+            | Event::ToolCallStart { .. }
+            | Event::ToolCallEnd { .. }
+            | Event::TurnEnded
+            | Event::Usage(_)
+            | Event::UsageWindows(_)
+            | Event::Billing { .. }
+            | Event::Context(_)
+            | Event::Cleared
+            | Event::CompactionStarted
+            | Event::CompactionEnded
+            | Event::Compacted { .. }
+            | Event::SessionLeft
+            | Event::PermissionResponse { .. }
+            | Event::PermissionWithdrawn { .. }
+            | Event::ModeSelected { .. }
+            | Event::ModelSelected { .. }
+            | Event::ModelRefused { .. }
+            | Event::AgentSpawn { .. }
+            | Event::AgentProgress { .. }
+            | Event::AgentExit { .. }
+            | Event::Commands { .. }
+            | Event::McpServers { .. }
+            | Event::Models { .. }
+            | Event::TurnTotalDiffers { .. }
+            | Event::Looked
+            | Event::Notice { .. }
+            | Event::Error { .. } => None,
+        }
+    }
+
+    /// Forgets what the shell holds of the session so far, as a session
+    /// opened afresh holds none of it. The plan's windows, the repository's
+    /// working tree, the history of prompts, the profile and the rules kept
+    /// are not the session's, and stay.
+    fn start_over(&mut self) {
+        let sent: Vec<PromptRow> = self
+            .own_prompts()
+            .map(|entry| PromptRow {
+                text: entry.body.clone(),
+                at: entry.at,
+                session: None,
+            })
+            .collect();
+        self.cleared_prompts.extend(sent);
+        self.entries.clear();
+        self.tool_entries.clear();
+        self.recorded.clear();
+        self.call_at.clear();
+        self.only_agent = None;
+        self.agent_entries.clear();
+        self.agents.clear();
+        self.run = None;
+        self.reply = None;
+        self.compaction = None;
+        self.answered.clear();
+        self.just_ended = None;
+        self.scroll = 0;
+        self.follow = true;
+        self.held = None;
+        self.selection = None;
+        self.pressed = None;
+        self.offer_closed = None;
+        self.drawn = crate::ui::DrawnEntries::default();
+        self.transcript_drawn = None;
+        if let Some(find) = &mut self.find {
+            find.from = (0, true);
+            find.current = None;
+        }
+        self.first_prompt_unsent = false;
+        self.turn_began_at = None;
+        self.turn_began_with = (0, 0);
+        self.turns_took = Some(Duration::ZERO);
+        self.last_folded_at = None;
+        self.stop_asked_in = None;
+        // The entry a refusal was counted on is gone, and an index into the
+        // entries that replace it would rewrite whichever one is there.
+        self.unsaved = None;
+        // A mark holds the figures of the conversation that ended.
+        self.looked = Mark::default();
+        self.caught_up = Mark::default();
+    }
+
+    /// Records that the process this session runs in is leaving it with a
+    /// turn still running, or that one before it did: a record that ends in
+    /// the middle of a turn, taken up again. The turn ends there, cut, so the
+    /// next prompt opens a turn of its own.
+    pub fn leave(&mut self) {
+        if self.session.turn_running() {
+            self.produce(Event::SessionLeft);
+        }
+    }
+
+    /// Records that everything folded in so far was read back from this
+    /// session's record, and that what follows is this process's own: the
+    /// plan windows the record holds are drawn as a reading from when they
+    /// were recorded, dated and put back where their reset has come around,
+    /// until the backend reports again. See [`App::plan_windows`].
+    pub fn resumed(&mut self) {
+        self.windows_recorded = self.session.usage_windows().is_some();
+        // A command the operator ran that the record never saw end was
+        // stopped with the session that ran it, which nothing outlives: the
+        // processes it started are in groups the session's reaper ends. Left
+        // open it would read as running for ever, with nothing to stop it.
+        let open: Vec<ToolCallId> = self
+            .session
+            .in_flight_tools()
+            .iter()
+            .filter(|(id, name)| {
+                name.as_str() == crate::shell::OPERATOR_SHELL
+                    && !self
+                        .running_commands
+                        .iter()
+                        .any(|(running, _)| running == *id)
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in open {
+            self.ran(crate::shell::Ran {
+                id,
+                output: String::new(),
+                bytes: 0,
+                whole: false,
+                exit_code: None,
+                error: Some("stopped: the session ended before the command did".to_owned()),
+            });
+        }
+        // What happened after the operator last looked is news on their first
+        // key back, the process that ran it having ended while they were
+        // away. A record that marks no look was kept before looks were kept,
+        // and what it holds was there to read before it was left.
+        if !self.looked_recorded {
+            self.looked = Mark::of(&self.session);
+        }
+        self.caught_up = self.looked.clone();
+        self.looked_stale = true;
+        self.returned = true;
+    }
+
     /// Draws the rule under the turn the fold has just ended, below whatever
-    /// the event that ended it put in the transcript.
-    fn rule_turn(&mut self) {
+    /// the event that ended it put in the transcript, as ended `at`.
+    fn rule_turn(&mut self, at: Option<Stamp>) {
         let began = self.turn_began_at.take();
         let Some(turn) = self.session.turns().last() else {
             return;
         };
-        let measured = match (began, self.at) {
+        let measured = match (began, at) {
             (Some(began), Some(ended)) => ended.since(began),
             _ => None,
         };
@@ -1219,18 +2307,62 @@ impl App {
             .zip(measured)
             .map(|(sum, took)| sum.saturating_add(took));
         let took = measured.filter(|took| *took >= TIMED);
+        let (agents_before, entries_before) = self.turn_began_with;
+        let calls = self
+            .entries
+            .get(entries_before..)
+            .unwrap_or_default()
+            .iter()
+            .map(|entry| entry.calls.len())
+            .sum::<usize>();
         let rule = TurnRule {
             number: turn.number,
-            ended: self.at.and_then(Stamp::local),
+            agents: count(self.agents.len().saturating_sub(agents_before)),
+            calls: count(calls),
+            cut: turn.cut,
+            compacted: turn.compacted,
+            ended: at.and_then(Stamp::local),
             tokens: turn.tokens,
             five_hour_points: turn.five_hour_share.map(percent),
             took,
         };
         self.push(Entry {
+            attention: Attention::of(&Event::TurnEnded),
             kind: EntryKind::Turn(rule),
             head: String::new(),
             meta: String::new(),
             body: String::new(),
+            streaming: false,
+            at: self.at,
+            calls: Vec::new(),
+            agent: None,
+        });
+        self.mark_next_turn_from_this_end(at);
+    }
+
+    /// Marks where the turn after this one begins in case it ends without a
+    /// prompt folded in to open it: here, so that its rule counts only what
+    /// came after this end. Its clock starts here only where a prompt sent
+    /// during this turn is waiting to run; an end with nothing behind it —
+    /// a command the CLI answers itself, a result said once too often — is
+    /// left untimed rather than timed across the idle before it.
+    fn mark_next_turn_from_this_end(&mut self, at: Option<Stamp>) {
+        self.turn_began_with = (self.agents.len(), self.entries.len());
+        self.turn_began_at = match std::mem::take(&mut self.prompt_queued) {
+            true => at,
+            false => None,
+        };
+    }
+
+    /// Puts a prompt the operator typed in the transcript.
+    fn push_prompt(&mut self, text: &str) {
+        self.images.seen(text);
+        self.push(Entry {
+            attention: Attention::Routine,
+            kind: EntryKind::User,
+            head: "you".to_owned(),
+            meta: String::new(),
+            body: text.to_owned(),
             streaming: false,
             at: self.at,
             calls: Vec::new(),
@@ -1243,22 +2375,22 @@ impl App {
     /// change is drawn under.
     fn fold_into_transcript(&mut self, event: &Event, ended: Option<(usize, usize, Option<Gate>)>) {
         match event {
-            Event::UserMessage { text } => self.push(Entry {
-                kind: EntryKind::User,
-                head: "you".to_owned(),
-                meta: String::new(),
-                body: text.clone(),
-                streaming: false,
-                at: self.at,
-                calls: Vec::new(),
-                agent: None,
-            }),
+            Event::UserMessage { text } => self.push_prompt(text),
+
+            // Shown as it was typed, with what became of it under it, read
+            // back as it was said live.
+            Event::PromptNotSent { text } => {
+                self.push_prompt(text);
+                self.say_not_attached();
+            }
 
             Event::AssistantDelta { text } => match self.streaming_agent_entry() {
                 Some(entry) => entry.body.push_str(text),
                 None => {
                     let head = self.agent_name();
+                    self.reply = Some(self.entries.len());
                     self.push(Entry {
+                        attention: Attention::Routine,
                         kind: EntryKind::Agent,
                         head,
                         meta: String::new(),
@@ -1277,6 +2409,7 @@ impl App {
             } => {
                 self.agent_entries.insert(self.entries.len(), agent.clone());
                 self.push(Entry {
+                    attention: Attention::Routine,
                     kind: EntryKind::SubAgent,
                     head: self.sub_agent_label(agent),
                     meta: "sub-agent".to_owned(),
@@ -1288,7 +2421,7 @@ impl App {
                 });
             }
 
-            Event::AssistantMessage { text, agent: None } => match self.streaming_agent_entry() {
+            Event::AssistantMessage { text, agent: None } => match self.finish_reply() {
                 Some(entry) => {
                     entry.body = text.clone();
                     entry.streaming = false;
@@ -1296,6 +2429,7 @@ impl App {
                 None => {
                     let head = self.agent_name();
                     self.push(Entry {
+                        attention: Attention::Routine,
                         kind: EntryKind::Agent,
                         head,
                         meta: String::new(),
@@ -1315,13 +2449,29 @@ impl App {
                 summary,
                 agent,
             } => {
+                self.recorded.push((
+                    id.clone(),
+                    crate::detail::Recorded {
+                        name: name.clone(),
+                        what: what_it_does(summary.as_deref(), input),
+                        input: input.clone(),
+                        ended: None,
+                        untrimmed: None,
+                    },
+                ));
                 let head = tool_label(name);
-                let call = Call::started(what_it_does(summary.as_deref(), input), self.at);
+                let mut call = Call::started(what_it_does(summary.as_deref(), input), self.at);
+                call.programs = programs_of(name, None, summary.as_deref());
+                if call.testing {
+                    call.last_run = self.test_times.get(&call.what).copied();
+                }
+                let recorded = self.recorded.len().saturating_sub(1);
                 match self.open_run(&head, agent.as_ref()) {
                     Some(at) => {
                         if let Some(entry) = self.entries.get_mut(at) {
                             self.tool_entries
                                 .insert(id.clone(), (at, entry.calls.len()));
+                            self.call_at.insert((at, entry.calls.len()), recorded);
                             entry.calls.push(call);
                             entry.streaming = true;
                         }
@@ -1329,11 +2479,13 @@ impl App {
                     None => {
                         let at = self.entries.len();
                         self.tool_entries.insert(id.clone(), (at, 0));
+                        self.call_at.insert((at, 0), recorded);
                         if let Some(agent) = agent {
                             self.agent_entries.insert(at, agent.clone());
                         }
                         let agent = agent.as_ref().map(|agent| self.sub_agent_tag(agent));
                         self.push(Entry {
+                            attention: Attention::Routine,
                             kind: EntryKind::Tool,
                             head,
                             meta: String::new(),
@@ -1358,6 +2510,8 @@ impl App {
                 summary,
                 exit_code,
                 error,
+                command,
+                untrimmed,
             } => {
                 let ending = Ending {
                     outcome: *outcome,
@@ -1365,6 +2519,12 @@ impl App {
                     exit_code: *exit_code,
                     error: error.clone(),
                 };
+                self.record_end(
+                    id,
+                    (name, input, summary.as_deref()),
+                    (output, *bytes, *outcome),
+                    untrimmed.as_deref(),
+                );
                 let gate = self.gate(id);
                 let started = self.tool_entries.remove(id);
                 let ended = match started {
@@ -1376,6 +2536,7 @@ impl App {
                         let mut call = Call::started(what_it_does(summary.as_deref(), input), None);
                         call.ended(ending, None);
                         self.push(Entry {
+                            attention: Attention::Routine,
                             kind: match call.failed() {
                                 true => EntryKind::Failure,
                                 false => EntryKind::Tool,
@@ -1388,7 +2549,10 @@ impl App {
                             calls: vec![call],
                             agent: None,
                         });
-                        Some((self.entries.len().saturating_sub(1), 0))
+                        let place = (self.entries.len().saturating_sub(1), 0);
+                        self.call_at
+                            .insert(place, self.recorded.len().saturating_sub(1));
+                        Some(place)
                     }
                 };
                 if name == crate::shell::OPERATOR_SHELL
@@ -1398,7 +2562,20 @@ impl App {
                             .and_then(|entry| entry.calls.get_mut(index))
                     })
                 {
-                    call.printed = Some(Printed::of(output));
+                    call.printed = Some(Printed::of(output, *bytes));
+                }
+                if let Some(call) = ended.and_then(|(at, index)| {
+                    self.entries
+                        .get_mut(at)
+                        .and_then(|entry| entry.calls.get_mut(index))
+                }) {
+                    call.gate = gate;
+                    if let Some(programs) =
+                        programs_of(name, command.as_deref(), summary.as_deref())
+                    {
+                        call.programs = Some(programs);
+                        call.command = command.clone();
+                    }
                 }
                 // A failed call is kept too: a test run that failed ended
                 // its call with a failing status.
@@ -1408,11 +2585,13 @@ impl App {
             }
 
             Event::FileChange {
+                path,
                 added,
                 removed,
                 hunks,
-                ..
+                scope,
             } => {
+                self.turn_edits.insert(path.clone());
                 if let Some((at, index, gate)) = ended
                     && let Some(call) = self
                         .entries
@@ -1421,6 +2600,7 @@ impl App {
                     && call.outcome == Some(ToolOutcome::Ok)
                 {
                     call.lines = Some((*added, *removed));
+                    call.memory = !scope.is_project();
                     if !hunks.is_empty() {
                         call.change = Some(Change::new(hunks.clone(), gate));
                     }
@@ -1430,7 +2610,31 @@ impl App {
             // The working line reads the end off the fold; the transcript has
             // already shown everything the turn said. A turn's calls are not
             // grouped with the next turn's.
-            Event::TurnEnded => self.run = None,
+            // A question still open when the turn ended waits on nobody, a
+            // call it left running will report no end, and a stop asked for
+            // it has nothing left to stop.
+            Event::TurnEnded => {
+                self.run = None;
+                self.reply = None;
+                self.forget_asks();
+                self.interrupt_what_the_fold_stopped();
+                self.forget_stopping_hint();
+            }
+
+            Event::PermissionWithdrawn { id } => self.withdraw_ask(id),
+
+            // Nothing the stopped process was doing will say any more of
+            // itself: a reply it was writing reads as cut off where it
+            // stopped, rather than as finished.
+            Event::SessionLeft => {
+                self.say_asks_went_unanswered();
+                self.forget_asks();
+                self.interrupt_what_the_fold_stopped();
+                if let Some(entry) = self.finish_reply() {
+                    entry.streaming = false;
+                    entry.meta = CUT_OFF.to_owned();
+                }
+            }
 
             Event::Error { message, fatal } => {
                 // A session that ended cannot take an answer, so a prompt it
@@ -1440,9 +2644,16 @@ impl App {
                     self.interrupt_what_the_fold_stopped();
                 }
                 self.push(Entry {
+                    attention: Attention::Routine,
                     kind: EntryKind::Failure,
                     head: if *fatal { "fatal" } else { "error" }.to_owned(),
-                    meta: String::new(),
+                    // A failure that ends a turn — a budget the backend
+                    // stopped on among them — says which, since the rule that
+                    // numbers the turn is drawn only once it has ended.
+                    meta: match self.session.turn_running() {
+                        true => format!("in turn {}", self.session.turns().len().saturating_add(1)),
+                        false => String::new(),
+                    },
                     body: message.clone(),
                     streaming: false,
                     at: self.at,
@@ -1452,6 +2663,7 @@ impl App {
             }
 
             Event::Notice { message } => self.push(Entry {
+                attention: Attention::Routine,
                 kind: EntryKind::Notice,
                 head: self.agent_name(),
                 meta: String::new(),
@@ -1462,44 +2674,141 @@ impl App {
                 agent: None,
             }),
 
-            Event::Cleared => self.push(Entry {
-                kind: EntryKind::Notice,
-                head: "cleared".to_owned(),
-                meta: String::new(),
-                body: "The conversation starts over here: nothing above this line is in \
-                       front of the model any more. What it cost stays in the session's \
-                       totals."
-                    .to_owned(),
-                streaming: false,
-                at: self.at,
-                calls: Vec::new(),
-                agent: None,
-            }),
+            Event::TurnTotalDiffers {
+                per_message,
+                reported,
+                backend_session,
+                unfinished,
+            } => {
+                let body = turn_total_differs(
+                    &TurnPlace {
+                        number: self.session.turns().len() as u64 + 1,
+                        at: self.at.and_then(Stamp::local),
+                    },
+                    per_message,
+                    reported,
+                    backend_session.as_deref(),
+                    unfinished,
+                );
+                self.push(Entry {
+                    attention: Attention::Routine,
+                    kind: EntryKind::Notice,
+                    head: self.agent_name(),
+                    meta: String::new(),
+                    body,
+                    streaming: false,
+                    at: self.at,
+                    calls: Vec::new(),
+                    agent: None,
+                });
+            }
+
+            Event::Compacted {
+                trigger,
+                before,
+                after,
+            } => {
+                self.compaction = Some(self.entries.len());
+                self.push(Entry {
+                    attention: Attention::Routine,
+                    kind: EntryKind::Compacted(CompactionRow {
+                        trigger: *trigger,
+                        before: *before,
+                        floor: *after,
+                        after: None,
+                    }),
+                    head: String::new(),
+                    meta: String::new(),
+                    body: String::new(),
+                    streaming: false,
+                    at: self.at,
+                    calls: Vec::new(),
+                    agent: None,
+                });
+            }
+
+            // The first request after a compaction is what it shrank the
+            // conversation to, and its row says so from then on.
+            Event::Context(context) => {
+                if let Some(at) = self.compaction.take()
+                    && let Some(entry) = self.entries.get_mut(at)
+                    && let EntryKind::Compacted(row) = &mut entry.kind
+                {
+                    row.after = Some(context.tokens);
+                }
+            }
+
+            // The working line reads the phase off the fold.
+            Event::CompactionStarted | Event::CompactionEnded => {}
+
+            // What the next catch-up is counted from, read back from a record
+            // as it was taken live.
+            Event::Looked => {
+                self.looked = Mark::of(&self.session);
+                self.looked_stale = false;
+                self.looked_recorded = true;
+            }
+
+            // A conversation started over is a new session: what the shell
+            // drew of the one before it goes, and the first row of this one
+            // says where that went.
+            Event::Cleared => {
+                self.start_over();
+                self.sent_since = self.sent.len();
+                self.push(Entry {
+                    attention: Attention::Routine,
+                    kind: EntryKind::Notice,
+                    head: "cleared".to_owned(),
+                    meta: String::new(),
+                    body: "The conversation starts over here, as a new session: nothing above \
+                       this line is in front of the model, and what came before is a session \
+                       of its own, with its own cost. Session › Resume opens it again."
+                        .to_owned(),
+                    streaming: false,
+                    at: self.at,
+                    calls: Vec::new(),
+                    agent: None,
+                });
+            }
 
             Event::PermissionRequest {
                 id,
                 tool,
                 input,
                 target,
+                proposal,
+                reason,
                 agent,
             } => {
+                // An Esc pressed before the question came up made the next
+                // digit an F-key for the shell, and that digit is now an
+                // answer to the question.
                 if self.asks.is_empty() {
                     self.ask_quiet_since = self.latest_instant();
+                    self.escaped = false;
+                }
+                if let Some(call) = self.call_mut(id) {
+                    call.asked = true;
                 }
                 self.asks.push_back(Ask {
                     id: id.clone(),
                     tool: tool.clone(),
                     input: input.clone(),
                     target: target.clone(),
+                    proposed: proposal.clone().map(Proposed::new),
+                    reason: reason.clone(),
                     turn: self.session.user_messages(),
                     agent: agent.clone(),
                 });
             }
 
-            // A refusal is shown as its own entry rather than left to the tool
+            // A refusal is shown when it is made rather than left to the tool
             // result that carries it back: a backend that reports nothing
             // further about a call it was not allowed to make would leave a
             // denial indistinguishable from the agent deciding not to act.
+            // A call already in the transcript ends there, as denied, and an
+            // end the backend reports for it after lands on the same row; a
+            // call that never started in it gets an entry of its own.
             Event::PermissionResponse {
                 id,
                 decision,
@@ -1510,7 +2819,24 @@ impl App {
                     self.answered.insert(id.clone(), *decision);
                     self.restart_clock(id);
                 }
-                if *decision == PermissionDecision::Deny {
+                if *decision == PermissionDecision::Deny
+                    && let Some(&(at, index)) = self.tool_entries.get(id)
+                {
+                    let refused = Ending {
+                        outcome: ToolOutcome::Denied,
+                        bytes: 0,
+                        exit_code: None,
+                        error: None,
+                    };
+                    self.end_call(at, index, refused);
+                    if let Some(call) = self
+                        .entries
+                        .get_mut(at)
+                        .and_then(|entry| entry.calls.get_mut(index))
+                    {
+                        call.answer = message.clone();
+                    }
+                } else if *decision == PermissionDecision::Deny {
                     let agent = asked.as_ref().and_then(|ask| ask.agent.clone());
                     let (tool, what) = match &asked {
                         Some(ask) => (
@@ -1524,6 +2850,7 @@ impl App {
                         self.agent_entries.insert(self.entries.len(), agent);
                     }
                     self.push(Entry {
+                        attention: Attention::Notable,
                         kind: EntryKind::Failure,
                         head: "denied".to_owned(),
                         meta: match what.is_empty() {
@@ -1551,15 +2878,12 @@ impl App {
             | Event::Usage(_)
             | Event::ModeSelected { .. }
             | Event::ModelSelected { .. }
+            | Event::ModelRefused { .. }
             | Event::UsageWindows(_)
             | Event::Billing { .. }
-            | Event::Context(_)
             | Event::Commands { .. }
-            | Event::Checkpoint { .. } => {}
-
-            // The decision itself is in the session fold, which carries no
-            // times; when it was made is kept here, beside it.
-            Event::Decision { .. } => self.decided_at.push(self.at),
+            | Event::McpServers { .. }
+            | Event::Models { .. } => {}
 
             // Straight after its call's end, so in the same tick and at the
             // same clock: the moment the call finished.
@@ -1570,7 +2894,6 @@ impl App {
                 failures,
                 ..
             } => {
-                self.tested_at = self.at;
                 if let Some((at, index, _)) = ended
                     && let Some(call) = self
                         .entries
@@ -1583,12 +2906,18 @@ impl App {
                         *failed,
                         failures.clone(),
                     ));
+                    if let Some(took) = call.took.filter(|_| counts.is_some()) {
+                        self.test_times.insert(call.what.clone(), took);
+                    }
                 }
             }
 
-            Event::AgentSpawn { id, label, .. } => {
+            Event::AgentSpawn {
+                id, kind, label, ..
+            } => {
                 let spawned = SubAgent {
                     id: id.clone(),
+                    kind: kind.clone(),
                     label: label.clone(),
                     at: self.at,
                     outcome: None,
@@ -1621,10 +2950,13 @@ impl App {
                     agent.latest = latest.clone().or(agent.latest.take());
                 }
             }
+            // A call the agent still had running reports no end now that it
+            // has gone, and the fold has cut it.
             Event::AgentExit { id, outcome } => {
                 if let Some(agent) = self.agents.iter_mut().find(|agent| &agent.id == id) {
                     agent.outcome = Some(*outcome);
                 }
+                self.interrupt_what_the_fold_stopped();
             }
         }
     }
@@ -1700,24 +3032,46 @@ impl App {
     /// What sub-agent `id` is called on a row it shares with what it did:
     /// see [`Entry::agent`].
     fn sub_agent_tag(&self, id: &AgentId) -> String {
-        let labels: Vec<&str> = self
-            .agents
-            .iter()
-            .map(|agent| agent.label.as_str())
-            .collect();
         match self.agents.iter().position(|agent| &agent.id == id) {
-            Some(at) => distinct_tail(&labels, at),
+            Some(at) => self.agent_tags().swap_remove(at),
             None => id.to_string(),
         }
+    }
+
+    /// The call sub-agent `id` has open, as its row in the transcript names
+    /// it — `Bash cargo test` — or `None` where it has none running.
+    pub fn agent_doing(&self, id: &AgentId) -> Option<String> {
+        self.agent_entries
+            .iter()
+            .rev()
+            .filter(|(_, agent)| *agent == id)
+            .find_map(|(&at, _)| {
+                let entry = self.entries.get(at)?;
+                let call = entry.calls.iter().rev().find(|call| call.running())?;
+                Some(format!("{} {}", entry.head, call.what))
+            })
+    }
+
+    /// Every sub-agent's tag, in the order [`App::agents`] lists them: the
+    /// word the transcript's rows and the Activity pane name it by.
+    pub fn agent_tags(&self) -> Vec<String> {
+        let named: Vec<crate::tags::Named<'_>> = self.agents.iter().map(SubAgent::named).collect();
+        crate::tags::tags(&named)
     }
 
     /// Names every sub-agent's entry again, now that the agents are not the
     /// ones its name was worked out among.
     fn rename_agents_entries(&mut self) {
+        let tags: BTreeMap<&AgentId, String> = self
+            .agents
+            .iter()
+            .map(|agent| &agent.id)
+            .zip(self.agent_tags())
+            .collect();
         let named: Vec<(usize, String)> = self
             .agent_entries
             .iter()
-            .map(|(&at, id)| (at, self.sub_agent_tag(id)))
+            .map(|(&at, id)| (at, tags.get(id).cloned().unwrap_or_else(|| id.to_string())))
             .collect();
         for (at, tag) in named {
             if let Some(entry) = self.entries.get_mut(at) {
@@ -1741,9 +3095,10 @@ impl App {
     }
 
     /// Marks every call and sub-agent the fold no longer counts as running as
-    /// cut short, after a fatal error ended the backend under them. The fold
-    /// decides which: a command the operator ran is not the backend's, and
-    /// runs on to an end of its own.
+    /// cut short, after a fatal error ended the backend under them, a turn
+    /// ended without their ends or the agent that made them exited. The fold decides which: a command the
+    /// operator ran is not the backend's, and runs on to an end of its own,
+    /// and a sub-agent working in the background outlives the turn.
     fn interrupt_what_the_fold_stopped(&mut self) {
         let running = self.session.in_flight_tools();
         let cut: Vec<(usize, usize)> = self
@@ -1755,7 +3110,9 @@ impl App {
         self.tool_entries.retain(|id, _| running.contains_key(id));
         for (at, index) in cut {
             if let Some(entry) = self.entries.get_mut(at) {
-                if let Some(call) = entry.calls.get_mut(index) {
+                // A call refused at the prompt ended there, though the fold
+                // still waits on the backend to report it.
+                if let Some(call) = entry.calls.get_mut(index).filter(|call| call.running()) {
                     call.interrupted = true;
                 }
                 entry.streaming = entry.calls.iter().any(Call::running);
@@ -1773,13 +3130,23 @@ impl App {
     /// let it run: the time it spent waiting on them is not the tool's.
     fn restart_clock(&mut self, id: &ToolCallId) {
         let now = self.at;
-        if let Some(&(at, index)) = self.tool_entries.get(id)
-            && let Some(call) = self
-                .entries
-                .get_mut(at)
-                .and_then(|entry| entry.calls.get_mut(index))
-        {
+        if let Some(call) = self.call_mut(id) {
             call.started = now;
+        }
+    }
+
+    /// The call `id` names, while it runs.
+    fn call_mut(&mut self, id: &ToolCallId) -> Option<&mut Call> {
+        let &(at, index) = self.tool_entries.get(id)?;
+        self.entries
+            .get_mut(at)
+            .and_then(|entry| entry.calls.get_mut(index))
+    }
+
+    /// Marks the call a question was about as no longer waiting on it.
+    fn unask(&mut self, id: &ToolCallId) {
+        if let Some(call) = self.call_mut(id) {
+            call.asked = false;
         }
     }
 
@@ -1797,6 +3164,120 @@ impl App {
     pub fn fold_calls(&mut self) {
         self.hold_view();
         self.calls_folded = !self.calls_folded;
+    }
+
+    /// Whether the sub-agents' rows are drawn under each agent: see
+    /// [`App::group_by_agent`].
+    pub fn grouped_by_agent(&self) -> bool {
+        self.by_agent
+    }
+
+    /// Draws each turn's sub-agent rows together under a header per agent,
+    /// where that agent first did something in the turn, or interleaved as
+    /// they happened again.
+    ///
+    /// Nine agents working at once interleave their calls row by row, which
+    /// is when it happened but not what any one agent did; grouped, each
+    /// agent's work reads top to bottom. The session's own rows, what anyone
+    /// said and every turn's boundary stay where they were.
+    pub fn group_by_agent(&mut self) {
+        self.hold_view();
+        self.by_agent = !self.by_agent;
+    }
+
+    /// Whether the transcript leaves its routine entries out: see
+    /// [`App::show_notable_only`].
+    pub fn notable_only(&self) -> bool {
+        self.notable_only
+    }
+
+    /// Leaves the transcript's routine entries out — reads, searches, the
+    /// stream of a reply, the backend's notices — each run of them drawn as
+    /// one row that says how many, or draws them all again.
+    ///
+    /// A long session is read for what it said, wrote and asked; the rows
+    /// between are how the agent got there, and are one key away.
+    pub fn show_notable_only(&mut self) {
+        self.hold_view();
+        self.notable_only = !self.notable_only;
+    }
+
+    /// Shows what happened since the operator was last shown what happened,
+    /// or says in one line that nothing has.
+    pub fn show_catch_up(&mut self) {
+        let caught = CatchUp::since(&self.caught_up, &self.session);
+        match caught.is_empty() {
+            true => self.hint = Some(crate::catch_up::NOTHING.to_owned()),
+            false => self.open_catch_up(&caught),
+        }
+    }
+
+    /// Opens the sheet of what `caught` says happened, from which the next
+    /// catch-up of either kind counts.
+    fn open_catch_up(&mut self, caught: &CatchUp) {
+        let now = self.session.turn_running().then(|| self.doing());
+        self.sheet = Some(crate::catch_up::sheet(caught, now));
+        self.produce(Event::Looked);
+        self.caught_up = self.looked.clone();
+    }
+
+    /// Opens what happened while the operator was away, where this key is
+    /// the first after [`App::with_catch_up`]'s time with none and something
+    /// did, and says whether it did.
+    ///
+    /// The key that brings them back is spent on telling them, rather than
+    /// on a pane, a prompt or a question they have not read yet: what it was
+    /// meant for was meant before they knew what changed.
+    fn caught_up_on_return(&mut self) -> bool {
+        let Some(now) = self.now else {
+            return false;
+        };
+        let away = std::mem::take(&mut self.returned)
+            || self
+                .last_key
+                .is_some_and(|last| now.saturating_duration_since(last) >= self.away_after);
+        self.last_key = Some(now);
+        if !std::mem::take(&mut self.looked_stale) {
+            return false;
+        }
+        // Nothing a catch-up counts has happened, so the mark stands: what
+        // moved since, the five-hour window, is still measured from it.
+        let caught = CatchUp::since(&self.looked, &self.session);
+        if caught.is_empty() {
+            return false;
+        }
+        let shown =
+            away && self.catch_up_automatic && self.overlay().is_none() && self.trusting.is_none();
+        match shown {
+            true => self.open_catch_up(&caught),
+            false => self.produce(Event::Looked),
+        }
+        shown
+    }
+
+    /// Whether the Activity pane counts calls per tool: see
+    /// [`App::count_tools_by_name`].
+    pub fn tools_by_name(&self) -> bool {
+        self.tools_by_name
+    }
+
+    /// Has the Activity pane count calls per tool, by the names the backend
+    /// calls them, or per kind of work again.
+    ///
+    /// The kinds are labels put on the calls; the tools' own names are what
+    /// the backend reported, and are kept one key away.
+    pub fn count_tools_by_name(&mut self) {
+        self.tools_by_name = !self.tools_by_name;
+    }
+
+    /// Each sub-agent's tag and task, for the header its rows are grouped
+    /// under.
+    pub(crate) fn agent_headings(&self) -> Vec<(String, String)> {
+        self.agents
+            .iter()
+            .zip(self.agent_tags())
+            .map(|(agent, tag)| (tag, agent.task().to_owned()))
+            .collect()
     }
 
     /// Whether every diff longer than [`crate::hunks::MAX_ROWS`] is drawn
@@ -1838,7 +3319,7 @@ impl App {
 
     /// Folds in an event the operator produced here and queues it to be kept.
     fn produce(&mut self, event: Event) {
-        self.apply(&event);
+        self.fold_event(&event);
         self.produced.push(event);
     }
 
@@ -1850,11 +3331,6 @@ impl App {
         std::mem::take(&mut self.produced)
     }
 
-    /// Drops a prompt from the queue, and gives it back.
-    ///
-    /// The next prompt starts afresh — on its first option, with the keyboard
-    /// on it — whatever the operator was doing with the one before, so a
-    /// question put off is not mistaken for the one behind it.
     /// How the call `id` came to run, as far as this shell saw.
     ///
     /// An answer it folded says who gave it. With no answer, the call ran
@@ -1872,8 +3348,14 @@ impl App {
         }
     }
 
+    /// Drops a prompt from the queue, and gives it back.
+    ///
+    /// The next prompt starts afresh — on its first option, with the keyboard
+    /// on it — whatever the operator was doing with the one before, so a
+    /// question put off is not mistaken for the one behind it.
     fn forget_ask(&mut self, id: &ToolCallId) -> Option<Ask> {
         let at = self.asks.iter().position(|ask| &ask.id == id)?;
+        self.unask(id);
         if at == 0 {
             self.ask_selected = 0;
             self.ask_focus = AskFocus::Choosing;
@@ -1883,16 +3365,104 @@ impl App {
         self.asks.remove(at)
     }
 
+    /// Takes the question about `id` off the queue, where it is still there:
+    /// the backend stopped asking it.
+    fn withdraw_ask(&mut self, id: &ToolCallId) {
+        let Some(at) = self.asks.iter().position(|ask| ask.id == *id) else {
+            return;
+        };
+        self.unask(id);
+        self.asks.remove(at);
+        if at == 0 {
+            self.front_ask_taken_away();
+        }
+    }
+
     /// Drops every prompt waiting, and whatever the operator had begun
     /// answering the one on screen with.
+    /// Says in the transcript which questions the session left unanswered as
+    /// it ended, before they are taken off the screen: a question that only
+    /// vanished would read as answered somewhere.
+    fn say_asks_went_unanswered(&mut self) {
+        let tools: Vec<String> = self.asks.iter().map(|ask| tool_label(&ask.tool)).collect();
+        let body = match tools.as_slice() {
+            [] => return,
+            [tool] => format!(
+                "The question about {tool} was never answered: the session that asked it \
+                 ended, and no call is waiting on it now."
+            ),
+            tools => format!(
+                "{} questions were never answered ({}): the session that asked them ended, \
+                 and no call is waiting on them now.",
+                tools.len(),
+                tools.join(", ")
+            ),
+        };
+        self.push(Entry {
+            attention: Attention::Notable,
+            kind: EntryKind::Notice,
+            head: self.agent_name(),
+            meta: String::new(),
+            body,
+            streaming: false,
+            at: self.at,
+            calls: Vec::new(),
+            agent: None,
+        });
+    }
+
     fn forget_asks(&mut self) {
         if self.asks.is_empty() {
             return;
         }
+        let asked: Vec<ToolCallId> = self.asks.iter().map(|ask| ask.id.clone()).collect();
+        for id in &asked {
+            self.unask(id);
+        }
         self.asks.clear();
+        self.front_ask_taken_away();
+    }
+
+    /// Settles the keyboard after the question on screen was taken away
+    /// rather than answered, with what is left of the queue in place.
+    ///
+    /// The operator may be halfway through answering it, and the keys they
+    /// type on were meant for it. The question behind it comes up as a new
+    /// one does, waiting for a quiet keyboard; with none behind it, the
+    /// prompt takes those keys but no Enter among them sends it, and an
+    /// answer being written is moved into an empty prompt rather than lost.
+    fn front_ask_taken_away(&mut self) {
+        let draft = std::mem::take(&mut self.ask_draft);
+        let had_keyboard = self.ask_focus != AskFocus::Deferred;
         self.ask_selected = 0;
         self.ask_focus = AskFocus::Choosing;
-        self.ask_draft.clear();
+        if !self.asks.is_empty() {
+            self.ask_quiet_since = self.latest_instant();
+        }
+        if !had_keyboard {
+            return;
+        }
+        self.hint = Some(QUESTION_WITHDRAWN_HINT.to_owned());
+        if self.asks.is_empty() {
+            self.withdrawn_quiet_since = self.latest_instant();
+        }
+        // Nothing the operator wrote is dropped: an answer goes into an empty
+        // prompt, or after what the prompt holds on a line of its own, and
+        // waits there where another question is queued behind this one.
+        if !draft.is_empty() {
+            let kept = match self.composer.is_empty() {
+                true => self.composer.insert_str(draft),
+                false => {
+                    self.composer
+                        .move_cursor(ratatui_textarea::CursorMove::Bottom);
+                    self.composer.move_cursor(ratatui_textarea::CursorMove::End);
+                    self.composer.insert_str(format!("\n{draft}"))
+                }
+            };
+            if kept && self.asks.is_empty() {
+                self.focus = Focus::Session;
+            }
+        }
     }
 
     /// The answers the prompt on screen offers, in the order they are
@@ -2003,7 +3573,7 @@ impl App {
 
         let rule = match answer {
             Answer::Once | Answer::No => None,
-            Answer::AlwaysTool => Some(ask.tool_rule()),
+            Answer::AlwaysTool => ask.tool_rule(),
             Answer::AlwaysTarget => ask.target_rule(),
         };
         if let Some(rule) = rule.clone()
@@ -2059,6 +3629,7 @@ impl App {
     /// session, so the operator is not surprised by the prompt returning.
     pub fn not_remembered(&mut self, rule: &Rule, error: &str) {
         self.push(Entry {
+            attention: Attention::NeedsYou,
             kind: EntryKind::Failure,
             head: "not saved".to_owned(),
             meta: rule.to_string(),
@@ -2073,10 +3644,32 @@ impl App {
         });
     }
 
+    /// Says in the transcript that a rule the operator just made was kept
+    /// where the next session reads it, and will not be used there: the file
+    /// it went into is one nobody trusted, and an untrusted config answers no
+    /// prompt.
+    pub fn kept_until_trusted(&mut self, rule: &Rule) {
+        self.push(Entry {
+            attention: Attention::Notable,
+            kind: EntryKind::Notice,
+            head: "not kept".to_owned(),
+            meta: rule.to_string(),
+            body: "The rule holds for this session. The repository's config it is kept in is \
+                   not trusted, so the next session does not use it until you trust it: the \
+                   next session asks, and `niobe trust` shows what the file sets and asks too."
+                .to_owned(),
+            streaming: false,
+            at: self.at,
+            calls: Vec::new(),
+            agent: None,
+        });
+    }
+
     /// Says in the transcript that a decision never reached the backend, so a
     /// turn that is still waiting is not read as one that was answered.
     pub fn not_answered(&mut self, error: &str) {
         self.push(Entry {
+            attention: Attention::NeedsYou,
             kind: EntryKind::Failure,
             head: "not answered".to_owned(),
             meta: String::new(),
@@ -2116,6 +3709,7 @@ impl App {
             count: 1,
         });
         self.push(Entry {
+            attention: Attention::NeedsYou,
             kind: EntryKind::Failure,
             head: "not saved".to_owned(),
             meta: events(1),
@@ -2135,6 +3729,7 @@ impl App {
             return;
         };
         self.push(Entry {
+            attention: Attention::Notable,
             kind: EntryKind::Notice,
             head: "saved again".to_owned(),
             meta: format!("{} not saved", events(unsaved.count)),
@@ -2146,11 +3741,51 @@ impl App {
         });
     }
 
+    /// Settles the oldest mode change handed out to the backend as taken.
+    pub fn mode_taken(&mut self) {
+        self.modes_before.pop_front();
+    }
+
+    /// Settles the oldest mode change handed out to the backend as refused:
+    /// says so in the transcript and returns the session to the mode it was
+    /// in before, handing back the event that does it, for the journal.
+    ///
+    /// Where a later change is still to be handed out, the session is left
+    /// on it, and it is the later one's refusal that goes back, to the mode
+    /// before this one. A session no backend had reported a mode for goes
+    /// back to `ask`, which is what the bridge spawns the CLI in and what
+    /// [`App::cycle_mode`] counts from.
+    pub fn mode_not_taken(&mut self, error: &str) -> Option<Event> {
+        self.not_changed("mode", error);
+        let before = self.modes_before.pop_front()?;
+        if let Some(later) = self.modes_before.front_mut() {
+            *later = before;
+            return None;
+        }
+        let back = Event::ModeSelected {
+            mode: before.unwrap_or(Mode::Ask),
+        };
+        self.fold_event(&back);
+        Some(back)
+    }
+
+    /// Settles a model change the backend would not take: says so in the
+    /// transcript and returns the session to the model the backend last
+    /// reported, as a refusal the backend sends does, handing back the event
+    /// that does it, for the journal.
+    pub fn model_not_taken(&mut self, error: &str) -> Event {
+        self.not_changed("model", error);
+        let back = Event::ModelRefused { back_to: None };
+        self.fold_event(&back);
+        back
+    }
+
     /// Says in the transcript that a change the operator made never reached the
     /// backend, so a session that is still running as it was is not read as one
     /// that moved.
-    pub fn not_changed(&mut self, what: &str, error: &str) {
+    fn not_changed(&mut self, what: &str, error: &str) {
         self.push(Entry {
+            attention: Attention::NeedsYou,
             kind: EntryKind::Failure,
             head: "not changed".to_owned(),
             meta: what.to_owned(),
@@ -2191,12 +3826,16 @@ impl App {
     /// A conversion, not a reading of the clock: the draw calls it to say when
     /// a window the backend timed comes back, and what it gets back does not
     /// depend on when it was called.
-    pub fn moment(&self, seconds: u64) -> Stamp {
-        let at = std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds);
-        match &self.clock {
+    ///
+    /// `None` for a time past what the clock can hold, which a backend, a
+    /// stored session or a replayed log can name: it is a moment nothing can
+    /// say anything about.
+    pub fn moment(&self, seconds: u64) -> Option<Stamp> {
+        let at = std::time::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(seconds))?;
+        Some(match &self.clock {
             Some(clock) => clock.at(at),
             None => Stamp::new(at, None),
-        }
+        })
     }
 
     /// The same shell, able to value the tokens a backend reported no cost
@@ -2218,6 +3857,145 @@ impl App {
         self.budget_usd
     }
 
+    /// Names the files a turn changed that none of its edit calls reported —
+    /// a shell command it ran, a formatter, or something outside the session
+    /// — once a read of the working tree that began after the turn ended has
+    /// come back to compare with one that began after the turn started.
+    ///
+    /// Returns whether the loop should ask the watch for a read now. Called
+    /// by the event loop and never by [`App::apply`]: a recorded session has
+    /// no working tree to read. A file is told by its line counts against
+    /// the last commit, so a change that leaves them as they were — a line
+    /// replaced by one of the same count in a file already changed — is not
+    /// seen, and nothing is said that the counts do not show.
+    pub fn settle_tree(&mut self, now: Instant) -> bool {
+        let ended = self.session.turns().len();
+        let Some(watch) = self.tree_watch.as_mut() else {
+            if self.session.turn_running() {
+                self.turn_edits.clear();
+                self.tree_watch = Some(TreeWatch {
+                    ended_before: ended,
+                    asked: now,
+                    before: None,
+                    ended: None,
+                });
+                return true;
+            }
+            return false;
+        };
+        let fresh = |since: Instant| self.repo.read && self.repo.began.is_some_and(|b| b >= since);
+        let turn_over = ended > watch.ended_before;
+        if watch.before.is_none() && !turn_over && fresh(watch.asked) {
+            watch.before = Some(self.repo.working.clone());
+        }
+        if !turn_over {
+            return false;
+        }
+        let (Some(before), Some(asked_end)) = (&watch.before, watch.ended) else {
+            if watch.before.is_none() {
+                self.tree_watch = None;
+                return false;
+            }
+            watch.ended = Some(now);
+            return true;
+        };
+        if !fresh(asked_end) {
+            return false;
+        }
+        let changed = changed_outside(before, &self.repo.working, &self.turn_edits);
+        let turn = watch.ended_before.saturating_add(1);
+        self.tree_watch = None;
+        if !changed.is_empty() {
+            self.say_outside(turn, &changed);
+        }
+        false
+    }
+
+    /// The notice of what `turn` changed outside the edit tools.
+    fn say_outside(&mut self, turn: usize, changed: &[Outside]) {
+        let side = |count: Option<u64>| count.map_or_else(|| "—".to_owned(), |n| n.to_string());
+        let named: Vec<String> = changed
+            .iter()
+            .take(OUTSIDE_LISTED)
+            .map(|outside| match outside {
+                Outside::Changed(file) => {
+                    format!(
+                        "{} +{} −{}",
+                        file.path,
+                        side(file.added),
+                        side(file.removed)
+                    )
+                }
+                Outside::Restored(path) => format!("{path} (put back as committed)"),
+            })
+            .collect();
+        let rest = changed.len().saturating_sub(OUTSIDE_LISTED);
+        let more = match rest {
+            0 => String::new(),
+            n => format!(", and {n} more"),
+        };
+        let files = match changed.len() {
+            1 => "1 file".to_owned(),
+            n => format!("{n} files"),
+        };
+        self.push(Entry {
+            attention: Attention::Notable,
+            kind: EntryKind::Notice,
+            head: "outside the edit tools".to_owned(),
+            meta: format!("turn {turn} · {files}"),
+            body: format!(
+                "Turn {turn} changed {}{more} with no edit call saying so: a shell command \
+                 it ran, a formatter, or something outside the session. Each is counted \
+                 against the last commit, as the Working tree counts it; the session's own \
+                 edit figures leave them out.",
+                named.join(", "),
+            ),
+            streaming: false,
+            at: self.at,
+            calls: Vec::new(),
+            agent: None,
+        });
+        self.scroll_to_tail();
+    }
+
+    /// Says so when a turn that ended since the last call spent more than
+    /// three times what the session's turns before it averaged.
+    ///
+    /// Called by the event loop and never by [`App::apply`], for the reason
+    /// [`App::settle_budget`] is: the turns a session read back holds are
+    /// taken as judged on the first call, so that opening an old session does
+    /// not call out what it spent long ago.
+    pub fn settle_spikes(&mut self) {
+        let ended = self.session.turns().len();
+        // A cleared conversation starts its turns over, and is judged from
+        // its own first turn.
+        let from = self.spikes_judged.map_or(ended, |judged| judged.min(ended));
+        self.spikes_judged = Some(ended);
+        let found: Vec<crate::spike::Spike> = (from..ended)
+            .filter_map(|index| crate::spike::at(self.session.turns(), index))
+            .collect();
+        for spike in found {
+            self.push(Entry {
+                attention: Attention::Notable,
+                kind: EntryKind::Notice,
+                head: "spike".to_owned(),
+                meta: format!("turn {} · {}× the average", spike.turn, spike.times),
+                body: format!(
+                    "Turn {} spent {} tokens, against the {} the session's turns before it \
+                     averaged.",
+                    spike.turn,
+                    crate::ui::compact(spike.tokens),
+                    crate::ui::compact(spike.average),
+                ),
+                streaming: false,
+                at: self.at,
+                calls: Vec::new(),
+                agent: None,
+            });
+            self.scroll_to_tail();
+        }
+    }
+
     /// Says once when the session has spent most of its budget.
     ///
     /// Called by the event loop and never by [`App::apply`], for the reason
@@ -2230,25 +4008,52 @@ impl App {
         if self.budget_warned || budget <= 0.0 {
             return;
         }
-        let spent = self.session.totals().reported_cost_usd;
-        if spent < budget * BUDGET_WARNING {
+        // The same labelled figure the Usage pane's budget row counts: a
+        // floor or an estimate past the line is past the line, and a cost
+        // nobody reported is no reason to warn.
+        let billed = crate::ui::Billed::of(&self.session);
+        let Some((spent, usd)) =
+            crate::ui::known_spend(billed.counted(&self.session), self.prices())
+        else {
+            return;
+        };
+        if usd < budget * BUDGET_WARNING {
             return;
         }
 
+        // Named as the pane's budget row names it. Where nothing said how the
+        // session is billed that row withholds the spend, and on a plan it
+        // shows no dollars at all, so this does too: the backend counts the
+        // budget in the same figure, and the warning stands without it.
+        let over = usd > budget;
+        let meta = match billed {
+            crate::ui::Billed::Plan if over => "over the budget".to_owned(),
+            crate::ui::Billed::Plan => "most of the budget".to_owned(),
+            crate::ui::Billed::Unknown if over => format!("over {}", crate::ui::dollars(budget)),
+            crate::ui::Billed::Unknown => format!("most of {}", crate::ui::dollars(budget)),
+            crate::ui::Billed::Metered | crate::ui::Billed::Both => {
+                let budget = crate::ui::dollars(budget);
+                match billed.qualifier() {
+                    Some(qualifier) => format!("{qualifier} {spent} of {budget}"),
+                    None => format!("{spent} of {budget}"),
+                }
+            }
+        };
         self.budget_warned = true;
         self.push(Entry {
+            attention: Attention::NeedsYou,
             kind: EntryKind::Notice,
             head: "budget".to_owned(),
-            meta: format!(
-                "{} of {}",
-                crate::ui::dollars(spent),
-                crate::ui::dollars(budget)
+            meta,
+            body: format!(
+                "{} The backend stops the session when the budget is reached, and it \
+                 checks between turns rather than inside one, so the session can finish \
+                 above the figure by what the turn that crosses the line costs.",
+                match over {
+                    true => "This session has spent more than its budget.",
+                    false => "Most of this session's budget is spent.",
+                }
             ),
-            body: "Most of this session's budget is spent. The backend stops the session \
-                   when the budget is reached, and it checks between turns rather than \
-                   inside one, so the session can finish above the figure by what the turn \
-                   that crosses the line costs."
-                .to_owned(),
             streaming: false,
             at: self.at,
             calls: Vec::new(),
@@ -2262,31 +4067,280 @@ impl App {
         self.picking.as_ref()
     }
 
+    /// The same shell, asking whether to trust the repository's config and
+    /// quitting on the answer, which [`App::trust_answer`] then holds.
+    #[must_use]
+    pub fn asking_trust(mut self, question: trust::Question) -> Self {
+        self.trusting = Some(trust::Asking::new(question));
+        self
+    }
+
+    /// The question whether to trust the repository's config, while it is up.
+    pub fn trusting(&self) -> Option<&trust::Asking> {
+        self.trusting.as_ref()
+    }
+
+    /// How the question whether to trust the repository's config was
+    /// answered; `None` until it has been, and where the operator quit
+    /// instead.
+    pub fn trust_answer(&self) -> Option<trust::Answer> {
+        self.trusted
+    }
+
+    /// One key, while the trust question is up.
+    ///
+    /// Held to the same guard as a permission question, and for a sharper
+    /// reason: a session is often started and typed into straight away, and
+    /// an Enter meant for the first prompt must not put a file in force that
+    /// nobody has read. A key read before the question was first drawn was
+    /// typed at a shell that was not asking anything.
+    fn on_trust_key(&mut self, key: ratatui::crossterm::event::KeyEvent) {
+        if self.now.is_none() {
+            self.hint = Some(TOO_SOON_HINT.to_owned());
+            return;
+        }
+        if self.too_small {
+            self.hint = Some(TOO_SMALL_HINT.to_owned());
+            return;
+        }
+        if self.too_soon_to_answer() {
+            return;
+        }
+        if self.trusting.is_none() {
+            return;
+        }
+        let Some(code) = answer_key(key) else {
+            return;
+        };
+        let Some(at) = self.latest_instant() else {
+            return;
+        };
+        let Some(asking) = self.trusting.as_mut() else {
+            return;
+        };
+        match asking.on_key(code, at) {
+            trust::Reply::Answered(answer) => {
+                self.trusting = None;
+                self.trusted = Some(answer);
+                self.quit();
+            }
+            trust::Reply::Typed => self.hint = Some(TYPED_AT_TRUST_HINT.to_owned()),
+            trust::Reply::Hasty => self.hint = Some(HASTY_AT_TRUST_HINT.to_owned()),
+            trust::Reply::Moved => {}
+        }
+    }
+
     /// Opens the model list, or says why there is none to open.
     fn pick_model(&mut self) {
-        let models = self
+        let named: &[String] = self
             .profile
             .as_ref()
-            .map(|profile| profile.models.clone())
-            .unwrap_or_default();
-        if models.is_empty() {
+            .map_or(&[], |profile| profile.models.as_slice());
+        let (options, more) = model_choices(self.session.models(), named);
+        // The models a replayed record lists are the ones its backend offered,
+        // and nothing now would take a choice among them.
+        if !self.attached {
             self.hint = Some(
-                "F8 Model — this profile names no models; add `models = [\"…\"]` to it in \
-                 the config"
+                "F4 Model — this session is not attached to a backend, so there is no model \
+                 to change"
+                    .to_owned(),
+            );
+            return;
+        }
+        if options.is_empty() {
+            self.hint = Some(
+                "F4 Model — the backend has not listed its models yet, and this profile names \
+                 none; add `models = [\"…\"]` to it in the config"
                     .to_owned(),
             );
             return;
         }
 
-        let at = self
-            .session
-            .model()
-            .and_then(|current| models.iter().position(|model| model == current))
-            .unwrap_or(0);
-        self.picking = Some(Picker { models, at });
+        let at = in_force(&options, self.session.models(), self.session.model()).unwrap_or(0);
+        self.picking = Some(Picker {
+            purpose: Purpose::Model,
+            options,
+            at,
+            more,
+        });
     }
 
-    /// One key, while the model list is up.
+    /// Opens the list of effort levels, where the backend takes `/effort`.
+    ///
+    /// The cursor starts on the first: the backend does not report the level
+    /// in force, so no row can be marked as it.
+    fn pick_effort(&mut self) {
+        if let Err(why) = self.can_send("effort") {
+            self.hint = Some(why);
+            return;
+        }
+        self.picking = Some(Picker {
+            purpose: Purpose::Effort,
+            options: EFFORTS.iter().copied().map(Choice::plain).collect(),
+            at: 0,
+            more: 0,
+        });
+    }
+
+    /// Keeps what the call `id` returned for the view of it, as the end
+    /// carried it; an end whose start never arrived is kept from the end's
+    /// own copy of what the start said.
+    fn record_end(
+        &mut self,
+        id: &ToolCallId,
+        (name, input, summary): (&str, &str, Option<&str>),
+        (output, bytes, outcome): (&str, u64, ToolOutcome),
+        untrimmed: Option<&str>,
+    ) {
+        let ended = Some((output.to_owned(), bytes, outcome));
+        let untrimmed = untrimmed.map(str::to_owned);
+        match self
+            .recorded
+            .iter_mut()
+            .rev()
+            .find(|(started, _)| started == id)
+        {
+            Some((_, call)) => {
+                call.ended = ended;
+                call.untrimmed = untrimmed;
+            }
+            None => self.recorded.push((
+                id.clone(),
+                crate::detail::Recorded {
+                    name: name.to_owned(),
+                    what: what_it_does(summary, input),
+                    input: input.to_owned(),
+                    ended,
+                    untrimmed,
+                },
+            )),
+        }
+    }
+
+    /// Opens the list of the session's sub-agents, on the newest, to narrow
+    /// the transcript to one; or, where it is narrowed, draws everything
+    /// again; or says there are no sub-agents yet.
+    fn pick_agent(&mut self) {
+        if self.only_agent.is_some() {
+            self.hold_view();
+            self.only_agent = None;
+            return;
+        }
+        if self.agents.is_empty() {
+            self.hint = Some(NO_AGENTS_HINT.to_owned());
+            return;
+        }
+        let options: Vec<Choice> = self
+            .agents
+            .iter()
+            .zip(self.agent_tags())
+            .map(|(agent, tag)| Choice {
+                value: agent.id.to_string(),
+                name: Some(tag),
+                note: Some(match agent.is_running() {
+                    true => format!("{} · running", agent.task()),
+                    false => agent.task().to_owned(),
+                }),
+            })
+            .collect();
+        self.picking = Some(Picker {
+            purpose: Purpose::Agent,
+            at: options.len().saturating_sub(1),
+            options,
+            more: 0,
+        });
+    }
+
+    /// The tag of the one sub-agent the transcript is narrowed to, where it
+    /// is: see [`App::pick_agent`].
+    pub fn only_agent_tag(&self) -> Option<String> {
+        self.only_agent.as_ref().map(|id| self.sub_agent_tag(id))
+    }
+
+    /// The entries the transcript draws, in the order it draws them, as the
+    /// operator last arranged it — a run of routine entries it leaves out
+    /// is not among them.
+    pub fn entries_shown(&self) -> Vec<&Entry> {
+        let only = self.only_agent_tag();
+        crate::ui::order(
+            &self.entries,
+            self.by_agent,
+            self.notable_only,
+            only.as_deref(),
+        )
+        .into_iter()
+        .filter_map(|slot| match slot {
+            crate::ui::Slot::Entry(at) => self.entries.get(at),
+            crate::ui::Slot::Heading { .. } | crate::ui::Slot::Hidden { .. } => None,
+        })
+        .collect()
+    }
+
+    /// Opens the list of the conversation's tool calls, on the newest, or
+    /// says there are none yet.
+    fn pick_call(&mut self) {
+        if self.recorded.is_empty() {
+            self.hint = Some(NO_CALLS_HINT.to_owned());
+            return;
+        }
+        let options: Vec<Choice> = self
+            .recorded
+            .iter()
+            .enumerate()
+            .map(|(at, (_, call))| Choice {
+                value: at.to_string(),
+                name: Some(tool_label(&call.name)),
+                note: Some(match &call.ended {
+                    Some((_, bytes, _)) => format!("{} · {}", call.what, human_bytes(*bytes)),
+                    None => format!("{} · running", call.what),
+                }),
+            })
+            .collect();
+        self.picking = Some(Picker {
+            purpose: Purpose::Call,
+            at: options.len().saturating_sub(1),
+            options,
+            more: 0,
+        });
+    }
+
+    /// Opens the list of themes, on the one in force.
+    fn pick_theme(&mut self) {
+        let options: Vec<Choice> = crate::theme::Theme::all()
+            .iter()
+            .map(|theme| Choice::plain(theme.name))
+            .collect();
+        let at = options
+            .iter()
+            .position(|choice| choice.value == self.theme.name)
+            .unwrap_or(0);
+        self.picking = Some(Picker {
+            purpose: Purpose::Theme,
+            options,
+            at,
+            more: 0,
+        });
+    }
+
+    /// Which row of the open list is in force, if it can know.
+    pub fn picked(&self) -> Option<usize> {
+        let picker = self.picking.as_ref()?;
+        match picker.purpose {
+            Purpose::Model => {
+                in_force(&picker.options, self.session.models(), self.session.model())
+            }
+            Purpose::Effort => None,
+            Purpose::Rewind => None,
+            Purpose::Call => None,
+            Purpose::Agent => None,
+            Purpose::Theme => picker
+                .options
+                .iter()
+                .position(|choice| choice.value == self.theme.name),
+        }
+    }
+
+    /// One key, while a list is up.
     ///
     /// Anything that is not a move, a choice or a way out is swallowed: the
     /// list is a question, and a key that typed into the composer behind it
@@ -2297,20 +4351,1012 @@ impl App {
         let Some(picker) = self.picking.as_mut() else {
             return;
         };
-        let last = picker.models.len().saturating_sub(1);
+        let last = picker.options.len().saturating_sub(1);
         match key.code {
             KeyCode::Up => picker.at = picker.at.saturating_sub(1),
             KeyCode::Down => picker.at = picker.at.saturating_add(1).min(last),
-            KeyCode::Esc | KeyCode::F(8) => self.picking = None,
+            KeyCode::Esc | KeyCode::F(4) => self.picking = None,
             KeyCode::Enter => {
-                let model = picker.models.get(picker.at).cloned();
+                let purpose = picker.purpose;
+                let chosen = picker
+                    .options
+                    .get(picker.at)
+                    .map(|choice| choice.value.clone());
                 self.picking = None;
-                if let Some(model) = model {
-                    self.produce(Event::ModelSelected { model });
+                if let Some(chosen) = chosen {
+                    self.choose(purpose, chosen);
                 }
             }
             _ => {}
         }
+    }
+
+    /// Does what choosing `chosen` from a list for `purpose` does.
+    fn choose(&mut self, purpose: Purpose, chosen: String) {
+        match purpose {
+            Purpose::Model => self.produce(Event::ModelSelected { model: chosen }),
+            Purpose::Effort => self.send_command("effort", Some(&chosen)),
+            Purpose::Rewind => {
+                if let Ok(prompt) = chosen.parse::<usize>() {
+                    let named = self.sent.get(prompt).cloned().unwrap_or_default();
+                    let hint = format!("Putting the files back as they were before \"{named}\"…");
+                    self.hint = Some(hint.clone());
+                    self.rewinding = Some(hint);
+                    self.rewinds.push(prompt);
+                }
+            }
+            Purpose::Theme => {
+                if let Some(theme) = Theme::by_name(&chosen) {
+                    self.set_theme(theme);
+                }
+            }
+            Purpose::Agent => {
+                self.hold_view();
+                self.only_agent = Some(chosen.into());
+            }
+            Purpose::Call => {
+                let call = chosen
+                    .parse::<usize>()
+                    .ok()
+                    .and_then(|at| self.recorded.get(at));
+                if let Some((_, call)) = call {
+                    self.detail = Some(crate::detail::Detail::of(call));
+                }
+            }
+        }
+    }
+
+    /// The menu that is open, and the item its cursor is on.
+    pub fn menu(&self) -> Option<crate::menu::Open> {
+        self.menu
+    }
+
+    /// What the shell is saying at length, while it is up.
+    pub fn sheet(&self) -> Option<&Sheet> {
+        self.sheet.as_ref()
+    }
+
+    /// Whether `pane` of the right-hand stack is drawn when there is room for
+    /// it: the View menu hides and shows each.
+    pub fn shows(&self, pane: crate::menu::SidePane) -> bool {
+        !self.hidden.contains(&pane)
+    }
+
+    /// The same shell, knowing where the files it can name or open are.
+    #[must_use]
+    pub fn with_places(mut self, places: Places) -> Self {
+        self.places = places;
+        self
+    }
+
+    /// Where the last frame drew the menu bar and the F-key bar, so a click
+    /// on either presses what is drawn there.
+    pub fn drew_bars(&mut self, menu: ratatui::layout::Rect, fkeys: ratatui::layout::Rect) {
+        self.bars = Some((menu, fkeys));
+    }
+
+    /// Where the last frame drew the open menu's list, border included.
+    pub fn drew_menu_list(&mut self, at: Option<ratatui::layout::Rect>) {
+        self.menu_list = at;
+    }
+
+    /// Told by the draw how far the open sheet can scroll, so a key past its
+    /// end does not leave a scroll the next key has to undo first.
+    pub(crate) fn measured_sheet(&mut self, max_scroll: usize) {
+        if let Some(sheet) = self.sheet.as_mut() {
+            sheet.scroll = sheet.scroll.min(max_scroll);
+        }
+    }
+
+    /// Told by the draw how far the memory file being read can scroll: see
+    /// [`crate::memory::View::measured`].
+    pub(crate) fn measured_memory(&mut self, max_scroll: usize) {
+        if let Some(view) = self.memory.as_mut() {
+            view.measured(max_scroll);
+        }
+    }
+
+    /// Told by the draw that it did not draw `pane`: nothing may scroll it
+    /// with the mouse, and the keyboard cannot stay on it.
+    pub(crate) fn pane_not_drawn(&mut self, pane: Pane) {
+        self.scroller_mut(pane).area = None;
+        if self.focus == Focus::Pane(pane) {
+            self.focus = Focus::Session;
+        }
+    }
+
+    /// Whether `action` can do what it is named for in this session, which is
+    /// what the menu draws an item dimmed by. One that cannot still says why
+    /// when it is chosen.
+    pub fn can(&self, action: crate::menu::Action) -> bool {
+        use crate::menu::Action;
+
+        match action {
+            Action::NewSession => self.listed("clear"),
+            Action::Compact => self.listed("compact"),
+            Action::Doctor => self.listed("doctor"),
+            Action::Mcp => true,
+            Action::Effort => self.listed("effort"),
+            Action::Rewind => self.sent.len() > self.sent_since,
+            Action::Hooks => self.listed("hooks"),
+            Action::SignIn => false,
+            Action::Resume => self.remembers,
+            Action::Memory => true,
+            Action::SwitchModel => {
+                !self.session.models().is_empty()
+                    || self
+                        .profile
+                        .as_ref()
+                        .is_some_and(|profile| !profile.models.is_empty())
+            }
+            Action::Stop => self.working(),
+            Action::Commands => !self.session.commands().is_empty(),
+            Action::About
+            | Action::History
+            | Action::Settings
+            | Action::Permissions
+            | Action::Quit
+            | Action::Export
+            | Action::AddFile
+            | Action::SubAgents
+            | Action::CycleMode
+            | Action::Usage
+            | Action::Find
+            | Action::Diff
+            | Action::GroupByAgent
+            | Action::NotableOnly
+            | Action::CatchUp
+            | Action::Calls
+            | Action::OneAgent
+            | Action::Overview
+            | Action::Pane(_)
+            | Action::Theme
+            | Action::Shortcuts
+            | Action::ReleaseNotes
+            | Action::ReportBug => true,
+        }
+    }
+
+    /// Does what a menu item or an F-key names.
+    pub fn perform(&mut self, action: crate::menu::Action) {
+        use crate::menu::Action;
+
+        self.menu = None;
+        match action {
+            Action::About => self.sheet = Some(self.about()),
+            Action::Settings => self.sheet = Some(self.settings()),
+            Action::Permissions => self.sheet = Some(self.permissions()),
+            Action::SignIn => self.hint = Some(self.sign_in_hint()),
+            Action::Doctor => self.send_command("doctor", None),
+            Action::Quit => self.quit(),
+            Action::NewSession => self.send_command("clear", None),
+            Action::Compact => self.send_command("compact", None),
+            Action::Resume => match self.remembers {
+                true => self.open_history(View::Sessions),
+                false => self.hint = Some(NO_RECORD_HINT.to_owned()),
+            },
+            Action::History => self.open_history(View::Prompts),
+            Action::Rewind => self.pick_rewind(),
+            Action::Stop => match self.working() {
+                true => {
+                    self.focus = Focus::Session;
+                    self.stop_turn();
+                }
+                false => self.hint = Some("Nothing is running to stop".to_owned()),
+            },
+            Action::Export => self.export(),
+            Action::Memory => self.open_memory(),
+            Action::AddFile => self.start_mention(),
+            Action::Mcp => self.mcp = Some(crate::mcp::View::default()),
+            Action::SubAgents => self.show_sub_agents(),
+            Action::Hooks => self.send_or_say(
+                "hooks",
+                "The backend lists no /hooks to a session niobe drives; its hooks are set in \
+                 its own settings files",
+            ),
+            Action::SwitchModel => self.pick_model(),
+            Action::CycleMode => self.cycle_mode(),
+            Action::Effort => self.pick_effort(),
+            Action::Usage => self.hint = Some(self.cost_hint(self.read_at())),
+            Action::Find => self.open_find(),
+            Action::Diff => self.open_diffs(),
+            Action::GroupByAgent => self.group_by_agent(),
+            Action::NotableOnly => self.show_notable_only(),
+            Action::CatchUp => self.show_catch_up(),
+            Action::Calls => self.pick_call(),
+            Action::Overview => self.open_overview(),
+            Action::OneAgent => self.pick_agent(),
+            Action::Pane(pane) => self.toggle_pane(pane),
+            Action::Theme => self.pick_theme(),
+            Action::Shortcuts => self.sheet = Some(self.shortcuts()),
+            Action::Commands => self.start_command(),
+            Action::ReleaseNotes => self.handoffs.push(crate::desktop::Handoff::Open(format!(
+                "{REPOSITORY}/releases"
+            ))),
+            Action::ReportBug => self.handoffs.push(crate::desktop::Handoff::Report(format!(
+                "{REPOSITORY}/issues/new?template=bug.yml"
+            ))),
+        }
+    }
+
+    /// Whether the backend listed the command `name` to this session.
+    fn listed(&self, name: &str) -> bool {
+        self.attached
+            && self
+                .session
+                .commands()
+                .iter()
+                .any(|command| command.name == name)
+    }
+
+    /// Whether the backend's command `name` can be sent now, and if not, why,
+    /// in words the operator reads.
+    ///
+    /// Not while a turn runs: the backend would hold it until the turn ends,
+    /// and a `/clear` that lands after a turn the operator then went on
+    /// steering would clear what they meant to keep.
+    fn can_send(&self, name: &str) -> Result<(), String> {
+        if !self.attached {
+            return Err(format!(
+                "/{name} goes to the backend, and this session is not attached to one"
+            ));
+        }
+        if !self.listed(name) {
+            return Err(format!(
+                "The backend does not offer /{name} to this session"
+            ));
+        }
+        if self.working() {
+            return Err(format!(
+                "/{name} waits for the running turn: let it end, or Esc to stop it"
+            ));
+        }
+        Ok(())
+    }
+
+    /// Sends the backend's command `name`, with `argument` after it, as the
+    /// turn it runs as, or says why it cannot be sent.
+    fn send_command(&mut self, name: &str, argument: Option<&str>) {
+        if let Err(why) = self.can_send(name) {
+            self.hint = Some(why);
+            return;
+        }
+        let text = match argument {
+            Some(argument) => format!("/{name} {argument}"),
+            None => format!("/{name}"),
+        };
+        // A turn with no images of its own, so the ones attached to the prompt
+        // still being written stay with it.
+        self.images.send_none();
+        self.focus = Focus::Session;
+        self.produce(Event::UserMessage { text });
+        self.sent_here = true;
+        self.scroll_to_tail();
+    }
+
+    /// Sends the backend's command `name` where it lists one, and says
+    /// `otherwise` where it does not.
+    fn send_or_say(&mut self, name: &str, otherwise: &str) {
+        match self.listed(name) {
+            true => self.send_command(name, None),
+            false => self.hint = Some(otherwise.to_owned()),
+        }
+    }
+
+    /// Hides `pane` of the right-hand stack, or shows it again.
+    fn toggle_pane(&mut self, pane: crate::menu::SidePane) {
+        if !self.hidden.remove(&pane) {
+            self.hidden.insert(pane);
+        }
+    }
+
+    /// Gives the keyboard to the pane the sub-agents are listed in, or says
+    /// why it cannot.
+    fn show_sub_agents(&mut self) {
+        let activity = Focus::Pane(Pane::Activity);
+        if self.shows(crate::menu::SidePane::Activity) && self.on_screen(activity) {
+            self.focus = activity;
+            return;
+        }
+        self.hint = Some(
+            "The sub-agents are listed in the Activity pane, which is not on screen: View \
+             shows it, on a terminal at least 100 columns wide"
+                .to_owned(),
+        );
+    }
+
+    /// Starts naming a file at the cursor, with the list of files open.
+    fn start_mention(&mut self) {
+        let ratatui_textarea::DataCursor(row, column) = self.composer.cursor();
+        let before = self
+            .composer
+            .lines()
+            .get(row)
+            .and_then(|line| line.chars().nth(column.checked_sub(1)?));
+        let at = match before {
+            Some(c) if !c.is_whitespace() => " @",
+            _ => "@",
+        };
+        self.offer_closed = None;
+        self.insert_into_composer(at);
+    }
+
+    /// Starts a backend command in an empty prompt, with the list of them
+    /// open, or says why it cannot: a command is only read from the start of
+    /// a prompt.
+    fn start_command(&mut self) {
+        if !self.composer_is_blank() {
+            self.hint = Some(
+                "A command is named at the start of a prompt; send or clear this one first"
+                    .to_owned(),
+            );
+            return;
+        }
+        self.composer.clear();
+        self.offer_closed = None;
+        self.insert_into_composer("/");
+    }
+
+    /// Opens the Memory view, and asks for what the agent is given to be
+    /// read for it.
+    /// Opens the project overview on a line saying it is being read, and
+    /// asks for it: written each time it opens, so the session running now is
+    /// in it as far as it has gone.
+    fn open_overview(&mut self) {
+        self.detail = Some(crate::detail::Detail::page(
+            crate::overview::TITLE,
+            "",
+            crate::overview::READING,
+        ));
+        self.overview_wanted = true;
+    }
+
+    fn open_memory(&mut self) {
+        self.memory = Some(crate::memory::View::default());
+        self.memory_wanted = true;
+    }
+
+    /// One key, while the Memory view is open: it holds the keyboard as a
+    /// sheet does, and an F-key closes it and does what the key does.
+    fn on_memory_key(&mut self, key: ratatui::crossterm::event::KeyEvent) {
+        use crate::memory::Outcome;
+        use ratatui::crossterm::event::KeyCode;
+
+        if let KeyCode::F(n) = key.code {
+            self.memory = None;
+            if let Some(action) = crate::menu::fkey(n) {
+                self.perform(action);
+            }
+            return;
+        }
+        let Some(view) = self.memory.as_mut() else {
+            return;
+        };
+        match view.on_key(key) {
+            Outcome::Stay => {}
+            Outcome::Close => self.memory = None,
+            Outcome::Edit(path) => self.handoffs.push(crate::desktop::Handoff::Edit(path)),
+            Outcome::Say(said) => self.hint = Some(said.to_owned()),
+        }
+    }
+
+    /// One key, while the MCP view is open: it holds the keyboard as the
+    /// Memory view does, and an F-key closes it and does what the key does.
+    fn on_mcp_key(&mut self, key: ratatui::crossterm::event::KeyEvent) {
+        use crate::mcp::Outcome;
+        use ratatui::crossterm::event::KeyCode;
+
+        if let KeyCode::F(n) = key.code {
+            self.mcp = None;
+            if let Some(action) = crate::menu::fkey(n) {
+                self.perform(action);
+            }
+            return;
+        }
+        let Some(view) = self.mcp.as_mut() else {
+            return;
+        };
+        match view.on_key(key, self.session.mcp_servers()) {
+            Outcome::Stay => {}
+            Outcome::Close => self.mcp = None,
+            Outcome::Reconnect(server) => self.reconnect_mcp(server),
+        }
+    }
+
+    /// Asks the backend to connect to the MCP server `server` again, where a
+    /// backend is listening: the list shows how it stands once the backend
+    /// has said.
+    fn reconnect_mcp(&mut self, server: String) {
+        if !self.reconnects_mcp() {
+            self.hint = Some(
+                "No backend is attached to this session, so no server can be reconnected"
+                    .to_owned(),
+            );
+            return;
+        }
+        self.hint = Some(Self::reconnecting_hint(&server));
+        self.reconnecting = Some(server.clone());
+        self.mcp_reconnects.push(server);
+    }
+
+    fn reconnecting_hint(server: &str) -> String {
+        format!("Reconnecting `{server}`…")
+    }
+
+    /// Replaces the "Reconnecting" hint with what the backend answered: the
+    /// failure it gave, or how the server stands in the report that follows.
+    /// A hint a key has already replaced is left alone.
+    fn reconnect_answered(&mut self, event: &Event) {
+        let Some(server) = self.reconnecting.clone() else {
+            return;
+        };
+        if self.hint.as_deref() != Some(Self::reconnecting_hint(&server).as_str()) {
+            self.reconnecting = None;
+            return;
+        }
+        match event {
+            Event::Notice { message }
+                if message.contains(&format!("`{server}`"))
+                    && message.contains("could not be reconnected") =>
+            {
+                self.hint = Some(message.clone());
+                self.reconnecting = None;
+            }
+            Event::McpServers { servers } => {
+                self.hint = servers
+                    .iter()
+                    .find(|listed| listed.name == server)
+                    .map(|listed| match &listed.error {
+                        Some(error) => {
+                            format!("`{server}` is {}: {error}", listed.status.label())
+                        }
+                        None => format!("`{server}` is {}", listed.status.label()),
+                    });
+                self.reconnecting = None;
+            }
+            _ => {}
+        }
+    }
+
+    /// Opens the list of the prompts sent to the conversation in front of
+    /// the model, newest first, to put the files back as they were before
+    /// one of them.
+    fn pick_rewind(&mut self) {
+        let offered = self.sent.get(self.sent_since..).unwrap_or_default();
+        if offered.is_empty() {
+            self.hint = Some(
+                "No prompt has gone to the backend from here since the conversation started, \
+                 so there is nothing to put the files back before"
+                    .to_owned(),
+            );
+            return;
+        }
+        let options = offered
+            .iter()
+            .enumerate()
+            .rev()
+            .map(|(at, prompt)| Choice {
+                value: self.sent_since.saturating_add(at).to_string(),
+                name: Some(prompt.clone()),
+                note: None,
+            })
+            .collect();
+        self.picking = Some(Picker {
+            purpose: Purpose::Rewind,
+            options,
+            at: 0,
+            more: 0,
+        });
+    }
+
+    /// Records that the loop handed `prompt` to the backend: it is one F6
+    /// can put the files back before.
+    pub fn sent_to_backend(&mut self, prompt: &str) {
+        let first = prompt.trim().lines().next().unwrap_or_default();
+        self.sent.push(crate::text::truncate(first, REWIND_LABEL));
+    }
+
+    /// The prompts the operator asked to have the files put back to before
+    /// since the last call, each by where it is among those sent, oldest
+    /// first, for the loop to hand to the backend.
+    pub fn take_rewinds(&mut self) -> Vec<usize> {
+        std::mem::take(&mut self.rewinds)
+    }
+
+    /// Takes the "putting back" hint down once the backend has said what it
+    /// put back, or why it put nothing back, which the transcript shows.
+    fn rewind_answered(&mut self, event: &Event) {
+        let (Event::Notice { message } | Event::Error { message, .. }) = event else {
+            return;
+        };
+        if !message.contains("put back") {
+            return;
+        }
+        if let Some(hint) = self.rewinding.take()
+            && self.hint.as_deref() == Some(hint.as_str())
+        {
+            self.hint = None;
+        }
+    }
+
+    /// The backend would not take the rewind.
+    pub fn not_rewound(&mut self, error: &str) {
+        self.hint = Some(format!("No files were put back: {error}"));
+    }
+
+    /// Whether `r` in the MCP view reaches a backend: only one listening can
+    /// be asked to reconnect a server.
+    pub(crate) fn reconnects_mcp(&self) -> bool {
+        self.attached
+    }
+
+    /// The MCP servers the operator asked to be reconnected since the last
+    /// call, oldest first, for the loop to hand to the backend.
+    pub fn take_mcp_reconnects(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.mcp_reconnects)
+    }
+
+    /// The backend would not take the reconnect of `server`.
+    pub fn not_reconnected(&mut self, server: &str, error: &str) {
+        self.hint = Some(format!("`{server}` was not reconnected: {error}"));
+    }
+
+    /// The MCP view, while it is open.
+    pub fn mcp(&self) -> Option<&crate::mcp::View> {
+        self.mcp.as_ref()
+    }
+
+    /// Told by the draw how far the server shown whole can scroll: see
+    /// [`crate::mcp::View::measured`].
+    pub(crate) fn measured_mcp(&mut self, max_scroll: usize) {
+        if let Some(view) = self.mcp.as_mut() {
+            view.measured(max_scroll);
+        }
+    }
+
+    /// Copies the transcript, as the last frame laid it out, to the
+    /// clipboard.
+    fn export(&mut self) {
+        let lines = self.transcript_drawn.map_or(0, |(_, lines)| lines);
+        if lines == 0 {
+            self.hint = Some("There is no transcript to export yet".to_owned());
+            return;
+        }
+        let text: Vec<String> = (0..lines)
+            .map(|line| self.drawn.plain_line(line).unwrap_or_default())
+            .collect();
+        self.handoffs
+            .push(crate::desktop::Handoff::Copy(text.join("\n")));
+    }
+
+    /// What the operator is told to do to sign in or out, which only the
+    /// backend's own CLI does.
+    fn sign_in_hint(&self) -> String {
+        let backend = self
+            .session
+            .meta()
+            .map(|meta| meta.backend.to_string())
+            .or_else(|| {
+                self.profile
+                    .as_ref()
+                    .map(|profile| profile.backend.to_string())
+            })
+            .unwrap_or_else(|| "claude".to_owned());
+        format!(
+            "Signing in is the {backend} CLI's own, and niobe never reads its credentials: \
+             quit, run `{backend}` in a terminal and use /login there"
+        )
+    }
+
+    /// What this program is.
+    fn about(&self) -> Sheet {
+        let (backend, model) = self.running_under();
+        Sheet {
+            title: "About".to_owned(),
+            rows: vec![
+                format!("niobe {}", env!("CARGO_PKG_VERSION")),
+                String::new(),
+                "A terminal coding agent that keeps you aware of what is being built and \
+                 how: what the agent did, what it decided, what it touched, what it is \
+                 doing now and what it cost."
+                    .to_owned(),
+                String::new(),
+                format!("{:<10}{backend}", "Backend"),
+                format!("{:<10}{model}", "Model"),
+                String::new(),
+                format!("Apache-2.0 · {REPOSITORY}"),
+            ],
+            link: Some(REPOSITORY.to_owned()),
+            scroll: 0,
+        }
+    }
+
+    /// The backend and profile, and the model, the session runs under, or an
+    /// em dash for what nothing has said.
+    fn running_under(&self) -> (String, String) {
+        let backend = match (self.session.meta(), self.profile.as_ref()) {
+            (Some(meta), _) if !meta.profile.is_empty() => {
+                format!("{} · {}", meta.backend, meta.profile)
+            }
+            (Some(meta), _) => meta.backend.to_string(),
+            (None, Some(profile)) => format!("{} · {}", profile.backend, profile.name),
+            (None, None) => "—".to_owned(),
+        };
+        let model = self
+            .session
+            .model()
+            .or_else(|| self.session.meta().map(|meta| meta.model.as_str()))
+            .unwrap_or("—")
+            .to_owned();
+        (backend, model)
+    }
+
+    /// What the session runs under, and the files that set it.
+    fn settings(&self) -> Sheet {
+        let (backend, model) = self.running_under();
+        let mode = self
+            .session
+            .mode()
+            .map_or_else(|| "—".to_owned(), |mode| mode.to_string());
+        let mut rows = vec![
+            format!("{:<10}{backend}", "Profile"),
+            format!("{:<10}{model}", "Model"),
+            format!("{:<10}{mode}", "Mode"),
+            format!("{:<10}{}", "Theme", self.theme.name.to_lowercase()),
+            String::new(),
+            "Config files, the later over the earlier:".to_owned(),
+        ];
+        rows.extend(
+            self.places
+                .config_files
+                .iter()
+                .map(|file| match file.exists {
+                    true => format!("  {}", file.path),
+                    false => format!("  {} — not there", file.path),
+                }),
+        );
+        if self.places.config_files.is_empty() {
+            rows.push("  none was looked for".to_owned());
+        }
+        rows.push(String::new());
+        rows.push(
+            "niobe reads them as a session starts, so a change takes effect in the next one."
+                .to_owned(),
+        );
+        Sheet {
+            title: "Settings".to_owned(),
+            rows,
+            link: self
+                .places
+                .config_files
+                .iter()
+                .find(|file| file.openable)
+                .map(|file| file.path.clone()),
+            scroll: 0,
+        }
+    }
+
+    /// The standing answers permission prompts are answered with.
+    fn permissions(&self) -> Sheet {
+        let mode = self
+            .session
+            .mode()
+            .map_or_else(|| "—".to_owned(), |mode| mode.to_string());
+        let mut rows = vec![
+            format!("{:<10}{mode}", "Mode"),
+            String::new(),
+            "Allowed without asking:".to_owned(),
+        ];
+        let rules = self.allowed.rules();
+        match rules.is_empty() {
+            true => rows.push(
+                "  nothing yet — “always” on a permission prompt adds a rule here".to_owned(),
+            ),
+            false => rows.extend(rules.iter().map(|rule| format!("  {rule}"))),
+        }
+        rows.push(String::new());
+        rows.push(
+            "The rules are kept in the config's [permissions] table. A repository's own \
+             table answers nothing until its file is trusted."
+                .to_owned(),
+        );
+        Sheet {
+            title: "Permissions".to_owned(),
+            rows,
+            link: None,
+            scroll: 0,
+        }
+    }
+
+    /// The backend this session runs, as the shell names it: the one it
+    /// reported, or else the profile's.
+    fn backend(&self) -> Option<niobe_core::Backend> {
+        self.session
+            .meta()
+            .map(|meta| meta.backend)
+            .or_else(|| self.profile.as_ref().map(|profile| profile.backend))
+    }
+
+    /// The backend's name for what the operator is told to run.
+    pub(crate) fn backend_name(&self) -> &'static str {
+        self.backend().map_or(
+            niobe_core::Backend::Claude.as_str(),
+            niobe_core::Backend::as_str,
+        )
+    }
+
+    /// Where the backend keeps its MCP servers' configuration, where the
+    /// shell knows.
+    pub(crate) fn mcp_config_files(&self) -> Option<&'static str> {
+        match self.backend()? {
+            niobe_core::Backend::Claude => Some(
+                "Its servers are configured in ~/.claude.json, the user's and each \
+                 project's own, and in the repository's .mcp.json.",
+            ),
+            niobe_core::Backend::Codex | niobe_core::Backend::Native => None,
+        }
+    }
+
+    /// The keys the shell answers to.
+    fn shortcuts(&self) -> Sheet {
+        let mut keys: Vec<(&str, String)> = vec![
+            ("Esc", "stop the running turn".to_owned()),
+            (
+                "Esc, then",
+                "a digit presses its F-key (0 is F10); a menu's letter opens the menu".to_owned(),
+            ),
+            ("Alt+letter", "open a menu".to_owned()),
+            ("Enter", "send the prompt".to_owned()),
+            (self.newline_key(), "a new line in the prompt".to_owned()),
+            ("Ctrl+W", "delete the word before the cursor".to_owned()),
+            ("Ctrl+U", "delete to the start of the line".to_owned()),
+            ("Ctrl+K", "delete to the end of the line".to_owned()),
+            ("⇧Tab", "the next permission mode".to_owned()),
+            ("/", "a backend command or skill".to_owned()),
+            (FIND_KEY, "search the transcript".to_owned()),
+            ("@", "name a file".to_owned()),
+            (
+                "↑↓",
+                "an earlier prompt, from the first or last row".to_owned(),
+            ),
+            (
+                crate::history::SEARCH_KEY,
+                "earlier prompts and sessions".to_owned(),
+            ),
+        ];
+        if self.runs_commands {
+            keys.push(("!", "a command for your own shell".to_owned()));
+            keys.push((crate::shell::STOP_KEY, "stop that command".to_owned()));
+        }
+        keys.extend([
+            ("Tab", "move the keyboard between the panes".to_owned()),
+            (
+                "PgUp PgDn",
+                "scroll the pane that has the keyboard".to_owned(),
+            ),
+            (
+                "↑↓ Enter",
+                "in a side pane, fold the section under the cursor".to_owned(),
+            ),
+            (
+                "a",
+                "in a side pane, group sub-agent rows by agent".to_owned(),
+            ),
+            (
+                "t",
+                "in the Activity pane, count tools by name or by kind of work".to_owned(),
+            ),
+            ("Ctrl+End", "back to the newest line".to_owned()),
+            ("Ctrl+O", "fold runs of tool calls".to_owned()),
+            ("Ctrl+T", "open every cut diff and whole command".to_owned()),
+            ("Ctrl+V", "attach the image on the clipboard".to_owned()),
+            ("drag", "copy what it covers".to_owned()),
+            ("click", "open a link".to_owned()),
+            ("Ctrl+Z", "suspend".to_owned()),
+            (
+                "Ctrl+C",
+                "stop the turn or close what is open; twice, quit".to_owned(),
+            ),
+        ]);
+        let mut rows: Vec<String> = keys
+            .into_iter()
+            .map(|(key, what)| format!("{key:<12}{what}"))
+            .collect();
+        rows.push(String::new());
+        rows.push("F-keys:".to_owned());
+        rows.push(
+            self.fkey_labels()
+                .iter()
+                .zip(crate::menu::FKEYS)
+                .map(|(key, (_, label, _))| format!("{key} {label}"))
+                .collect::<Vec<_>>()
+                .join(" · "),
+        );
+        rows.push(String::new());
+        rows.extend(typed_rows());
+        if !self.keymap.is_empty() {
+            rows.push(
+                "Rebound in your config: ".to_owned()
+                    + &self
+                        .keymap
+                        .iter()
+                        .map(|(action, chord)| format!("{chord} is {}", action.name()))
+                        .collect::<Vec<_>>()
+                        .join(" · "),
+            );
+        }
+        Sheet {
+            title: "Shortcuts".to_owned(),
+            rows,
+            link: None,
+            scroll: 0,
+        }
+    }
+
+    /// Opens menu `at` on its first item.
+    fn open_menu(&mut self, at: usize) {
+        self.focus = Focus::Session;
+        self.menu = Some(crate::menu::Open::at(at));
+        self.menu_from_esc = None;
+    }
+
+    /// One key, while a menu is open: the menu has the keyboard whole.
+    fn on_menu_key(&mut self, key: ratatui::crossterm::event::KeyEvent) {
+        use ratatui::crossterm::event::KeyCode;
+
+        let Some(open) = self.menu else {
+            return;
+        };
+        // Only the key straight after the one that opened the menu can be the
+        // start of a word: an Esc that did nothing, then a sentence, would
+        // otherwise run whichever item the letters happened to land on.
+        if let Some((first, at)) = self.menu_from_esc.take()
+            && typed_char(key).is_some()
+            && let (Some(opened), Some(now)) = (at, self.latest_instant())
+            && now.saturating_duration_since(opened) < TYPING_AFTER_ESC
+        {
+            self.menu = None;
+            let typed = ratatui::crossterm::event::KeyEvent::new(
+                ratatui::crossterm::event::KeyCode::Char(first),
+                ratatui::crossterm::event::KeyModifiers::NONE,
+            );
+            self.on_key_under(typed);
+            self.on_key_under(key);
+            return;
+        }
+        match key.code {
+            KeyCode::Esc => self.menu = None,
+            KeyCode::Left => self.menu = Some(open.left()),
+            KeyCode::Right => self.menu = Some(open.right()),
+            KeyCode::Up => self.menu = Some(open.up()),
+            KeyCode::Down => self.menu = Some(open.down()),
+            KeyCode::Enter => {
+                if let Some(item) = open.item() {
+                    self.perform(item.action);
+                }
+            }
+            KeyCode::F(n) => {
+                self.menu = None;
+                if let Some(action) = crate::menu::fkey(n) {
+                    self.perform(action);
+                }
+            }
+            KeyCode::Char(c) => self.menu = Some(open.to_letter(c)),
+            _ => {}
+        }
+    }
+
+    /// One key, while a sheet is up: it has the keyboard whole, and changes
+    /// nothing but its own scroll.
+    fn on_sheet_key(&mut self, key: ratatui::crossterm::event::KeyEvent) {
+        use ratatui::crossterm::event::KeyCode;
+
+        let Some(sheet) = self.sheet.as_mut() else {
+            return;
+        };
+        match key.code {
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => self.sheet = None,
+            KeyCode::Up => sheet.scroll = sheet.scroll.saturating_sub(1),
+            KeyCode::Down => sheet.scroll = sheet.scroll.saturating_add(1),
+            KeyCode::PageUp => sheet.scroll = sheet.scroll.saturating_sub(SHEET_PAGE),
+            KeyCode::PageDown => sheet.scroll = sheet.scroll.saturating_add(SHEET_PAGE),
+            KeyCode::Char('o') => {
+                if let Some(link) = sheet.link.clone() {
+                    self.handoffs.push(crate::desktop::Handoff::Open(link));
+                }
+            }
+            KeyCode::F(n) => {
+                self.sheet = None;
+                if let Some(action) = crate::menu::fkey(n) {
+                    self.perform(action);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// A left click on the menus, the F-key bar or an open sheet. Returns
+    /// whether the click was theirs.
+    ///
+    /// With a menu open every click is: one on an item runs it, one on a
+    /// menu's name opens that menu or closes this one, and one anywhere else
+    /// only closes it, as a menu does on a desktop — a click that closed the
+    /// menu and also landed on what was under it would do something nobody
+    /// aimed at.
+    fn on_menu_click(&mut self, column: u16, row: u16) -> bool {
+        let point = (column, row).into();
+        let on_menu_bar = self.bars.is_some_and(|(bar, _)| bar.contains(point));
+        if let Some(open) = self.menu {
+            if let Some(list) = self.menu_list.filter(|list| list.contains(point)) {
+                let item = usize::from(row.saturating_sub(list.y.saturating_add(1)));
+                let inside = row > list.y && row + 1 < list.bottom();
+                if let Some(item) = open.menu().items.get(item).filter(|_| inside) {
+                    self.perform_clicked(item.action);
+                }
+                return true;
+            }
+            let switches = on_menu_bar && !self.question_waits();
+            self.menu = match crate::menu::title_at(column).filter(|_| switches) {
+                Some(at) if at != open.menu => Some(crate::menu::Open::at(at)),
+                _ => None,
+            };
+            return true;
+        }
+        if self.sheet.is_some()
+            || self.memory.is_some()
+            || self.mcp.is_some()
+            || self.detail.is_some()
+        {
+            self.sheet = None;
+            self.memory = None;
+            self.mcp = None;
+            self.detail = None;
+            return true;
+        }
+        if on_menu_bar {
+            match crate::menu::title_at(column) {
+                Some(_) if self.question_waits() => {
+                    self.hint = Some(QUESTION_FIRST_HINT.to_owned());
+                }
+                Some(at) => self.open_menu(at),
+                None => {}
+            }
+            return true;
+        }
+        if let Some((_, fkeys)) = self.bars.filter(|(_, fkeys)| fkeys.contains(point)) {
+            if let Some(action) =
+                crate::menu::fkey_at_for(fkeys.width, column - fkeys.x, &self.fkey_labels())
+            {
+                self.perform_clicked(action);
+            }
+            return true;
+        }
+        false
+    }
+
+    /// Whether a permission question, or the question whether to trust the
+    /// repository's config, waits for an answer.
+    fn question_waits(&self) -> bool {
+        self.trusting.is_some() || self.asking().is_some()
+    }
+
+    /// Does what a clicked menu item or F-key names, unless a question waits
+    /// and it is neither quitting nor stopping the turn.
+    ///
+    /// A key goes to the question ahead of the bars, but a click reaches
+    /// them past it: a list or the search it opened would then be drawn
+    /// over the question, and what the operator typed at it would land on
+    /// whichever of the two takes the keys. Quitting and stopping are
+    /// always available, as their keys are.
+    fn perform_clicked(&mut self, action: crate::menu::Action) {
+        use crate::menu::Action;
+
+        if self.question_waits() && !matches!(action, Action::Quit | Action::Stop) {
+            self.menu = None;
+            self.hint = Some(QUESTION_FIRST_HINT.to_owned());
+            return;
+        }
+        self.perform(action);
     }
 
     /// Moves the session to the next mode in the cycle.
@@ -2319,28 +5365,86 @@ impl App {
     /// what the bridge spawns the CLI in: one keypress then lands where it
     /// would have from a mode that had been reported.
     fn cycle_mode(&mut self) {
-        let mode = self.session.mode().unwrap_or(Mode::Ask).next();
+        // A record read back with nothing driving it has no mode to move: the
+        // change would be recorded and nothing would take it.
+        if !self.attached {
+            self.hint = Some(
+                "Shift+Tab — this session is not attached to a backend, so there is no mode \
+                 to change"
+                    .to_owned(),
+            );
+            return;
+        }
+        let before = self.session.mode();
+        let mode = before.unwrap_or(Mode::Ask).next();
+        if mode == Mode::Auto && self.model_cannot_run_auto() {
+            self.hint = Some(
+                "Shift+Tab — this model cannot run auto mode; pick another with F8 or stay \
+                 in this mode"
+                    .to_owned(),
+            );
+            return;
+        }
+        if self.attached {
+            self.modes_before.push_back(before);
+        }
         self.produce(Event::ModeSelected { mode });
     }
 
+    /// Whether the backend said the model this session runs on cannot run
+    /// `auto` mode. Unknown — no model reported, none of the listed ones the
+    /// one running, or a backend that did not say — is not a refusal.
+    fn model_cannot_run_auto(&self) -> bool {
+        let Some(running) = self.session.model() else {
+            return false;
+        };
+        let offered = self.session.models();
+        offered
+            .iter()
+            .find(|offer| offer.id == running)
+            .or_else(|| {
+                offered
+                    .iter()
+                    .find(|offer| offer.resolves_to.as_deref() == Some(running))
+            })
+            .is_some_and(|offer| offer.auto_mode == Some(false))
+    }
+
+    /// The session's reply still being written, where nothing drawn since it
+    /// began has ended it.
     fn streaming_agent_entry(&mut self) -> Option<&mut Entry> {
+        let at = self.reply?;
         // A sub-agent's rows land while the session is still writing, and do
         // not end its reply: the reply keeps its place above them rather than
-        // being started again below. Nor does the store refusing the reply's
-        // first fragment, or every fragment after it would start a reply of
-        // its own under the failure.
+        // being started again below. Nor does a prompt sent while it streams,
+        // which the CLI reads once the reply is done. Nor does the store
+        // refusing the reply's first fragment, or every fragment after it
+        // would start a reply of its own under the failure.
         let unsaved = self.unsaved.as_ref().map(|unsaved| unsaved.entry);
-        match self
+        let ended = self
             .entries
-            .iter_mut()
+            .iter()
             .enumerate()
-            .rev()
-            .find(|(at, entry)| entry.agent.is_none() && Some(*at) != unsaved)
-            .map(|(_, entry)| entry)
-        {
-            Some(entry) if entry.kind == EntryKind::Agent && entry.streaming => Some(entry),
-            _ => None,
+            .skip(at.saturating_add(1))
+            .any(|(later, entry)| {
+                entry.agent.is_none() && entry.kind != EntryKind::User && Some(later) != unsaved
+            });
+        if ended {
+            return None;
         }
+        self.entries
+            .get_mut(at)
+            .filter(|entry| entry.kind == EntryKind::Agent && entry.streaming)
+    }
+
+    /// The reply still being written, which the event being folded finishes:
+    /// no delta after it lands in it.
+    fn finish_reply(&mut self) -> Option<&mut Entry> {
+        let at = self
+            .reply
+            .filter(|_| self.streaming_agent_entry().is_some());
+        self.reply = None;
+        self.entries.get_mut(at?)
     }
 
     pub(crate) fn agent_name(&self) -> String {
@@ -2357,6 +5461,73 @@ impl App {
         self
     }
 
+    /// The same shell, with the plan's windows as an earlier session under
+    /// the same profile recorded them at `at`: a plan's windows belong to the
+    /// account, and the Usage pane shows the last level seen, dated, until
+    /// this session's backend reports one.
+    #[must_use]
+    pub fn with_carried_windows(
+        mut self,
+        windows: UsageWindows,
+        at: std::time::SystemTime,
+    ) -> Self {
+        self.carried_windows = Some((windows, at));
+        self
+    }
+
+    /// The plan's windows as the Usage pane draws them.
+    ///
+    /// What this session's backend reported, where it has since the session
+    /// was started or [resumed](App::resumed), with each window whose reset
+    /// has come around since holding a level nothing measured: a limited
+    /// session hears no more from its backend, so the draw clock is what ends
+    /// a level. Before then, the newer of what
+    /// an earlier session recorded and what this session's own record held,
+    /// dated, with each window whose reset has come around since holding a
+    /// level nothing measured and its next reset where the window has a fixed
+    /// one; or,
+    /// where nothing was ever recorded and the first reply has not come in,
+    /// rows waiting for it. None of that on an account known to be metered,
+    /// which has no plan windows.
+    pub fn plan_windows(&self) -> PlanWindows {
+        let folded = self.session.usage_windows().copied();
+        let recorded = match (folded, self.windows_recorded) {
+            (Some(windows), false) => {
+                return PlanWindows::Reported(since_reset(windows, self.read_at()));
+            }
+            (Some(windows), true) => self.windows_at.map(|at| (windows, at)),
+            (None, _) => None,
+        };
+        let metered = |billing: Option<Billing>| billing == Some(Billing::Metered);
+        if metered(self.session.billing())
+            || metered(self.profile.as_ref().and_then(|profile| profile.billing))
+        {
+            return PlanWindows::None;
+        }
+        let carried = self.carried_windows.map(|(windows, at)| {
+            let at = match &self.clock {
+                Some(clock) => clock.at(at),
+                None => Stamp::new(at, None),
+            };
+            (windows, at)
+        });
+        let newest = match (recorded, carried) {
+            (Some(recorded), Some(carried)) if carried.1.at() > recorded.1.at() => Some(carried),
+            (Some(recorded), _) => Some(recorded),
+            (None, carried) => carried,
+        };
+        if let Some((windows, at)) = newest {
+            return PlanWindows::Carried {
+                windows: since_reset(windows, self.read_at()),
+                at,
+            };
+        }
+        match self.attached && self.session.turns().is_empty() {
+            true => PlanWindows::Awaited,
+            false => PlanWindows::None,
+        }
+    }
+
     /// The same shell, drawn in `theme` at the terminal's depth.
     ///
     /// The composer is a widget that holds its own styles rather than being
@@ -2369,7 +5540,7 @@ impl App {
     }
 
     /// The same shell on a terminal that draws `depth` colours: every theme,
-    /// the one in force and each `F9` moves to, is drawn at it.
+    /// the one in force and each the theme list switches to, is drawn at it.
     #[must_use]
     pub fn with_depth(mut self, depth: Depth) -> Self {
         self.depth = depth;
@@ -2377,20 +5548,157 @@ impl App {
         self
     }
 
-    /// The same shell with the desktop's motion on or off.
-    ///
-    /// Off, the desktop is left empty while a turn runs and no frame of the
-    /// motion is worked out at all; the spinner under the transcript still
-    /// says the turn is going.
+    /// The same shell with the F-key bar's actions on the keys `keymap`
+    /// gives them: each is pressed by its chord, and the bar and the menus
+    /// draw that chord in place of its F-key.
     #[must_use]
-    pub fn with_effects(mut self, on: bool) -> Self {
-        self.effects = on;
+    pub fn with_keymap(mut self, keymap: niobe_core::Keymap) -> Self {
+        self.keymap = keymap;
         self
     }
 
-    /// Moves to the next theme, which is what `F9` does.
-    fn cycle_theme(&mut self) {
-        self.set_theme(self.theme.next());
+    /// The same shell, calling the operator back as `alerts` says when the
+    /// agent waits on them or a turn they sent ends.
+    #[must_use]
+    pub fn with_alerts(mut self, alerts: Alerts) -> Self {
+        self.alerts = alerts;
+        self
+    }
+
+    /// The same shell, knowing whether the backend was asked to state the
+    /// decisions it makes. Asked unless this says otherwise.
+    #[must_use]
+    pub fn with_decisions_asked(mut self, asked: bool) -> Self {
+        self.decisions_asked = asked;
+        self
+    }
+
+    /// Whether the backend was asked to state the decisions it makes.
+    pub fn decisions_asked(&self) -> bool {
+        self.decisions_asked
+    }
+
+    /// The same shell, telling the operator what happened while they were
+    /// away once `after` has passed with no key pressed: of itself on the
+    /// first key back where `automatic`, and on `c` or the View menu always.
+    #[must_use]
+    pub fn with_catch_up(mut self, after: Duration, automatic: bool) -> Self {
+        self.away_after = after;
+        self.catch_up_automatic = automatic;
+        self
+    }
+
+    /// What the shell sends to call the operator back.
+    pub fn alerts(&self) -> Alerts {
+        self.alerts
+    }
+
+    /// Takes what is on screen now as what the operator has already been
+    /// called back for, so that a session folded in before the shell opened —
+    /// a question it left unanswered, a turn it left running — rings nothing
+    /// as it opens.
+    pub fn alerts_seen(&mut self) {
+        self.called = Called {
+            asks: self.asks.iter().map(|ask| ask.id.clone()).collect(),
+            working: self.working(),
+        };
+    }
+
+    /// Why the operator is to be called back since the loop last asked, if
+    /// anything is: a question no standing rule answers came up, or a turn
+    /// sent from here ended without being stopped. A question outranks the
+    /// end of its turn arriving in the same pass, and one call is made per
+    /// pass, however much came in.
+    ///
+    /// Asked after [`App::settle_rules`], so that a prompt a rule answers is
+    /// never rung for.
+    pub fn take_alert(&mut self) -> Option<Alert> {
+        let new_ask = self.asks.iter().any(|ask| {
+            !self.called.asks.contains(&ask.id)
+                && !self.allowed.allows(&ask.tool, ask.target.as_deref())
+        });
+        // Only the questions still waiting are remembered, so the set is as
+        // long as the queue and a call id the backend reuses later is rung for.
+        self.called.asks = self.asks.iter().map(|ask| ask.id.clone()).collect();
+        let working = self.working();
+        let ended = std::mem::replace(&mut self.called.working, working) && !working;
+        // The turn that ended is the last one counted, and a stop asked of it
+        // means the operator was here to ask.
+        let stopped = self.stop_asked_in.is_some()
+            && self.stop_asked_in == self.session.turns().len().checked_sub(1);
+        match (new_ask, ended && !stopped) {
+            (true, _) => Some(Alert::NeedsYou),
+            (false, true) => Some(Alert::TurnEnded),
+            (false, false) => None,
+        }
+    }
+
+    /// What each key of the F-key bar is drawn as: the digit that follows
+    /// Esc, or the chord the action was given.
+    pub fn fkey_labels(&self) -> [String; 10] {
+        std::array::from_fn(|at| {
+            let slot = u8::try_from(at + 1).unwrap_or(u8::MAX);
+            niobe_core::Bindable::ALL
+                .into_iter()
+                .find(|action| action.slot() == slot)
+                .and_then(|action| self.keymap.chord_of(action))
+                .map_or_else(
+                    || crate::menu::default_labels()[at].clone(),
+                    niobe_core::Chord::short,
+                )
+        })
+    }
+
+    /// The keys a menu item is drawn with: what the menu says, with the
+    /// F-key of an action that was rebound replaced by the chord it was given.
+    pub fn item_keys(&self, item: &crate::menu::Item) -> String {
+        let Some(action) = crate::menu::bindable(item.action) else {
+            return item.keys.to_owned();
+        };
+        let Some(chord) = self.keymap.chord_of(action) else {
+            return item.keys.to_owned();
+        };
+        let default = format!("F{}", action.slot());
+        item.keys
+            .split_whitespace()
+            .map(|key| {
+                if key == default {
+                    chord.to_string()
+                } else {
+                    key.to_owned()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("  ")
+    }
+
+    /// The key as the action it is bound to, where it is a chord that was
+    /// given to one: the F-key that action has by default.
+    fn rebound(
+        &self,
+        key: ratatui::crossterm::event::KeyEvent,
+    ) -> ratatui::crossterm::event::KeyEvent {
+        use niobe_core::Chord;
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        if self.keymap.is_empty() {
+            return key;
+        }
+        let chord = match (key.code, key.modifiers) {
+            (KeyCode::F(n), _) if Chord::F_KEYS.contains(&n) => Chord::F(n),
+            (KeyCode::Char(letter), KeyModifiers::CONTROL) => {
+                Chord::Ctrl(letter.to_ascii_lowercase())
+            }
+            _ => return key,
+        };
+        match self.keymap.action_of(chord) {
+            Some(action) => KeyEvent {
+                code: KeyCode::F(action.slot()),
+                modifiers: KeyModifiers::NONE,
+                ..key
+            },
+            None => key,
+        }
     }
 
     fn set_theme(&mut self, theme: Theme) {
@@ -2451,6 +5759,7 @@ impl App {
     #[must_use]
     pub fn with_notice(mut self, head: &str, meta: &str, body: &str) -> Self {
         self.push(Entry {
+            attention: Attention::Notable,
             kind: EntryKind::Notice,
             head: head.to_owned(),
             meta: meta.to_owned(),
@@ -2473,6 +5782,26 @@ impl App {
     /// Whether a backend is listening.
     pub fn is_attached(&self) -> bool {
         self.attached
+    }
+
+    /// What the session is about: the title the backend gave it, or else the
+    /// first thing the operator asked, as [`SessionState::caption`] has it —
+    /// unless that first prompt never reached the backend. `None` where
+    /// nothing says yet.
+    pub fn caption(&self) -> Option<String> {
+        match self.first_prompt_unsent && self.session.title().is_none() {
+            true => None,
+            false => self.session.caption(),
+        }
+    }
+
+    /// Whether [`App::caption`] is a title the backend made, and not the
+    /// prompt the operator typed: a title with words in it, which the
+    /// caption takes ahead of the prompt.
+    pub fn titled(&self) -> bool {
+        self.session
+            .title()
+            .is_some_and(|title| title.lines().any(|line| !line.trim().is_empty()))
     }
 
     /// Where the session is running.
@@ -2588,6 +5917,43 @@ impl App {
         }
     }
 
+    /// Told by a frame whether the composer's box holds every row of what is
+    /// typed. Where it does after a frame where it did not, the editor is
+    /// scrolled back to its first row, the cursor kept where it was: the editor
+    /// only scrolls as far as the cursor needs, never back, so the rows that
+    /// went above the box would stay hidden though the box now has room.
+    ///
+    /// A selection is left alone, since moving the cursor would drop it; the
+    /// first row comes back once it is gone.
+    pub fn composer_fits(&mut self, fits: bool) {
+        if !fits {
+            self.composer_scrolled = true;
+            return;
+        }
+        if !self.composer_scrolled || self.composer.is_selecting() {
+            return;
+        }
+        let ratatui_textarea::DataCursor(row, col) = self.composer.cursor();
+        let (Ok(row), Ok(col)) = (u16::try_from(row), u16::try_from(col)) else {
+            return;
+        };
+        // The editor keeps its top row as a `u16` and scrolls by an `i16`, so
+        // three steps of `i16::MAX` rows reach row 0 from any top it can hold.
+        for _ in 0..3 {
+            self.composer.scroll((-i16::MAX, 0));
+        }
+        self.composer
+            .move_cursor(ratatui_textarea::CursorMove::Jump(row, col));
+        self.composer_scrolled = false;
+    }
+
+    /// Whether the composer is drawn from its first row, as it is wherever
+    /// the box holds every row it wraps to and no selection keeps it
+    /// scrolled.
+    pub fn composer_from_its_top(&self) -> bool {
+        !self.composer_scrolled
+    }
+
     /// What the last frame drew the session pane as, so the mouse can tell it
     /// from the panes beside it.
     pub fn measured_session(&mut self, area: ratatui::layout::Rect) {
@@ -2609,6 +5975,29 @@ impl App {
     /// `None` when it drew none because the transcript was at its end.
     pub fn drew_jump(&mut self, at: Option<ratatui::layout::Rect>) {
         self.jump = at;
+    }
+
+    /// Whether the last frame drew the top row of the question waiting.
+    pub fn drew_question_top(&mut self, drawn: bool) {
+        self.question_top_drawn = drawn;
+    }
+
+    /// Whether the last frame was too small to draw the shell, and with it
+    /// any question waiting.
+    ///
+    /// A question the window grows back over comes up as it does when it is
+    /// first asked, waiting from then for a quiet keyboard: an Enter pressed
+    /// at the blank window must not answer what appears under it.
+    pub fn drew_too_small(&mut self, too_small: bool) {
+        let shown = self.too_small && !too_small;
+        self.too_small = too_small;
+        if !shown || (self.asking().is_none() && self.trusting.is_none()) {
+            return;
+        }
+        self.ask_quiet_since = self.latest_instant();
+        if self.hint.as_deref() == Some(TOO_SMALL_HINT) {
+            self.hint = None;
+        }
     }
 
     /// The pane under a point on the screen, if the point is on one that
@@ -2685,6 +6074,13 @@ impl App {
             KeyCode::Up => self.scroller_mut(pane).move_cursor(false),
             KeyCode::Down => self.scroller_mut(pane).move_cursor(true),
             KeyCode::Enter => self.fold_under_cursor(pane),
+            KeyCode::Char('a') => self.group_by_agent(),
+            KeyCode::Char('n') => self.show_notable_only(),
+            KeyCode::Char('c') => self.show_catch_up(),
+            KeyCode::Char('d') => self.pick_call(),
+            KeyCode::Char('s') => self.pick_agent(),
+            KeyCode::Char('o') => self.open_overview(),
+            KeyCode::Char('t') if pane == Pane::Activity => self.count_tools_by_name(),
             KeyCode::Esc => self.focus = Focus::Session,
             _ => return false,
         }
@@ -2715,6 +6111,9 @@ impl App {
     /// nothing at all, so what is on screen is the last read that worked rather
     /// than an emptied pane.
     pub fn set_repo(&mut self, repo: Repo) {
+        if repo.files != self.repo.files {
+            self.mention_index = crate::mention::Files::new(&repo.files);
+        }
         self.repo = repo;
     }
 
@@ -2728,9 +6127,11 @@ impl App {
         &self.theme
     }
 
-    /// Whether the desktop moves while a turn is running.
-    pub fn effects(&self) -> bool {
-        self.effects
+    /// Whether the conversation was compacted and no request has measured
+    /// what it left yet — the compaction row's figure and the context
+    /// meter's are, until one does, what the backend said or nothing.
+    pub fn compaction_unmeasured(&self) -> bool {
+        self.compaction.is_some()
     }
 
     /// The fold every pane reads its numbers from.
@@ -2752,29 +6153,17 @@ impl App {
             .map(|agent| agent.label.clone())
     }
 
-    /// The transcript, oldest first.
-    /// Each decision the session recorded, with the moment it was recorded at.
+    /// Each decision the session's replies stated, with the moment it was
+    /// stated at.
     ///
     /// The two are handed out together because they are kept apart: the
     /// decision is in the session fold, which has no times, and the time is
     /// here. A pane that paired them by index could pair the wrong two.
     pub fn decisions(&self) -> impl Iterator<Item = (&DecisionRecord, Option<Stamp>)> {
-        // Padded rather than zipped short: the two grow together in the same
-        // fold and cannot fall out of step, and if they ever did, a decision
-        // that lost its time should still be on screen without one.
-        let times = self
-            .decided_at
+        self.session
+            .decisions()
             .iter()
-            .copied()
-            .chain(std::iter::repeat(None));
-        self.session.decisions().iter().zip(times)
-    }
-
-    /// The session's latest test run, with the moment its call finished where
-    /// the shell had a clock at the time. `None` where the session has run no
-    /// tests.
-    pub fn test_run(&self) -> Option<(&TestRunRecord, Option<Stamp>)> {
-        self.session.test_run().map(|run| (run, self.tested_at))
+            .zip(self.decided_at.iter().copied())
     }
 
     /// When a sub-agent was spawned, where the shell had a clock at the time.
@@ -2785,14 +6174,18 @@ impl App {
             .and_then(|agent| agent.at)
     }
 
+    /// The transcript, oldest first: every row the shell draws in it.
     pub fn entries(&self) -> &[Entry] {
         &self.entries
     }
 
-    /// The entries together with what the last draw made of them, for the
+    /// The entries together with the commands the backend lists, which a
+    /// prompt is drawn naming, and what the last draw made of them, for the
     /// draw to reuse.
-    pub(crate) fn entries_to_draw(&mut self) -> (&[Entry], &mut crate::ui::DrawnEntries) {
-        (&self.entries, &mut self.drawn)
+    pub(crate) fn entries_to_draw(
+        &mut self,
+    ) -> (&[Entry], &[SlashCommand], &mut crate::ui::DrawnEntries) {
+        (&self.entries, self.session.commands(), &mut self.drawn)
     }
 
     /// The composer widget, for the draw.
@@ -2806,8 +6199,8 @@ impl App {
     }
 
     /// Whether the composer holds nothing a prompt could be made of. Spaces
-    /// the operator cannot see must not turn the `/` and `!` that start a
-    /// search or a command into text, or the next command goes to the agent.
+    /// the operator cannot see must not turn the `!` that starts a command
+    /// into text, or the next command goes to the agent.
     fn composer_is_blank(&self) -> bool {
         self.composer
             .lines()
@@ -2849,6 +6242,7 @@ impl App {
             && !self.shell_mode
             && self.find.is_none()
             && self.picking.is_none()
+            && self.browser.is_none()
             && !self
                 .asking()
                 .is_some_and(|_| self.ask_focus != AskFocus::Deferred)
@@ -2877,36 +6271,41 @@ impl App {
         let lines = self.composer.lines();
         let word = crate::mention::at_cursor(lines, (row, column))
             .map(|mention| (mention.row, mention.at))
-            .or_else(|| crate::slash::at_cursor(lines, (row, column)).map(|_| (0, 0)));
+            .or_else(|| {
+                crate::slash::at_cursor(lines, (row, column)).map(|slash| (slash.row, slash.at))
+            });
         if word != self.offer_closed {
             self.offer_closed = None;
         }
     }
 
-    /// What has been typed after the `/` that opens the prompt, while the
-    /// list of the backend's commands for it is open.
-    fn slash(&self) -> Option<String> {
-        if !self.typing_a_prompt() || self.offer_closed == Some((0, 0)) {
+    /// The `/` word the cursor is at the end of, while the list of the
+    /// backend's commands for it is open: only while the operator is typing
+    /// into the composer, and not for a word the list was closed for.
+    fn slash(&self) -> Option<crate::slash::Slash> {
+        if !self.typing_a_prompt() {
             return None;
         }
         let ratatui_textarea::DataCursor(row, column) = self.composer.cursor();
         crate::slash::at_cursor(self.composer.lines(), (row, column))
+            .filter(|slash| self.offer_closed != Some((slash.row, slash.at)))
     }
 
-    /// The backend's commands the `/` that opens the prompt could name, and
+    /// The backend's commands the `/` word at the cursor could name, and
     /// which of them Enter would take. Empty where no list is open, which is
-    /// also where the backend has listed none.
+    /// also where the backend has listed nothing that can be named there.
     pub fn offered_commands(&self) -> (Vec<&SlashCommand>, usize) {
-        let Some(typed) = self.slash() else {
+        let Some(slash) = self.slash() else {
             return (Vec::new(), 0);
         };
-        let commands = crate::slash::candidates(self.session.commands(), &typed, MENTION_ROWS);
+        let commands = crate::slash::candidates(self.session.commands(), &slash, MENTION_ROWS);
         let selected = self.offer_selected.min(commands.len().saturating_sub(1));
         (commands, selected)
     }
 
     /// One key, while the list of the backend's commands is open. Returns
-    /// whether the list took it: the same keys as the list of files.
+    /// whether the list took it: the same keys as the list of files, except
+    /// an Enter on a command typed in full, which is left to send the prompt.
     fn on_command_key(&mut self, key: ratatui::crossterm::event::KeyEvent) -> bool {
         use ratatui::crossterm::event::{KeyCode, KeyModifiers};
 
@@ -2915,6 +6314,13 @@ impl App {
         let Some(chosen) = commands.get(selected).map(|command| command.name.clone()) else {
             return false;
         };
+        // A command already typed in full, as the backend spells it, has
+        // nothing left to pick: Enter sends it, as it does in the CLI itself.
+        if (key.code, key.modifiers) == (KeyCode::Enter, KeyModifiers::NONE)
+            && self.slash().is_some_and(|slash| slash.typed == chosen)
+        {
+            return false;
+        }
         match (key.code, key.modifiers) {
             (KeyCode::Up, KeyModifiers::NONE) => {
                 self.offer_selected = (selected + count - 1) % count;
@@ -2923,19 +6329,21 @@ impl App {
                 self.offer_selected = (selected + 1) % count;
             }
             (KeyCode::Tab | KeyCode::Enter, KeyModifiers::NONE) => self.name_command(&chosen),
-            (KeyCode::Esc, _) => self.offer_closed = Some((0, 0)),
+            (KeyCode::Esc, _) => {
+                self.offer_closed = self.slash().map(|slash| (slash.row, slash.at));
+            }
             _ => return false,
         }
         true
     }
 
-    /// Replaces what was typed after the opening `/` with `name`, and a space
-    /// after it for what the command takes.
+    /// Replaces what was typed after the `/` at the cursor with `name`, and a
+    /// space after it for what the command takes.
     fn name_command(&mut self, name: &str) {
-        let Some(typed) = self.slash() else {
+        let Some(slash) = self.slash() else {
             return;
         };
-        for _ in typed.chars() {
+        for _ in slash.typed.chars() {
             self.composer.delete_char();
         }
         self.composer.insert_str(format!("{name} "));
@@ -2948,7 +6356,9 @@ impl App {
         let Some(mention) = self.mention() else {
             return (Vec::new(), 0);
         };
-        let files = crate::mention::candidates(&self.repo.files, &mention.typed, MENTION_ROWS);
+        let files = self
+            .mention_index
+            .candidates(&self.repo.files, &mention.typed, MENTION_ROWS);
         let selected = self.offer_selected.min(files.len().saturating_sub(1));
         (files, selected)
     }
@@ -2984,8 +6394,9 @@ impl App {
         true
     }
 
-    /// Replaces what was typed after the `@` with `file`, and a space after
-    /// it so the next word is not taken for more of the path.
+    /// Replaces what was typed after the `@` with `file`, written as the
+    /// backend reads a mention ([`crate::mention::written`]), and a space
+    /// after it so the next word is not taken for more of the path.
     fn name_file(&mut self, file: &str) {
         let Some(mention) = self.mention() else {
             return;
@@ -2993,7 +6404,8 @@ impl App {
         for _ in mention.typed.chars() {
             self.composer.delete_char();
         }
-        self.composer.insert_str(format!("{file} "));
+        self.composer
+            .insert_str(format!("{} ", crate::mention::written(file)));
         self.offer_selected = 0;
     }
 
@@ -3059,6 +6471,72 @@ impl App {
         self.scroll_to_tail();
     }
 
+    /// Where the operator asked for an image since the last call, oldest
+    /// first, for the event loop to hand to a [`crate::images::Images`].
+    pub fn take_image_requests(&mut self) -> Vec<Source> {
+        self.images.take_asked()
+    }
+
+    /// Folds in how a fetch ended: an image is attached where the cursor is,
+    /// as the placeholder that stands for it; a failure says why on the bar.
+    ///
+    /// A path that was pasted and is not an image to attach goes into the
+    /// prompt as it was pasted, quoting and escapes included, since a paste
+    /// of anything else would have put it there unchanged.
+    pub fn fetched(&mut self, fetched: Fetched) {
+        let pasted = self.images.fetched(&fetched.source);
+        match (fetched.image, fetched.source) {
+            // Asked for before a `!` was typed, and landing after: a command
+            // line takes no image, and its placeholder would be a word of
+            // the command.
+            (Ok(_), _) if self.shell_mode => {
+                self.hint = Some(NO_IMAGE_IN_A_COMMAND_HINT.to_owned());
+            }
+            (Ok(image), _) => {
+                let placeholder = self.images.attach(image);
+                self.hint = None;
+                self.insert_into_composer(&format!("{placeholder} "));
+            }
+            (Err(reason), Source::Clipboard) => {
+                self.hint = Some(format!("No image attached: {reason}"));
+            }
+            (Err(reason), Source::File(path)) => {
+                self.hint = Some(format!("{path} is not attached: {reason}"));
+                self.insert_into_composer(&pasted.unwrap_or(path));
+            }
+        }
+    }
+
+    /// The images of the oldest prompt sent and not yet handed to the
+    /// backend, for the event loop to send with it. Taken once for every
+    /// prompt sent, whether or not anything is attached to hear it.
+    pub fn take_turn_images(&mut self) -> Vec<niobe_core::image::Image> {
+        self.images.take_turn()
+    }
+
+    /// Whether an image the operator asked for has not come back yet.
+    pub fn fetching_image(&self) -> bool {
+        self.images.fetching()
+    }
+
+    /// Asks for the image at `source`, and says so until it arrives.
+    fn attach_image(&mut self, source: Source) {
+        self.hint = Some(match &source {
+            Source::Clipboard => "Reading the image on the clipboard…".to_owned(),
+            Source::File(path) => format!("Reading {path}…"),
+        });
+        self.images.ask(source);
+    }
+
+    /// Puts `text` in the composer where the cursor is, as typing would.
+    fn insert_into_composer(&mut self, text: &str) {
+        self.focus = Focus::Session;
+        if self.composer.insert_str(text) {
+            self.offer_selected = 0;
+            self.reopen_offers();
+        }
+    }
+
     /// The commands the operator ran since the last call, oldest first, for
     /// the event loop to hand to a [`crate::shell::Shell`].
     pub fn take_commands(&mut self) -> Vec<(ToolCallId, String)> {
@@ -3094,10 +6572,12 @@ impl App {
     /// and, where it ran `cargo test`, the run it reported.
     ///
     /// A command the operator stopped ends as [`crate::shell::STOPPED`] and
-    /// as a call that did not succeed, rather than with the signal that
-    /// stopped it — the signal is how, the operator is why — and keeps any
-    /// status it was reported with: `sh` can outlive the signal that ends
-    /// what it runs and exit 0, which is not the command succeeding.
+    /// as interrupted — the operator's own stop, as Esc on a backend's call
+    /// is, which counts as neither a failure nor a refusal — rather than with
+    /// the signal that stopped it — the signal is how, the operator is why —
+    /// and with no status: whatever `sh` exited with after the stop is how the shell
+    /// ended, not how the command did, and an `exit 0` beside "stopped"
+    /// would read as a command that succeeded.
     pub fn ran(&mut self, mut ran: crate::shell::Ran) {
         let command = match self
             .running_commands
@@ -3113,10 +6593,12 @@ impl App {
         let stopped = self.stopping.remove(&ran.id);
         if stopped {
             ran.error = Some(crate::shell::STOPPED.to_owned());
+            ran.exit_code = None;
         }
-        let outcome = match ran.exit_code {
-            Some(0) if !stopped => ToolOutcome::Ok,
-            _ => ToolOutcome::Failed,
+        let outcome = match (stopped, ran.exit_code) {
+            (true, _) => ToolOutcome::Interrupted,
+            (false, Some(0)) => ToolOutcome::Ok,
+            (false, _) => ToolOutcome::Failed,
         };
         let tested = niobe_core::test_run::is_test_run(&command).then(|| {
             let whole = ran.whole.then_some(ran.output.as_str());
@@ -3132,13 +6614,15 @@ impl App {
         self.produce(Event::ToolCallEnd {
             id: ran.id,
             name: crate::shell::OPERATOR_SHELL.to_owned(),
-            input: command,
+            input: command.clone(),
             output: ran.output,
             bytes: ran.bytes,
             outcome,
             summary: None,
             exit_code: ran.exit_code,
             error: ran.error,
+            command: Some(command),
+            untrimmed: None,
         });
         if let Some(tested) = tested {
             self.produce(tested);
@@ -3193,30 +6677,42 @@ impl App {
     pub(crate) fn find_marks(&self) -> Option<(&[crate::find::Found], Option<usize>)> {
         self.find
             .as_ref()
-            .map(|find| (find.found.as_slice(), find.current))
+            .map(|find| (self.drawn.found(), find.current.map(|(at, _)| at)))
     }
 
-    /// Told by the draw where the query is in the transcript as it is drawn
-    /// now.
+    /// Told by the draw that it has found the query in the transcript as it
+    /// is drawn now, and whether where it found it has `changed` since the
+    /// last frame.
     ///
     /// A query just typed starts on the match nearest the bottom of where the
     /// view was when the search opened, and on the first one where none is
     /// above it: the transcript is read upwards from where the operator was.
-    pub(crate) fn found(&mut self, found: Vec<crate::find::Found>) {
+    /// After that the match stepped to stays the same match while lines
+    /// above it come and go — a run of calls folded, a diff opened — and
+    /// only where it is no longer drawn at all does the one with its number
+    /// take its place.
+    pub(crate) fn found(&mut self, changed: bool) {
         let viewport = self.viewport_lines;
+        let found = self.drawn.found();
         let Some(find) = self.find.as_mut() else {
             return;
         };
         let bottom = find.from.0.saturating_add(viewport);
-        find.current = match find.current {
+        let at = match find.current {
             _ if found.is_empty() => None,
-            Some(at) => Some(at.min(found.len() - 1)),
+            Some((at, _)) if !changed => Some(at),
+            Some((at, which)) => Some(
+                found
+                    .iter()
+                    .position(|found| found.which == which)
+                    .unwrap_or(at.min(found.len() - 1)),
+            ),
             None => {
                 find.revealed = false;
                 Some(found.iter().rposition(|at| at.line < bottom).unwrap_or(0))
             }
         };
-        find.found = found;
+        find.current = at.and_then(|at| found.get(at).map(|found| (at, found.which)));
     }
 
     /// Moves the view to the current match, once for each time it changes:
@@ -3226,7 +6722,7 @@ impl App {
             return;
         };
         let line = match (find.revealed, find.current) {
-            (false, Some(at)) => find.found.get(at).map(|found| found.line),
+            (false, Some((at, _))) => self.drawn.found().get(at).map(|found| found.line),
             _ => None,
         };
         find.revealed = true;
@@ -3255,7 +6751,6 @@ impl App {
         self.find = Some(Find {
             query,
             from: (self.scroll(), self.follow),
-            found: Vec::new(),
             current: None,
             revealed: true,
         });
@@ -3301,9 +6796,7 @@ impl App {
     ///
     /// The F-keys, Shift+Tab, Ctrl+O and Ctrl+T still do what they do everywhere;
     /// every other key is the search's, so nothing typed at it lands in the
-    /// composer behind it. The key that opened it, pressed again on an empty
-    /// query, closes it and types itself: that is how a prompt starts with a
-    /// literal `/`.
+    /// composer behind it.
     fn on_find_key(&mut self, key: ratatui::crossterm::event::KeyEvent) -> bool {
         use ratatui::crossterm::event::{KeyCode, KeyModifiers};
 
@@ -3318,12 +6811,8 @@ impl App {
             }
             (KeyCode::Esc, _) => self.close_find(),
             (KeyCode::Backspace, _) if empty => self.close_find(),
-            (KeyCode::Char('/'), KeyModifiers::NONE | KeyModifiers::SHIFT) if empty => {
-                self.close_find();
-                self.composer.insert_char('/');
-            }
-            (KeyCode::Enter | KeyCode::Up, _) => find.step(false),
-            (KeyCode::Down, _) => find.step(true),
+            (KeyCode::Enter | KeyCode::Up, _) => find.step(self.drawn.found(), false),
+            (KeyCode::Down, _) => find.step(self.drawn.found(), true),
             (KeyCode::Tab, _) => {}
             _ => {
                 if find.query.input(Input::from(key)) {
@@ -3354,6 +6843,115 @@ impl App {
     /// turn it into SIGTSTP, so the loop is what stops the process for it.
     pub fn take_suspend(&mut self) -> bool {
         std::mem::take(&mut self.suspend)
+    }
+
+    /// Whether the operator asked the running turn to stop since this was
+    /// last asked. The loop hands it to the backend, which ends the turn and
+    /// keeps the session.
+    pub fn take_interrupt(&mut self) -> bool {
+        std::mem::take(&mut self.interrupt)
+    }
+
+    /// What is open over the session that Esc would close, where something
+    /// is: the one that takes the keys, as [`App::on_key`] tries them.
+    fn overlay(&self) -> Option<Overlay> {
+        [
+            (self.menu.is_some(), Overlay::Menu),
+            (self.sheet.is_some(), Overlay::Sheet),
+            (self.memory.is_some(), Overlay::Memory),
+            (self.mcp.is_some(), Overlay::Mcp),
+            (self.detail.is_some(), Overlay::Detail),
+            (self.browser.is_some(), Overlay::History),
+            (self.picking.is_some(), Overlay::List),
+            (self.find.is_some(), Overlay::Search),
+        ]
+        .into_iter()
+        .find_map(|(open, overlay)| open.then_some(overlay))
+    }
+
+    /// Whether something is open over the session that Esc would close: a
+    /// menu, a sheet, the Memory view, the history dialog, a list to pick
+    /// from or a search.
+    fn closes_on_esc(&self) -> bool {
+        self.overlay().is_some()
+    }
+
+    /// Ctrl+C with nothing open that Esc would close: it stops a running turn
+    /// that has not been asked to stop yet, and otherwise quits if it follows
+    /// `asked`, the Ctrl+C before it, inside [`QUIT_WINDOW`], or asks for one
+    /// that does.
+    ///
+    /// What is typed in the composer is left as it is: the second press is
+    /// there so that a slip of the hand loses nothing, and a first press that
+    /// cleared the draft would lose it all the same.
+    fn on_ctrl_c(&mut self, asked: Option<QuitAsked>) {
+        if self.working() && !self.stopping() {
+            self.stop_turn();
+            return;
+        }
+        let now = self.latest_instant();
+        if asked.is_some_and(|asked| within_quit_window(asked.at, now)) {
+            self.quit();
+            return;
+        }
+        self.quit_asked = Some(QuitAsked { at: now });
+        self.hint = Some(QUIT_AGAIN_HINT.to_owned());
+    }
+
+    /// Takes back a Ctrl+C's request for a second one once its window has run
+    /// out by `now`, and the hint that asked for it.
+    fn expire_quit(&mut self, now: Instant) {
+        if self
+            .quit_asked
+            .is_some_and(|asked| !within_quit_window(asked.at, Some(now)))
+        {
+            self.quit_asked = None;
+            if self.hint.as_deref() == Some(QUIT_AGAIN_HINT) {
+                self.hint = None;
+            }
+        }
+    }
+
+    /// Asks the running turn to stop, once per turn.
+    fn stop_turn(&mut self) {
+        let turn = self.session.turns().len();
+        if self.stop_asked_in != Some(turn) {
+            self.stop_asked_in = Some(turn);
+            self.interrupt = true;
+        }
+        self.hint = Some(STOPPING_HINT.to_owned());
+    }
+
+    /// Takes back the hint that the turn is stopping, where it is the hint
+    /// shown: the turn has ended, or the stop was not taken.
+    fn forget_stopping_hint(&mut self) {
+        if self.hint.as_deref() == Some(STOPPING_HINT) {
+            self.hint = None;
+        }
+    }
+
+    /// Whether a stop has been asked for the turn that is running.
+    fn stopping(&self) -> bool {
+        self.working() && self.stop_asked_in == Some(self.session.turns().len())
+    }
+
+    /// Says in the transcript that the backend did not take a stop, so the
+    /// turn runs on. The turn counts as not asked again, so the next Esc or
+    /// Ctrl+C asks for the stop once more instead of leading to a quit.
+    pub fn not_stopped(&mut self, error: &str) {
+        self.stop_asked_in = None;
+        self.forget_stopping_hint();
+        self.push(Entry {
+            attention: Attention::NeedsYou,
+            kind: EntryKind::Failure,
+            head: "not stopped".to_owned(),
+            meta: "turn".to_owned(),
+            body: format!("The backend did not take the stop, so the turn runs on: {error}"),
+            streaming: false,
+            at: self.at,
+            calls: Vec::new(),
+            agent: None,
+        });
     }
 
     /// Records what the last draw measured, so that paging moves by a screen
@@ -3413,9 +7011,21 @@ impl App {
 
     /// Handles one mouse report: a click or a wheel notch gives the keyboard
     /// to the pane under the pointer, the wheel then scrolls it, and a click on
-    /// the way back down returns the transcript to its newest line. Nothing
-    /// else the mouse does means anything to the shell yet.
+    /// the way back down returns the transcript to its newest line.
+    ///
+    /// Over the transcript, a drag selects what it covers and letting go
+    /// copies it, and a click that does not drag opens the link under it: a
+    /// terminal reporting the mouse to the shell no longer selects anything
+    /// itself, so the shell does. Nothing else the mouse does means anything
+    /// to the shell yet.
     pub fn on_mouse(&mut self, mouse: ratatui::crossterm::event::MouseEvent) {
+        let covered = self.overlay().is_some();
+        self.on_mouse_under(mouse);
+        self.after_uncovering(covered);
+    }
+
+    /// [`App::on_mouse`], before the question it may have uncovered is told.
+    fn on_mouse_under(&mut self, mouse: ratatui::crossterm::event::MouseEvent) {
         use ratatui::crossterm::event::{MouseButton, MouseEventKind};
 
         // The wheel goes to whatever the pointer is over, and takes the focus
@@ -3432,7 +7042,15 @@ impl App {
         match mouse.kind {
             MouseEventKind::ScrollUp => wheel(self, Scroll::Up(Self::WHEEL_LINES)),
             MouseEventKind::ScrollDown => wheel(self, Scroll::Down(Self::WHEEL_LINES)),
+            MouseEventKind::Down(MouseButton::Left)
+                if self.on_menu_click(mouse.column, mouse.row) => {}
+            // What is open takes the click that lands on it, like a sheet
+            // does, and nothing is pressed under it: the link or the text
+            // beneath a dialog is not what the operator aimed at, and a drag
+            // would copy what the dialog hides.
+            MouseEventKind::Down(MouseButton::Left) if self.overlay().is_some() => {}
             MouseEventKind::Down(MouseButton::Left) => {
+                self.selection = None;
                 let jump = self
                     .jump
                     .is_some_and(|at| at.contains((mouse.column, mouse.row).into()));
@@ -3441,10 +7059,147 @@ impl App {
                     self.scroll_to_tail();
                 } else if let Some(focus) = over {
                     self.focus = focus;
+                    self.pressed = self.transcript_point(mouse.column, mouse.row);
                 }
             }
+            MouseEventKind::Drag(MouseButton::Left) => self.drag_to(mouse.column, mouse.row),
+            MouseEventKind::Up(MouseButton::Left) => self.let_go(),
             _ => {}
         }
+    }
+
+    /// The transcript cell at a place on the screen, or `None` where the
+    /// last frame drew none of the session's lines there.
+    fn transcript_point(&self, column: u16, row: u16) -> Option<crate::select::Point> {
+        let (area, lines) = self.transcript_drawn?;
+        if !area.contains((column, row).into()) {
+            return None;
+        }
+        let line = self.scroll() + usize::from(row - area.y);
+        (line < lines).then_some(crate::select::Point {
+            line,
+            column: usize::from(column - area.x),
+        })
+    }
+
+    /// Carries a drag over the transcript on to a place on the screen. A
+    /// drag past the top or the bottom of the pane scrolls it a line, so a
+    /// selection can be taken further than one screenful.
+    fn drag_to(&mut self, column: u16, row: u16) {
+        let (Some(anchor), Some((area, lines))) = (self.pressed, self.transcript_drawn) else {
+            return;
+        };
+        let column = column.clamp(area.x, area.right().saturating_sub(1));
+        let row = if row < area.y {
+            self.scroll_up(1);
+            area.y
+        } else if row >= area.bottom() {
+            self.scroll_down(1);
+            area.bottom().saturating_sub(1)
+        } else {
+            row
+        };
+        let line = (self.scroll() + usize::from(row - area.y)).min(lines.saturating_sub(1));
+        let head = crate::select::Point {
+            line,
+            column: usize::from(column - area.x),
+        };
+        self.selection = Some(crate::select::Selection::new(anchor, head));
+    }
+
+    /// The left button came up: what a drag selected goes to the clipboard,
+    /// and a click that did not drag opens the link it was on.
+    fn let_go(&mut self) {
+        let Some(pressed) = self.pressed.take() else {
+            return;
+        };
+        let handoff = match self.selection {
+            Some(selection) => {
+                let drawn = &self.drawn;
+                let copied = selection.text(|line| drawn.plain_line(line));
+                (!copied.is_empty()).then_some(crate::desktop::Handoff::Copy(copied))
+            }
+            None => {
+                let link = self.transcript_drawn.and_then(|(area, _)| {
+                    self.drawn
+                        .link_at(pressed, usize::from(area.width), &self.entries)
+                });
+                if link.is_none() {
+                    self.open_call_at(pressed.line);
+                }
+                link.map(crate::desktop::Handoff::Open)
+            }
+        };
+        self.handoffs.extend(handoff);
+    }
+
+    /// Opens the call drawn on transcript line `line` whole, where a call is
+    /// drawn there; a run of calls folded into one entry opens the list of
+    /// calls on the run's first, since which of them was meant is not said
+    /// by a click on the run.
+    fn open_call_at(&mut self, line: usize) {
+        let Some(at) = self.drawn.entry_at(line) else {
+            return;
+        };
+        let calls = self.entries.get(at).map_or(0, |entry| entry.calls.len());
+        let Some(&first) = self.call_at.get(&(at, 0)) else {
+            return;
+        };
+        match calls {
+            1 => {
+                if let Some((_, call)) = self.recorded.get(first) {
+                    self.detail = Some(crate::detail::Detail::of(call));
+                }
+            }
+            _ => {
+                self.pick_call();
+                if let Some(picker) = self.picking.as_mut() {
+                    picker.at = first;
+                }
+            }
+        }
+    }
+
+    /// The run of the transcript the operator selected, for the draw to mark.
+    pub(crate) fn selection(&self) -> Option<crate::select::Selection> {
+        self.selection
+    }
+
+    /// Where the last frame drew the transcript's lines, and how many lines
+    /// the session's entries came to, the question waiting after them left
+    /// out.
+    pub fn drew_transcript(&mut self, area: ratatui::layout::Rect, lines: usize) {
+        self.transcript_drawn = Some((area, lines));
+    }
+
+    /// What the operator asked of the desktop since the loop last looked:
+    /// text to copy and links to open, oldest first.
+    pub fn take_handoffs(&mut self) -> Vec<crate::desktop::Handoff> {
+        std::mem::take(&mut self.handoffs)
+    }
+
+    /// Says how handing `handoff` to the desktop went.
+    pub fn handed_off(&mut self, handoff: &crate::desktop::Handoff, outcome: Result<(), String>) {
+        use crate::desktop::Handoff;
+
+        self.hint = Some(match (handoff, outcome) {
+            (Handoff::Copy(copied), Ok(())) => {
+                let lines = copied.lines().count().max(1);
+                match lines {
+                    1 => format!("Copied {} characters", copied.chars().count()),
+                    _ => format!("Copied {lines} lines"),
+                }
+            }
+            (Handoff::Copy(_), Err(reason)) => format!("Nothing copied: {reason}"),
+            (Handoff::Open(link), Ok(())) => format!("Opening {link}"),
+            (Handoff::Open(link), Err(reason)) => format!("{link} is not opened: {reason}"),
+            (Handoff::Edit(path), Ok(())) => format!("Edited {path}"),
+            (Handoff::Edit(path), Err(reason)) => format!("{path} is not edited: {reason}"),
+            (Handoff::Report(link), Ok(())) => {
+                format!("Copied the diagnostics for a report: paste them into the form at {link}")
+            }
+            (Handoff::Report(_), Err(reason)) => format!("Nothing reported: {reason}"),
+        });
     }
 
     /// Handles one key the event loop read from the terminal, saying when
@@ -3463,6 +7218,9 @@ impl App {
     /// Handles the keys one read of the terminal held, in order, as
     /// [`App::on_key_read`] would one at a time.
     ///
+    /// An Enter among several keys is a line break, never a send: see the
+    /// comment on it below.
+    ///
     /// Where a character has just been typed into the prompt, the characters
     /// that follow it in the same read go in with one insert, as a paste
     /// does. The composer's editor lays out its whole text again after every
@@ -3471,8 +7229,18 @@ impl App {
     pub fn on_keys_read(&mut self, keys: &[ratatui::crossterm::event::KeyEvent], arrival: Arrival) {
         let mut rest = keys;
         while let Some((&key, after)) = rest.split_first() {
-            self.on_key_read(key, arrival);
             rest = after;
+            // An Enter in a read of several keys was pasted, not pressed: a
+            // terminal that does not bracket pastes sends the line breaks of
+            // one as Enter. Pressed, it would send the prompt or run the `!`
+            // command the paste typed, which nobody asked for.
+            if !arrival.alone && is_plain_enter(key) && self.composer_has_the_keyboard() {
+                if self.composer_has_room_for(1) {
+                    self.composer.insert_newline();
+                }
+                continue;
+            }
+            self.on_key_read(key, arrival);
             if typed_char(key).is_none() || !self.types_into_the_prompt() {
                 continue;
             }
@@ -3482,23 +7250,38 @@ impl App {
                 .count();
             let (typed, after) = rest.split_at(run);
             let text: String = typed.iter().copied().filter_map(typed_char).collect();
+            rest = after;
+            if !self.composer_has_room_for(text.len()) {
+                continue;
+            }
             if self.composer.insert_str(text) {
                 self.offer_selected = 0;
                 self.reopen_offers();
             }
-            rest = after;
         }
     }
 
+    /// Whether keys go to the composer — the prompt or the `!` command line —
+    /// rather than to a question, the trust question, or anything open over
+    /// the session: a list, a menu, a sheet, the Memory view, the history or
+    /// the search.
+    fn composer_has_the_keyboard(&self) -> bool {
+        self.focus() == Focus::Session
+            && self.trusting.is_none()
+            && self.overlay().is_none()
+            && !self
+                .asking()
+                .is_some_and(|_| self.ask_focus != AskFocus::Deferred)
+    }
+
     /// Whether a character typed now would go into the prompt as itself: the
-    /// prompt has the keyboard and something in it already, so no `/` or `!`
-    /// could open the search or a command, and no `Esc` has made the next
-    /// digit an F-key.
+    /// prompt has the keyboard and something in it already, so no `!` could
+    /// open a command, and no `Esc` has made the next digit an F-key.
     fn types_into_the_prompt(&self) -> bool {
         self.focus() == Focus::Session
             && !self.escaped
-            && self.find.is_none()
-            && self.picking.is_none()
+            && self.trusting.is_none()
+            && self.overlay().is_none()
             && !self
                 .asking()
                 .is_some_and(|_| self.ask_focus != AskFocus::Deferred)
@@ -3509,13 +7292,41 @@ impl App {
     ///
     /// Its line breaks stay line breaks, so a pasted log is one prompt to
     /// read over and send rather than a turn per line. It goes where typing
-    /// would go, but it presses nothing: no Enter, no `/` or `!` opening the
-    /// search or a command, and no answer to a question — a paste is exactly
+    /// would go, but it presses nothing: no Enter, no `!` opening a command,
+    /// and no answer to a question — a paste is exactly
     /// what a prompt must not take as one (see [`ASK_QUIET`]).
-    pub fn on_paste(&mut self, text: &str) {
+    pub fn on_paste(&mut self, pasted: &str) {
         self.hint = None;
         self.escaped = false;
-        let text = pasted_lines(text);
+        let text = pasted_lines(pasted);
+        // A paste is text. A control character in it — an escape sequence
+        // copied out of a terminal, a bell — would be sent with the prompt and
+        // drawn nowhere, so what is sent would not be what is shown: it is
+        // left out, and the bar says how many were.
+        let kept: String = text
+            .chars()
+            .filter(|c| !c.is_control() || matches!(c, '\n' | '\t'))
+            .collect();
+        let left_out = text.chars().count() - kept.chars().count();
+        let text = kept;
+        if left_out > 0 && text.trim().is_empty() {
+            self.hint = Some(controls_left_out(left_out));
+            return;
+        }
+        // Nothing pasted answers the trust question, and there is no prompt
+        // behind it to take the text.
+        if self.trusting.is_some() {
+            self.hint = Some(TOO_SOON_HINT.to_owned());
+            return;
+        }
+        // A list or a search open over a question takes what is pasted as it
+        // takes keys, ahead of the question.
+        if self.picking().is_some() {
+            return;
+        }
+        if self.asking().is_some() && self.paste_into_find(&text) {
+            return;
+        }
         if self.asking().is_some() {
             match self.ask_focus {
                 AskFocus::Writing => {
@@ -3529,20 +7340,81 @@ impl App {
                 AskFocus::Deferred => {}
             }
         }
-        if self.picking().is_some() {
+        if self.menu.is_some()
+            || self.sheet.is_some()
+            || self.memory.is_some()
+            || self.mcp.is_some()
+            || self.detail.is_some()
+        {
             return;
         }
-        if let Some(find) = self.find.as_mut() {
-            if find.query.insert_str(joined_lines(&text)) {
-                find.current = None;
-            }
+        if self.browser.is_some() {
+            self.paste_into_browser(pasted);
+            return;
+        }
+        if self.paste_into_find(&text) {
+            return;
+        }
+        // A command for `sh` is text: a path pasted into it is the path, and
+        // an image has nowhere to go.
+        if self.shell_mode && text.is_empty() {
+            self.hint = Some(NO_IMAGE_IN_A_COMMAND_HINT.to_owned());
+            return;
+        }
+        // A terminal that pastes an image it cannot give as text pastes
+        // nothing, and a dropped image file arrives as its path. Blanks are
+        // text the operator copied, and go in as typed.
+        if text.is_empty() {
+            self.focus = Focus::Session;
+            self.attach_image(Source::Clipboard);
+            return;
+        }
+        if let Some(path) = image_path(pasted).filter(|_| !self.shell_mode) {
+            self.focus = Focus::Session;
+            self.images.remember_paste(path.clone(), text);
+            self.attach_image(Source::File(path));
             return;
         }
         self.focus = Focus::Session;
+        if !self.composer_has_room_for(text.len()) {
+            return;
+        }
         if self.composer.insert_str(text) {
             self.offer_selected = 0;
             self.reopen_offers();
         }
+        if left_out > 0 {
+            self.hint = Some(controls_left_out(left_out));
+        }
+    }
+
+    /// Whether `more` bytes still fit in the composer under
+    /// [`COMPOSER_CAP`]. Where they do not, the bar says so.
+    fn composer_has_room_for(&mut self, more: usize) -> bool {
+        let held = self
+            .composer
+            .lines()
+            .iter()
+            .map(|line| line.len().saturating_add(1))
+            .sum::<usize>()
+            .saturating_sub(1);
+        let fits = held.saturating_add(more) <= COMPOSER_CAP;
+        if !fits {
+            self.hint = Some(TOO_LONG_HINT.to_owned());
+        }
+        fits
+    }
+
+    /// Puts `text` into the search, joined onto one line, where a search is
+    /// open. Returns whether one was.
+    fn paste_into_find(&mut self, text: &str) -> bool {
+        let Some(find) = self.find.as_mut() else {
+            return false;
+        };
+        if find.query.insert_str(joined_lines(text)) {
+            find.current = None;
+        }
+        true
     }
 
     /// The latest moment the shell has been told of: the tick's, or the
@@ -3578,16 +7450,72 @@ impl App {
         true
     }
 
+    /// Whether the key being handled is an Enter that would send the prompt
+    /// before the keyboard has been quiet since a question that had it was
+    /// taken away, and if so, says so. Every key until then starts the quiet
+    /// over again, as a key held back from a question does: the operator
+    /// typing on is still answering it.
+    fn sends_too_soon_after_withdrawal(
+        &mut self,
+        key: ratatui::crossterm::event::KeyEvent,
+    ) -> bool {
+        let (Some(since), Some(arrival)) = (self.withdrawn_quiet_since, self.arrival) else {
+            return false;
+        };
+        if self.asking().is_some() {
+            return false;
+        }
+        if arrival.alone && arrival.at >= since + ASK_QUIET {
+            self.withdrawn_quiet_since = None;
+            return false;
+        }
+        self.withdrawn_quiet_since = Some(arrival.at);
+        if !is_plain_enter(key) {
+            return false;
+        }
+        self.hint = Some(WITHDRAWN_NOT_SENT_HINT.to_owned());
+        true
+    }
+
     /// Handles one key.
     ///
     /// The shell's own bindings are taken first and everything left over goes
     /// to the composer, so typing an `f` is typing an `f` even though `F1` is a
     /// menu.
     pub fn on_key(&mut self, key: ratatui::crossterm::event::KeyEvent) {
+        if self.caught_up_on_return() {
+            return;
+        }
+        let covered = self.overlay().is_some();
+        self.on_key_under(key);
+        self.after_uncovering(covered);
+    }
+
+    /// Starts a question's quiet wait over again where `covered`, something
+    /// open over the session before the key or click just handled, has
+    /// closed while the question waits.
+    ///
+    /// Whatever closed it — an Enter on a sheet, a prompt chosen from the
+    /// history, a menu's item, a click beside a menu — the operator was
+    /// working what was open, not reading the question it uncovered, and an
+    /// Enter pressed again or held is no answer to it. Done here, around
+    /// every key and click, rather than in each overlay's own keys, so an
+    /// overlay added later cannot forget it.
+    fn after_uncovering(&mut self, covered: bool) {
+        if covered && self.overlay().is_none() && self.asking().is_some() {
+            self.ask_quiet_since = self.latest_instant();
+        }
+    }
+
+    /// [`App::on_key`], before the question it may have uncovered is told.
+    fn on_key_under(&mut self, key: ratatui::crossterm::event::KeyEvent) {
         use ratatui::crossterm::event::{KeyCode, KeyModifiers};
 
         self.hint = None;
+        self.selection = None;
+        let escaped = self.escaped;
         let key = self.as_function_key(key);
+        let key = self.rebound(key);
         // A terminal that did not say it could send Shift+Enter has now sent
         // one — tmux asked for modifyOtherKeys, under a terminal that reports
         // it — so it is the key the bar can name.
@@ -3595,10 +7523,24 @@ impl App {
             self.reports_shift_enter = true;
         }
 
+        let quit_asked = self.quit_asked.take();
+        // Ctrl+C is what an operator presses to stop a thing, and is pressed
+        // by accident: it closes what is open as Esc would, stops a running
+        // turn, and only otherwise leads to a quit — on a second press.
+        let key = match (key.code, key.modifiers) {
+            (KeyCode::Char('c'), KeyModifiers::CONTROL) if self.closes_on_esc() => {
+                ratatui::crossterm::event::KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)
+            }
+            (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                self.on_ctrl_c(quit_asked);
+                return;
+            }
+            _ => key,
+        };
         // Quitting is always available: a session with a prompt up is still a
         // session the operator may need to leave, and the backend is told the
         // same way it is told about any other way out.
-        if let (KeyCode::F(10), _) | (KeyCode::Char('q' | 'c'), KeyModifiers::CONTROL) =
+        if let (KeyCode::F(10), _) | (KeyCode::Char('q'), KeyModifiers::CONTROL) =
             (key.code, key.modifiers)
         {
             self.quit();
@@ -3617,6 +7559,49 @@ impl App {
             && self.runs_commands
         {
             self.stop_command();
+            return;
+        }
+        // The trust question takes the keyboard whole: there is no session
+        // behind it to type into, and nothing else to do until it is answered.
+        if self.trusting.is_some() {
+            self.on_trust_key(key);
+            return;
+        }
+        // An open menu, and a sheet, take the keyboard whole: each is
+        // something the operator opened and is reading.
+        if self.menu.is_some() {
+            self.on_menu_key(key);
+            return;
+        }
+        if self.sheet.is_some() {
+            self.on_sheet_key(key);
+            return;
+        }
+        if self.memory.is_some() {
+            self.on_memory_key(key);
+            return;
+        }
+        if self.mcp.is_some() {
+            self.on_mcp_key(key);
+            return;
+        }
+        if let Some(detail) = self.detail.as_mut() {
+            if detail.on_key(key) == crate::detail::Outcome::Close {
+                self.detail = None;
+            }
+            return;
+        }
+        // The history dialog takes it the same way: what is typed there
+        // filters it.
+        if self.browser.is_some() {
+            self.on_browser_key(key);
+            return;
+        }
+        // A list or a search open over a question is what the operator is
+        // looking at, and the question is covered by it or not marked as the
+        // one with the keys: its keys answering the question would approve a
+        // call nobody was reading.
+        if self.on_overlay_key(key) {
             return;
         }
         // A prompt takes the keyboard whole until it is put off. Typing into
@@ -3646,11 +7631,20 @@ impl App {
                 AskFocus::Deferred => {}
             }
         }
-        // The model list takes the keyboard the same way, and for the same
-        // reason: an arrow key that scrolled the transcript behind an open
-        // list would move something the operator was not looking at.
-        if self.picking().is_some() {
-            self.on_pick_key(key);
+        if self.sends_too_soon_after_withdrawal(key) {
+            return;
+        }
+        // A menu's letter after an Esc that did nothing else, or with Alt
+        // held, opens it: the same two bytes, as a digit is an F-key.
+        if let KeyCode::Char(letter) = key.code
+            && (escaped && key.modifiers == KeyModifiers::NONE
+                || key.modifiers == KeyModifiers::ALT)
+            && let Some(at) = crate::menu::menu_of(letter)
+        {
+            self.open_menu(at);
+            if escaped && key.modifiers == KeyModifiers::NONE {
+                self.menu_from_esc = Some((letter, self.latest_instant()));
+            }
             return;
         }
 
@@ -3676,51 +7670,76 @@ impl App {
             // Tab has nothing to do in a prompt, and Shift+Tab already cycles
             // the mode, so the plain key is the one that moves the focus.
             (KeyCode::Tab, KeyModifiers::NONE) => self.focus_next(),
+            (KeyCode::Char('r'), KeyModifiers::CONTROL) => self.open_history(View::Prompts),
+            // A binding rather than a character, so it searches with a prompt
+            // half written and leaves the prompt as it was.
+            (KeyCode::Char('f'), KeyModifiers::CONTROL) => {
+                self.focus = Focus::Session;
+                self.open_find();
+            }
+            // Up on the composer's first row and Down on its last are where
+            // the cursor has nowhere to go, and where a shell walks its
+            // history; anywhere else they move the cursor as they always have.
+            (KeyCode::Up | KeyCode::Down, KeyModifiers::NONE)
+                if !self.shell_mode && self.recall_key(key.code == KeyCode::Up) =>
+            {
+                self.focus = Focus::Session;
+            }
             // Shift+Enter, Ctrl+J or Alt+Enter opens a line; Enter sends. The
             // other way round would make the common action the awkward one.
             _ if opens_a_line(key) => {
                 self.focus = Focus::Session;
-                self.composer.insert_newline();
+                if self.composer_has_room_for(1) {
+                    self.composer.insert_newline();
+                }
             }
             (KeyCode::Enter, _) => self.submit(),
             (KeyCode::Char('o'), KeyModifiers::CONTROL) => self.fold_calls(),
             (KeyCode::Char('t'), KeyModifiers::CONTROL) => self.open_diffs(),
+            // A terminal's own paste hands over text, and an image on the
+            // clipboard is none: this is the one way to reach it.
+            (KeyCode::Char('v'), KeyModifiers::CONTROL) if self.shell_mode => {
+                self.hint = Some(NO_IMAGE_IN_A_COMMAND_HINT.to_owned());
+            }
+            (KeyCode::Char('v'), KeyModifiers::CONTROL) => {
+                self.focus = Focus::Session;
+                self.attach_image(Source::Clipboard);
+            }
 
             // Shift+Tab reaches crossterm as its own code rather than as Tab
             // with a modifier, which is why it is matched on the code alone.
             (KeyCode::BackTab, _) => self.cycle_mode(),
-            // F5 has no cost breakdown behind it, but on a flat-rate plan the
-            // question it is pressed for is when the windows come back, and
-            // the session fold knows that.
-            (KeyCode::F(5), _) => self.hint = Some(self.cost_hint(self.read_at())),
-            // The two sections the F-key bar already names fold from anywhere;
-            // every section, these two included, also folds under the cursor
-            // of the pane that has the keyboard.
-            (KeyCode::F(6), _) => self.fold(Section::WorkingTree),
-            (KeyCode::F(7), _) => self.fold(Section::Tools),
-            (KeyCode::F(8), _) => self.pick_model(),
-            (KeyCode::F(9), _) => self.cycle_theme(),
-            (KeyCode::F(n), _) => self.hint = Some(fkey_hint(n).to_owned()),
+            (KeyCode::F(n), _) => {
+                if let Some(action) = crate::menu::fkey(n) {
+                    self.perform(action);
+                }
+            }
             // An Esc nothing else wanted leaves the composer as it is and
             // makes the next digit an F-key, which is how the bar's actions
             // are reached where the F-keys never arrive.
+            // With a turn running, it stops the turn instead, as it does in
+            // the CLI's own interface: stopping the agent is the more urgent
+            // of the two, and the F-keys are there again once the turn ends.
+            (KeyCode::Esc, _) if self.working() => {
+                self.focus = Focus::Session;
+                self.stop_turn();
+            }
+            // A recalled prompt is not the operator's until they edit it, and
+            // the draft it replaced is out of sight: Esc is the way back to it
+            // that does not depend on how far the walk went.
+            (KeyCode::Esc, _) if self.recalled().is_some() => {
+                self.focus = Focus::Session;
+                self.give_draft_back();
+            }
             (KeyCode::Esc, _) => {
                 self.focus = Focus::Session;
                 self.escaped = true;
                 self.hint = Some(ESCAPED_HINT.to_owned());
             }
 
-            // `/` searches the transcript where it would start a prompt: in
-            // a composer with anything but spaces in it, it is a slash.
-            (KeyCode::Char('/'), KeyModifiers::NONE | KeyModifiers::SHIFT)
-                if self.composer_is_blank() =>
-            {
-                self.focus = Focus::Session;
-                self.composer.clear();
-                self.open_find();
-            }
-            // `!` runs a command where it would start a prompt, for the same
-            // reason `/` searches only there.
+            // `!` runs a command where it would start a prompt: in a
+            // composer with anything but spaces in it, it is an exclamation
+            // mark.
             (KeyCode::Char('!'), KeyModifiers::NONE | KeyModifiers::SHIFT)
                 if self.composer_is_blank() && self.runs_commands =>
             {
@@ -3728,11 +7747,31 @@ impl App {
                 self.composer.clear();
                 self.shell_mode = true;
             }
+            // A shell's line editor deletes back to the start of the line
+            // with Ctrl+U. The composer's editor would undo with it, giving
+            // back what Ctrl+W had just deleted.
+            (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
+                self.focus = Focus::Session;
+                if self.composer.delete_line_by_head() {
+                    self.offer_selected = 0;
+                    self.reopen_offers();
+                }
+            }
+
             // What was typed goes where typing always goes, and the keyboard
             // follows it back: the Enter after it has to send it.
             _ => {
                 self.focus = Focus::Session;
-                if self.composer.input(Input::from(key)) {
+                if let Some(typed) = typed_char(key)
+                    && !self.composer_has_room_for(typed.len_utf8())
+                {
+                    return;
+                }
+                let changed = match whole_character(&mut self.composer, key) {
+                    Some(changed) => changed,
+                    None => self.composer.input(Input::from(key)),
+                };
+                if changed {
                     self.offer_selected = 0;
                     self.reopen_offers();
                 }
@@ -3740,13 +7779,37 @@ impl App {
         }
     }
 
+    /// One key, while a list is up, or a search is up over a question.
+    /// Returns whether one of them took it.
+    ///
+    /// The list takes the keyboard whole: an arrow key that scrolled the
+    /// transcript behind it, or moved the answer of a question under it,
+    /// would move something the operator was not looking at. A search with
+    /// no question waiting takes its keys later, after the shell's own
+    /// bindings. A question the closing uncovers waits for a quiet keyboard
+    /// again: see [`App::after_uncovering`].
+    fn on_overlay_key(&mut self, key: ratatui::crossterm::event::KeyEvent) -> bool {
+        if self.picking.is_some() {
+            self.on_pick_key(key);
+        } else if self.find.is_some() && self.asking().is_some() {
+            if !(self.scroll_key(key) || self.on_find_key(key)) {
+                return false;
+            }
+        } else {
+            return false;
+        }
+        true
+    }
+
     /// One key, while a prompt has the keyboard.
     ///
     /// Scrolling still scrolls and a cut diff still opens, because the work that led to the question is
-    /// what the operator reads to answer it. Anything else that is not about
-    /// the question is swallowed rather than passed on: a key that did
-    /// something else while a question was being asked would be a key nobody
-    /// meant.
+    /// what the operator reads to answer it. A character typed at the
+    /// numbered answers that is not one of their digits is the operator
+    /// typing, and goes into the prompt behind the question (see
+    /// [`App::type_past_the_question`]). Anything else that is not about the
+    /// question is swallowed rather than passed on: a key that did something
+    /// else while a question was being asked would be a key nobody meant.
     fn on_ask_key(&mut self, key: ratatui::crossterm::event::KeyEvent) {
         use ratatui::crossterm::event::{KeyCode, KeyModifiers};
 
@@ -3759,6 +7822,12 @@ impl App {
             self.open_diffs();
             return;
         }
+        // Below the smallest window the shell draws only the size it needs,
+        // so no part of the question is on screen to answer.
+        if self.too_small {
+            self.hint = Some(TOO_SMALL_HINT.to_owned());
+            return;
+        }
         // The question is the last thing in the transcript. Scrolled back,
         // the operator cannot see it, and a key that answered it then would
         // answer something they were not reading; the first such key brings
@@ -3768,23 +7837,75 @@ impl App {
             self.ask_quiet_since = self.latest_instant();
             return;
         }
+        // Drawn whole and taller than the pane, the question's top is above
+        // it while the view follows its end: Enter would confirm a call whose
+        // name, and whose first answer, are not on screen.
+        if !self.question_top_drawn {
+            self.hint = Some(TOP_OFF_SCREEN_HINT.to_owned());
+            return;
+        }
+        // The answer field takes words, and words may arrive together —
+        // pasted, expanded, dictated. Only what would send the answer is
+        // held to the guard against keys that were not meant for it.
+        if self.ask_focus == AskFocus::Writing && !is_plain_enter(key) {
+            self.on_writing_key(key);
+            return;
+        }
+        // A letter answers nothing, so it is never held back: a word typed
+        // through the moment a question comes up would otherwise lose every
+        // letter that came within the quiet of the one before it, each of
+        // which restarts it.
+        if self.ask_focus == AskFocus::Choosing
+            && let Some(typed) = typed_char(key).filter(|c| !c.is_ascii_digit())
+        {
+            self.type_past_the_question(typed);
+            return;
+        }
         if self.too_soon_to_answer() {
             return;
         }
         match self.ask_focus {
-            AskFocus::Writing => self.on_writing_key(key.code),
-            AskFocus::Choosing | AskFocus::Deferred => self.on_choosing_key(key.code),
+            AskFocus::Writing => self.on_writing_key(key),
+            AskFocus::Choosing | AskFocus::Deferred => self.on_choosing_key(key),
+        }
+    }
+
+    /// A character typed at the numbered answers that is not one of their
+    /// digits: what an operator who has not read the question types as their
+    /// next prompt.
+    ///
+    /// It goes into the prompt behind the question, which is put aside as Esc
+    /// puts it aside, so the Enter that ends what they were typing is refused
+    /// there rather than taking the answer the cursor is on — "Allow once"
+    /// unless they moved it — and what they typed is still in front of them.
+    /// Letters, `j` and `k` among them, choose nothing: a word of them would
+    /// move the cursor and leave Enter to answer wherever it stopped. Typed
+    /// as text, a `!` opens no command.
+    fn type_past_the_question(&mut self, typed: char) {
+        self.ask_focus = AskFocus::Deferred;
+        self.focus = Focus::Session;
+        self.hint = Some(TYPED_AT_QUESTION_HINT.to_owned());
+        if !self.composer_has_room_for(typed.len_utf8()) {
+            return;
+        }
+        let mut bytes = [0; 4];
+        if self.composer.insert_str(typed.encode_utf8(&mut bytes)) {
+            self.offer_selected = 0;
+            self.reopen_offers();
         }
     }
 
     /// One key, on the numbered answers.
-    fn on_choosing_key(&mut self, code: ratatui::crossterm::event::KeyCode) {
+    fn on_choosing_key(&mut self, key: ratatui::crossterm::event::KeyEvent) {
         use ratatui::crossterm::event::KeyCode;
 
+        let Some(code) = answer_key(key) else {
+            return;
+        };
         match code {
             KeyCode::Enter => self.answer(self.ask_selected()),
-            KeyCode::Down | KeyCode::Char('j') => self.move_selection(true),
-            KeyCode::Up | KeyCode::Char('k') => self.move_selection(false),
+            KeyCode::Down => self.move_selection(true),
+            KeyCode::Up => self.move_selection(false),
             KeyCode::Char(c) => {
                 if let Some(number) = c.to_digit(10) {
                     self.select_option(number);
@@ -3797,9 +7918,12 @@ impl App {
     }
 
     /// One key, on an answer being written.
-    fn on_writing_key(&mut self, code: ratatui::crossterm::event::KeyCode) {
+    fn on_writing_key(&mut self, key: ratatui::crossterm::event::KeyEvent) {
         use ratatui::crossterm::event::KeyCode;
 
+        let Some(code) = answer_key(key) else {
+            return;
+        };
         match code {
             KeyCode::Enter => {
                 let words = self.ask_draft.clone();
@@ -3807,7 +7931,12 @@ impl App {
             }
             KeyCode::Char(c) => self.ask_draft.push(c),
             KeyCode::Backspace => {
-                self.ask_draft.pop();
+                let kept = self
+                    .ask_draft
+                    .grapheme_indices(true)
+                    .next_back()
+                    .map_or(0, |(at, _)| at);
+                self.ask_draft.truncate(kept);
             }
             KeyCode::Esc => self.ask_focus = AskFocus::Choosing,
             _ => {}
@@ -3828,6 +7957,13 @@ impl App {
     pub fn tick(&mut self, now: Instant, at: Option<Stamp>) {
         self.now = Some(now);
         self.at = at;
+        self.last_key = self.last_key.or(Some(now));
+        self.expire_quit(now);
+        // The trust question is up from the first tick, which draws it, and
+        // waits from there for a quiet keyboard as a permission question does.
+        if self.trusting.is_some() && self.ask_quiet_since.is_none() {
+            self.ask_quiet_since = Some(now);
+        }
         match self.working() {
             true => {
                 self.working_since = self.working_since.or(Some(now));
@@ -3904,6 +8040,7 @@ impl App {
         Some(Activity {
             elapsed,
             doing: self.doing(),
+            compacting: self.session.compacting(),
         })
     }
 
@@ -3917,6 +8054,9 @@ impl App {
     fn doing(&self) -> String {
         if !self.session.pending_permissions().is_empty() {
             return "waiting on you".to_owned();
+        }
+        if self.session.compacting() {
+            return COMPACTING.to_owned();
         }
         let running = self.tool_entries.values().max().and_then(|&(at, index)| {
             let entry = self.entries.get(at)?;
@@ -3936,45 +8076,159 @@ impl App {
     /// The prompt is folded in and queued: the event loop takes it from
     /// [`App::take_produced`] and hands it to the backend and to the journal.
     /// With nothing attached, the shell says so plainly rather than leaving a
-    /// prompt on screen that looks sent.
+    /// prompt on screen that looks sent. While an image asked for is still
+    /// being read, nothing is sent: it would land in the next prompt instead.
     pub fn submit(&mut self) {
         let text = self.composed();
         if text.trim().is_empty() {
             return;
         }
-
-        self.composer.clear();
-        self.offer_closed = None;
+        if self.images.fetching() {
+            self.hint = Some(IMAGE_STILL_READING_HINT.to_owned());
+            return;
+        }
+        if let Some((typed, argument)) = crate::menu::typed_command(&text) {
+            self.run_typed(typed, argument);
+            return;
+        }
+        if self.held_unlisted(&text) {
+            return;
+        }
         if let Some(model) = crate::slash::model_named(&text, self.session.commands()) {
+            let draft = self.take_composer_for_the_shell();
             self.produce(Event::ModelSelected { model });
+            self.give_back(&draft);
             self.scroll_to_tail();
             return;
         }
-        self.produce(Event::UserMessage { text });
+
+        self.composer.clear();
+        self.offer_closed = None;
+        let draft = self.take_draft();
+        let kept = kept_with(&draft, &self.drafts);
+        self.images.send(&text, &kept);
         self.sent_here = self.attached;
-        if !self.attached {
-            self.push(Entry {
-                kind: EntryKind::Notice,
-                head: "no backend".to_owned(),
-                meta: "not sent".to_owned(),
-                body: "This session is not attached to a backend, so the prompt above was \
-                       not sent. `niobe profiles` shows which profiles are defined and which \
-                       backend each one runs."
-                    .to_owned(),
-                streaming: false,
-                at: self.at,
-                calls: Vec::new(),
-                agent: None,
-            });
+        match self.attached {
+            true => self.produce(Event::UserMessage { text }),
+            false => self.produce(Event::PromptNotSent { text }),
         }
+        self.give_back(&draft);
         self.scroll_to_tail();
+    }
+
+    /// Whether `text` is held back rather than sent: a prompt that opens
+    /// with a command the backend did not list, the first time Enter sends
+    /// it. A backend may pass such a command to the model as text, which
+    /// spends a whole turn on a word; the second Enter on the same prompt
+    /// sends it, for a command the backend answers though it lists it not.
+    /// Nothing is held where the backend has listed no commands at all.
+    fn held_unlisted(&mut self, text: &str) -> bool {
+        let Some(name) = unlisted_command(text, self.session.commands()) else {
+            self.unlisted_held = None;
+            return false;
+        };
+        if self.unlisted_held.as_deref() == Some(text) {
+            self.unlisted_held = None;
+            return false;
+        }
+        self.hint = Some(format!(
+            "The backend does not list /{name}, so it may reach the model as text and spend a \
+             turn. Enter again sends it anyway"
+        ));
+        self.unlisted_held = Some(text.to_owned());
+        true
+    }
+
+    /// Says in the transcript that the prompt above it went nowhere.
+    fn say_not_attached(&mut self) {
+        self.push(Entry {
+            attention: Attention::NeedsYou,
+            kind: EntryKind::Notice,
+            head: "no backend".to_owned(),
+            meta: "not sent".to_owned(),
+            body: NOT_ATTACHED.to_owned(),
+            streaming: false,
+            at: self.at,
+            calls: Vec::new(),
+            agent: None,
+        });
+    }
+
+    /// Does what a prompt that is one of the commands in
+    /// [`crate::menu::TYPED`] asks for, as its menu item does it.
+    ///
+    /// A command the backend runs is checked first, the way the menu item
+    /// checks it, and a refused one is left in the composer with the reason
+    /// beside it: what was typed after it is the operator's to keep.
+    fn run_typed(&mut self, typed: crate::menu::Typed, argument: Option<&str>) {
+        if typed.backend
+            && let Err(why) = self.can_send(typed.name)
+        {
+            self.hint = Some(why);
+            return;
+        }
+        let argument = argument.map(str::to_owned);
+        let draft = self.take_composer_for_the_shell();
+        match argument {
+            Some(argument) => self.send_command(typed.name, Some(&argument)),
+            None => self.perform(typed.action),
+        }
+        self.give_back(&draft);
+    }
+
+    /// Empties the composer of a prompt the shell answers itself rather than
+    /// sending, and returns the draft that is to come back after it. The
+    /// images attached to it go with it; those of drafts set aside stay.
+    fn take_composer_for_the_shell(&mut self) -> (DraftId, String) {
+        self.composer.clear();
+        self.offer_closed = None;
+        let draft = self.take_draft();
+        let kept = kept_with(&draft, &self.drafts);
+        self.images.discard(&kept);
+        draft
+    }
+
+    /// Ends a walk through earlier prompts, as sending what it shows does,
+    /// and takes the draft that is to come back after: the one it set aside,
+    /// or else the newest an edit left set aside.
+    fn take_draft(&mut self) -> (DraftId, String) {
+        let draft = self.end_walk();
+        match draft.filter(|(_, draft)| !draft.is_empty()) {
+            Some(draft) => draft,
+            None => self.drafts.pop().unwrap_or_default(),
+        }
+    }
+
+    /// Ends a walk through earlier prompts, handing back the draft it set
+    /// aside with what its images belong to.
+    fn end_walk(&mut self) -> Option<(DraftId, String)> {
+        self.recall
+            .take()
+            .map(|recall| (self.walk_draft, recall.into_draft()))
+    }
+
+    /// Starts `recall`, a walk that set aside the draft the composer held.
+    fn start_walk(&mut self, recall: Recall) {
+        self.walk_draft = self.images.composing();
+        self.recall = Some(recall);
+    }
+
+    /// Puts a draft set aside back in the empty composer, where there is one.
+    fn give_back(&mut self, (id, draft): &(DraftId, String)) {
+        if !draft.is_empty() {
+            self.show_draft(*id, draft);
+        }
     }
 
     /// Says in the transcript that a turn never reached the backend, so that a
     /// prompt with no reply is not read as a backend thinking about it.
     pub fn not_sent(&mut self, error: &str) {
         self.sent_here = false;
+        if self.session.user_messages() == 1 {
+            self.first_prompt_unsent = true;
+        }
         self.push(Entry {
+            attention: Attention::NeedsYou,
             kind: EntryKind::Failure,
             head: "not sent".to_owned(),
             meta: String::new(),
@@ -3990,15 +8244,15 @@ impl App {
         self.scroll_to_tail();
     }
 
-    /// What F5 says: the plan's windows and when they come back, where a
-    /// backend has reported them, and otherwise that the breakdown behind the
-    /// key is not implemented yet.
+    /// What Cost & usage says: the plan's windows and when they come back,
+    /// where a backend has reported them, and otherwise that the breakdown
+    /// behind the item is not implemented yet.
     ///
     /// `now` is seconds since the Unix epoch, taken by the caller so that the
     /// wording can be asserted against a fixed clock.
     pub fn cost_hint(&self, now: u64) -> String {
         let Some(windows) = self.session.usage_windows() else {
-            return "F5 Usage — the usage breakdown is not implemented yet".to_owned();
+            return "Cost & usage — the usage breakdown is not implemented yet".to_owned();
         };
         let mut parts = Vec::new();
         if let Some(window) = windows.five_hour {
@@ -4010,7 +8264,7 @@ impl App {
         if windows.using_overage {
             parts.push("spending beyond the plan".to_owned());
         }
-        format!("F5 Usage — {}", parts.join(" · "))
+        format!("Cost & usage — {}", parts.join(" · "))
     }
 
     /// The moment the shell is reading the session at, in seconds since the
@@ -4032,12 +8286,705 @@ impl App {
     }
 }
 
+/// The prompts and sessions the operator can go back to: Up and Down in the
+/// composer, and the history dialog.
+impl App {
+    /// The same shell, handed a record of the repository's sessions: the
+    /// history dialog can open one of them in place of this one.
+    #[must_use]
+    pub fn remembers(mut self) -> Self {
+        self.remembers = true;
+        self
+    }
+
+    /// Whether the shell has asked for the repository's earlier sessions to
+    /// be read since this was last asked: once as it opens, and again each
+    /// time the history dialog does, so a session another shell ended since
+    /// is in it.
+    pub fn take_history_request(&mut self) -> bool {
+        std::mem::take(&mut self.history_wanted)
+    }
+
+    /// Whether the Memory view has asked for what the agent is given to be
+    /// read since this was last asked: each time it opens, so a file the
+    /// session changed is read as it is now.
+    pub fn take_memory_request(&mut self) -> bool {
+        std::mem::take(&mut self.memory_wanted)
+    }
+
+    /// What the agent is given, as it was read for the open Memory view. A
+    /// read that lands after the view was closed is dropped.
+    pub fn set_memory(&mut self, files: Vec<crate::memory::MemoryFile>) {
+        if let Some(view) = self.memory.as_mut() {
+            view.files = Some(files);
+            view.at = 0;
+            view.reading = None;
+        }
+    }
+
+    /// Whether the project overview has been opened since this was last
+    /// asked.
+    pub fn take_overview_request(&mut self) -> bool {
+        std::mem::take(&mut self.overview_wanted)
+    }
+
+    /// The project overview the binary wrote, for the open overview. A page
+    /// that lands after the dialog was closed, or once a tool call was opened
+    /// in its place, is dropped.
+    pub fn set_overview(&mut self, page: &str) {
+        if self
+            .detail
+            .as_ref()
+            .is_some_and(|open| open.title() == crate::overview::TITLE)
+        {
+            self.detail = Some(crate::detail::Detail::page(
+                crate::overview::TITLE,
+                page,
+                "nothing is recorded here to read",
+            ));
+        }
+    }
+
+    /// The tool call open to be read whole, while one is.
+    pub fn detail(&self) -> Option<&crate::detail::Detail> {
+        self.detail.as_ref()
+    }
+
+    /// Told by the draw how the open call is laid out: see
+    /// [`crate::detail::Detail::measured`].
+    pub(crate) fn measured_detail(&mut self, width: usize, room: usize) {
+        if let Some(detail) = self.detail.as_mut() {
+            detail.measured(width, room);
+        }
+    }
+
+    /// The Memory view, while it is open.
+    pub fn memory(&self) -> Option<&crate::memory::View> {
+        self.memory.as_ref()
+    }
+
+    /// Whether the session changed the file a backend names `path`.
+    pub(crate) fn changed_in_session(&self, path: &str) -> bool {
+        self.session.files().iter().any(|file| file.path == path)
+    }
+
+    /// Whether the backend runs `command` from a prompt, as `/command`.
+    pub(crate) fn offers(&self, command: &str) -> bool {
+        self.listed(command)
+    }
+
+    /// What a load of the repository's earlier sessions found.
+    ///
+    /// A walk through the prompts already under way keeps the ones it started
+    /// with, so the prompt on screen does not change under the operator.
+    pub fn set_past(&mut self, past: crate::history::Past) {
+        self.past = Some(past);
+        // Wrapping, not saturating: the count is told apart, never read as
+        // a size, and one that stopped would stop telling loads apart.
+        self.past_loads = self.past_loads.wrapping_add(1);
+        self.keep_browser_cursor();
+    }
+
+    /// Whether a load has landed, so that an empty list is one that is empty
+    /// rather than one that has not been read yet.
+    pub fn history_read(&self) -> bool {
+        self.past.is_some()
+    }
+
+    /// What the last load could not read, in words the operator reads.
+    pub fn history_unread(&self) -> Option<&str> {
+        self.past.as_ref()?.unread.as_deref()
+    }
+
+    /// The number this session is recorded under, once it is: its record is
+    /// this session, which the dialog lists as itself rather than as another.
+    pub fn set_recorded_as(&mut self, recorded: Option<String>) {
+        if self.recorded_as != recorded {
+            self.recorded_as = recorded;
+        }
+    }
+
+    /// The session the operator chose to open in place of this one, once.
+    pub fn take_opening(&mut self) -> Option<Target> {
+        self.opening.take()
+    }
+
+    /// The history dialog, while it is open.
+    pub fn browser(&self) -> Option<&Browser> {
+        self.browser.as_ref()
+    }
+
+    /// Opens the history dialog on `view`, and asks for what it lists to be
+    /// read again.
+    fn open_history(&mut self, view: View) {
+        self.menu = None;
+        self.browser = Some(Browser::new(view));
+        self.history_wanted = true;
+    }
+
+    /// Whether `target` is the record of this very session: the number it is
+    /// recorded under, or the conversation its backend is carrying on.
+    fn is_this_session(&self, target: &Target) -> bool {
+        match target {
+            Target::Recorded(id) => self.recorded_as.as_deref() == Some(id.as_str()),
+            Target::Claude(id) => {
+                self.session
+                    .meta()
+                    .and_then(|meta| meta.backend_session.as_deref())
+                    == Some(id.as_str())
+            }
+        }
+    }
+
+    /// This session's prompts, oldest first, with when each was sent.
+    fn own_prompts(&self) -> impl DoubleEndedIterator<Item = &Entry> {
+        self.entries
+            .iter()
+            .filter(|entry| entry.kind == EntryKind::User)
+    }
+
+    /// Every prompt there is to go back to, newest first: this session's, then
+    /// the earlier sessions'. A prompt sent more than once is listed where it
+    /// was sent last.
+    fn every_prompt(&self) -> Vec<PromptRow> {
+        let own = self
+            .own_prompts()
+            .map(|entry| PromptRow {
+                text: entry.body.clone(),
+                at: entry.at,
+                session: None,
+            })
+            .rev()
+            .chain(self.cleared_prompts.iter().rev().cloned());
+        let earlier = self
+            .past
+            .iter()
+            .flat_map(|past| &past.prompts)
+            .filter(|prompt| !self.is_this_session(&prompt.session))
+            .map(|prompt| PromptRow {
+                text: prompt.text.clone(),
+                at: prompt.at,
+                session: Some(prompt.session.clone()),
+            });
+        let mut seen = std::collections::HashSet::new();
+        own.chain(earlier)
+            .filter(|row| !row.text.trim().is_empty() && seen.insert(row.text.clone()))
+            .collect()
+    }
+
+    /// What the history dialog's rows are built from, as things stand.
+    fn history_source(&self) -> crate::history::Source {
+        crate::history::Source {
+            loads: self.past_loads,
+            own: self.own_prompts().count() + self.cleared_prompts.len(),
+            recorded_as: self.recorded_as.clone(),
+            carrying_on: self
+                .session
+                .meta()
+                .and_then(|meta| meta.backend_session.clone()),
+        }
+    }
+
+    /// `read` of the history dialog's rows, built again first where what
+    /// they are built from has changed since they last were.
+    fn with_history<R>(&self, read: impl FnOnce(&mut crate::history::Index) -> R) -> R {
+        let source = self.history_source();
+        let mut index = self.history_index.borrow_mut();
+        if !index
+            .as_ref()
+            .is_some_and(|index| index.built_from(&source))
+        {
+            *index = None;
+        }
+        let index = index.get_or_insert_with(|| {
+            crate::history::Index::new(source, self.every_prompt(), self.other_sessions())
+        });
+        read(index)
+    }
+
+    /// Every prompt there is to go back to, newest first, as the walk Up
+    /// starts takes them.
+    fn every_prompt_text(&self) -> Vec<String> {
+        self.with_history(|index| {
+            index
+                .every_prompt()
+                .iter()
+                .map(|row| row.text.clone())
+                .collect()
+        })
+    }
+
+    /// The prompts the history dialog lists, newest first, as its filter
+    /// leaves them.
+    pub fn prompt_rows(&self) -> Listed<PromptRow> {
+        let query = self.browser.as_ref().map_or("", |browser| &browser.query);
+        self.with_history(|index| index.prompts(query))
+    }
+
+    /// The sessions the history dialog lists, as its filter leaves them: this
+    /// one first, then the others newest first, each with its prompts where
+    /// they are known.
+    pub fn session_rows(&self) -> Listed<SessionRow> {
+        let query = self.browser.as_ref().map_or("", |browser| &browser.query);
+        let this = SessionRow {
+            target: None,
+            last: self.entries.iter().rev().find_map(|entry| entry.at),
+            prompts: self.own_prompts().map(|entry| entry.body.clone()).collect(),
+            first_prompt: None,
+            title: self.session.title().map(str::to_owned),
+            open_elsewhere: false,
+        };
+        self.with_history(|index| index.sessions(this, query))
+    }
+
+    /// The sessions other than this one, newest first, each with its prompts
+    /// where they are known.
+    fn other_sessions(&self) -> Vec<SessionRow> {
+        let mut prompts: std::collections::HashMap<&Target, Vec<String>> =
+            std::collections::HashMap::new();
+        for prompt in self.past.iter().flat_map(|past| past.prompts.iter().rev()) {
+            prompts
+                .entry(&prompt.session)
+                .or_default()
+                .push(prompt.text.clone());
+        }
+        self.past
+            .iter()
+            .flat_map(|past| &past.sessions)
+            .filter(|session| !self.is_this_session(&session.target))
+            .map(|session| SessionRow {
+                target: Some(session.target.clone()),
+                last: session.last,
+                prompts: prompts.remove(&session.target).unwrap_or_default(),
+                first_prompt: session.first_prompt.clone(),
+                title: session.title.clone(),
+                open_elsewhere: session.open_elsewhere,
+            })
+            .collect()
+    }
+
+    /// How many rows the open dialog lists.
+    fn browser_rows(&self) -> usize {
+        match self.browser.as_ref().map(|browser| browser.view) {
+            Some(View::Prompts) => self.prompt_rows().len(),
+            Some(View::Sessions) => self.session_rows().len(),
+            None => 0,
+        }
+    }
+
+    /// Keeps the dialog's cursor on a row it lists, after what it lists
+    /// changed under it.
+    fn keep_browser_cursor(&mut self) {
+        let last = self.browser_rows().saturating_sub(1);
+        if let Some(browser) = self.browser.as_mut() {
+            browser.at = browser.at.min(last);
+        }
+    }
+
+    /// One key, while the history dialog is open. It takes the keyboard
+    /// whole: what is typed filters it, and nothing reaches the composer
+    /// behind it until a prompt is chosen.
+    fn on_browser_key(&mut self, key: ratatui::crossterm::event::KeyEvent) {
+        use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+
+        let Some(browser) = self.browser.as_mut() else {
+            return;
+        };
+        match (key.code, key.modifiers) {
+            (KeyCode::Esc, _) => self.browser = None,
+            (KeyCode::Tab, KeyModifiers::NONE) | (KeyCode::BackTab, _) => {
+                browser.view = browser.view.other();
+                browser.at = 0;
+            }
+            (KeyCode::Up, _) => browser.at = browser.at.saturating_sub(1),
+            (KeyCode::PageUp, _) => browser.at = browser.at.saturating_sub(BROWSER_PAGE),
+            // Ctrl+R again steps to the next older match, as a shell's
+            // reverse search does.
+            (KeyCode::Down, _) | (KeyCode::Char('r'), KeyModifiers::CONTROL) => {
+                browser.at = browser.at.saturating_add(1);
+            }
+            (KeyCode::PageDown, _) => browser.at = browser.at.saturating_add(BROWSER_PAGE),
+            (KeyCode::Enter, _) => {
+                self.choose_from_history();
+                return;
+            }
+            (KeyCode::Backspace, _) => {
+                browser.query.pop();
+                browser.at = 0;
+            }
+            (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
+                browser.query.clear();
+                browser.at = 0;
+            }
+            (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
+                browser.query.push(c);
+                browser.at = 0;
+            }
+            _ => {}
+        }
+        self.keep_browser_cursor();
+    }
+
+    /// Text pasted while the history dialog is open: more of its filter, on
+    /// one line.
+    fn paste_into_browser(&mut self, pasted: &str) {
+        if let Some(browser) = self.browser.as_mut() {
+            browser
+                .query
+                .push_str(&pasted.split_whitespace().collect::<Vec<_>>().join(" "));
+            browser.at = 0;
+        }
+        self.keep_browser_cursor();
+    }
+
+    /// Does what Enter on the dialog's row does: puts a prompt in the
+    /// composer, or opens a session in place of this one.
+    fn choose_from_history(&mut self) {
+        let Some(browser) = self.browser.as_ref() else {
+            return;
+        };
+        let at = browser.at;
+        match browser.view {
+            View::Prompts => {
+                let Some(row) = self.prompt_rows().get(at).cloned() else {
+                    return;
+                };
+                self.browser = None;
+                self.focus = Focus::Session;
+                // What the dialog lists was sent to the agent, and the Enter
+                // that sends it in `!` mode would hand it to `sh` instead: a
+                // sentence about deleting a directory would run as one.
+                if self.shell_mode {
+                    self.shell_mode = false;
+                    self.hint = Some(LEFT_BANG_FOR_HISTORY_HINT.to_owned());
+                }
+                self.recall_chosen(&row.text);
+            }
+            View::Sessions => {
+                let Some(row) = self.session_rows().get(at).cloned() else {
+                    return;
+                };
+                self.open_session(row);
+            }
+        }
+    }
+
+    /// Ends this session and opens `row`'s in its place, where that is a
+    /// session that can be opened now.
+    fn open_session(&mut self, row: SessionRow) {
+        let Some(target) = row.target else {
+            self.hint = Some("This is the session open now".to_owned());
+            return;
+        };
+        // Refused here, while this session is still open: the other niobe
+        // would refuse it once this one had ended, and the operator would be
+        // left with neither, and without what they were writing.
+        if row.open_elsewhere {
+            self.hint = Some(format!(
+                "{} is open in another niobe: quit it there to open it here",
+                target.label()
+            ));
+            return;
+        }
+        if !self.remembers {
+            self.hint = Some(NO_RECORD_HINT.to_owned());
+            return;
+        }
+        // The turn would be left half done, and the session it was part of
+        // reopened later would read it as one the process was killed under.
+        if self.working() {
+            self.hint = Some(
+                "A turn is running: stop it first with Esc, then open another session".to_owned(),
+            );
+            return;
+        }
+        self.browser = None;
+        self.opening = Some(target);
+        self.quit();
+    }
+
+    /// Puts `chosen`, a prompt from the history dialog, in the composer as a
+    /// step of a walk: what was being written is set aside as Up sets it
+    /// aside, and the arrows go on from where `chosen` was sent.
+    fn recall_chosen(&mut self, chosen: &str) {
+        self.end_walk_if_edited();
+        let (id, draft) = match self.end_walk() {
+            Some(draft) => draft,
+            None => (self.images.composing(), self.composed()),
+        };
+        let prompts = self.every_prompt_text();
+        let at = prompts.iter().position(|prompt| prompt == chosen);
+        match at.and_then(|at| Recall::start_on(prompts, at, draft.clone())) {
+            Some(recall) => {
+                self.images.compose(id);
+                self.start_walk(recall);
+            }
+            None => self.set_aside((id, draft)),
+        }
+        self.show_recalled(chosen, false);
+    }
+
+    /// Ends the walk where the composer no longer shows the prompt it is on:
+    /// the operator has edited it, and the arrows move the cursor through
+    /// what they wrote rather than replacing it. The draft the walk set
+    /// aside stays set aside.
+    fn end_walk_if_edited(&mut self) {
+        let edited = self
+            .recall
+            .as_ref()
+            .is_some_and(|recall| recall.current() != self.composed());
+        if edited && let Some(draft) = self.end_walk() {
+            self.set_aside(draft);
+        }
+    }
+
+    /// Where the prompt in the composer is in the history, as
+    /// [`Recall::place`] counts it, while it is one a walk recalled and the
+    /// operator has not edited. `None` while the composer holds their own
+    /// text.
+    pub fn recalled(&self) -> Option<(usize, usize)> {
+        self.recall
+            .as_ref()
+            .filter(|recall| recall.current() == self.composed())
+            .map(Recall::place)
+    }
+
+    /// What the composer is labelled with while it shows a recalled prompt:
+    /// that it is one, where it is in the history, and how to get the draft
+    /// back. The prompt can be longer than the composer shows, so this is
+    /// what says the words in it are not the operator's. With a turn
+    /// running Esc stops the turn instead, and the label does not offer it.
+    pub fn recall_label(&self) -> Option<String> {
+        let (at, of) = self.recalled()?;
+        Some(match self.working() {
+            true => format!("history {at}/{of}"),
+            false => format!("history {at}/{of} · Esc gives your draft back"),
+        })
+    }
+
+    /// Ends the walk and puts back the draft it set aside, empty or not.
+    fn give_draft_back(&mut self) {
+        if let Some((id, draft)) = self.end_walk() {
+            self.show_draft(id, &draft);
+        }
+    }
+
+    /// Keeps `draft` to come back after the next prompt is sent.
+    fn set_aside(&mut self, draft: (DraftId, String)) {
+        if !draft.1.is_empty() {
+            self.drafts.push(draft);
+        }
+    }
+
+    /// Up or Down where the composer's cursor cannot move that way: the
+    /// prompt before or after the one shown. Returns whether it was that.
+    fn recall_key(&mut self, older: bool) -> bool {
+        use ratatui_textarea::CursorMove;
+
+        self.end_walk_if_edited();
+        let before = self.composer.cursor();
+        self.composer.move_cursor(match older {
+            true => CursorMove::Up,
+            false => CursorMove::Down,
+        });
+        if self.composer.cursor() != before {
+            return false;
+        }
+        match older {
+            true => self.recall_older(),
+            false => self.recall_newer(),
+        }
+        true
+    }
+
+    /// The prompt before the one shown, starting a walk on the newest with
+    /// what was being written set aside.
+    fn recall_older(&mut self) {
+        let shown = match self.recall.as_mut() {
+            Some(recall) => recall.older().map(str::to_owned),
+            None => {
+                let recall = Recall::start(self.every_prompt_text(), self.composed());
+                let shown = recall.as_ref().map(|recall| recall.current().to_owned());
+                if let Some(recall) = recall {
+                    self.start_walk(recall);
+                }
+                shown
+            }
+        };
+        if let Some(shown) = shown {
+            self.show_recalled(&shown, true);
+        }
+    }
+
+    /// The prompt after the one shown, or past the newest the draft the walk
+    /// set aside, which ends it.
+    fn recall_newer(&mut self) {
+        let Some(recall) = self.recall.as_mut() else {
+            return;
+        };
+        match recall.newer() {
+            Newer::Prompt(prompt) => {
+                let prompt = prompt.to_owned();
+                self.show_recalled(&prompt, false);
+            }
+            Newer::Draft(draft) => {
+                self.recall = None;
+                self.show_draft(self.walk_draft, &draft);
+            }
+        }
+    }
+
+    /// Shows `text`, a prompt from the history, in the composer as
+    /// [`App::show_in_composer`] does. No image attached to a draft belongs
+    /// to it, whatever placeholders it holds: an earlier session numbered
+    /// its own images from one.
+    fn show_recalled(&mut self, text: &str, at_top: bool) {
+        self.images.compose_anew();
+        self.show_in_composer(text, at_top);
+    }
+
+    /// Puts `draft`, set aside earlier, back in the composer, with the images
+    /// attached to it.
+    fn show_draft(&mut self, id: DraftId, draft: &str) {
+        self.images.compose(id);
+        self.show_in_composer(draft, false);
+    }
+
+    /// Replaces what the composer holds with `text`, the cursor at the end of
+    /// its first row or of its last: where the next Up, or the next Down,
+    /// steps on rather than moving inside it. A first line too long for the
+    /// composer wraps, and its end is on a later row, so the cursor goes to
+    /// its start instead.
+    ///
+    /// A `/` or `@` it opens with is not offered a list: the arrows would go
+    /// to the list, and the walk would stop on the first such prompt.
+    fn show_in_composer(&mut self, text: &str, at_top: bool) {
+        use ratatui_textarea::CursorMove;
+
+        self.composer.clear();
+        self.composer.insert_str(text);
+        match at_top {
+            true => self.composer.move_cursor(CursorMove::Top),
+            false => self.composer.move_cursor(CursorMove::Bottom),
+        }
+        self.composer.move_cursor(CursorMove::End);
+        if at_top && self.composer.screen_cursor().row > 0 {
+            self.composer.move_cursor(CursorMove::Head);
+        }
+        self.offer_selected = 0;
+        self.offer_closed = None;
+        if let Some(mention) = self.mention() {
+            self.offer_closed = Some((mention.row, mention.at));
+        } else if self.slash().is_some() {
+            self.offer_closed = Some((0, 0));
+        }
+    }
+}
+
+/// `draft`, about to come back to the composer, and every draft still set
+/// aside in `drafts`: the texts whose images stay attached when the
+/// composer's go.
+fn kept_with<'a>(
+    draft: &'a (DraftId, String),
+    drafts: &'a [(DraftId, String)],
+) -> Vec<(DraftId, &'a str)> {
+    std::iter::once(draft)
+        .chain(drafts)
+        .map(|(id, text)| (*id, text.as_str()))
+        .collect()
+}
+
+/// What opening another session says where there is no record to open one
+/// from: a log being read back.
+const NO_RECORD_HINT: &str =
+    "This shell was opened on a log, with no record of sessions to open another from";
+
+/// Rows PageUp and PageDown move the history dialog's cursor by.
+const BROWSER_PAGE: usize = 10;
+
+/// Backspace, Delete, Left or Right on the composer, taking what the
+/// operator sees as one character — a letter and the accents on it, an
+/// emoji and the ones joined to it — rather than the one code point the
+/// editor would. A cursor left inside one would put what is typed next
+/// between an emoji and the ones joined to it. `None` where the editor's
+/// own handling is already that: a selection, a line break, a character
+/// that is one code point, or any other key.
+///
+/// `Some` says whether the text changed, as the editor's own input does.
+fn whole_character(
+    composer: &mut TextArea<'static>,
+    key: ratatui::crossterm::event::KeyEvent,
+) -> Option<bool> {
+    use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+    use ratatui_textarea::CursorMove;
+
+    if key.modifiers != KeyModifiers::NONE
+        || !matches!(
+            key.code,
+            KeyCode::Backspace | KeyCode::Delete | KeyCode::Left | KeyCode::Right
+        )
+        || composer.selection_range().is_some()
+    {
+        return None;
+    }
+    let ratatui_textarea::DataCursor(row, col) = composer.cursor();
+    let line = composer.lines().get(row)?;
+    let split = line
+        .char_indices()
+        .nth(col)
+        .map_or(line.len(), |(at, _)| at);
+    let (before, after) = line.split_at(split);
+    match key.code {
+        KeyCode::Backspace => {
+            let chars = before.graphemes(true).next_back()?.chars().count();
+            if chars < 2 {
+                return None;
+            }
+            for _ in 0..chars {
+                composer.move_cursor(CursorMove::Back);
+            }
+            Some(composer.delete_str(chars))
+        }
+        KeyCode::Delete => {
+            let chars = after.graphemes(true).next()?.chars().count();
+            (chars >= 2).then(|| composer.delete_str(chars))
+        }
+        KeyCode::Left => {
+            let chars = before.graphemes(true).next_back()?.chars().count();
+            (chars >= 2).then(|| {
+                for _ in 0..chars {
+                    composer.move_cursor(CursorMove::Back);
+                }
+                false
+            })
+        }
+        KeyCode::Right => {
+            let chars = after.graphemes(true).next()?.chars().count();
+            (chars >= 2).then(|| {
+                for _ in 0..chars {
+                    composer.move_cursor(CursorMove::Forward);
+                }
+                false
+            })
+        }
+        _ => None,
+    }
+}
+
 /// A paste with every line break in it written as `\n`, which is what the
 /// composer splits lines at. A terminal sends the lines of a paste apart with
 /// a carriage return, as the Enter key is sent; a file copied from elsewhere
 /// may hold `\r\n` or `\n`.
 fn pasted_lines(text: &str) -> String {
     text.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+/// What the bar says of the control characters a paste had in it.
+fn controls_left_out(count: usize) -> String {
+    match count {
+        1 => "1 control character was left out of the paste".to_owned(),
+        n => format!("{n} control characters were left out of the paste"),
+    }
 }
 
 /// A paste for somewhere that holds one line: its lines joined by spaces.
@@ -4054,7 +9001,116 @@ fn now_secs() -> u64 {
         .map_or(0, |since| since.as_secs())
 }
 
-/// One window, as F5 reads it out: `5h window 62%, resets in 2h 14m`.
+/// The model list: every model the backend offers, or where the profile
+/// names models, those, in its order, described where the backend listed
+/// them; and how many the backend offers beyond what is listed.
+///
+/// A model the profile names that the backend did not list is still offered:
+/// a gateway or a backend that lists nothing takes ids it never announced,
+/// and the profile is the operator's word that this one is taken.
+fn model_choices(
+    offered: &[niobe_core::event::ModelOption],
+    named: &[String],
+) -> (Vec<Choice>, usize) {
+    let described = |model: &niobe_core::event::ModelOption| Choice {
+        value: model.id.clone(),
+        name: model.name.clone().filter(|name| *name != model.id),
+        note: noted(model),
+    };
+    if named.is_empty() {
+        return (offered.iter().map(described).collect(), 0);
+    }
+    let choices = named
+        .iter()
+        .map(|id| match offered.iter().find(|model| model.id == *id) {
+            Some(model) => described(model),
+            None => Choice::plain(id.clone()),
+        })
+        .collect();
+    let more = offered
+        .iter()
+        .filter(|model| !named.contains(&model.id))
+        .count();
+    (choices, more)
+}
+
+/// What a model's row says beside its name: what it is for, in the backend's
+/// words, and that it cannot run `auto` where the backend said so, so that
+/// the refusal is read before the model is chosen rather than after a mode
+/// change fails.
+fn noted(model: &niobe_core::event::ModelOption) -> Option<String> {
+    let refusal = (model.auto_mode == Some(false)).then_some("cannot run auto mode");
+    match (model.description.as_deref(), refusal) {
+        (Some(words), Some(refusal)) => Some(format!("{words} · {refusal}")),
+        (Some(words), None) => Some(words.to_owned()),
+        (None, Some(refusal)) => Some(refusal.to_owned()),
+        (None, None) => None,
+    }
+}
+
+/// Which of `options` the session runs on `model`: the row whose id it is,
+/// or else the first whose id the backend said runs on it — an alias reports
+/// itself by the release it resolves to once the backend confirms it.
+fn in_force(
+    options: &[Choice],
+    offered: &[niobe_core::event::ModelOption],
+    model: Option<&str>,
+) -> Option<usize> {
+    let model = model?;
+    options
+        .iter()
+        .position(|choice| choice.value == model)
+        .or_else(|| {
+            options.iter().position(|choice| {
+                offered.iter().any(|offer| {
+                    offer.id == choice.value && offer.resolves_to.as_deref() == Some(model)
+                })
+            })
+        })
+}
+
+/// `windows` as they stand at `now`, where they were reported or recorded earlier: each
+/// window whose reset has come around has a level nothing measured, since
+/// other clients on the account may have spent from it since, so it holds
+/// [`UNMEASURED`] rather than the stale level or a zero; the seven-day one
+/// keeps its next reset a whole number of weeks on, and the five-hour one has
+/// none, since it starts again only with the next request. The plan spending
+/// beyond its fee is a state of the windows that were full, so it is not
+/// carried past a reset.
+fn since_reset(windows: UsageWindows, now: u64) -> UsageWindows {
+    let has_reset = |window: Option<UsageWindow>| {
+        window
+            .and_then(|window| window.resets_at)
+            .is_some_and(|at| at <= now)
+    };
+    let reset = |window: Option<UsageWindow>, every: Option<u64>| {
+        window.map(|window| match window.resets_at {
+            Some(at) if at <= now => UsageWindow {
+                utilization: UNMEASURED,
+                resets_at: every.and_then(|every| {
+                    let weeks = (now - at) / every + 1;
+                    at.checked_add(weeks.checked_mul(every)?)
+                }),
+            },
+            _ => window,
+        })
+    };
+    UsageWindows {
+        using_overage: windows.using_overage
+            && !has_reset(windows.five_hour)
+            && !has_reset(windows.seven_day),
+        overage: windows.overage,
+        five_hour: reset(windows.five_hour, None),
+        seven_day: reset(windows.seven_day, Some(SEVEN_DAYS)),
+    }
+}
+
+/// The level of a window nothing has measured: one carried from an earlier
+/// reading whose reset has come around since. It is not a number, which is
+/// what the Usage pane draws as an em dash with no meter, never as a `0%`.
+const UNMEASURED: f64 = f64::NAN;
+
+/// One window, as Cost & usage reads it out: `5h window 62%, resets in 2h 14m`.
 ///
 /// The reset is shown as the time left rather than as a wall clock, because
 /// what the operator is deciding is whether to wait, and a clock time would
@@ -4083,6 +9139,16 @@ fn left(seconds: u64) -> String {
     }
 }
 
+/// What asking for one sub-agent's entries says before there are any agents.
+const NO_AGENTS_HINT: &str = "No sub-agents yet: the list holds the ones this conversation started";
+
+/// What asking for the list of tool calls says before there are any.
+const NO_CALLS_HINT: &str = "No tool calls yet: the list holds this conversation's calls";
+
+/// How long with no key pressed the operator is away, where the config
+/// does not say: long enough that a pause to read is not an absence.
+const AWAY_AFTER: Duration = Duration::from_secs(5 * 60);
+
 /// A share of a window as whole percent. Not clamped: a backend reporting more
 /// than the whole window is reporting something the operator has to see.
 pub fn percent(utilization: f64) -> u64 {
@@ -4093,11 +9159,14 @@ pub fn percent(utilization: f64) -> u64 {
 /// each only once it works.
 const PLACEHOLDER: [&str; 5] = [
     "Ask for a change",
-    "/ search transcript",
+    "/ command or skill",
     "@ file",
     "! shell",
-    "// command",
+    "Ctrl+F find",
 ];
+
+/// The key that searches the transcript.
+const FIND_KEY: &str = "Ctrl+F";
 
 /// What an empty composer says while it holds a command: where it runs, and
 /// the one thing about it an operator could not guess.
@@ -4116,6 +9185,32 @@ fn typed_char(key: ratatui::crossterm::event::KeyEvent) -> Option<char> {
         (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) if !c.is_control() => Some(c),
         _ => None,
     }
+}
+
+/// The key a question's answer keys take `key` as, or `None` where it is
+/// one they ignore.
+///
+/// A key held with Ctrl or Alt is a binding elsewhere in the shell, and
+/// Shift+Enter opens a line in the composer: taken by its code alone, Ctrl+W
+/// would type a `w` into a refusal the model reads verbatim, and an Enter
+/// pressed out of the composer's habit would confirm an answer. A character
+/// typed with Shift is still the character.
+fn answer_key(
+    key: ratatui::crossterm::event::KeyEvent,
+) -> Option<ratatui::crossterm::event::KeyCode> {
+    use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+
+    match key.code {
+        KeyCode::Char(_) => typed_char(key).map(KeyCode::Char),
+        code => (key.modifiers == KeyModifiers::NONE).then_some(code),
+    }
+}
+
+/// Whether `key` is Enter with nothing held, which sends the prompt.
+fn is_plain_enter(key: ratatui::crossterm::event::KeyEvent) -> bool {
+    use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+
+    key.code == KeyCode::Enter && key.modifiers == KeyModifiers::NONE
 }
 
 /// Whether `key` opens a line in the composer rather than sending it.
@@ -4143,14 +9238,14 @@ fn opens_a_line(key: ratatui::crossterm::event::KeyEvent) -> bool {
 /// `@ file` is left out where there are no files to name — a session outside
 /// a repository, or one whose repository has not been read yet — since it
 /// would be advertising a list that cannot open; `! shell` where nothing runs
-/// commands, as in a recorded log being looked at; `// command` where the
-/// backend has listed no commands of its own.
+/// commands, as in a recorded log being looked at; `/ command or skill` where
+/// the backend has listed no commands of its own.
 fn placeholder(columns: usize, can: Offers) -> String {
     let mut said = PLACEHOLDER[0].to_owned();
     for more in PLACEHOLDER[1..].iter().filter(|more| match **more {
         "@ file" => can.files,
         "! shell" => can.shell,
-        "// command" => can.commands,
+        "/ command or skill" => can.commands,
         _ => true,
     }) {
         let longer = format!("{said} · {more}");
@@ -4170,7 +9265,7 @@ struct Offers {
     files: bool,
     /// Something runs the operator's `!` commands.
     shell: bool,
-    /// The backend has listed commands to pick with `//`.
+    /// The backend has listed commands to pick with `/`.
     commands: bool,
 }
 
@@ -4186,9 +9281,41 @@ fn paint_composer(composer: &mut TextArea<'static>, theme: &Theme) {
     composer.set_cursor_style(Style::new().fg(theme.pane_bg).bg(theme.hot));
 }
 
-/// What the shell says once Esc has made the next digit an F-key.
-const ESCAPED_HINT: &str = "Esc — a digit now presses its F-key: 1 Help · 5 Usage · 6 Files · \
-                            7 Tools · 8 Model · 9 Theme · 0 Quit";
+/// What a reply the session was writing when its process stopped says of
+/// itself.
+const CUT_OFF: &str = "cut off: the session stopped here";
+
+/// What the bar says once a stop of the running turn has been asked for.
+const STOPPING_HINT: &str = "Stopping the turn · Ctrl+C twice quits";
+
+/// What the bar says after a Ctrl+C that would have quit had it been the
+/// second: one press is too easy to make by accident to end a session on.
+const QUIT_AGAIN_HINT: &str = "Press Ctrl+C again to quit";
+
+/// How long after one Ctrl+C a second one still quits.
+const QUIT_WINDOW: Duration = Duration::from_millis(1500);
+
+/// Whether a Ctrl+C at `now` is inside the window of one pressed `at`. Where
+/// either moment is unknown the window is taken as open: two presses are the
+/// deliberate act, and the window only keeps one from long ago counting.
+fn within_quit_window(at: Option<Instant>, now: Option<Instant>) -> bool {
+    match (at, now) {
+        (Some(at), Some(now)) => now.saturating_duration_since(at) <= QUIT_WINDOW,
+        (None, _) | (_, None) => true,
+    }
+}
+
+/// What the shell says once Esc has made the next key an F-key or a menu.
+const ESCAPED_HINT: &str = "Esc — a digit now presses its F-key (1 Help … 0 Quit), a letter \
+                            opens its menu: N Niobe · S Session · C Context · M Model · V View · \
+                            H Help";
+
+/// Where this project is published, which the About sheet names and the Help
+/// menu's links go to.
+const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
+
+/// How many lines PgUp and PgDn move a sheet.
+const SHEET_PAGE: usize = 10;
 
 /// The F-key a digit stands for after Esc: `1` to `9` are F1 to F9 and `0`
 /// is F10, in the order the bar draws them.
@@ -4209,29 +9336,79 @@ fn stop_hint() -> String {
     format!("{} stops it", crate::shell::STOP_KEY)
 }
 
-/// What an F-key does, for the ones that do nothing yet.
-///
-/// F5, F8, F9 and F10 are handled before this is reached, so nothing here
-/// names them.
-fn fkey_hint(n: u8) -> &'static str {
-    match n {
-        1 => {
-            "F1 Help — the help browser is not implemented yet. Tab or a click moves the \
-             keyboard between the panes; the wheel and PgUp/PgDn scroll the one that has it, \
-             and in the right-hand panes ↑↓ and Enter fold a section; Ctrl+End returns to the \
-             newest line; Ctrl+O folds runs of tool calls; Ctrl+T shows the rows of a diff cut \
-             short; Shift- or Option-drag selects text"
-        }
-        2 => {
-            "F2 Plan — the plan view is not implemented yet; Shift+Tab puts the \
-              session in plan mode"
-        }
-        3 => "F3 Diff — the diff viewer is not implemented yet",
-        4 => "F4 Undo — checkpoints and rewind are not implemented yet",
-        // F8 opens the model list and F9 changes the theme rather than saying
-        // anything, so nothing here names them.
-        _ => "F10 Quit",
+/// Where in the session something happened, as the transcript names it:
+/// the turn by the number its rule carries, and the time of day.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TurnPlace {
+    number: u64,
+    at: Option<LocalTime>,
+}
+
+/// What the transcript says where the backend's total for a turn was not
+/// what the turn's messages added up to: what the difference is, in words,
+/// and under it what a report of it needs — the turn, the time, the
+/// backend's own name for the conversation, the messages that never said
+/// what they finished at, and both sets of figures as reported.
+fn turn_total_differs(
+    place: &TurnPlace,
+    per_message: &TokenCounts,
+    reported: &TokenCounts,
+    backend_session: Option<&str>,
+    unfinished: &[String],
+) -> String {
+    let more = per_message.short_of(reported).total();
+    let fewer = reported.short_of(per_message).total();
+    let split = per_message.cache_write_1h.zip(reported.cache_write_1h);
+    let said = match (more, fewer) {
+        (0, 0) => match split {
+            Some((messages, total)) if messages != total => format!(
+                "The CLI's total for this turn bought {total} of its cache writes for an hour; \
+                 its messages said {messages}. Each cache write is priced at the lifetime its \
+                 message gave."
+            ),
+            _ => "The CLI's total for this turn does not match what its messages reported."
+                .to_owned(),
+        },
+        (more, 0) => format!(
+            "The CLI counted {more} tokens for this turn beyond what its messages reported. \
+             The session's totals hold them where the CLI's bill carried them; no message \
+             accounts for them."
+        ),
+        (0, fewer) => format!(
+            "The CLI counted {fewer} tokens fewer for this turn than its messages reported."
+        ),
+        (more, fewer) => format!(
+            "The CLI's total for this turn does not match what its messages reported: \
+             {more} tokens more in some figures, {fewer} fewer in others."
+        ),
+    };
+    let mut detail = vec![format!("turn {}", place.number)];
+    detail.extend(place.at.map(|at| at.to_string()));
+    detail.extend(backend_session.map(|id| format!("CLI session {id}")));
+    if !unfinished.is_empty() {
+        detail.push(format!("no final count: {}", unfinished.join(", ")));
     }
+    detail.push(format!("per message {}", figures(per_message)));
+    detail.push(format!("reported {}", figures(reported)));
+    format!("{said}\n{}", detail.join(" · "))
+}
+
+/// Token counts as a report gives them, each figure named, and the cache
+/// writes bought for an hour where the counts split them.
+fn figures(counts: &TokenCounts) -> String {
+    let figures = format!(
+        "{} in, {} out, {} cache read, {} cache write",
+        counts.input, counts.output, counts.cache_read, counts.cache_write
+    );
+    match counts.cache_write_1h {
+        Some(hour) => format!("{figures}, {hour} for an hour"),
+        None => figures,
+    }
+}
+
+/// A count of things in the transcript, as a figure.
+fn count(things: usize) -> u64 {
+    u64::try_from(things).unwrap_or(u64::MAX)
 }
 
 /// A tool's name as a person reads it.
@@ -4256,43 +9433,14 @@ pub fn tool_label(name: &str) -> String {
     format!("{server}·{tool}")
 }
 
-/// The part of `labels[at]` that tells it apart from every other label:
-/// whatever follows the longest start it shares with another, from the word
-/// that start ends in, behind an ellipsis that says something was left off.
-///
-/// A label that shares no start with another is whole, and so is one that
-/// nothing is left of — another label is it with more on the end — because
-/// an ellipsis alone names nothing. A label the same as another's is told
-/// apart from the rest as that one is: nothing tells the two apart.
-pub(crate) fn distinct_tail(labels: &[&str], at: usize) -> String {
-    let Some(label) = labels.get(at) else {
-        return String::new();
-    };
-    let shared = labels
-        .iter()
-        .enumerate()
-        .filter(|&(other, text)| other != at && text != label)
-        .map(|(_, other)| shared_start(label, other))
-        .max()
-        .unwrap_or(0);
-    // Back to the start of the word the shared part ends in, so the name
-    // begins at a word rather than inside one.
-    let from = label
-        .get(..shared)
-        .and_then(|start| start.rfind([' ', '/']))
-        .map_or(0, |space| space + 1);
-    match label.get(from..) {
-        Some(tail) if from > 0 && !tail.is_empty() => format!("…{tail}"),
-        _ => (*label).to_owned(),
+/// The programs a call of the agent's ran, where it ran a shell command, as
+/// its row names them: see [`Call::programs`].
+fn programs_of(tool: &str, command: Option<&str>, summary: Option<&str>) -> Option<String> {
+    if tool == crate::shell::OPERATOR_SHELL {
+        return None;
     }
-}
-
-/// How many bytes `a` and `b` start with in common, on a character boundary.
-fn shared_start(a: &str, b: &str) -> usize {
-    a.char_indices()
-        .zip(b.chars())
-        .find(|((_, x), y)| x != y)
-        .map_or(a.len().min(b.len()), |((at, _), _)| at)
+    niobe_core::work::command_of(tool, command, summary)
+        .map(|command| niobe_core::work::of_command(command).specifics.join(" · "))
 }
 
 /// The backend's one-line reading of a call, or its arguments where it had
@@ -4320,25 +9468,48 @@ fn one_line(input: &str) -> String {
     result
 }
 
-/// Bytes, short enough for a meta line.
+/// Bytes, short enough for a meta line: in the largest unit whose figure,
+/// rounded to its tenth, is still under 1024 — `1.0 MB`, not `1024.0 kB` —
+/// so no count a `u64` holds reads wider than `1023.9 kB`.
 pub fn human_bytes(bytes: u64) -> String {
-    match bytes {
-        0..=1023 => format!("{bytes} B"),
-        1024..=1_048_575 => format!("{:.1} kB", bytes as f64 / 1024.0),
-        _ => format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0)),
+    const UNITS: [&str; 6] = ["kB", "MB", "GB", "TB", "PB", "EB"];
+    if bytes < 1024 {
+        return format!("{bytes} B");
     }
+    let mut scaled = bytes as f64 / 1024.0;
+    let mut unit = UNITS[0];
+    for larger in &UNITS[1..] {
+        if scaled < 1023.95 {
+            break;
+        }
+        scaled /= 1024.0;
+        unit = larger;
+    }
+    format!("{scaled:.1} {unit}")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::clock::LocalMoment;
+    use niobe_core::Billing;
     use niobe_core::event::{Backend, SessionMeta, Usage, UsageWindows};
     use niobe_core::permission::Rule;
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
     use ratatui::layout::Rect;
     use ratatui_textarea::Key;
     use std::time::{Duration, Instant};
+
+    impl App {
+        /// What the operator produced, without the looks the shell records
+        /// for the catch-up, which no test of what they said is about.
+        fn said(&mut self) -> Vec<Event> {
+            self.take_produced()
+                .into_iter()
+                .filter(|event| *event != Event::Looked)
+                .collect()
+        }
+    }
 
     fn app() -> App {
         App::new(Repo {
@@ -4354,12 +9525,12 @@ mod tests {
 
         assert!(Section::ALL.iter().all(|s| !app.folded(*s)));
 
-        app.fold(Section::Commits);
-        assert!(app.folded(Section::Commits));
+        app.fold(Section::SubAgents);
+        assert!(app.folded(Section::SubAgents));
         assert!(!app.folded(Section::WorkingTree), "one section, not all");
 
-        app.fold(Section::Commits);
-        assert!(!app.folded(Section::Commits));
+        app.fold(Section::SubAgents);
+        assert!(!app.folded(Section::SubAgents));
     }
 
     #[test]
@@ -4450,6 +9621,223 @@ mod tests {
         assert_eq!(app.focus(), Focus::Pane(Pane::Activity));
         app.on_key(key(KeyCode::Tab));
         assert_eq!(app.focus(), Focus::Session, "the cycle wraps");
+    }
+
+    /// `a` groups the transcript by agent where a pane beside it has the
+    /// keyboard; in the composer it is a letter of the prompt.
+    #[test]
+    fn a_groups_by_agent_from_a_pane_and_is_typed_in_the_composer() {
+        let mut app = laid_out();
+        app.on_key(key(KeyCode::Char('a')));
+        assert!(!app.grouped_by_agent());
+        assert_eq!(app.composed(), "a");
+
+        app.on_key(key(KeyCode::Tab));
+        app.on_key(key(KeyCode::Char('a')));
+        assert!(app.grouped_by_agent());
+        assert_eq!(app.composed(), "a", "nothing was typed");
+        app.on_key(key(KeyCode::Char('a')));
+        assert!(!app.grouped_by_agent(), "the key groups and ungroups");
+    }
+
+    #[test]
+    fn n_leaves_the_routine_out_from_a_pane_and_is_typed_in_the_composer() {
+        let mut app = laid_out();
+        app.on_key(key(KeyCode::Char('n')));
+        assert!(!app.notable_only());
+        assert_eq!(app.composed(), "n");
+
+        app.on_key(key(KeyCode::Tab));
+        app.on_key(key(KeyCode::Char('n')));
+        assert!(app.notable_only());
+        assert_eq!(app.composed(), "n", "nothing was typed");
+        app.on_key(key(KeyCode::Char('n')));
+        assert!(!app.notable_only(), "the key hides and shows them");
+    }
+
+    fn changed(path: &str) -> Event {
+        Event::FileChange {
+            path: path.to_owned(),
+            added: Some(4),
+            removed: Some(1),
+            hunks: Vec::new(),
+            scope: niobe_core::event::ChangeScope::Project,
+        }
+    }
+
+    const AWAY: Duration = Duration::from_secs(6 * 60);
+
+    #[test]
+    fn the_first_key_after_minutes_away_shows_what_happened_and_is_spent_on_it() {
+        let mut app = laid_out();
+        let left = Instant::now();
+        app.tick(left, None);
+        app.apply(&changed("src/lib.rs"));
+        app.tick(left + AWAY, None);
+
+        app.on_key(key(KeyCode::Char('x')));
+        let sheet = app.sheet().expect("something happened while away");
+        assert_eq!(sheet.title, crate::catch_up::TITLE);
+        assert_eq!(sheet.rows[..2], ["1 file changed:", "  src/lib.rs  +4 −1"]);
+        assert_eq!(app.composed(), "", "the key went on telling them");
+
+        app.on_key(key(KeyCode::Esc));
+        app.on_key(key(KeyCode::Char('x')));
+        assert!(app.sheet().is_none(), "nothing new, and not away");
+        assert_eq!(app.composed(), "x");
+    }
+
+    #[test]
+    fn a_key_pressed_as_things_happen_moves_the_mark_so_coming_back_tells_only_what_came_after() {
+        let mut app = laid_out();
+        let at = Instant::now();
+        app.tick(at, None);
+        app.apply(&changed("src/seen.rs"));
+        app.tick(at + Duration::from_secs(1), None);
+        app.on_key(key(KeyCode::Char('x')));
+        assert!(app.sheet().is_none(), "a second is no absence");
+
+        app.apply(&changed("src/unseen.rs"));
+        app.tick(at + AWAY, None);
+        app.on_key(key(KeyCode::Char('y')));
+        let rows = &app.sheet().expect("a file changed while away").rows;
+        assert!(
+            rows.iter().any(|row| row.contains("src/unseen.rs")),
+            "{rows:?}"
+        );
+        assert!(
+            !rows.iter().any(|row| row.contains("src/seen.rs")),
+            "{rows:?}"
+        );
+    }
+
+    #[test]
+    fn minutes_away_with_nothing_happening_open_nothing_and_the_key_lands() {
+        let mut app = laid_out();
+        let left = Instant::now();
+        app.tick(left, None);
+        app.tick(left + AWAY, None);
+        app.on_key(key(KeyCode::Char('x')));
+        assert!(app.sheet().is_none());
+        assert_eq!(app.composed(), "x");
+    }
+
+    #[test]
+    fn with_the_automatic_catch_up_off_c_in_a_pane_still_shows_it_and_says_when_nothing_is_new() {
+        let mut app = laid_out().with_catch_up(Duration::from_secs(60), false);
+        let left = Instant::now();
+        app.tick(left, None);
+        app.apply(&changed("src/lib.rs"));
+        app.tick(left + AWAY, None);
+        app.on_key(key(KeyCode::Tab));
+        assert!(app.sheet().is_none(), "not of itself");
+
+        app.on_key(key(KeyCode::Char('c')));
+        assert_eq!(
+            app.sheet().map(|sheet| sheet.title.as_str()),
+            Some(crate::catch_up::TITLE),
+            "c counts from the last catch-up shown, not the last key"
+        );
+        app.on_key(key(KeyCode::Esc));
+        app.on_key(key(KeyCode::Tab));
+        app.on_key(key(KeyCode::Char('c')));
+        assert!(app.sheet().is_none());
+        assert_eq!(app.hint(), Some(crate::catch_up::NOTHING));
+    }
+
+    #[test]
+    fn a_conversation_started_over_counts_what_it_changes_from_nothing() {
+        let mut app = laid_out();
+        let at = Instant::now();
+        app.tick(at, None);
+        app.apply(&changed("src/lib.rs"));
+        app.on_key(key(KeyCode::Char('x')));
+        app.apply(&Event::Cleared);
+        app.apply(&changed("src/lib.rs"));
+        app.tick(at + AWAY, None);
+        app.on_key(key(KeyCode::Char('y')));
+        assert!(
+            app.sheet().is_some(),
+            "the same file changed once in each conversation is news in the new one"
+        );
+    }
+
+    #[test]
+    fn a_look_is_recorded_once_something_has_happened_and_read_back_as_the_mark() {
+        let mut live = laid_out();
+        let at = Instant::now();
+        live.tick(at, None);
+        live.on_key(key(KeyCode::Char('x')));
+        assert!(
+            !live.take_produced().contains(&Event::Looked),
+            "nothing had happened to look at"
+        );
+        live.apply(&changed("src/seen.rs"));
+        live.on_key(key(KeyCode::Char('y')));
+        live.on_key(key(KeyCode::Char('z')));
+        let looks = live
+            .take_produced()
+            .iter()
+            .filter(|event| **event == Event::Looked)
+            .count();
+        assert_eq!(looks, 1, "one look for one thing that happened");
+
+        // The process ended while the operator was away, after a file they
+        // never saw changed; the session taken up again tells them of it on
+        // the first key, however soon.
+        let mut app = laid_out();
+        app.apply(&changed("src/seen.rs"));
+        app.apply(&Event::Looked);
+        app.apply(&changed("src/unseen.rs"));
+        app.resumed();
+        app.tick(Instant::now(), None);
+        app.on_key(key(KeyCode::Char('x')));
+        let rows = &app
+            .sheet()
+            .expect("a file changed after the last look")
+            .rows;
+        assert!(
+            rows.iter().any(|row| row.contains("src/unseen.rs")),
+            "{rows:?}"
+        );
+        assert!(
+            !rows.iter().any(|row| row.contains("src/seen.rs")),
+            "{rows:?}"
+        );
+    }
+
+    #[test]
+    fn a_record_that_marks_no_look_holds_nothing_to_catch_up_on() {
+        let mut app = laid_out();
+        app.apply(&changed("src/lib.rs"));
+        app.resumed();
+        let left = Instant::now();
+        app.tick(left, None);
+        app.tick(left + AWAY, None);
+        app.on_key(key(KeyCode::Char('x')));
+        assert!(app.sheet().is_none(), "the record was there to read before");
+        assert_eq!(app.composed(), "x");
+    }
+
+    /// `t` turns the Activity pane's tools between kinds of work and tool
+    /// names where that pane has the keyboard; anywhere else it is typed.
+    #[test]
+    fn t_counts_tools_by_name_from_the_activity_pane_and_is_typed_elsewhere() {
+        let mut app = laid_out();
+        app.on_key(key(KeyCode::Tab));
+        assert_eq!(app.focus(), Focus::Pane(Pane::Changes));
+        app.on_key(key(KeyCode::Char('t')));
+        assert!(!app.tools_by_name());
+        assert_eq!(app.composed(), "t");
+
+        app.on_key(key(KeyCode::Tab));
+        app.on_key(key(KeyCode::Tab));
+        assert_eq!(app.focus(), Focus::Pane(Pane::Activity));
+        app.on_key(key(KeyCode::Char('t')));
+        assert!(app.tools_by_name());
+        assert_eq!(app.composed(), "t", "nothing more was typed");
+        app.on_key(key(KeyCode::Char('t')));
+        assert!(!app.tools_by_name(), "the key turns the count back");
     }
 
     #[test]
@@ -4547,42 +9935,35 @@ mod tests {
     fn the_arrows_walk_a_focused_panes_sections_and_enter_folds_the_one_under_the_cursor() {
         let mut app = laid_out();
         app.measured_sections(
-            Pane::Changes,
-            vec![
-                (Section::WorkingTree, 1),
-                (Section::Commits, 12),
-                (Section::Edited, 25),
-            ],
+            Pane::Activity,
+            vec![(Section::SubAgents, 1), (Section::Tools, 19)],
         );
-        assert_eq!(app.section_cursor(Pane::Changes), None, "not focused");
+        assert_eq!(app.section_cursor(Pane::Activity), None, "not focused");
 
         app.on_key(key(KeyCode::Tab));
-        assert_eq!(
-            app.section_cursor(Pane::Changes),
-            Some(Section::WorkingTree)
-        );
+        app.on_key(key(KeyCode::Tab));
+        assert_eq!(app.section_cursor(Pane::Activity), Some(Section::SubAgents));
 
         app.on_key(key(KeyCode::Down));
-        app.on_key(key(KeyCode::Down));
-        assert_eq!(app.section_cursor(Pane::Changes), Some(Section::Edited));
+        assert_eq!(app.section_cursor(Pane::Activity), Some(Section::Tools));
         assert_eq!(
-            app.pane_scroll(Pane::Changes),
-            16,
+            app.pane_scroll(Pane::Activity),
+            12,
             "the section under the cursor is scrolled into view"
         );
         app.on_key(key(KeyCode::Down));
         assert_eq!(
-            app.section_cursor(Pane::Changes),
-            Some(Section::Edited),
+            app.section_cursor(Pane::Activity),
+            Some(Section::Tools),
             "the last section is as far as it goes"
         );
 
         app.on_key(key(KeyCode::Up));
         app.on_key(key(KeyCode::Enter));
-        assert!(app.folded(Section::Commits));
+        assert!(app.folded(Section::SubAgents));
         assert!(app.entries().is_empty(), "Enter folded rather than sent");
         assert!(
-            app.pane_scroll(Pane::Changes) <= 12,
+            app.pane_scroll(Pane::Activity) <= 1,
             "the folded header stays in view"
         );
     }
@@ -4670,6 +10051,7 @@ mod tests {
         app.apply(&Event::AgentSpawn {
             id: AgentId::new("toolu_a"),
             parent: None,
+            kind: None,
             label: "deep-reasoner: Review cache".to_owned(),
         });
         app.apply(&Event::AssistantDelta {
@@ -4718,40 +10100,108 @@ mod tests {
         );
     }
 
+    /// A prompt sent while the reply streams is drawn where it was sent, and
+    /// the reply keeps its place above it: the rest of its deltas and its
+    /// whole message finish that one entry rather than start it again under
+    /// the prompt, as though it answered it.
     #[test]
-    fn an_agent_is_named_by_what_tells_it_apart_from_the_others() {
-        let labels = [
-            "quick-lookup: Summarize catalog/cache.py",
-            "deep-reasoner: Review catalog/fetch.py for bugs",
-            "deep-reasoner: Review catalog/cache.py for bugs",
-            "deep-reasoner: Review",
-            "deep-reasoner: Review catalog/fetch.py for bugs",
-        ];
-        let named: Vec<String> = (0..labels.len())
-            .map(|at| distinct_tail(&labels, at))
+    fn a_prompt_sent_while_the_reply_streams_leaves_one_reply_above_it() {
+        let mut app = app();
+        app.apply(&Event::SessionMeta(SessionMeta {
+            backend: Backend::Claude,
+            profile: "default".to_owned(),
+            model: "opus-5".to_owned(),
+            backend_session: None,
+        }));
+        app.apply(&Event::UserMessage {
+            text: "slow".to_owned(),
+        });
+        app.apply(&Event::AssistantDelta {
+            text: "word0 ".to_owned(),
+        });
+        app.apply(&Event::UserMessage {
+            text: "hello during".to_owned(),
+        });
+        app.apply(&Event::AssistantDelta {
+            text: "word1".to_owned(),
+        });
+        let streamed: Vec<(EntryKind, &str, bool)> = app
+            .entries()
+            .iter()
+            .map(|entry| (entry.kind, entry.body.as_str(), entry.streaming))
             .collect();
         assert_eq!(
-            named,
+            streamed,
             [
-                "quick-lookup: Summarize catalog/cache.py",
-                "…fetch.py for bugs",
-                "…cache.py for bugs",
-                "…Review",
-                // Two agents spawned alike are named alike: nothing in what
-                // the backend said tells them apart.
-                "…fetch.py for bugs",
+                (EntryKind::User, "slow", false),
+                (EntryKind::Agent, "word0 word1", true),
+                (EntryKind::User, "hello during", false),
+            ]
+        );
+
+        app.apply(&Event::AssistantMessage {
+            text: "word0 word1 word2".to_owned(),
+            agent: None,
+        });
+        let finished: Vec<(EntryKind, &str, bool)> = app
+            .entries()
+            .iter()
+            .map(|entry| (entry.kind, entry.body.as_str(), entry.streaming))
+            .collect();
+        assert_eq!(
+            finished,
+            [
+                (EntryKind::User, "slow", false),
+                (EntryKind::Agent, "word0 word1 word2", false),
+                (EntryKind::User, "hello during", false),
             ]
         );
     }
 
-    /// An agent named whole while it was the only one is renamed on the rows
-    /// it has already made once a second agent shares the start of its name.
+    /// A reply a turn ended on without its message is not the next turn's:
+    /// that turn's words start a reply of their own under its prompt.
+    #[test]
+    fn a_reply_left_streaming_by_its_turn_does_not_take_the_next_turns_words() {
+        let mut app = app();
+        app.apply(&Event::SessionMeta(SessionMeta {
+            backend: Backend::Claude,
+            profile: "default".to_owned(),
+            model: "opus-5".to_owned(),
+            backend_session: None,
+        }));
+        app.apply(&Event::UserMessage {
+            text: "first".to_owned(),
+        });
+        app.apply(&Event::AssistantDelta {
+            text: "cut ".to_owned(),
+        });
+        app.apply(&Event::TurnEnded);
+        app.apply(&Event::UserMessage {
+            text: "second".to_owned(),
+        });
+        app.apply(&Event::AssistantDelta {
+            text: "fresh".to_owned(),
+        });
+
+        let replies: Vec<&str> = app
+            .entries()
+            .iter()
+            .filter(|entry| entry.kind == EntryKind::Agent)
+            .map(|entry| entry.body.as_str())
+            .collect();
+        assert_eq!(replies, ["cut ", "fresh"]);
+    }
+
+    /// An agent tagged by its first word while it was the only one is
+    /// renamed on the rows it has already made once a second agent shares
+    /// that word.
     #[test]
     fn a_second_agent_renames_the_first_agents_rows() {
         let mut app = app();
         let spawn = |id: &str, label: &str| Event::AgentSpawn {
             id: AgentId::new(id),
             parent: None,
+            kind: None,
             label: label.to_owned(),
         };
         app.apply(&spawn("toolu_a", "Review catalog/fetch.py"));
@@ -4762,13 +10212,10 @@ mod tests {
             summary: None,
             agent: Some(AgentId::new("toolu_a")),
         });
-        assert_eq!(
-            app.entries()[0].agent.as_deref(),
-            Some("Review catalog/fetch.py")
-        );
+        assert_eq!(app.entries()[0].agent.as_deref(), Some("review"));
 
         app.apply(&spawn("toolu_b", "Review catalog/cache.py"));
-        assert_eq!(app.entries()[0].agent.as_deref(), Some("…fetch.py"));
+        assert_eq!(app.entries()[0].agent.as_deref(), Some("fetch"));
     }
 
     #[test]
@@ -4793,6 +10240,8 @@ mod tests {
             summary: None,
             exit_code: None,
             error: None,
+            command: None,
+            untrimmed: None,
         });
 
         assert_eq!(app.entries().len(), 1, "the end opened a second entry");
@@ -4827,6 +10276,8 @@ mod tests {
             summary: None,
             exit_code: None,
             error: None,
+            command: None,
+            untrimmed: None,
         });
         app.apply(&Event::ToolCallEnd {
             id: "t9".into(),
@@ -4838,6 +10289,8 @@ mod tests {
             summary: None,
             exit_code: None,
             error: None,
+            command: None,
+            untrimmed: None,
         });
 
         assert_eq!(app.entries()[0].kind, EntryKind::Failure);
@@ -4856,20 +10309,203 @@ mod tests {
     #[test]
     fn numbers_go_to_the_panes_and_not_to_the_transcript() {
         let mut app = app();
-        app.apply(&Event::Decision {
-            summary: "Reuse the existing LRU".to_owned(),
-            rationale: None,
-            rejected: vec!["A second Map".to_owned()],
-        });
         app.apply(&Event::AgentSpawn {
             id: "a1".into(),
             parent: None,
+            kind: None,
             label: "test-writer".to_owned(),
         });
 
         assert!(app.entries().is_empty());
-        assert_eq!(app.session().decisions().len(), 1);
         assert_eq!(app.session().agents_spawned(), 1);
+    }
+
+    fn png(tag: &[u8]) -> niobe_core::image::Image {
+        let mut data = b"\x89PNG\r\n\x1a\n".to_vec();
+        data.extend_from_slice(tag);
+        niobe_core::image::Image::from_bytes(data).expect("a PNG signature")
+    }
+
+    #[test]
+    fn a_pasted_image_path_asks_for_the_file_rather_than_typing_the_path() {
+        let mut app = app();
+        app.on_paste("'/Users/me/Desktop/Screen Shot.png'");
+
+        assert_eq!(
+            app.take_image_requests(),
+            [Source::File("/Users/me/Desktop/Screen Shot.png".to_owned())]
+        );
+        assert_eq!(app.composed(), "");
+    }
+
+    #[test]
+    fn an_image_path_pasted_into_a_shell_command_is_the_path() {
+        let mut app = app().runs_commands();
+        typed(&mut app, "!open ");
+        assert!(app.shell_mode());
+
+        app.on_paste("/Users/me/Desktop/shot.png");
+
+        assert_eq!(app.take_image_requests(), []);
+        assert_eq!(app.composed(), "open /Users/me/Desktop/shot.png");
+    }
+
+    #[test]
+    fn ctrl_v_in_a_shell_command_attaches_nothing_and_says_why() {
+        let mut app = app().runs_commands();
+        typed(&mut app, "!ls");
+
+        app.on_key(ctrl('v'));
+        app.on_paste("");
+
+        assert_eq!(app.take_image_requests(), []);
+        assert_eq!(app.composed(), "ls");
+        assert_eq!(app.hint(), Some(NO_IMAGE_IN_A_COMMAND_HINT));
+    }
+
+    /// An image asked for before the `!` and landing after it: the command
+    /// line takes none, and its placeholder would be a word of the command.
+    #[test]
+    fn an_image_landing_in_a_shell_command_leaves_the_command_as_it_was() {
+        let mut app = app().runs_commands();
+        app.on_key(ctrl('v'));
+        assert_eq!(app.take_image_requests(), [Source::Clipboard]);
+        typed(&mut app, "!ls");
+        assert!(app.shell_mode());
+
+        app.fetched(Fetched {
+            source: Source::Clipboard,
+            image: Ok(png(b"a")),
+        });
+
+        assert_eq!(app.composed(), "ls");
+        assert_eq!(app.hint(), Some(NO_IMAGE_IN_A_COMMAND_HINT));
+        assert_eq!(app.take_turn_images(), vec![]);
+    }
+
+    /// What is sent is what is drawn: a terminal's escape sequence or a bell
+    /// in a paste is not sent, and the bar says it was left out.
+    #[test]
+    fn a_paste_leaves_its_control_characters_out_and_says_so() {
+        let mut app = app();
+
+        app.on_paste("ab\x1b[31mred\x1b[0m\x07cd\nef");
+
+        assert_eq!(app.composed(), "ab[31mred[0mcd\nef");
+        assert_eq!(
+            app.hint(),
+            Some("3 control characters were left out of the paste")
+        );
+    }
+
+    #[test]
+    fn a_paste_of_nothing_but_controls_is_not_a_request_for_the_image_on_the_clipboard() {
+        let mut app = app();
+
+        app.on_paste("\x1b\x07");
+
+        assert_eq!(app.take_image_requests(), []);
+        assert_eq!(app.composed(), "");
+        assert_eq!(
+            app.hint(),
+            Some("2 control characters were left out of the paste")
+        );
+    }
+
+    #[test]
+    fn an_empty_paste_asks_for_the_image_on_the_clipboard() {
+        let mut app = app();
+        app.on_paste("");
+        assert_eq!(app.take_image_requests(), [Source::Clipboard]);
+        assert_eq!(app.hint(), Some("Reading the image on the clipboard…"));
+    }
+
+    #[test]
+    fn a_pasted_path_that_is_no_image_goes_into_the_prompt_as_it_would_have() {
+        let mut app = app();
+        app.on_paste("/tmp/notes.png");
+        app.fetched(Fetched {
+            source: Source::File("/tmp/notes.png".to_owned()),
+            image: Err("it is not a PNG, JPEG, GIF or WebP image".to_owned()),
+        });
+
+        assert_eq!(app.composed(), "/tmp/notes.png");
+        assert_eq!(
+            app.hint(),
+            Some("/tmp/notes.png is not attached: it is not a PNG, JPEG, GIF or WebP image")
+        );
+    }
+
+    #[test]
+    fn a_pasted_path_that_cannot_be_read_goes_back_as_it_was_pasted() {
+        for (pasted, path) in [
+            (r"^shot\d+\.png", "^shotd+.png"),
+            ("\"assets/logo.png\"", "assets/logo.png"),
+        ] {
+            let mut app = app();
+            app.on_paste(pasted);
+            assert_eq!(app.take_image_requests(), [Source::File(path.to_owned())]);
+            app.fetched(Fetched {
+                source: Source::File(path.to_owned()),
+                image: Err("it does not exist".to_owned()),
+            });
+
+            assert_eq!(app.composed(), pasted);
+        }
+    }
+
+    #[test]
+    fn a_prompt_waits_for_the_image_still_being_read_for_it() {
+        let mut app = app().attached();
+        app.on_paste("/tmp/shot.png");
+        let produced = submitted(&mut app, "look at this");
+
+        assert_eq!(produced, Vec::new());
+        assert_eq!(app.composed(), "look at this");
+        assert_eq!(app.hint(), Some(IMAGE_STILL_READING_HINT));
+
+        app.fetched(Fetched {
+            source: Source::File("/tmp/shot.png".to_owned()),
+            image: Ok(png(b"a")),
+        });
+        app.submit();
+
+        assert_eq!(
+            app.said(),
+            vec![Event::UserMessage {
+                text: "look at this[Image #1] ".to_owned()
+            }]
+        );
+        assert_eq!(app.take_turn_images(), vec![png(b"a")]);
+    }
+
+    #[test]
+    fn an_image_lands_where_the_cursor_is() {
+        let mut app = app();
+        app.on_paste("before  after");
+        for _ in 0.."after".len() + 1 {
+            app.on_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        }
+        app.fetched(Fetched {
+            source: Source::Clipboard,
+            image: Ok(png(b"a")),
+        });
+
+        assert_eq!(app.composed(), "before [Image #1]  after");
+    }
+
+    #[test]
+    fn images_attached_after_a_resume_are_numbered_past_the_ones_it_holds() {
+        let mut app = app();
+        app.apply(&Event::UserMessage {
+            text: "earlier: [Image #2]".to_owned(),
+        });
+        app.fetched(Fetched {
+            source: Source::Clipboard,
+            image: Ok(png(b"a")),
+        });
+
+        assert_eq!(app.composed(), "[Image #3] ");
     }
 
     #[test]
@@ -4887,7 +10523,13 @@ mod tests {
 
         app.submit();
         assert_eq!(app.composed(), "");
-        assert_eq!(app.session().user_messages(), 1);
+        assert_eq!(
+            app.said(),
+            [Event::PromptNotSent {
+                text: "hi".to_owned()
+            }]
+        );
+        assert_eq!(app.session().user_messages(), 0, "nothing was asked");
         assert_eq!(app.entries()[0].kind, EntryKind::User);
         assert_eq!(app.entries()[1].kind, EntryKind::Notice);
     }
@@ -4917,6 +10559,7 @@ mod tests {
                 name: "model".to_owned(),
                 description: String::new(),
                 argument_hint: None,
+                mid_prompt: false,
             }],
         });
         app
@@ -4930,7 +10573,39 @@ mod tests {
             });
         }
         app.submit();
-        app.take_produced()
+        app.said()
+    }
+
+    /// A command the backend does not list may reach the model as text and
+    /// spend a whole turn: Claude Code 2.1.309 passes `/todos` on that way.
+    #[test]
+    fn a_command_the_backend_does_not_list_is_held_until_enter_comes_again() {
+        let mut app = offering_model(app());
+
+        assert_eq!(submitted(&mut app, "/todos"), []);
+        let hint = app.hint().expect("the shell says why it held it");
+        assert!(
+            hint.contains("/todos") && hint.contains("Enter again"),
+            "{hint}"
+        );
+        assert_eq!(app.composer().lines(), ["/todos"], "the prompt is kept");
+
+        app.submit();
+        assert_eq!(app.said().len(), 1, "sent the second time");
+    }
+
+    #[test]
+    fn a_listed_command_a_path_and_a_backend_that_listed_nothing_are_sent_at_once() {
+        let mut listing = offering_model(app());
+        assert_eq!(
+            submitted(&mut listing, "/model").len(),
+            0,
+            "the shell's own"
+        );
+        assert_eq!(submitted(&mut listing, "/usr/bin/env is missing").len(), 1);
+
+        let mut unlisted = app();
+        assert_eq!(submitted(&mut unlisted, "/todos").len(), 1);
     }
 
     /// Typed as a prompt, the backend would move the model only when the next
@@ -4952,17 +10627,23 @@ mod tests {
 
     #[test]
     fn a_model_command_the_picker_cannot_stand_for_goes_to_the_backend_as_typed() {
-        for text in ["/model", "/model haiku please", "/models haiku"] {
-            let mut app = offering_model(app());
+        for text in ["/model haiku please", "/models haiku"] {
+            let mut app = offering_model(app().attached());
+            let mut said = submitted(&mut app, text);
+            if text.starts_with("/models") {
+                assert_eq!(said, [], "not listed, so held once");
+                app.submit();
+                said = app.said();
+            }
             assert_eq!(
-                submitted(&mut app, text),
+                said,
                 [Event::UserMessage {
                     text: text.to_owned()
                 }]
             );
         }
 
-        let mut app = app();
+        let mut app = app().attached();
         assert_eq!(
             submitted(&mut app, "/model haiku"),
             [Event::UserMessage {
@@ -4972,25 +10653,342 @@ mod tests {
         );
     }
 
+    /// What the operator is left with once `app` has been asked for
+    /// something: what it sent, what it said, what it opened and handed over,
+    /// and whether it is ending.
+    fn outcome(app: &mut App) -> String {
+        let sent = app.said();
+        let handed = app.take_handoffs();
+        format!(
+            "sent {sent:?}\nsaid {:?}\nsheet {:?}\npicking {:?}\nbrowsing {:?}\n\
+             handed {handed:?}\nquits {}",
+            app.hint(),
+            app.sheet(),
+            app.picking(),
+            app.browser(),
+            app.should_quit(),
+        )
+    }
+
+    /// Sends `text` from the composer of the app `make` builds, and asks
+    /// another the same build for `action` from the menu, and expects the
+    /// two to end alike, with nothing left in the composer.
+    fn typed_as_asked(make: impl Fn() -> App, text: &str, action: crate::menu::Action) {
+        let mut asked = make();
+        asked.perform(action);
+        let mut typed = make();
+        for c in text.chars() {
+            typed.type_into_composer(Input {
+                key: Key::Char(c),
+                ..Default::default()
+            });
+        }
+        typed.submit();
+        assert_eq!(outcome(&mut typed), outcome(&mut asked), "{text}");
+        assert_eq!(typed.composed(), "", "{text}");
+    }
+
     #[test]
-    fn a_cleared_conversation_is_a_line_in_the_transcript() {
+    fn a_bare_model_command_opens_the_model_picker_and_sends_nothing() {
+        let mut picking = offering_model(under_a_profile(&["opus", "sonnet"]));
+        assert_eq!(submitted(&mut picking, "/model"), []);
+        assert_eq!(
+            picking.picking().map(|picker| picker
+                .options
+                .iter()
+                .map(|choice| choice.value.clone())
+                .collect::<Vec<_>>()),
+            Some(vec!["opus".to_owned(), "sonnet".to_owned()])
+        );
+        assert_eq!(picking.session().user_messages(), 0);
+
+        typed_as_asked(
+            || offering_model(under_a_profile(&["opus", "sonnet"])),
+            "/model",
+            crate::menu::Action::SwitchModel,
+        );
+        typed_as_asked(app, "/model", crate::menu::Action::SwitchModel);
+    }
+
+    #[test]
+    fn a_typed_memory_command_opens_memory_as_f8_does() {
+        typed_as_asked(app, "/memory", crate::menu::Action::Memory);
+    }
+
+    #[test]
+    fn a_typed_resume_command_opens_the_sessions_as_the_menu_item_does() {
+        typed_as_asked(
+            || remembering(&[], &["earlier"]),
+            "/resume",
+            crate::menu::Action::Resume,
+        );
+        typed_as_asked(app, "/resume", crate::menu::Action::Resume);
+    }
+
+    #[test]
+    fn the_shortcuts_name_the_typed_commands_that_open_the_shells_own_and_the_hold() {
         let mut app = app();
+        app.perform(crate::menu::Action::Shortcuts);
+        let rows = app.sheet().expect("F1 opens the sheet").rows.join("\n");
+        for named in [
+            "/status Settings",
+            "/permissions Permissions",
+            "/export Export transcript",
+            "/bug Report a bug",
+            "/login Login / Logout",
+        ] {
+            assert!(rows.contains(named), "{named} missing from:\n{rows}");
+        }
+        assert!(
+            !rows.contains("/compact"),
+            "a backend command is the backend's:\n{rows}"
+        );
+        assert!(rows.contains("Enter again"), "{rows}");
+    }
+
+    #[test]
+    fn a_typed_help_command_lists_the_shortcuts_as_f1_does() {
+        typed_as_asked(app, "/help", crate::menu::Action::Shortcuts);
+    }
+
+    #[test]
+    fn a_typed_config_command_shows_the_settings_as_f9_does() {
+        typed_as_asked(app, "/config", crate::menu::Action::Settings);
+    }
+
+    #[test]
+    fn a_typed_exit_or_quit_command_ends_the_session_as_f10_does() {
+        typed_as_asked(app, "/exit", crate::menu::Action::Quit);
+        typed_as_asked(app, "/quit", crate::menu::Action::Quit);
+    }
+
+    #[test]
+    fn typed_clear_and_compact_send_what_f3_and_f2_send() {
+        let both = || offering(&["compact", "clear"]);
+        typed_as_asked(both, "/clear", crate::menu::Action::NewSession);
+        typed_as_asked(both, "/compact", crate::menu::Action::Compact);
+
+        let mut app = both();
+        assert_eq!(
+            submitted(&mut app, "/compact keep the plan"),
+            [Event::UserMessage {
+                text: "/compact keep the plan".to_owned()
+            }],
+            "what the command takes goes with it"
+        );
+    }
+
+    #[test]
+    fn a_typed_command_the_backend_does_not_list_is_refused_as_its_key_refuses_it() {
+        let compact_only = || offering(&["compact"]);
+        let mut app = compact_only();
+        app.on_key(key(KeyCode::F(3)));
+        let refused = app.hint().map(str::to_owned);
+        let mut typed = compact_only();
+        assert_eq!(submitted(&mut typed, "/clear with notes"), []);
+        assert_eq!(typed.hint().map(str::to_owned), refused);
+        assert_eq!(
+            typed.composed(),
+            "/clear with notes",
+            "a refused command stays in the composer to be sent once it can be"
+        );
+    }
+
+    #[test]
+    fn a_typed_command_waits_for_the_running_turn_as_its_key_does() {
+        let working = || {
+            let mut app = offering(&["compact"]);
+            submitted(&mut app, "go on");
+            app
+        };
+        let mut app = working();
+        app.on_key(key(KeyCode::F(2)));
+        assert_eq!(app.said(), []);
+        let refused = app.hint().map(str::to_owned);
+        assert!(
+            refused
+                .as_deref()
+                .is_some_and(|hint| hint.contains("waits")),
+            "{refused:?}"
+        );
+
+        let mut typed = working();
+        assert_eq!(submitted(&mut typed, "/compact"), []);
+        assert_eq!(typed.hint().map(str::to_owned), refused);
+        assert_eq!(typed.composed(), "/compact");
+    }
+
+    #[test]
+    fn a_command_the_shell_has_no_action_for_goes_to_the_backend_as_typed() {
+        for text in [
+            "/review",
+            "/review the diff",
+            "/config theme dark",
+            "/help me",
+        ] {
+            let mut app = offering(&["review", "config", "help"]);
+            assert_eq!(
+                submitted(&mut app, text),
+                [Event::UserMessage {
+                    text: text.to_owned()
+                }],
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_cleared_conversation_starts_the_transcript_over_at_a_line_that_says_so() {
+        let mut app = app();
+        for event in [
+            Event::UserMessage {
+                text: "one".to_owned(),
+            },
+            Event::AssistantMessage {
+                text: "done".to_owned(),
+                agent: None,
+            },
+            Event::TurnEnded,
+            Event::Error {
+                message: "rate limited".to_owned(),
+                fatal: false,
+            },
+        ] {
+            app.apply(&event);
+        }
+        assert!(app.entries().len() > 2);
+        assert_eq!(app.session().errors(), 1);
+
         app.apply(&Event::Cleared);
+
+        let [only] = app.entries() else {
+            panic!("the transcript holds only the clear: {:?}", app.entries());
+        };
+        assert_eq!(only.kind, EntryKind::Notice);
+        assert_eq!(only.head, "cleared");
+        assert!(only.body.contains("new session"), "{}", only.body);
+        assert_eq!(app.session().errors(), 0);
+        assert!(app.session().turns().is_empty());
+    }
+
+    #[test]
+    fn a_compaction_leaves_the_transcript_and_the_turn_numbers_as_they_were() {
+        let mut app = app();
+        for event in [
+            Event::UserMessage {
+                text: "one".to_owned(),
+            },
+            Event::TurnEnded,
+            Event::UserMessage {
+                text: "/compact".to_owned(),
+            },
+            Event::CompactionStarted,
+            Event::CompactionEnded,
+            Event::Compacted {
+                trigger: CompactTrigger::Manual,
+                before: Some(9_000),
+                after: Some(1_000),
+            },
+            Event::TurnEnded,
+        ] {
+            app.apply(&event);
+        }
+        assert_eq!(app.session().turns().len(), 2);
+        assert!(app.entries().len() >= 3);
+    }
+
+    #[test]
+    fn a_turn_total_that_differs_says_so_in_words_and_names_where_to_look() {
+        let mut app = app();
+        let counts = |input, output, cache_read, cache_write| TokenCounts {
+            input,
+            output,
+            cache_read,
+            cache_write,
+            cache_write_1h: None,
+        };
+        app.apply(&Event::UserMessage {
+            text: "one".to_owned(),
+        });
+        app.apply(&Event::TurnEnded);
+        app.apply(&Event::UserMessage {
+            text: "two".to_owned(),
+        });
+        app.apply(&Event::TurnTotalDiffers {
+            per_message: counts(38, 19_386, 1_832_928, 117_517),
+            reported: counts(40, 19_394, 1_950_998, 120_328),
+            backend_session: Some("506fa4fd".to_owned()),
+            unfinished: vec!["msg_cut (request req_cut)".to_owned()],
+        });
+
         let last = app.entries().last().expect("an entry");
-        assert_eq!(last.kind, EntryKind::Notice);
-        assert_eq!(last.head, "cleared");
+        assert_eq!(last.kind, EntryKind::Notice, "{last:?}");
+        let (said, detail) = last.body.split_once('\n').expect("words, then the detail");
+        assert!(
+            said.contains("120891 tokens for this turn beyond what its messages reported"),
+            "{said}"
+        );
+        assert!(detail.starts_with("turn 2 · "), "{detail}");
+        assert!(detail.contains("CLI session 506fa4fd"), "{detail}");
+        assert!(detail.contains("msg_cut (request req_cut)"), "{detail}");
+        assert!(
+            detail.contains("per message 38 in, 19386 out, 1832928 cache read, 117517 cache write"),
+            "{detail}"
+        );
+        assert!(detail.contains("reported 40 in"), "{detail}");
+        assert_eq!(app.session().errors(), 0);
+    }
+
+    #[test]
+    fn a_turn_whose_one_hour_cache_writes_alone_differ_says_how() {
+        let mut app = app();
+        let counts = |cache_write_1h| TokenCounts {
+            input: 4,
+            output: 20,
+            cache_read: 0,
+            cache_write: 500,
+            cache_write_1h,
+        };
+        app.apply(&Event::UserMessage {
+            text: "one".to_owned(),
+        });
+        app.apply(&Event::TurnTotalDiffers {
+            per_message: counts(Some(300)),
+            reported: counts(Some(500)),
+            backend_session: None,
+            unfinished: Vec::new(),
+        });
+
+        let last = app.entries().last().expect("an entry");
+        let (said, detail) = last.body.split_once('\n').expect("words, then the detail");
+        assert_eq!(
+            said,
+            "The CLI's total for this turn bought 500 of its cache writes for an hour; \
+             its messages said 300. Each cache write is priced at the lifetime its message \
+             gave."
+        );
+        assert!(
+            detail.contains(
+                "per message 4 in, 20 out, 0 cache read, 500 cache write, 300 for an hour"
+            ),
+            "{detail}"
+        );
+        assert!(
+            detail.contains("500 cache write, 500 for an hour"),
+            "{detail}"
+        );
     }
 
     #[test]
     fn shift_enter_opens_a_line_and_enter_still_sends() {
         use ratatui::crossterm::event::KeyModifiers;
 
-        let mut app = app().reports_shift_enter();
+        let mut app = app().attached().reports_shift_enter();
         typed_then_enter(&mut app, "one", KeyModifiers::SHIFT);
         typed_then_enter(&mut app, "two", KeyModifiers::NONE);
 
         assert_eq!(
-            app.take_produced(),
+            app.said(),
             [Event::UserMessage {
                 text: "one\ntwo".to_owned()
             }]
@@ -5001,12 +10999,12 @@ mod tests {
     fn alt_enter_opens_a_line_on_any_terminal() {
         use ratatui::crossterm::event::KeyModifiers;
 
-        for mut app in [app(), app().reports_shift_enter()] {
+        for mut app in [app().attached(), app().attached().reports_shift_enter()] {
             typed_then_enter(&mut app, "one", KeyModifiers::ALT);
             typed_then_enter(&mut app, "two", KeyModifiers::NONE);
 
             assert_eq!(
-                app.take_produced(),
+                app.said(),
                 [Event::UserMessage {
                     text: "one\ntwo".to_owned()
                 }]
@@ -5018,7 +11016,7 @@ mod tests {
     fn ctrl_j_opens_a_line_on_any_terminal() {
         use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-        for mut app in [app(), app().reports_shift_enter()] {
+        for mut app in [app().attached(), app().attached().reports_shift_enter()] {
             for c in "one".chars() {
                 app.type_into_composer(Input {
                     key: Key::Char(c),
@@ -5029,7 +11027,7 @@ mod tests {
             typed_then_enter(&mut app, "two", KeyModifiers::NONE);
 
             assert_eq!(
-                app.take_produced(),
+                app.said(),
                 [Event::UserMessage {
                     text: "one\ntwo".to_owned()
                 }]
@@ -5059,7 +11057,7 @@ mod tests {
 
     #[test]
     fn a_submitted_prompt_is_handed_out_once_to_be_kept() {
-        let mut app = app();
+        let mut app = app().attached();
         app.type_into_composer(Input {
             key: Key::Char('h'),
             ..Default::default()
@@ -5067,12 +11065,12 @@ mod tests {
         app.submit();
 
         assert_eq!(
-            app.take_produced(),
+            app.said(),
             [Event::UserMessage {
                 text: "h".to_owned()
             }]
         );
-        assert!(app.take_produced().is_empty());
+        assert!(app.said().is_empty());
     }
 
     #[test]
@@ -5081,7 +11079,7 @@ mod tests {
         app.apply(&Event::UserMessage {
             text: "from the store".to_owned(),
         });
-        assert!(app.take_produced().is_empty());
+        assert!(app.said().is_empty());
     }
 
     #[test]
@@ -5095,6 +11093,98 @@ mod tests {
         assert!(entry.body.ends_with("disk full"), "{}", entry.body);
     }
 
+    /// A clear starts the shell's side of the conversation over as well: the
+    /// rows of its calls and agents, the answers it was given, where the view
+    /// is, and the figures a turn's rule is measured from. Each is a line of
+    /// `start_over` that nothing else would notice leaving out.
+    #[test]
+    fn a_clear_forgets_the_rows_the_answers_and_the_figures_of_the_conversation_before_it() {
+        let mut app = app();
+        app.apply(&Event::UserMessage {
+            text: "first".to_owned(),
+        });
+        app.apply(&Event::AgentSpawn {
+            id: "a1".into(),
+            parent: None,
+            kind: None,
+            label: "explorer".to_owned(),
+        });
+        app.apply(&Event::ToolCallStart {
+            id: "t1".into(),
+            name: "Read".to_owned(),
+            input: "{}".to_owned(),
+            summary: None,
+            agent: Some("a1".into()),
+        });
+        app.apply(&Event::PermissionRequest {
+            id: "t1".into(),
+            tool: "Read".to_owned(),
+            input: "{}".to_owned(),
+            target: None,
+            proposal: None,
+            reason: None,
+            agent: None,
+        });
+        app.apply(&Event::PermissionResponse {
+            id: "t1".into(),
+            decision: PermissionDecision::Allow,
+            message: None,
+        });
+        app.follow = false;
+        app.stop_asked_in = Some(3);
+        app.turn_began_with = (4, 5);
+        app.turns_took = Some(Duration::from_secs(9));
+        assert!(!app.tool_entries.is_empty());
+        assert!(!app.agents.is_empty());
+        assert!(!app.answered.is_empty());
+
+        app.apply(&Event::Cleared);
+
+        assert!(app.tool_entries.is_empty(), "the calls' rows");
+        assert!(app.agent_entries.is_empty(), "the agents' lines");
+        assert!(app.agents.is_empty(), "the agents");
+        assert!(app.answered.is_empty(), "the answers given");
+        assert!(app.follow, "the view follows the new conversation");
+        assert_eq!(app.stop_asked_in, None, "a stop asked of a turn gone");
+        assert_eq!(app.turn_began_with, (0, 0));
+        assert_eq!(app.turns_took, Some(Duration::ZERO));
+    }
+
+    /// The store keeps refusing while the operator clears the conversation:
+    /// the count was kept on an entry by its place, and the entries are new.
+    #[test]
+    fn a_refusal_counted_across_a_clear_rewrites_no_entry_it_did_not_make() {
+        let mut app = app();
+        app.apply(&Event::UserMessage {
+            text: "first".to_owned(),
+        });
+        app.not_kept("locked");
+        app.apply(&Event::Cleared);
+        app.apply(&Event::UserMessage {
+            text: "second".to_owned(),
+        });
+        app.apply(&Event::AssistantMessage {
+            text: "second reply".to_owned(),
+            agent: None,
+        });
+
+        app.not_kept("locked");
+
+        let reply = app
+            .entries()
+            .iter()
+            .find(|entry| entry.body.contains("second reply"))
+            .expect("the reply is still there");
+        assert_eq!(reply.kind, EntryKind::Agent);
+        let saved: Vec<_> = app
+            .entries()
+            .iter()
+            .filter(|entry| entry.head == "not saved")
+            .collect();
+        assert_eq!(saved.len(), 1, "one entry of its own for the new count");
+        assert_eq!(saved[0].meta, events(1));
+    }
+
     /// A usage record carrying a cost the backend reported.
     fn priced(cost_usd: f64) -> Event {
         Event::Usage(Usage {
@@ -5102,12 +11192,12 @@ mod tests {
             output: 1,
             cache_read: 0,
             cache_write: 0,
-            cache_write_1h: 0,
+            cache_write_1h: Some(0),
             reasoning: 0,
             model: "opus-5".to_owned(),
             cost_usd: Some(cost_usd),
-            cost_basis: None,
-            settles_model: false,
+            settles_model: Some(false),
+            fast: false,
         })
     }
 
@@ -5118,6 +11208,8 @@ mod tests {
             tool: "Bash".to_owned(),
             input: r#"{"command":"rm -rf build"}"#.to_owned(),
             target: target.map(str::to_owned),
+            proposal: None,
+            reason: None,
             agent: None,
         }
     }
@@ -5130,35 +11222,7 @@ mod tests {
     }
 
     #[test]
-    fn f9_moves_to_the_next_theme_and_takes_the_composer_with_it() {
-        use crate::theme::{CLASSIC, CYBER, THEMES};
-        use ratatui::crossterm::event::KeyCode;
-
-        let mut app = app();
-        assert_eq!(*app.theme(), CYBER);
-
-        app.on_key(key(KeyCode::F(9)));
-
-        assert_eq!(*app.theme(), CLASSIC);
-        // The composer keeps the styles it was given rather than being handed
-        // them per frame, so a theme that did not reach it would leave the
-        // prompt drawn in the one before.
-        assert_eq!(
-            app.composer().style(),
-            Style::new().fg(CLASSIC.fg).bg(CLASSIC.pane_bg)
-        );
-        // And it says nothing: the menu bar already names the theme in force.
-        assert_eq!(app.hint(), None);
-
-        for _ in 1..THEMES.len() {
-            app.on_key(key(KeyCode::F(9)));
-        }
-        assert_eq!(*app.theme(), CYBER);
-    }
-
-    #[test]
     fn esc_then_a_digit_presses_the_function_key_of_that_number() {
-        use crate::theme::CLASSIC;
         use ratatui::crossterm::event::KeyCode;
 
         let mut app = app();
@@ -5168,14 +11232,14 @@ mod tests {
             "Esc says what the digit after it does: {:?}",
             app.hint()
         );
-        app.on_key(key(KeyCode::Char('9')));
-        assert_eq!(*app.theme(), CLASSIC);
+        app.on_key(key(KeyCode::Char('5')));
+        assert!(app.diffs_open(), "Esc then 5 is F5 Diff");
         assert_eq!(app.composer().lines(), [""]);
 
         // It is one key after Esc, not every key after it.
-        app.on_key(key(KeyCode::Char('9')));
-        assert_eq!(*app.theme(), CLASSIC);
-        assert_eq!(app.composer().lines(), ["9"]);
+        app.on_key(key(KeyCode::Char('5')));
+        assert!(app.diffs_open());
+        assert_eq!(app.composer().lines(), ["5"]);
 
         app.on_key(key(KeyCode::Esc));
         app.on_key(key(KeyCode::Char('0')));
@@ -5184,21 +11248,20 @@ mod tests {
 
     #[test]
     fn alt_and_a_digit_is_the_same_function_key() {
-        use crate::theme::CLASSIC;
         use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
         // Esc and a digit that reach the terminal together, or Option sent
         // as Meta, arrive as the digit with Alt held.
         let mut app = app();
-        app.on_key(KeyEvent::new(KeyCode::Char('9'), KeyModifiers::ALT));
-        assert_eq!(*app.theme(), CLASSIC);
+        app.on_key(KeyEvent::new(KeyCode::Char('5'), KeyModifiers::ALT));
+        assert!(app.diffs_open());
         assert_eq!(app.composer().lines(), [""]);
         app.on_key(KeyEvent::new(KeyCode::Char('0'), KeyModifiers::ALT));
         assert!(app.should_quit(), "Alt+0 is F10");
     }
 
     #[test]
-    fn a_key_after_esc_that_is_not_a_digit_is_typed_as_itself() {
+    fn a_key_after_esc_that_is_neither_a_digit_nor_a_menus_letter_is_typed() {
         use crate::theme::CYBER;
         use ratatui::crossterm::event::KeyCode;
 
@@ -5218,7 +11281,7 @@ mod tests {
         // That Esc already did something; the digit after it is the start of
         // what the operator types next.
         let mut app = app();
-        app.on_key(key(KeyCode::Char('/')));
+        ctrl_f(&mut app);
         app.on_key(key(KeyCode::Esc));
         app.on_key(key(KeyCode::Char('9')));
         assert_eq!(app.composer().lines(), ["9"]);
@@ -5228,7 +11291,6 @@ mod tests {
     #[test]
     fn a_shell_on_a_deep_terminal_draws_every_theme_at_that_depth() {
         use crate::theme::{CLASSIC, CYBER_TRUE, Depth, MODERN_TRUE, NEO, NEO_TRUE};
-        use ratatui::crossterm::event::KeyCode;
 
         // In either order: the depth is the terminal's, the theme the
         // operator's, and neither is allowed to undo the other.
@@ -5241,12 +11303,14 @@ mod tests {
             Style::new().fg(NEO_TRUE.fg).bg(NEO_TRUE.pane_bg)
         );
 
-        app.on_key(key(KeyCode::F(9)));
-        assert_eq!(*app.theme(), MODERN_TRUE);
-        app.on_key(key(KeyCode::F(9)));
-        assert_eq!(*app.theme(), CYBER_TRUE);
-        app.on_key(key(KeyCode::F(9)));
-        assert_eq!(*app.theme(), CLASSIC);
+        for (name, drawn) in [
+            (MODERN_TRUE.name, MODERN_TRUE),
+            (CYBER_TRUE.name, CYBER_TRUE),
+            (CLASSIC.name, CLASSIC),
+        ] {
+            app.choose(Purpose::Theme, name.to_owned());
+            assert_eq!(*app.theme(), drawn);
+        }
     }
 
     #[test]
@@ -5275,6 +11339,8 @@ mod tests {
             tool: "Bash".to_owned(),
             input: r#"{"command":"ls"}"#.to_owned(),
             target: Some("ls".to_owned()),
+            proposal: None,
+            reason: None,
             agent: None,
         });
         app.on_key(key(KeyCode::Esc));
@@ -5292,7 +11358,7 @@ mod tests {
         // Nothing is left for a key to answer, so nothing goes to a backend
         // that could not take it.
         app.on_key(key(KeyCode::Enter));
-        assert!(app.take_produced().is_empty());
+        assert!(app.said().is_empty());
     }
 
     #[test]
@@ -5304,6 +11370,7 @@ mod tests {
         app.apply(&Event::AgentSpawn {
             id: "a1".into(),
             parent: None,
+            kind: None,
             label: "Review fetch".to_owned(),
         });
         app.apply(&start("t1", "Bash", "cargo test", None));
@@ -5346,6 +11413,42 @@ mod tests {
     }
 
     #[test]
+    fn an_agent_that_exits_leaves_none_of_its_calls_running() {
+        let mut app = app();
+        app.apply(&Event::UserMessage {
+            text: "review it".to_owned(),
+        });
+        app.apply(&Event::AgentSpawn {
+            id: "a1".into(),
+            parent: None,
+            kind: None,
+            label: "Review fetch".to_owned(),
+        });
+        app.apply(&Event::TurnEnded);
+        app.apply(&Event::ToolCallStart {
+            id: "t1".into(),
+            name: "Bash".to_owned(),
+            input: "cargo test".to_owned(),
+            summary: None,
+            agent: Some("a1".into()),
+        });
+
+        app.apply(&Event::AgentExit {
+            id: "a1".into(),
+            outcome: AgentOutcome::Cancelled,
+        });
+
+        let calls: Vec<(&str, bool, bool)> = app
+            .entries()
+            .iter()
+            .flat_map(|entry| &entry.calls)
+            .map(|call| (call.what.as_str(), call.running(), call.interrupted))
+            .collect();
+        assert_eq!(calls, [("cargo test", false, true)]);
+        assert!(app.entries().iter().all(|entry| !entry.streaming));
+    }
+
+    #[test]
     fn a_prompt_waits_on_the_operator_and_is_answered_once() {
         use ratatui::crossterm::event::KeyCode;
         let mut app = app();
@@ -5361,7 +11464,7 @@ mod tests {
 
         assert!(app.asking().is_none());
         assert_eq!(
-            app.take_produced(),
+            app.said(),
             [Event::PermissionResponse {
                 id: "t1".into(),
                 decision: PermissionDecision::Allow,
@@ -5398,6 +11501,29 @@ mod tests {
         );
     }
 
+    /// A standing answer to a plan would let every later plan go ahead
+    /// unread, which is what asking for a plan was meant to stop.
+    #[test]
+    fn a_plan_offers_no_standing_answer() {
+        let mut app = app();
+        app.apply(&Event::PermissionRequest {
+            id: "t1".into(),
+            tool: "ExitPlanMode".to_owned(),
+            input: r#"{"plan":"1. Guard it."}"#.to_owned(),
+            target: None,
+            proposal: Some(niobe_core::Proposal::new(
+                niobe_core::Action::Plan {
+                    plan: "1. Guard it.".to_owned(),
+                },
+                ["plan"],
+            )),
+            reason: None,
+            agent: None,
+        });
+
+        assert_eq!(app.ask_options(), [Answer::Once, Answer::No]);
+    }
+
     #[test]
     fn a_refusal_is_visible_in_the_transcript() {
         use ratatui::crossterm::event::KeyCode;
@@ -5412,6 +11538,38 @@ mod tests {
         assert_eq!(entry.head, "denied");
         assert_eq!(entry.meta, "Bash · rm -rf build");
         assert_eq!(app.session().permissions_denied(), 1);
+    }
+
+    /// A rule about an empty target is written `Bash()`, which the next start
+    /// refuses to read, so the answer that would write it is not offered.
+    #[test]
+    fn a_prompt_with_an_empty_target_offers_no_standing_answer_about_it() {
+        let mut app = app();
+        app.apply(&prompt(Some("")));
+
+        let ask = app.asking().expect("the prompt is up");
+        assert!(ask.target_rule().is_none());
+        assert!(!ask.options().contains(&Answer::AlwaysTarget));
+        assert!(ask.options().contains(&Answer::AlwaysTool));
+    }
+
+    #[test]
+    fn always_this_target_on_a_command_ending_in_a_glob_allows_only_that_command() {
+        use ratatui::crossterm::event::KeyCode;
+
+        let mut app = app();
+        app.apply(&prompt(Some("rm -rf build/*")));
+        let rule = app
+            .asking()
+            .and_then(Ask::target_rule)
+            .expect("the prompt has a target");
+        assert!(!rule.covers("Bash", Some("rm -rf build/ ~")));
+
+        app.on_key(key(KeyCode::Char('3')));
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(app.take_rules(), [Rule::targeted("Bash", "rm -rf build/*")]);
+        assert!(app.allowed().allows("Bash", Some("rm -rf build/*")));
+        assert!(!app.allowed().allows("Bash", Some("rm -rf build/ ~")));
     }
 
     #[test]
@@ -5439,7 +11597,7 @@ mod tests {
         // answer was a standing one.
         for mut app in [by_target, by_tool] {
             assert_eq!(
-                app.take_produced(),
+                app.said(),
                 [Event::PermissionResponse {
                     id: "t1".into(),
                     decision: PermissionDecision::AllowAlways,
@@ -5447,6 +11605,21 @@ mod tests {
                 }]
             );
         }
+    }
+
+    /// An Esc pressed with nothing waiting makes the next digit an F-key, and
+    /// that digit is meant for the shell. A question that comes up before it
+    /// is pressed is answered by its own number keys.
+    #[test]
+    fn a_question_coming_up_after_an_esc_takes_the_next_digit_as_its_option() {
+        use ratatui::crossterm::event::KeyCode;
+        let mut app = app();
+        app.on_key(key(KeyCode::Esc));
+        app.apply(&prompt(Some("rm -rf build")));
+
+        app.on_key(key(KeyCode::Char('4')));
+
+        assert_eq!(app.ask_selected(), Answer::No);
     }
 
     #[test]
@@ -5461,23 +11634,34 @@ mod tests {
         assert_eq!(app.ask_selected(), Answer::No);
 
         assert!(app.take_rules().is_empty());
-        assert!(
-            app.take_produced().is_empty(),
-            "a number answered by itself"
-        );
+        assert!(app.said().is_empty(), "a number answered by itself");
     }
 
     #[test]
-    fn a_prompt_takes_the_keyboard_from_the_composer() {
+    fn a_letter_typed_at_a_prompt_goes_into_the_composer_and_answers_nothing() {
         use ratatui::crossterm::event::KeyCode;
         let mut app = app();
         app.apply(&prompt(Some("rm -rf build")));
 
-        // `x` is neither an answer nor a quit: under a question it is nothing.
+        // `x` is neither an answer nor a quit: it is the operator typing.
         app.on_key(key(KeyCode::Char('x')));
+        app.on_key(key(KeyCode::Enter));
 
-        assert_eq!(app.composed(), "");
+        assert_eq!(app.composed(), "x");
         assert!(app.asking().is_some());
+        assert_eq!(app.said(), []);
+    }
+
+    #[test]
+    fn a_bang_typed_at_a_prompt_opens_no_command() {
+        use ratatui::crossterm::event::KeyCode;
+        let mut app = app();
+        app.apply(&prompt(Some("rm -rf build")));
+
+        app.on_key(key(KeyCode::Char('!')));
+
+        assert_eq!(app.composed(), "!");
+        assert!(!app.shell_mode());
     }
 
     #[test]
@@ -5516,6 +11700,8 @@ mod tests {
             tool: "Write".to_owned(),
             input: r#"{"file_path":"/repo/a.rs"}"#.to_owned(),
             target: Some("/repo/a.rs".to_owned()),
+            proposal: None,
+            reason: None,
             agent: None,
         });
 
@@ -5534,6 +11720,178 @@ mod tests {
         let mut app = sent(sent(app().attached(), "first"), "second");
         app.apply(&prompt(Some("rm -rf build")));
         assert_eq!(app.asking().map(|ask| ask.turn), Some(2));
+    }
+
+    /// What the operator sees as one character can be several code points: a
+    /// family emoji joined by zero-width joiners, a letter and the accent
+    /// that combines with it. Backspace takes it whole, or what is sent to
+    /// the model is half of it.
+    #[test]
+    fn backspace_deletes_what_is_seen_as_one_character() {
+        use ratatui::crossterm::event::KeyCode;
+        for (typed, left) in [
+            ("hi \u{1f469}\u{200d}\u{1f469}\u{200d}\u{1f467}", "hi "),
+            ("a\u{301}", ""),
+            ("ab", "a"),
+        ] {
+            let mut app = app();
+            for c in typed.chars() {
+                app.on_key(key(KeyCode::Char(c)));
+            }
+            app.on_key(key(KeyCode::Backspace));
+            assert_eq!(app.composed(), left, "{typed:?}");
+        }
+    }
+
+    #[test]
+    fn delete_deletes_what_is_seen_as_one_character() {
+        use ratatui::crossterm::event::KeyCode;
+        let mut app = app();
+        for c in "a\u{301}b".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        app.on_key(key(KeyCode::Home));
+        app.on_key(key(KeyCode::Delete));
+        assert_eq!(app.composed(), "b");
+    }
+
+    #[test]
+    fn right_moves_past_what_is_seen_as_one_character() {
+        use ratatui::crossterm::event::KeyCode;
+        for (typed, then) in [
+            (
+                "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}x",
+                "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}Zx",
+            ),
+            ("e\u{301}x", "e\u{301}Zx"),
+            ("ex", "eZx"),
+        ] {
+            let mut app = app();
+            app.on_paste(typed);
+            app.on_key(key(KeyCode::Home));
+            app.on_key(key(KeyCode::Right));
+            app.on_key(key(KeyCode::Char('Z')));
+            assert_eq!(app.composed(), then, "{typed:?}");
+        }
+    }
+
+    #[test]
+    fn left_moves_back_past_what_is_seen_as_one_character() {
+        use ratatui::crossterm::event::KeyCode;
+        for (typed, then) in [
+            (
+                "x\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}",
+                "xZ\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}",
+            ),
+            ("xe\u{301}", "xZe\u{301}"),
+            ("xe", "xZe"),
+        ] {
+            let mut app = app();
+            app.on_paste(typed);
+            app.on_key(key(KeyCode::Left));
+            app.on_key(key(KeyCode::Char('Z')));
+            assert_eq!(app.composed(), then, "{typed:?}");
+        }
+    }
+
+    /// Ctrl+U is what a shell's line editor deletes back to the start of the
+    /// line with. As the editor's undo, it gave back what Ctrl+W had just
+    /// deleted.
+    #[test]
+    fn ctrl_u_deletes_from_the_cursor_back_to_the_start_of_the_line() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+        let mut app = app();
+        app.on_paste("first\nhello world foo");
+        app.on_key(ctrl('w'));
+        app.on_key(key(KeyCode::Left));
+        app.on_key(ctrl('u'));
+        assert_eq!(app.composed(), "first\n ");
+
+        app.on_key(key(KeyCode::F(1)));
+        let sheet = app.sheet().expect("the shortcuts");
+        assert!(
+            sheet
+                .rows
+                .iter()
+                .any(|row| row.starts_with("Ctrl+U") && row.contains("start of the line")),
+            "{:?}",
+            sheet.rows
+        );
+    }
+
+    #[test]
+    fn a_paste_of_only_blanks_goes_into_the_prompt_rather_than_asking_for_an_image() {
+        let mut app = app();
+        app.on_paste("   \n  ");
+        assert_eq!(app.take_image_requests(), []);
+        assert_eq!(app.composed(), "   \n  ");
+    }
+
+    /// The composer's editor lays out the whole of what it holds again after
+    /// every edit, so past [`COMPOSER_CAP`] a key would no longer land inside
+    /// a frame. A paste that would take it past is refused whole rather than
+    /// cut, since a log sent without its end reads as the whole of it.
+    #[test]
+    fn a_paste_that_would_take_the_prompt_past_its_cap_is_refused_whole() {
+        let mut app = app();
+        app.on_paste(&"a".repeat(COMPOSER_CAP - 1));
+        app.on_paste("bc");
+        assert_eq!(app.composed().len(), COMPOSER_CAP - 1);
+        assert_eq!(app.hint(), Some(TOO_LONG_HINT));
+
+        app.on_paste("b");
+        assert_eq!(app.composed().len(), COMPOSER_CAP);
+        assert_eq!(app.hint(), None);
+    }
+
+    #[test]
+    fn a_key_typed_into_a_prompt_at_its_cap_is_refused() {
+        use ratatui::crossterm::event::KeyCode;
+        let mut app = app();
+        app.on_paste(&"a".repeat(COMPOSER_CAP));
+        app.on_key(key(KeyCode::Char('b')));
+        assert_eq!(app.composed().len(), COMPOSER_CAP);
+        assert_eq!(app.hint(), Some(TOO_LONG_HINT));
+
+        app.on_key(key(KeyCode::Backspace));
+        app.on_key(key(KeyCode::Char('b')));
+        assert_eq!(app.composed().len(), COMPOSER_CAP);
+        assert!(app.composed().ends_with("ab"));
+    }
+
+    #[test]
+    fn keys_read_together_that_would_take_the_prompt_past_its_cap_are_refused_whole() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut app = app();
+        app.on_paste(&"a".repeat(COMPOSER_CAP - 2));
+        let keys: Vec<KeyEvent> = "bcd"
+            .chars()
+            .map(|c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+            .collect();
+        app.on_keys_read(
+            &keys,
+            Arrival {
+                at: Instant::now(),
+                alone: false,
+            },
+        );
+        assert_eq!(app.composed().len(), COMPOSER_CAP - 1);
+        assert!(app.composed().ends_with("ab"));
+        assert_eq!(app.hint(), Some(TOO_LONG_HINT));
+    }
+
+    #[test]
+    fn backspace_in_a_written_answer_deletes_what_is_seen_as_one_character() {
+        use ratatui::crossterm::event::KeyCode;
+        let mut app = app();
+        app.apply(&prompt(Some("rm -rf build")));
+        app.on_key(key(KeyCode::Tab));
+        for c in "no e\u{301}".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        app.on_key(key(KeyCode::Backspace));
+        assert_eq!(app.ask_draft(), "no ");
     }
 
     #[test]
@@ -5556,7 +11914,7 @@ mod tests {
         app.on_key(key(KeyCode::Enter));
 
         assert_eq!(
-            app.take_produced(),
+            app.said(),
             [Event::PermissionResponse {
                 id: "t1".into(),
                 decision: PermissionDecision::Deny,
@@ -5582,7 +11940,7 @@ mod tests {
 
         app.on_key(key(KeyCode::Tab));
         app.on_key(key(KeyCode::Enter));
-        assert!(app.take_produced().is_empty());
+        assert!(app.said().is_empty());
 
         app.on_key(key(KeyCode::Char('n')));
         app.on_key(key(KeyCode::Esc));
@@ -5593,17 +11951,129 @@ mod tests {
     }
 
     #[test]
+    fn a_question_left_open_by_a_turn_that_ended_is_not_waited_on() {
+        let mut app = sent(app().attached(), "go");
+        app.apply(&prompt(Some("rm -rf build")));
+        app.apply(&Event::TurnEnded);
+        let mut app = sent(app, "again");
+        app.said();
+
+        assert!(app.asking().is_none(), "the question is still up");
+        assert_ne!(
+            app.activity().map(|a| a.doing).as_deref(),
+            Some("waiting on you")
+        );
+    }
+
+    #[test]
+    fn a_question_the_backend_withdrew_is_taken_down() {
+        let mut app = sent(app().attached(), "go");
+        app.apply(&prompt(Some("rm -rf build")));
+
+        app.apply(&Event::PermissionWithdrawn { id: "t1".into() });
+
+        assert!(app.asking().is_none());
+        assert_ne!(
+            app.activity().map(|a| a.doing).as_deref(),
+            Some("waiting on you")
+        );
+    }
+
+    #[test]
+    fn a_question_no_rule_answers_calls_the_operator_back_once() {
+        let mut app = sent(app().attached(), "go");
+        app.said();
+        assert_eq!(app.take_alert(), None, "a turn starting is no call");
+
+        app.apply(&prompt(Some("rm -rf build")));
+        assert_eq!(app.take_alert(), Some(Alert::NeedsYou));
+        assert_eq!(app.take_alert(), None, "the same question rang twice");
+    }
+
+    #[test]
+    fn a_question_a_rule_answers_calls_nobody_back() {
+        let mut app = sent(
+            app()
+                .attached()
+                .with_rules([Rule::tool("Bash")].into_iter().collect()),
+            "go",
+        );
+        app.said();
+        app.apply(&prompt(Some("rm -rf build")));
+        app.settle_rules();
+
+        assert_eq!(app.take_alert(), None);
+    }
+
+    #[test]
+    fn a_turn_sent_from_here_that_ends_calls_the_operator_back() {
+        let mut app = sent(app().attached(), "go");
+        app.said();
+        assert_eq!(app.take_alert(), None);
+
+        app.apply(&Event::TurnEnded);
+        assert_eq!(app.take_alert(), Some(Alert::TurnEnded));
+        assert_eq!(app.take_alert(), None, "the same end rang twice");
+    }
+
+    #[test]
+    fn a_turn_the_operator_stopped_ends_without_calling_them_back() {
+        use ratatui::crossterm::event::KeyCode;
+        let mut app = sent(app().attached(), "go");
+        app.said();
+        assert_eq!(app.take_alert(), None);
+
+        app.on_key(key(KeyCode::Esc));
+        app.apply(&Event::TurnEnded);
+        assert_eq!(app.take_alert(), None);
+
+        let mut app = sent(app, "again");
+        app.said();
+        assert_eq!(app.take_alert(), None);
+        app.apply(&Event::TurnEnded);
+        assert_eq!(
+            app.take_alert(),
+            Some(Alert::TurnEnded),
+            "the stop of the turn before kept this one quiet"
+        );
+    }
+
+    #[test]
+    fn a_session_folded_in_before_the_shell_opened_rings_nothing_as_it_opens() {
+        let mut app = sent(app().attached(), "go");
+        app.said();
+        app.apply(&prompt(Some("rm -rf build")));
+
+        app.alerts_seen();
+
+        assert_eq!(app.take_alert(), None);
+    }
+
+    #[test]
+    fn a_turn_read_back_from_a_record_is_no_turn_to_call_anyone_back_for() {
+        let mut app = app().attached();
+        app.apply(&Event::UserMessage {
+            text: "go".to_owned(),
+        });
+        assert_eq!(app.take_alert(), None);
+
+        app.apply(&Event::TurnEnded);
+
+        assert_eq!(app.take_alert(), None);
+    }
+
+    #[test]
     fn esc_puts_the_question_off_and_leaves_it_waiting_in_the_transcript() {
         use ratatui::crossterm::event::KeyCode;
         let mut app = sent(app().attached(), "go");
-        app.take_produced();
+        app.said();
         app.apply(&prompt(Some("rm -rf build")));
 
         app.on_key(key(KeyCode::Esc));
 
         assert_eq!(app.ask_focus(), AskFocus::Deferred);
         assert!(app.asking().is_some(), "putting it off answered it");
-        assert!(app.take_produced().is_empty());
+        assert!(app.said().is_empty());
         assert_eq!(
             app.activity().map(|a| a.doing).as_deref(),
             Some("waiting on you"),
@@ -5615,10 +12085,7 @@ mod tests {
         assert_eq!(app.composed(), "x");
         // … but not sent into a turn that is waiting on the answer.
         app.on_key(key(KeyCode::Enter));
-        assert!(
-            app.take_produced().is_empty(),
-            "a prompt went out past the question"
-        );
+        assert!(app.said().is_empty(), "a prompt went out past the question");
         assert_eq!(app.composed(), "x");
         let hint = app.hint().unwrap_or_default();
         assert!(hint.contains("waiting"), "{hint}");
@@ -5646,7 +12113,7 @@ mod tests {
         app.on_key(key(KeyCode::Enter));
         assert!(app.follows_tail());
         assert!(
-            app.take_produced().is_empty(),
+            app.said().is_empty(),
             "a question the operator could not see was answered"
         );
         app.on_key(key(KeyCode::Enter));
@@ -5660,6 +12127,8 @@ mod tests {
             tool: "Bash".to_owned(),
             input: r#"{"command":"rm -rf build"}"#.to_owned(),
             target: Some("rm -rf build".to_owned()),
+            proposal: None,
+            reason: None,
             agent: agent.map(AgentId::new),
         }
     }
@@ -5676,12 +12145,13 @@ mod tests {
             app.apply(&Event::AgentSpawn {
                 id: AgentId::new("toolu_a"),
                 parent: None,
+                kind: None,
                 label: "deep-reasoner: Review fetch.py".to_owned(),
             });
             app.apply(&asked_by("t1", Some("toolu_a")));
             assert_eq!(
                 app.asking().map(|ask| app.asker(ask)),
-                Some("deep-reasoner: Review fetch.py".to_owned())
+                Some("deep".to_owned())
             );
             app.on_key(key(KeyCode::Char(answer)));
             app.on_key(key(KeyCode::Enter));
@@ -5706,6 +12176,7 @@ mod tests {
         app.apply(&Event::AgentSpawn {
             id: AgentId::new("toolu_a"),
             parent: None,
+            kind: None,
             label: "deep-reasoner: Review fetch.py".to_owned(),
         });
         app.apply(&asked_by("t1", Some("toolu_a")));
@@ -5727,10 +12198,7 @@ mod tests {
         assert_eq!(
             refused,
             [
-                (
-                    "Bash · rm -rf build",
-                    Some("deep-reasoner: Review fetch.py")
-                ),
+                ("Bash · rm -rf build", Some("deep")),
                 ("Bash · rm -rf build", None),
             ]
         );
@@ -5744,6 +12212,8 @@ mod tests {
             tool: "Read".to_owned(),
             input: r#"{"file_path":"/repo/a.rs"}"#.to_owned(),
             target: Some("/repo/a.rs".to_owned()),
+            proposal: None,
+            reason: None,
             agent: None,
         });
 
@@ -5751,7 +12221,7 @@ mod tests {
 
         assert!(app.asking().is_none());
         assert_eq!(
-            app.take_produced(),
+            app.said(),
             [Event::PermissionResponse {
                 id: "t1".into(),
                 decision: PermissionDecision::AllowByRule,
@@ -5770,6 +12240,8 @@ mod tests {
             tool: "Bash".to_owned(),
             input: r#"{"command":"cargo test && rm -rf ~"}"#.to_owned(),
             target: Some("cargo test && rm -rf ~".to_owned()),
+            proposal: None,
+            reason: None,
             agent: None,
         });
 
@@ -5780,14 +12252,15 @@ mod tests {
             Some(Some("cargo test && rm -rf ~")),
             "the chained command was let through by a rule about cargo"
         );
-        assert!(app.take_produced().is_empty());
+        assert!(app.said().is_empty());
     }
 
     fn under_a_profile(models: &[&str]) -> App {
-        app().with_profile(SelectedProfile {
+        app().attached().with_profile(SelectedProfile {
             name: "max".to_owned(),
             backend: Backend::Claude,
             models: models.iter().map(|m| (*m).to_owned()).collect(),
+            billing: None,
         })
     }
 
@@ -5796,26 +12269,133 @@ mod tests {
         KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT)
     }
 
+    /// A record read back with nothing driving it has no mode to change and no
+    /// model to move to, however many of them it lists.
+    #[test]
+    fn with_no_backend_attached_neither_the_mode_nor_the_model_can_be_changed() {
+        let mut app = app().with_profile(SelectedProfile {
+            name: "max".to_owned(),
+            backend: Backend::Claude,
+            models: vec!["opus".to_owned(), "sonnet".to_owned()],
+            billing: None,
+        });
+        app.apply(&offered());
+        app.apply(&Event::ModeSelected { mode: Mode::Ask });
+
+        app.on_key(back_tab());
+        assert_eq!(app.session().mode(), Some(Mode::Ask));
+        assert_eq!(app.said(), []);
+        assert!(
+            app.hint().is_some_and(|hint| hint.contains("not attached")),
+            "{:?}",
+            app.hint()
+        );
+
+        app.on_key(key(KeyCode::F(4)));
+        assert!(app.picking().is_none());
+        assert!(
+            app.hint().is_some_and(|hint| hint.contains("not attached")),
+            "{:?}",
+            app.hint()
+        );
+    }
+
     #[test]
     fn shift_tab_cycles_the_mode_and_hands_the_change_out_to_be_kept() {
-        let mut app = app();
+        let mut app = app().attached();
         app.apply(&Event::ModeSelected { mode: Mode::Ask });
 
         app.on_key(back_tab());
 
         assert_eq!(app.session().mode(), Some(Mode::Auto));
-        assert_eq!(
-            app.take_produced(),
-            [Event::ModeSelected { mode: Mode::Auto }]
-        );
+        assert_eq!(app.said(), [Event::ModeSelected { mode: Mode::Auto }]);
 
         app.on_key(back_tab());
         assert_eq!(app.session().mode(), Some(Mode::Plan));
     }
 
+    /// A model the backend says cannot run `auto`, among others it does not
+    /// say it of.
+    fn without_auto(id: &str) -> Event {
+        let Event::Models { mut models } = offered() else {
+            unreachable!("the helper offers models");
+        };
+        for model in &mut models {
+            if model.id == id {
+                model.auto_mode = Some(false);
+            }
+        }
+        Event::Models { models }
+    }
+
+    #[test]
+    fn a_model_that_cannot_run_auto_says_so_on_its_row_in_the_model_list() {
+        use ratatui::crossterm::event::KeyCode;
+        let mut app = under_a_profile(&[]);
+        app.apply(&without_auto("opus"));
+
+        app.on_key(key(KeyCode::F(4)));
+
+        let picker = app.picking().expect("the model list is on screen");
+        let note = |value: &str| {
+            picker
+                .options
+                .iter()
+                .find(|choice| choice.value == value)
+                .and_then(|choice| choice.note.clone())
+                .unwrap_or_default()
+        };
+        assert!(
+            note("opus").contains("cannot run auto mode"),
+            "{}",
+            note("opus")
+        );
+        assert!(
+            note("opus").contains("For complex work"),
+            "{}",
+            note("opus")
+        );
+        assert!(!note("fable").contains("auto"), "{}", note("fable"));
+    }
+
+    #[test]
+    fn shift_tab_refuses_auto_on_a_model_that_cannot_run_it_and_changes_nothing() {
+        let mut app = app().attached();
+        app.apply(&without_auto("opus"));
+        app.apply(&Event::ModelSelected {
+            model: "opus".to_owned(),
+        });
+        app.apply(&Event::ModeSelected { mode: Mode::Ask });
+
+        app.on_key(back_tab());
+
+        assert_eq!(app.session().mode(), Some(Mode::Ask));
+        assert_eq!(app.said(), []);
+        assert!(
+            app.hint()
+                .is_some_and(|hint| hint.contains("cannot run auto mode")),
+            "{:?}",
+            app.hint()
+        );
+    }
+
+    #[test]
+    fn a_model_the_backend_said_nothing_of_is_not_refused_auto() {
+        let mut app = app().attached();
+        app.apply(&offered());
+        app.apply(&Event::ModelSelected {
+            model: "opus".to_owned(),
+        });
+        app.apply(&Event::ModeSelected { mode: Mode::Ask });
+
+        app.on_key(back_tab());
+
+        assert_eq!(app.session().mode(), Some(Mode::Auto));
+    }
+
     #[test]
     fn a_session_no_backend_has_reported_a_mode_for_cycles_from_asking() {
-        let mut app = app();
+        let mut app = app().attached();
         assert_eq!(app.session().mode(), None);
 
         app.on_key(back_tab());
@@ -5828,13 +12408,37 @@ mod tests {
     }
 
     #[test]
-    fn f8_offers_the_models_the_profile_names_and_picking_one_asks_for_it() {
+    fn a_first_prompt_with_no_backend_to_send_it_to_is_not_the_caption() {
+        use ratatui::crossterm::event::KeyCode;
+        let mut app = app();
+
+        typed(&mut app, "hello");
+        app.on_key(key(KeyCode::Enter));
+
+        assert_eq!(app.caption(), None);
+    }
+
+    #[test]
+    fn the_model_list_with_no_backend_says_no_backend_is_attached() {
+        use ratatui::crossterm::event::KeyCode;
+        let mut app = app();
+
+        typed(&mut app, "/model");
+        app.on_key(key(KeyCode::Enter));
+
+        let hint = app.hint().expect("something is said");
+        assert!(hint.contains("not attached to a backend"), "{hint}");
+        assert!(!hint.contains("config"), "{hint}");
+    }
+
+    #[test]
+    fn f4_offers_the_models_the_profile_names_and_picking_one_asks_for_it() {
         use ratatui::crossterm::event::KeyCode;
         let mut app = under_a_profile(&["opus", "sonnet", "haiku"]);
 
-        app.on_key(key(KeyCode::F(8)));
+        app.on_key(key(KeyCode::F(4)));
         let picker = app.picking().expect("the model list is on screen");
-        assert_eq!(picker.models, ["opus", "sonnet", "haiku"]);
+        assert_eq!(values(picker), ["opus", "sonnet", "haiku"]);
         assert_eq!(picker.at, 0);
 
         app.on_key(key(KeyCode::Down));
@@ -5842,7 +12446,7 @@ mod tests {
 
         assert!(app.picking().is_none(), "the list stayed on screen");
         assert_eq!(
-            app.take_produced(),
+            app.said(),
             [Event::ModelSelected {
                 model: "sonnet".to_owned()
             }]
@@ -5854,28 +12458,169 @@ mod tests {
         );
     }
 
+    /// What the `claude` CLI lists in its answer to `initialize` on a Max
+    /// login, cut to five: aliases, Fable, and exact releases.
+    fn offered() -> Event {
+        let model = |id: &str, name: &str, description: &str, resolves_to: &str| {
+            niobe_core::event::ModelOption {
+                id: id.to_owned(),
+                name: Some(name.to_owned()),
+                description: Some(description.to_owned()),
+                resolves_to: Some(resolves_to.to_owned()),
+                auto_mode: None,
+            }
+        };
+        Event::Models {
+            models: vec![
+                model(
+                    "default",
+                    "Default (recommended)",
+                    "Sonnet 5.5 · Efficient for routine tasks",
+                    "claude-sonnet-5-5",
+                ),
+                model(
+                    "opus",
+                    "Opus 5.5",
+                    "For complex work and everyday tasks",
+                    "claude-opus-5-5",
+                ),
+                model(
+                    "fable",
+                    "Fable 5.1",
+                    "For your toughest challenges",
+                    "claude-fable-5-1",
+                ),
+                model(
+                    "claude-sonnet-5",
+                    "Sonnet 5",
+                    "Efficient for routine tasks",
+                    "claude-sonnet-5",
+                ),
+                model(
+                    "claude-fable-5",
+                    "Fable 5",
+                    "Most capable for your hardest and longest-running tasks",
+                    "claude-fable-5",
+                ),
+            ],
+        }
+    }
+
+    fn values(picker: &Picker) -> Vec<&str> {
+        picker
+            .options
+            .iter()
+            .map(|choice| choice.value.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn f4_offers_every_model_the_backend_lists_where_the_profile_names_none() {
+        use ratatui::crossterm::event::KeyCode;
+        let mut app = under_a_profile(&[]);
+        app.apply(&offered());
+
+        assert!(app.can(crate::menu::Action::SwitchModel));
+        app.on_key(key(KeyCode::F(4)));
+        let picker = app.picking().expect("the model list is on screen");
+        assert_eq!(
+            values(picker),
+            [
+                "default",
+                "opus",
+                "fable",
+                "claude-sonnet-5",
+                "claude-fable-5"
+            ]
+        );
+        assert_eq!(picker.options[2].name.as_deref(), Some("Fable 5.1"));
+        assert_eq!(picker.more, 0);
+
+        for _ in 0..4 {
+            app.on_key(key(KeyCode::Down));
+        }
+        app.on_key(key(KeyCode::Enter));
+
+        assert_eq!(
+            app.said(),
+            [Event::ModelSelected {
+                model: "claude-fable-5".to_owned()
+            }],
+            "the exact release was not what was asked for"
+        );
+        assert_eq!(app.session().model(), Some("claude-fable-5"));
+    }
+
+    #[test]
+    fn a_profile_that_names_models_narrows_the_backends_list_to_them_in_its_order() {
+        use ratatui::crossterm::event::KeyCode;
+        let mut app = under_a_profile(&["fable", "opus", "my-gateway-model"]);
+        app.apply(&offered());
+
+        app.on_key(key(KeyCode::F(4)));
+        let picker = app.picking().expect("the model list is on screen");
+        assert_eq!(values(picker), ["fable", "opus", "my-gateway-model"]);
+        assert_eq!(picker.options[0].name.as_deref(), Some("Fable 5.1"));
+        assert_eq!(
+            picker.options[2].name, None,
+            "a model the backend did not list was given a name"
+        );
+        assert_eq!(
+            picker.more, 3,
+            "the backend offers three the profile left out"
+        );
+    }
+
+    #[test]
+    fn the_model_in_force_is_found_by_its_id_or_by_the_release_it_runs_on() {
+        use ratatui::crossterm::event::KeyCode;
+        let mut app = under_a_profile(&[]);
+        app.apply(&offered());
+        app.apply(&Event::SessionMeta(SessionMeta {
+            backend: Backend::Claude,
+            profile: "max".to_owned(),
+            model: "claude-opus-5-5".to_owned(),
+            backend_session: None,
+        }));
+
+        app.on_key(key(KeyCode::F(4)));
+        assert_eq!(
+            app.picked(),
+            Some(1),
+            "the alias running it is the one marked"
+        );
+        assert_eq!(app.picking().map(|picker| picker.at), Some(1));
+
+        app.on_key(key(KeyCode::Esc));
+        app.apply(&Event::ModelSelected {
+            model: "claude-fable-5".to_owned(),
+        });
+        app.on_key(key(KeyCode::F(4)));
+        assert_eq!(app.picked(), Some(4));
+    }
+
     #[test]
     fn a_model_list_the_operator_left_asks_for_nothing() {
         use ratatui::crossterm::event::KeyCode;
         let mut app = under_a_profile(&["opus", "sonnet"]);
-        app.on_key(key(KeyCode::F(8)));
+        app.on_key(key(KeyCode::F(4)));
 
         app.on_key(key(KeyCode::Esc));
 
         assert!(app.picking().is_none());
-        assert!(app.take_produced().is_empty());
+        assert!(app.said().is_empty());
     }
 
     #[test]
-    fn f8_under_a_profile_that_names_no_model_says_so_rather_than_opening_an_empty_list() {
+    fn f4_under_a_profile_that_names_no_model_says_so_rather_than_opening_an_empty_list() {
         use ratatui::crossterm::event::KeyCode;
-        let mut app = under_a_profile(&[]);
+        let mut app = under_a_profile(&[]).attached();
 
-        app.on_key(key(KeyCode::F(8)));
+        app.on_key(key(KeyCode::F(4)));
 
         assert!(app.picking().is_none());
         let hint = app.hint().unwrap_or_default();
-        assert!(hint.contains("models"), "{hint}");
+        assert!(hint.contains("models = ["), "{hint}");
     }
 
     #[test]
@@ -5884,7 +12629,7 @@ mod tests {
         let mut app = under_a_profile(&["opus"]);
         app.apply(&prompt(Some("rm -rf build")));
 
-        app.on_key(key(KeyCode::F(8)));
+        app.on_key(key(KeyCode::F(4)));
 
         assert!(
             app.picking().is_none(),
@@ -5893,9 +12638,244 @@ mod tests {
         assert!(app.asking().is_some());
     }
 
+    /// A turn that spent `input` tokens and ended.
+    fn turn_of(input: u64) -> [Event; 3] {
+        [
+            Event::UserMessage {
+                text: "go on".to_owned(),
+            },
+            Event::Usage(Usage {
+                input,
+                output: 0,
+                cache_read: 0,
+                cache_write: 0,
+                cache_write_1h: Some(0),
+                reasoning: 0,
+                model: "opus-5".to_owned(),
+                cost_usd: None,
+                settles_model: Some(false),
+                fast: false,
+            }),
+            Event::TurnEnded,
+        ]
+    }
+
+    fn spikes(app: &App) -> Vec<&Entry> {
+        app.entries()
+            .iter()
+            .filter(|entry| entry.head == "spike")
+            .collect()
+    }
+
+    fn file(path: &str, added: u64, removed: u64) -> WorkingFile {
+        WorkingFile {
+            path: path.to_owned(),
+            added: Some(added),
+            removed: Some(removed),
+            new: false,
+        }
+    }
+
+    /// The working tree as a read that began at `began` found it.
+    fn tree_read(began: Instant, working: &[WorkingFile]) -> Repo {
+        Repo {
+            read: true,
+            began: Some(began),
+            working: working.to_vec(),
+            ..Repo::default()
+        }
+    }
+
+    fn outside(app: &App) -> Vec<&Entry> {
+        app.entries()
+            .iter()
+            .filter(|entry| entry.head == "outside the edit tools")
+            .collect()
+    }
+
+    #[test]
+    fn a_file_a_turn_changed_with_no_edit_call_is_named_when_the_turn_ends() {
+        let start = Instant::now();
+        let at = |ms| start + Duration::from_millis(ms);
+        let mut app = app();
+        app.apply(&Event::UserMessage {
+            text: "format it".to_owned(),
+        });
+        assert!(
+            app.settle_tree(at(0)),
+            "a turn asks for the tree it began on"
+        );
+
+        // What was uncommitted before the turn is not the turn's.
+        app.set_repo(tree_read(at(1), &[file("notes.md", 5, 0)]));
+        assert!(!app.settle_tree(at(2)));
+        app.apply(&changed("src/lib.rs"));
+        app.apply(&Event::TurnEnded);
+        assert!(
+            app.settle_tree(at(3)),
+            "an ended turn asks for the tree again"
+        );
+
+        // A read that began before the turn ended says nothing of its end.
+        app.set_repo(tree_read(at(2), &[file("notes.md", 5, 0)]));
+        assert!(!app.settle_tree(at(4)));
+        assert!(outside(&app).is_empty());
+
+        app.set_repo(tree_read(
+            at(5),
+            &[
+                file("notes.md", 5, 0),
+                file("src/lib.rs", 4, 1),
+                file("src/main.rs", 2, 2),
+            ],
+        ));
+        assert!(!app.settle_tree(at(6)));
+        app.settle_tree(at(7));
+
+        let said = outside(&app);
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert_eq!(said[0].meta, "turn 1 · 1 file");
+        assert!(
+            said[0].body.contains("src/main.rs +2 −2"),
+            "{}",
+            said[0].body
+        );
+        assert!(
+            !said[0].body.contains("lib.rs") && !said[0].body.contains("notes.md"),
+            "{}",
+            said[0].body
+        );
+    }
+
+    #[test]
+    fn a_turn_whose_edits_account_for_every_change_says_nothing() {
+        let start = Instant::now();
+        let at = |ms| start + Duration::from_millis(ms);
+        let mut app = app();
+        app.apply(&Event::UserMessage {
+            text: "fix it".to_owned(),
+        });
+        app.settle_tree(at(0));
+        app.set_repo(tree_read(at(1), &[]));
+        app.settle_tree(at(2));
+        app.apply(&changed("src/lib.rs"));
+        app.apply(&Event::TurnEnded);
+        app.settle_tree(at(3));
+        app.set_repo(tree_read(at(4), &[file("src/lib.rs", 4, 1)]));
+        app.settle_tree(at(5));
+        app.settle_tree(at(6));
+        assert!(outside(&app).is_empty(), "{:?}", outside(&app));
+    }
+
+    #[test]
+    fn a_turn_that_ended_before_its_tree_was_read_is_not_judged() {
+        let start = Instant::now();
+        let at = |ms| start + Duration::from_millis(ms);
+        let mut app = app();
+        app.apply(&Event::UserMessage {
+            text: "hi".to_owned(),
+        });
+        app.settle_tree(at(0));
+        app.apply(&Event::TurnEnded);
+        assert!(!app.settle_tree(at(1)), "nothing to compare an end with");
+        app.set_repo(tree_read(at(2), &[file("a.rs", 1, 0)]));
+        app.settle_tree(at(3));
+        assert!(outside(&app).is_empty());
+    }
+
+    #[test]
+    fn an_error_that_ends_a_turn_names_the_turn_it_ended() {
+        let mut app = app();
+        for event in turn_of(1_000) {
+            app.apply(&event);
+        }
+        app.apply(&Event::Error {
+            message: "between turns".to_owned(),
+            fatal: false,
+        });
+        app.apply(&Event::UserMessage {
+            text: "go on".to_owned(),
+        });
+        app.apply(&Event::Error {
+            message: "the turn ended as `error_max_budget_usd`: Reached maximum budget ($0.4)"
+                .to_owned(),
+            fatal: false,
+        });
+        app.apply(&Event::TurnEnded);
+
+        let errors: Vec<&str> = app
+            .entries()
+            .iter()
+            .filter(|entry| entry.head == "error")
+            .map(|entry| entry.meta.as_str())
+            .collect();
+        assert_eq!(errors, ["", "in turn 2"]);
+    }
+
+    #[test]
+    fn a_turn_past_three_times_the_average_is_named_once_by_its_number() {
+        let mut app = app();
+        app.settle_spikes();
+        for input in [1_000, 1_200, 5_000] {
+            for event in turn_of(input) {
+                app.apply(&event);
+            }
+            app.settle_spikes();
+        }
+        app.settle_spikes();
+
+        let spikes = spikes(&app);
+        assert_eq!(spikes.len(), 1, "{spikes:?}");
+        assert_eq!(spikes[0].meta, "turn 3 · 4× the average");
+        assert!(
+            spikes[0].body.contains("5000 tokens") && spikes[0].body.contains("1100"),
+            "{}",
+            spikes[0].body
+        );
+    }
+
+    #[test]
+    fn a_spike_in_a_session_read_back_is_not_called_out_again() {
+        let mut app = app();
+        for input in [1_000, 1_000, 9_000] {
+            for event in turn_of(input) {
+                app.apply(&event);
+            }
+        }
+        app.settle_spikes();
+        assert!(spikes(&app).is_empty(), "{:?}", spikes(&app));
+
+        for event in turn_of(90_000) {
+            app.apply(&event);
+        }
+        app.settle_spikes();
+        assert_eq!(spikes(&app).len(), 1, "a turn ended live is still judged");
+    }
+
+    #[test]
+    fn a_cleared_conversation_is_judged_from_its_own_turns() {
+        let mut app = app();
+        app.settle_spikes();
+        for input in [1_000, 1_000, 1_000] {
+            for event in turn_of(input) {
+                app.apply(&event);
+            }
+            app.settle_spikes();
+        }
+        app.apply(&Event::Cleared);
+        app.settle_spikes();
+        for input in [100, 100, 900] {
+            for event in turn_of(input) {
+                app.apply(&event);
+            }
+            app.settle_spikes();
+        }
+        assert_eq!(spikes(&app).len(), 1, "{:?}", spikes(&app));
+    }
+
     #[test]
     fn four_fifths_of_a_budget_is_warned_about_once_and_says_the_stop_can_overshoot() {
-        let mut app = app().with_budget(1.0);
+        let mut app = metered().with_budget(1.0);
 
         app.apply(&priced(0.79));
         app.settle_budget();
@@ -5923,12 +12903,139 @@ mod tests {
     }
 
     #[test]
+    fn a_floor_past_four_fifths_of_the_budget_is_warned_about_as_a_floor() {
+        let mut app = metered().with_budget(1.0);
+        let mut unreported = priced(0.0);
+        if let Event::Usage(usage) = &mut unreported {
+            usage.cost_usd = None;
+        }
+
+        app.apply(&unreported);
+        app.settle_budget();
+        assert!(
+            app.entries().iter().all(|entry| entry.head != "budget"),
+            "a cost nobody reported was warned about"
+        );
+
+        app.apply(&priced(0.85));
+        app.settle_budget();
+        let warning = app
+            .entries()
+            .iter()
+            .find(|entry| entry.head == "budget")
+            .expect("a floor past the line is warned about");
+        assert_eq!(warning.meta, "≥$0.85 of $1.00");
+    }
+
+    /// A session whose backend said it is billed by use.
+    fn metered() -> App {
+        let mut app = app();
+        app.apply(&Event::Billing {
+            billing: Billing::Metered,
+        });
+        app
+    }
+
+    /// What the budget warning says beside its head, against a $1.00
+    /// budget, once each of `parts` has been spent under its billing; or
+    /// `None` where it gave none.
+    fn budget_warning(parts: &[(Option<Billing>, f64)]) -> Option<String> {
+        let mut app = app().with_budget(1.0);
+        for (billing, spent) in parts {
+            if let Some(billing) = billing {
+                app.apply(&Event::Billing { billing: *billing });
+            }
+            app.apply(&priced(*spent));
+        }
+        app.settle_budget();
+        app.entries()
+            .iter()
+            .find(|entry| entry.head == "budget")
+            .map(|entry| entry.meta.clone())
+    }
+
+    #[test]
+    fn the_budget_warning_names_its_figure_as_the_usage_pane_does() {
+        let plan = Some(Billing::Plan);
+        let metered = Some(Billing::Metered);
+        assert_eq!(
+            budget_warning(&[(plan, 0.9)]).as_deref(),
+            Some("most of the budget")
+        );
+        assert_eq!(
+            budget_warning(&[(metered, 0.9)]).as_deref(),
+            Some("$0.90 of $1.00")
+        );
+        assert_eq!(
+            budget_warning(&[(plan, 0.5), (metered, 0.85)]).as_deref(),
+            Some("metered part $0.85 of $1.00")
+        );
+        assert_eq!(
+            budget_warning(&[(metered, 0.85), (plan, 0.1)]).as_deref(),
+            Some("metered part $0.85 of $1.00")
+        );
+        assert_eq!(budget_warning(&[(plan, 0.7), (metered, 0.25)]), None);
+        assert_eq!(
+            budget_warning(&[(None, 0.9)]).as_deref(),
+            Some("most of $1.00")
+        );
+    }
+
+    #[test]
+    fn a_budget_already_overspent_is_said_to_be_over_rather_than_mostly_spent() {
+        let mut app = metered().with_budget(0.02);
+
+        app.apply(&priced(0.05));
+        app.settle_budget();
+
+        let warning = app
+            .entries()
+            .iter()
+            .find(|entry| entry.head == "budget")
+            .expect("a spend past the budget is warned about");
+        assert_eq!(warning.meta, "$0.05 of $0.02");
+        assert!(
+            warning
+                .body
+                .starts_with("This session has spent more than its budget."),
+            "{}",
+            warning.body
+        );
+        assert_eq!(
+            budget_warning(&[(Some(Billing::Plan), 1.5)]).as_deref(),
+            Some("over the budget")
+        );
+        assert_eq!(
+            budget_warning(&[(None, 1.5)]).as_deref(),
+            Some("over $1.00")
+        );
+    }
+
+    #[test]
     fn a_session_with_no_budget_is_never_warned_about_one() {
         let mut app = app();
         app.apply(&priced(99.0));
         app.settle_budget();
 
         assert!(app.entries().iter().all(|entry| entry.head != "budget"));
+    }
+
+    #[test]
+    fn a_carriage_return_writes_over_the_line_as_a_terminal_does() {
+        assert_eq!(terminal_line("abcdef\rXY"), "XYcdef");
+        assert_eq!(terminal_line("[#####     ] 50%\r"), "[#####     ] 50%");
+        assert_eq!(terminal_line("10%\r20%\r100%"), "100%");
+        assert_eq!(terminal_line("plain"), "plain");
+    }
+
+    #[test]
+    fn a_commands_colours_and_title_are_taken_out_whole_and_not_drawn_as_text() {
+        let whole = |output: &str| Printed::of(output, output.len() as u64);
+        let printed = whole("\x1b[31mred\x1b[0m \x1b]0;TITLE\x07 x\ty\n");
+        assert_eq!(printed.tail, ["red  x  y"]);
+
+        let linked = whole("\x1b]8;;https://example.test\x1b\\link\x1b]8;;\x1b\\ done\n");
+        assert_eq!(linked.tail, ["link done"]);
     }
 
     #[test]
@@ -5979,11 +13086,12 @@ mod tests {
                 resets_at: Some(now + 367_200),
             }),
             using_overage: false,
+            overage: niobe_core::event::Overage::Unreported,
         }
     }
 
     #[test]
-    fn f5_reads_out_both_windows_and_when_each_comes_back() {
+    fn cost_and_usage_reads_out_both_windows_and_when_each_comes_back() {
         const NOW: u64 = 1_789_000_000;
 
         let mut app = app();
@@ -5991,21 +13099,21 @@ mod tests {
 
         assert_eq!(
             app.cost_hint(NOW),
-            "F5 Usage — 5h window 33%, resets in 1h 30m · 7d window 23%, resets in 4d 6h"
+            "Cost & usage — 5h window 33%, resets in 1h 30m · 7d window 23%, resets in 4d 6h"
         );
     }
 
     #[test]
-    fn f5_on_a_session_with_no_windows_says_what_the_key_does_not_do_yet() {
+    fn cost_and_usage_on_a_session_with_no_windows_says_what_it_does_not_do_yet() {
         let mut app = app();
         assert!(
             app.cost_hint(0)
                 .contains("the usage breakdown is not implemented yet")
         );
 
-        // Pressing it is what puts the line under the transcript.
+        // Choosing it is what puts the line under the transcript.
         app.apply(&Event::UsageWindows(windows(1_789_000_000)));
-        app.on_key(key(KeyCode::F(5)));
+        app.perform(crate::menu::Action::Usage);
         assert!(
             app.hint()
                 .is_some_and(|hint| hint.contains("5h window 33%")),
@@ -6029,11 +13137,12 @@ mod tests {
                 resets_at: None,
             }),
             using_overage: true,
+            overage: niobe_core::event::Overage::Unreported,
         }));
 
         assert_eq!(
             app.cost_hint(NOW),
-            "F5 Usage — 5h window 90%, already reset · 7d window 40%, no reset time \
+            "Cost & usage — 5h window 90%, already reset · 7d window 40%, no reset time \
              reported · spending beyond the plan"
         );
     }
@@ -6055,7 +13164,7 @@ mod tests {
         // UTC, is half past midnight on the second.
         let moment = app
             .moment(23 * 3_600 + 30 * 60)
-            .moment()
+            .and_then(|stamp| stamp.moment())
             .expect("a fixed clock always names a zone");
 
         assert_eq!(moment.day(), 1);
@@ -6065,7 +13174,16 @@ mod tests {
     #[test]
     fn a_moment_read_without_a_clock_has_no_time_of_day_at_all() {
         let app = App::new(Repo::default());
-        assert_eq!(app.moment(23 * 3_600).moment(), None);
+        assert_eq!(
+            app.moment(23 * 3_600).and_then(|stamp| stamp.moment()),
+            None
+        );
+    }
+
+    #[test]
+    fn a_time_past_what_the_clock_holds_is_no_moment() {
+        let app = App::new(Repo::default());
+        assert_eq!(app.moment(u64::MAX), None);
     }
 
     #[test]
@@ -6081,6 +13199,288 @@ mod tests {
         assert_eq!(human_bytes(512), "512 B");
         assert_eq!(human_bytes(4_096), "4.0 kB");
         assert_eq!(human_bytes(3 * 1024 * 1024), "3.0 MB");
+    }
+
+    #[test]
+    fn bytes_that_round_up_to_the_next_unit_read_in_it_and_any_count_fits() {
+        assert_eq!(human_bytes(1_048_575), "1.0 MB");
+        assert_eq!(human_bytes(1_073_741_823), "1.0 GB");
+        assert_eq!(human_bytes(5 * 1024 * 1024 * 1024), "5.0 GB");
+        assert_eq!(human_bytes(u64::MAX), "16.0 EB");
+    }
+
+    fn ctrl_c() -> ratatui::crossterm::event::KeyEvent {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn esc_during_a_running_turn_asks_the_backend_to_stop_it() {
+        let mut app = sent(app().attached(), "go");
+        app.said();
+
+        app.on_key(key(ratatui::crossterm::event::KeyCode::Esc));
+
+        assert!(app.take_interrupt(), "nothing asked the turn to stop");
+        assert!(!app.take_interrupt(), "the stop is asked for once");
+        assert!(!app.should_quit());
+        assert!(
+            !app.escaped,
+            "the next digit would press an F-key rather than type"
+        );
+    }
+
+    #[test]
+    fn esc_with_no_turn_running_is_still_the_way_to_the_f_keys() {
+        let mut app = app().attached();
+
+        app.on_key(key(ratatui::crossterm::event::KeyCode::Esc));
+
+        assert!(!app.take_interrupt());
+        assert!(app.escaped);
+    }
+
+    /// Ctrl+C pressed at `at`, as the event loop hands it over.
+    fn ctrl_c_at(app: &mut App, at: Instant) {
+        app.on_key_read(ctrl_c(), Arrival { at, alone: true });
+    }
+
+    #[test]
+    fn ctrl_c_stops_a_running_turn_and_then_takes_two_more_presses_to_quit() {
+        let mut app = sent(app().attached(), "go");
+        app.said();
+        let start = Instant::now();
+
+        ctrl_c_at(&mut app, start);
+        assert!(app.take_interrupt());
+        assert!(!app.should_quit(), "the first Ctrl+C ended the session");
+
+        ctrl_c_at(&mut app, start + Duration::from_millis(100));
+        assert!(
+            !app.should_quit(),
+            "a Ctrl+C while the turn stops ended the session on its own"
+        );
+        assert_eq!(app.hint(), Some(QUIT_AGAIN_HINT));
+
+        ctrl_c_at(&mut app, start + Duration::from_millis(200));
+        assert!(app.should_quit());
+    }
+
+    #[test]
+    fn one_ctrl_c_on_an_idle_shell_says_how_to_quit_and_does_not() {
+        let mut app = app().attached();
+
+        ctrl_c_at(&mut app, Instant::now());
+
+        assert!(!app.should_quit(), "one Ctrl+C ended the session");
+        assert!(!app.take_interrupt());
+        assert_eq!(app.hint(), Some(QUIT_AGAIN_HINT));
+    }
+
+    #[test]
+    fn two_ctrl_c_inside_the_window_quit() {
+        let mut app = app().attached();
+        let start = Instant::now();
+
+        ctrl_c_at(&mut app, start);
+        ctrl_c_at(&mut app, start + QUIT_WINDOW);
+
+        assert!(app.should_quit());
+    }
+
+    #[test]
+    fn two_ctrl_c_with_the_window_run_out_between_them_do_not_quit() {
+        let mut app = app().attached();
+        let start = Instant::now();
+
+        ctrl_c_at(&mut app, start);
+        ctrl_c_at(&mut app, start + QUIT_WINDOW + Duration::from_millis(1));
+
+        assert!(!app.should_quit());
+        assert_eq!(
+            app.hint(),
+            Some(QUIT_AGAIN_HINT),
+            "the late press starts the window over"
+        );
+    }
+
+    #[test]
+    fn the_quit_hint_goes_when_its_window_runs_out() {
+        let mut app = app().attached();
+        let start = Instant::now();
+        app.tick(start, None);
+        ctrl_c_at(&mut app, start);
+
+        app.tick(start + QUIT_WINDOW / 2, None);
+        assert_eq!(app.hint(), Some(QUIT_AGAIN_HINT));
+
+        app.tick(start + QUIT_WINDOW + Duration::from_millis(1), None);
+        assert_eq!(app.hint(), None);
+        ctrl_c_at(&mut app, start + QUIT_WINDOW + Duration::from_millis(2));
+        assert!(!app.should_quit());
+    }
+
+    #[test]
+    fn another_key_between_two_ctrl_c_takes_the_quit_back() {
+        let mut app = app().attached();
+        let start = Instant::now();
+
+        ctrl_c_at(&mut app, start);
+        app.on_key_read(
+            key(KeyCode::Char('x')),
+            Arrival {
+                at: start + Duration::from_millis(100),
+                alone: true,
+            },
+        );
+        assert_eq!(app.hint(), None);
+        ctrl_c_at(&mut app, start + Duration::from_millis(200));
+
+        assert!(!app.should_quit());
+        assert_eq!(app.composer().lines(), ["x"]);
+    }
+
+    #[test]
+    fn ctrl_c_leaves_what_is_typed_in_the_composer() {
+        let mut app = app().attached();
+        app.on_key(key(KeyCode::Char('x')));
+
+        ctrl_c_at(&mut app, Instant::now());
+
+        assert_eq!(app.composer().lines(), ["x"]);
+    }
+
+    #[test]
+    fn ctrl_c_closes_an_open_menu_and_does_not_quit() {
+        let mut app = app().attached();
+        let start = Instant::now();
+        app.on_key(alt('h'));
+
+        ctrl_c_at(&mut app, start);
+        assert_eq!(app.menu(), None);
+        assert!(!app.should_quit());
+        assert_eq!(
+            app.hint(),
+            None,
+            "closing the menu is not the first press of a quit"
+        );
+
+        ctrl_c_at(&mut app, start + Duration::from_millis(100));
+        assert!(!app.should_quit());
+    }
+
+    #[test]
+    fn ctrl_c_closes_the_history_dialog_and_does_not_quit() {
+        let mut app = remembering(&[("earlier", "3")], &["3"]);
+        app.on_key(ctrl('r'));
+        assert!(app.browser().is_some());
+
+        ctrl_c_at(&mut app, Instant::now());
+
+        assert!(app.browser().is_none());
+        assert!(!app.should_quit());
+    }
+
+    /// Ctrl+C in the Memory view closes it, as Esc does, rather than
+    /// stopping the turn behind it or asking for a quit while it stays open.
+    #[test]
+    fn ctrl_c_closes_the_memory_view_and_stops_nothing() {
+        let mut app = sent(app().attached(), "go");
+        app.said();
+        app.on_key(key(KeyCode::F(8)));
+        assert!(app.memory().is_some());
+
+        ctrl_c_at(&mut app, Instant::now());
+
+        assert!(app.memory().is_none());
+        assert!(!app.take_interrupt(), "the turn is left running");
+        assert!(!app.should_quit());
+    }
+
+    #[test]
+    fn f10_and_ctrl_q_still_quit_with_one_press() {
+        for quit in [key(KeyCode::F(10)), ctrl('q')] {
+            let mut app = app().attached();
+            app.on_key(quit);
+            assert!(app.should_quit(), "{quit:?}");
+        }
+    }
+
+    #[test]
+    fn a_turn_that_ended_after_a_stop_lets_the_next_turn_be_stopped_too() {
+        let mut app = sent(app().attached(), "go");
+        app.on_key(ctrl_c());
+        app.take_interrupt();
+        app.apply(&Event::TurnEnded);
+        let mut app = sent(app, "again");
+        app.said();
+
+        app.on_key(ctrl_c());
+
+        assert!(app.take_interrupt());
+        assert!(!app.should_quit());
+    }
+
+    #[test]
+    fn a_stop_the_backend_would_not_take_is_said_in_the_transcript() {
+        let mut app = sent(app().attached(), "go");
+
+        app.not_stopped("the pipe is closed");
+
+        let last = app.entries().last().expect("an entry");
+        assert_eq!(last.kind, EntryKind::Failure);
+        assert!(last.body.contains("the pipe is closed"), "{}", last.body);
+    }
+
+    #[test]
+    fn esc_after_a_stop_the_backend_would_not_take_asks_for_the_stop_again() {
+        let mut app = sent(app().attached(), "go");
+        app.said();
+        app.on_key(key(KeyCode::Esc));
+        assert!(app.take_interrupt());
+        app.not_stopped("the pipe is closed");
+
+        app.on_key(key(KeyCode::Esc));
+
+        assert!(app.take_interrupt());
+    }
+
+    #[test]
+    fn ctrl_c_after_a_stop_the_backend_would_not_take_stops_rather_than_quits() {
+        let mut app = sent(app().attached(), "go");
+        app.said();
+        app.on_key(ctrl_c());
+        assert!(app.take_interrupt());
+        app.not_stopped("the pipe is closed");
+
+        app.on_key(ctrl_c());
+
+        assert!(app.take_interrupt());
+        assert!(!app.should_quit(), "the Ctrl+C ended the session");
+    }
+
+    #[test]
+    fn a_stop_the_backend_would_not_take_no_longer_says_the_turn_is_stopping() {
+        let mut app = sent(app().attached(), "go");
+        app.said();
+        app.on_key(ctrl_c());
+        assert_eq!(app.hint(), Some(STOPPING_HINT));
+
+        app.not_stopped("the pipe is closed");
+
+        assert_eq!(app.hint(), None);
+    }
+
+    #[test]
+    fn a_turn_that_ended_after_a_stop_no_longer_says_it_is_stopping() {
+        let mut app = sent(app().attached(), "go");
+        app.said();
+        app.on_key(key(KeyCode::Esc));
+        assert_eq!(app.hint(), Some(STOPPING_HINT));
+
+        app.apply(&Event::TurnEnded);
+
+        assert_eq!(app.hint(), None);
     }
 
     fn sent(mut app: App, prompt: &str) -> App {
@@ -6102,6 +13502,99 @@ mod tests {
             summary: summary.map(str::to_owned),
             agent: None,
         }
+    }
+
+    fn end(id: &str, name: &str) -> Event {
+        Event::ToolCallEnd {
+            id: id.into(),
+            name: name.to_owned(),
+            input: "{}".to_owned(),
+            output: String::new(),
+            bytes: 0,
+            outcome: ToolOutcome::Ok,
+            summary: None,
+            exit_code: None,
+            error: None,
+            command: None,
+            untrimmed: None,
+        }
+    }
+
+    fn attention(app: &App) -> Vec<Attention> {
+        app.entries().iter().map(|entry| entry.attention).collect()
+    }
+
+    #[test]
+    fn each_entry_is_as_high_as_the_highest_event_that_built_it() {
+        let mut app = sent(app().attached(), "go");
+        app.apply(&start("t1", "Read", "{}", Some("src/lib.rs")));
+        app.apply(&end("t1", "Read"));
+        app.apply(&start("t2", "Edit", "{}", Some("src/lib.rs")));
+        app.apply(&end("t2", "Edit"));
+        app.apply(&Event::FileChange {
+            path: "src/lib.rs".to_owned(),
+            added: Some(1),
+            removed: Some(1),
+            hunks: Vec::new(),
+            scope: niobe_core::event::ChangeScope::Project,
+        });
+        app.apply(&Event::AssistantDelta {
+            text: "do".to_owned(),
+        });
+        assert_eq!(
+            attention(&app).last(),
+            Some(&Attention::Routine),
+            "a reply still arriving is the stream"
+        );
+        app.apply(&Event::AssistantMessage {
+            text: "done".to_owned(),
+            agent: None,
+        });
+        app.apply(&Event::TurnEnded);
+
+        assert_eq!(
+            attention(&app),
+            [
+                Attention::Notable,
+                Attention::Routine,
+                Attention::Notable,
+                Attention::Notable,
+                Attention::Notable,
+            ],
+            "the prompt, the read, the edit, the reply and the turn's rule"
+        );
+    }
+
+    #[test]
+    fn a_question_no_rule_answers_leaves_its_call_needing_the_operator() {
+        let mut app = sent(app().attached(), "go");
+        app.apply(&start("t1", "Bash", "{}", Some("rm -rf build")));
+        app.apply(&prompt(Some("rm -rf build")));
+        assert_eq!(attention(&app).last(), Some(&Attention::NeedsYou));
+
+        let mut ruled = sent(
+            self::app()
+                .attached()
+                .with_rules([Rule::tool("Bash")].into_iter().collect()),
+            "go",
+        );
+        ruled.apply(&start("t1", "Bash", "{}", Some("rm -rf build")));
+        ruled.apply(&prompt(Some("rm -rf build")));
+        assert_eq!(
+            attention(&ruled).last(),
+            Some(&Attention::Routine),
+            "a standing rule answered it, and nobody was asked"
+        );
+    }
+
+    #[test]
+    fn what_the_shell_says_went_wrong_needs_the_operator_and_a_cleared_session_is_notable() {
+        let mut app = sent(app().attached(), "go");
+        app.not_sent("the pipe closed");
+        assert_eq!(attention(&app).last(), Some(&Attention::NeedsYou));
+
+        app.apply(&Event::Cleared);
+        assert_eq!(attention(&app), [Attention::Notable]);
     }
 
     #[test]
@@ -6138,6 +13631,81 @@ mod tests {
             app.entries()[1].calls[0].what,
             r#"{"pattern":"*.rs"}"#,
             "with no summary the arguments are all there is to show"
+        );
+    }
+
+    #[test]
+    fn a_compaction_is_what_the_turn_is_doing_until_it_ends_and_leaves_a_row_of_its_own() {
+        let mut listing = app().attached();
+        listing.apply(&Event::Commands {
+            commands: vec![SlashCommand {
+                name: "compact".to_owned(),
+                description: "Clear history but keep a summary".to_owned(),
+                argument_hint: None,
+                mid_prompt: false,
+            }],
+        });
+        let mut app = sent(listing, "/compact");
+        app.tick(Instant::now(), None);
+        app.apply(&Event::CompactionStarted);
+        let working = app.activity().expect("the compaction's turn is running");
+        assert_eq!(working.doing, "compacting context");
+        assert!(working.compacting);
+
+        app.apply(&Event::CompactionEnded);
+        app.apply(&Event::Compacted {
+            trigger: CompactTrigger::Manual,
+            before: Some(192_000),
+            after: Some(4_282),
+        });
+        let working = app.activity().expect("the turn has not ended yet");
+        assert_eq!(working.doing, "thinking");
+        assert!(!working.compacting);
+        app.apply(&Event::TurnEnded);
+
+        let rows: Vec<CompactionRow> = app
+            .entries()
+            .iter()
+            .filter_map(|entry| match entry.kind {
+                EntryKind::Compacted(row) => Some(row),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            [CompactionRow {
+                trigger: CompactTrigger::Manual,
+                before: Some(192_000),
+                floor: Some(4_282),
+                after: None,
+            }],
+            "the backend's floor, and nothing has measured what it left yet"
+        );
+        let Some(EntryKind::Turn(rule)) = app.entries().last().map(|entry| entry.kind) else {
+            panic!("the turn is ruled off: {:?}", app.entries());
+        };
+        assert_eq!(rule.compacted, Some(CompactTrigger::Manual));
+
+        let mut app = sent(app, "carry on");
+        for tokens in [18_000, 19_500] {
+            app.apply(&Event::Context(niobe_core::event::Context {
+                tokens,
+                model: "opus-5".to_owned(),
+                window: None,
+            }));
+        }
+        let after: Vec<Option<u64>> = app
+            .entries()
+            .iter()
+            .filter_map(|entry| match entry.kind {
+                EntryKind::Compacted(row) => Some(row.after),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            after,
+            [Some(18_000)],
+            "the first request after it is what it left, not a later one"
         );
     }
 
@@ -6183,6 +13751,8 @@ mod tests {
             tool: "Bash".to_owned(),
             input: "{}".to_owned(),
             target: None,
+            proposal: None,
+            reason: None,
             agent: None,
         });
         assert_eq!(
@@ -6216,6 +13786,8 @@ mod tests {
                 tool: "Bash".to_owned(),
                 input: r#"{"command":"ls"}"#.to_owned(),
                 target: target.map(str::to_owned),
+                proposal: None,
+                reason: None,
                 agent: None,
             });
         }
@@ -6227,17 +13799,12 @@ mod tests {
     }
 
     #[test]
-    fn arrows_and_vi_keys_move_the_selection_and_wrap_at_either_end() {
+    fn arrows_move_the_selection_and_wrap_at_either_end() {
         let mut app = asked(Some("ls"));
         assert_eq!(app.ask_selected(), Answer::Once);
 
         let mut walked = Vec::new();
-        for code in [
-            KeyCode::Down,
-            KeyCode::Char('j'),
-            KeyCode::Down,
-            KeyCode::Down,
-        ] {
+        for code in [KeyCode::Down, KeyCode::Down, KeyCode::Down, KeyCode::Down] {
             press(&mut app, code);
             walked.push(app.ask_selected());
         }
@@ -6253,8 +13820,18 @@ mod tests {
 
         press(&mut app, KeyCode::Up);
         assert_eq!(app.ask_selected(), Answer::No);
-        press(&mut app, KeyCode::Char('k'));
+        press(&mut app, KeyCode::Up);
         assert_eq!(app.ask_selected(), Answer::AlwaysTarget);
+    }
+
+    #[test]
+    fn j_and_k_move_no_selection_and_are_typed() {
+        let mut app = asked(Some("ls"));
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('k'));
+
+        assert_eq!(app.ask_selected(), Answer::Once);
+        assert_eq!(app.composed(), "jk");
     }
 
     #[test]
@@ -6272,7 +13849,7 @@ mod tests {
         press(&mut app, KeyCode::Enter);
 
         assert_eq!(
-            app.take_produced(),
+            app.said(),
             [Event::PermissionResponse {
                 id: "t1".into(),
                 decision: PermissionDecision::Deny,
@@ -6281,6 +13858,247 @@ mod tests {
         );
         assert_eq!(app.asking().map(|ask| ask.id.as_str()), Some("t2"));
         assert_eq!(app.ask_selected(), Answer::Once);
+    }
+
+    #[test]
+    fn enter_held_with_a_modifier_confirms_no_answer() {
+        let mut app = asked(Some("ls"));
+        for held in [
+            KeyModifiers::SHIFT,
+            KeyModifiers::ALT,
+            KeyModifiers::CONTROL,
+        ] {
+            app.on_key(KeyEvent::new(KeyCode::Enter, held));
+        }
+
+        assert_eq!(app.said(), []);
+        assert_eq!(app.asking().map(|ask| ask.id.as_str()), Some("t1"));
+    }
+
+    /// An operator typing their next prompt one key at a time, past the
+    /// quiet a question waits for, and sending it.
+    fn typed_at_the_question(text: &str) -> App {
+        let shown = Instant::now();
+        let mut app = app();
+        app.tick(shown, None);
+        app.apply(&prompt(Some("touch one.txt")));
+        let mut at = shown + ASK_QUIET * 2;
+        for c in text.chars() {
+            let mut bytes = [0; 4];
+            read(&mut app, c.encode_utf8(&mut bytes).as_bytes(), at);
+            at += Duration::from_millis(150);
+        }
+        read(&mut app, b"\r", at + Duration::from_secs(1));
+        app
+    }
+
+    #[test]
+    fn a_prompt_typed_at_a_question_and_sent_answers_nothing_and_is_kept() {
+        for text in ["hello", "keep going", "j", "jk", "ok"] {
+            let mut app = typed_at_the_question(text);
+
+            assert_eq!(app.said(), [], "{text}");
+            assert!(app.asking().is_some(), "{text}");
+            assert_eq!(app.composed(), text, "{text}");
+            assert_eq!(app.ask_focus(), AskFocus::Deferred, "{text}");
+        }
+    }
+
+    /// A question that comes up in the middle of a word the operator is
+    /// typing at a steady pace: every key lands within the quiet of the one
+    /// before it, and none of them can answer anything.
+    #[test]
+    fn a_word_typed_through_the_moment_a_question_comes_up_is_kept_whole() {
+        let start = Instant::now();
+        let mut app = app();
+        app.tick(start, None);
+        let mut at = start;
+        let step = Duration::from_millis(120);
+        for c in "fix the".chars() {
+            let mut bytes = [0; 4];
+            read(&mut app, c.encode_utf8(&mut bytes).as_bytes(), at);
+            at += step;
+        }
+        app.tick(at, None);
+        app.apply(&prompt(Some("touch one.txt")));
+        for c in " tests".chars() {
+            let mut bytes = [0; 4];
+            read(&mut app, c.encode_utf8(&mut bytes).as_bytes(), at);
+            at += step;
+        }
+
+        assert_eq!(app.composed(), "fix the tests");
+        assert_eq!(app.said(), []);
+        assert!(app.asking().is_some());
+    }
+
+    #[test]
+    fn a_digit_or_enter_inside_the_quiet_still_answers_nothing() {
+        let shown = Instant::now();
+        let mut app = app();
+        app.tick(shown, None);
+        app.apply(&prompt(Some("touch one.txt")));
+
+        read(&mut app, b"1", shown + Duration::from_millis(50));
+        read(&mut app, b"\r", shown + Duration::from_millis(100));
+
+        assert_eq!(app.said(), []);
+        assert!(app.asking().is_some());
+    }
+
+    /// An Esc that did nothing, then a prompt typed at the pace of a hand:
+    /// its first letter is a menu's, as it is for an operator who means the
+    /// menu, and the second is told from a choice by how soon it comes.
+    #[test]
+    fn a_prompt_typed_after_an_idle_esc_is_the_prompt_and_opens_no_menu_item() {
+        let start = Instant::now();
+        let mut app = app();
+        app.tick(start, None);
+        read(&mut app, b"\x1b", start);
+        let mut at = start + Duration::from_millis(400);
+        for c in "start now".chars() {
+            let mut bytes = [0; 4];
+            read(&mut app, c.encode_utf8(&mut bytes).as_bytes(), at);
+            at += Duration::from_millis(120);
+        }
+
+        assert_eq!(app.composed(), "start now");
+        assert!(app.menu().is_none());
+        assert_eq!(app.said(), []);
+        assert_eq!(app.take_handoffs(), vec![]);
+    }
+
+    #[test]
+    fn esc_then_a_menus_letter_with_nothing_after_it_still_opens_the_menu() {
+        let start = Instant::now();
+        let mut app = app();
+        app.tick(start, None);
+
+        read(&mut app, b"\x1b", start);
+        read(&mut app, b"s", start + Duration::from_millis(400));
+
+        assert!(app.menu().is_some());
+
+        // And an item is chosen by a key that comes after a look at it.
+        read(&mut app, b"n", start + Duration::from_millis(900));
+        assert!(app.menu().is_some(), "the menu stays open on a hot key");
+    }
+
+    #[test]
+    fn a_letter_typed_at_a_question_says_where_it_went() {
+        let shown = Instant::now();
+        let mut app = app();
+        app.tick(shown, None);
+        app.apply(&prompt(Some("touch one.txt")));
+
+        read(&mut app, b"h", shown + ASK_QUIET * 2);
+
+        assert_eq!(app.hint(), Some(TYPED_AT_QUESTION_HINT));
+    }
+
+    #[test]
+    fn a_question_typed_past_is_answered_again_after_esc() {
+        let shown = Instant::now();
+        let mut app = typed_at_the_question("hello");
+
+        read(&mut app, b"\x1b", shown + ASK_QUIET * 20);
+        read(&mut app, b"\r", shown + ASK_QUIET * 22);
+
+        assert_eq!(
+            app.said(),
+            [Event::PermissionResponse {
+                id: "t1".into(),
+                decision: PermissionDecision::Allow,
+                message: None,
+            }]
+        );
+        assert_eq!(app.composed(), "hello", "the prompt typed waits to be sent");
+    }
+
+    #[test]
+    fn a_digit_or_enter_on_an_untouched_question_still_answers_it() {
+        let shown = Instant::now();
+        let mut first = app();
+        first.tick(shown, None);
+        first.apply(&prompt(Some("touch one.txt")));
+        read(&mut first, b"\r", shown + ASK_QUIET * 2);
+        assert_eq!(
+            first.said(),
+            [Event::PermissionResponse {
+                id: "t1".into(),
+                decision: PermissionDecision::Allow,
+                message: None,
+            }]
+        );
+
+        let mut again = app();
+        again.tick(shown, None);
+        again.apply(&prompt(Some("touch one.txt")));
+        read(&mut again, b"4", shown + ASK_QUIET * 2);
+        read(&mut again, b"\r", shown + ASK_QUIET * 4);
+        assert_eq!(
+            again.said(),
+            [Event::PermissionResponse {
+                id: "t1".into(),
+                decision: PermissionDecision::Deny,
+                message: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn ctrl_with_a_vi_key_or_a_digit_moves_no_selection() {
+        let mut app = asked(Some("ls"));
+        for c in ['j', 'k', '3'] {
+            app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL));
+        }
+        app.on_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::ALT));
+
+        assert_eq!(app.ask_selected(), Answer::Once);
+    }
+
+    #[test]
+    fn a_control_key_types_no_letter_into_a_written_answer() {
+        let mut app = asked(Some("ls"));
+        press(&mut app, KeyCode::Tab);
+        for c in "hello".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        for c in ['w', 'u', 'o'] {
+            app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL));
+        }
+        app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT));
+        app.on_key(KeyEvent::new(KeyCode::Char('W'), KeyModifiers::SHIFT));
+
+        assert_eq!(app.ask_draft(), "helloW");
+    }
+
+    #[test]
+    fn enter_held_with_a_modifier_sends_no_written_answer() {
+        let mut app = asked(Some("ls"));
+        press(&mut app, KeyCode::Tab);
+        for c in "no".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        for held in [
+            KeyModifiers::SHIFT,
+            KeyModifiers::ALT,
+            KeyModifiers::CONTROL,
+        ] {
+            app.on_key(KeyEvent::new(KeyCode::Enter, held));
+        }
+        assert_eq!(app.said(), []);
+        assert_eq!(app.ask_draft(), "no");
+
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(
+            app.said(),
+            [Event::PermissionResponse {
+                id: "t1".into(),
+                decision: PermissionDecision::Deny,
+                message: Some("no".to_owned()),
+            }]
+        );
     }
 
     fn wheel(app: &mut App, kind: MouseEventKind) {
@@ -6325,12 +14143,12 @@ mod tests {
             output: 0,
             cache_read: 0,
             cache_write: 0,
-            cache_write_1h: 0,
+            cache_write_1h: Some(0),
             reasoning: 0,
             model: "opus-5".to_owned(),
             cost_usd: None,
-            cost_basis: None,
-            settles_model: false,
+            settles_model: Some(false),
+            fast: false,
         })
     }
 
@@ -6376,8 +14194,101 @@ mod tests {
                 tokens: Some(4_100),
                 five_hour_points: None,
                 took: Some(Duration::from_secs(38)),
+                agents: 0,
+                calls: 0,
+                cut: false,
+                compacted: None,
             }
         );
+    }
+
+    #[test]
+    fn a_turns_rule_counts_the_agents_it_spawned_and_the_calls_it_made() {
+        let mut app = app();
+        let start = |id: &str, agent: Option<&str>| Event::ToolCallStart {
+            id: id.into(),
+            name: "Read".to_owned(),
+            input: String::new(),
+            summary: None,
+            agent: agent.map(AgentId::new),
+        };
+        app.apply(&Event::UserMessage {
+            text: "first".to_owned(),
+        });
+        app.apply(&start("t0", None));
+        app.apply(&Event::TurnEnded);
+
+        app.apply(&Event::UserMessage {
+            text: "second".to_owned(),
+        });
+        app.apply(&Event::AgentSpawn {
+            id: AgentId::new("toolu_a"),
+            parent: None,
+            kind: Some("Explore".to_owned()),
+            label: "Find the loop".to_owned(),
+        });
+        app.apply(&start("t1", Some("toolu_a")));
+        app.apply(&start("t2", Some("toolu_a")));
+        app.apply(&start("t3", None));
+        app.apply(&Event::TurnEnded);
+
+        let counted: Vec<(u64, u64)> = rules(&app)
+            .into_iter()
+            .map(|(_, rule)| (rule.agents, rule.calls))
+            .collect();
+        assert_eq!(counted, [(0, 1), (1, 3)]);
+    }
+
+    #[test]
+    fn a_prompt_sent_mid_turn_is_ruled_as_a_turn_from_where_the_last_one_ended() {
+        let mut app = app();
+        app.apply_at(&said("run three"), at(100, 14, 0));
+        for id in ["t1", "t2", "t3"] {
+            app.apply_at(&start(id, "Bash", "{}", None), at(110, 14, 0));
+        }
+        app.apply_at(
+            &Event::AgentSpawn {
+                id: AgentId::new("toolu_a"),
+                parent: None,
+                kind: Some("Explore".to_owned()),
+                label: "Find the loop".to_owned(),
+            },
+            at(115, 14, 0),
+        );
+        app.apply_at(&said("hello during"), at(120, 14, 0));
+        app.apply_at(&Event::TurnEnded, at(130, 14, 0));
+        app.apply_at(&start("t4", "Read", "{}", None), at(140, 14, 0));
+        app.apply_at(&Event::TurnEnded, at(160, 14, 0));
+
+        let counted: Vec<(u64, u64, Option<Duration>)> = rules(&app)
+            .into_iter()
+            .map(|(_, rule)| (rule.agents, rule.calls, rule.took))
+            .collect();
+        assert_eq!(
+            counted,
+            [
+                (1, 3, Some(Duration::from_secs(30))),
+                (0, 1, Some(Duration::from_secs(30)))
+            ]
+        );
+    }
+
+    #[test]
+    fn an_end_with_no_prompt_behind_it_counts_from_the_last_end_and_is_not_timed() {
+        let mut app = app();
+        app.apply_at(&said("run three"), at(100, 14, 0));
+        for id in ["t1", "t2", "t3"] {
+            app.apply_at(&start(id, "Bash", "{}", None), at(110, 14, 0));
+        }
+        app.apply_at(&Event::TurnEnded, at(130, 14, 0));
+        app.apply_at(&start("t4", "Read", "{}", None), at(140, 14, 0));
+        app.apply_at(&Event::TurnEnded, at(600, 14, 8));
+
+        let counted: Vec<(u64, Option<Duration>)> = rules(&app)
+            .into_iter()
+            .map(|(_, rule)| (rule.calls, rule.took))
+            .collect();
+        assert_eq!(counted, [(3, Some(Duration::from_secs(30))), (1, None)]);
     }
 
     #[test]
@@ -6469,31 +14380,6 @@ mod tests {
     }
 
     #[test]
-    fn the_latest_test_run_is_kept_with_the_moment_its_call_finished() {
-        let run = |id: &str, passed: u64| Event::TestRun {
-            id: ToolCallId::new(id),
-            counts: Some(niobe_core::TestCounts {
-                passed,
-                failed: 0,
-                ignored: 0,
-                suites: 1,
-            }),
-            exit_code: Some(0),
-            failed: false,
-            failures: Vec::new(),
-        };
-        let mut app = app();
-        assert_eq!(app.test_run(), None, "no run is not a run of nothing");
-
-        app.apply_at(&run("t1", 3), at(1_000, 9, 30));
-        app.apply_at(&run("t2", 5), at(1_060, 9, 31));
-
-        let (latest, finished) = app.test_run().expect("the session ran its tests");
-        assert_eq!(latest.counts.map(|counts| counts.passed), Some(5));
-        assert_eq!(finished, Some(at(1_060, 9, 31)));
-    }
-
-    #[test]
     fn a_fold_with_no_clock_behind_it_leaves_no_times_rather_than_invented_ones() {
         // A JSON Lines log records no times. It is folded in before the event
         // loop has ticked, and what it produces has to say so.
@@ -6508,6 +14394,7 @@ mod tests {
             },
         ]);
 
+        assert!(!app.entries().is_empty());
         assert!(
             app.entries().iter().all(|entry| entry.at.is_none()),
             "a log that kept no times was stamped with the moment it was parsed"
@@ -6557,20 +14444,19 @@ mod tests {
     }
 
     #[test]
-    fn a_decision_is_handed_out_with_the_time_it_was_made() {
+    fn a_decision_is_handed_out_with_the_time_its_reply_was_stated_at() {
         let mut app = app();
+        let said = |text: &str| Event::AssistantMessage {
+            text: text.to_owned(),
+            agent: None,
+        };
         app.tick(Instant::now(), Some(at(49_260, 13, 41)));
-        app.apply(&Event::Decision {
-            summary: "Reuse the existing cache".to_owned(),
-            rationale: None,
-            rejected: Vec::new(),
-        });
+        app.apply(&said(
+            "DECISION: reuse the existing cache\nDECISION: keep the flag",
+        ));
         app.tick(Instant::now(), Some(at(50_580, 14, 3)));
-        app.apply(&Event::Decision {
-            summary: "Do not widen the layering table".to_owned(),
-            rationale: None,
-            rejected: Vec::new(),
-        });
+        app.apply(&said("No decision here."));
+        app.apply(&said("DECISION: do not widen the layering table"));
 
         let made: Vec<_> = app
             .decisions()
@@ -6579,25 +14465,20 @@ mod tests {
         assert_eq!(
             made,
             [
-                ("Reuse the existing cache", LocalTime::new(13, 41)),
-                ("Do not widen the layering table", LocalTime::new(14, 3)),
+                ("reuse the existing cache", LocalTime::new(13, 41)),
+                ("keep the flag", LocalTime::new(13, 41)),
+                ("do not widen the layering table", LocalTime::new(14, 3)),
             ]
         );
-    }
 
-    #[test]
-    fn a_decision_folded_in_without_a_clock_is_still_paired_with_its_own_row() {
-        let mut app = app();
-        app.apply(&Event::Decision {
-            summary: "made before the loop ticked".to_owned(),
-            rationale: None,
-            rejected: Vec::new(),
-        });
-
-        let made: Vec<_> = app.decisions().collect();
-        assert_eq!(made.len(), 1);
-        assert_eq!(made[0].0.summary, "made before the loop ticked");
-        assert_eq!(made[0].1, None);
+        app.apply(&Event::Cleared);
+        assert_eq!(app.decisions().count(), 0, "a clear starts them over");
+        app.apply(&said("DECISION: after the clear"));
+        let after: Vec<_> = app
+            .decisions()
+            .map(|(_, at)| at.and_then(Stamp::local))
+            .collect();
+        assert_eq!(after, [LocalTime::new(14, 3)], "paired with its own time");
     }
 
     #[test]
@@ -6607,6 +14488,7 @@ mod tests {
         app.apply(&Event::AgentSpawn {
             id: AgentId::new("a1"),
             parent: None,
+            kind: None,
             label: "review the diff".to_owned(),
         });
 
@@ -6631,6 +14513,7 @@ mod tests {
         app.apply(&Event::AgentSpawn {
             id: id.clone(),
             parent: None,
+            kind: None,
             label: "review the diff".to_owned(),
         });
         app.apply(&Event::AgentProgress {
@@ -6692,12 +14575,15 @@ mod tests {
             summary: Some("a.rs".to_owned()),
             exit_code: None,
             error: None,
+            command: None,
+            untrimmed: None,
         });
         app.apply(&Event::FileChange {
             path: "a.rs".to_owned(),
             added: Some(1),
             removed: Some(1),
             hunks,
+            scope: niobe_core::event::ChangeScope::Project,
         });
     }
 
@@ -6766,6 +14652,8 @@ mod tests {
             summary: None,
             exit_code: None,
             error: None,
+            command: None,
+            untrimmed: None,
         });
         app.apply(&Event::AssistantMessage {
             text: "and then".to_owned(),
@@ -6776,12 +14664,18 @@ mod tests {
             added: Some(1),
             removed: Some(1),
             hunks: one_hunk(),
+            scope: niobe_core::event::ChangeScope::Project,
         });
 
+        let calls: Vec<_> = app
+            .entries()
+            .iter()
+            .flat_map(|entry| &entry.calls)
+            .collect();
+        assert!(!calls.is_empty());
         assert!(
-            app.entries()
+            calls
                 .iter()
-                .flat_map(|entry| &entry.calls)
                 .all(|call| call.change.is_none() && call.lines.is_none())
         );
     }
@@ -6792,6 +14686,8 @@ mod tests {
             tool: "Edit".to_owned(),
             input: r#"{"file_path":"/repo/a.rs"}"#.to_owned(),
             target: Some("/repo/a.rs".to_owned()),
+            proposal: None,
+            reason: None,
             agent: None,
         });
         app.apply(&Event::PermissionResponse {
@@ -6856,6 +14752,8 @@ mod tests {
             summary: None,
             exit_code: None,
             error: None,
+            command: None,
+            untrimmed: None,
         }
     }
 
@@ -6945,7 +14843,7 @@ mod tests {
     }
 
     #[test]
-    fn a_refusal_between_two_calls_breaks_their_run() {
+    fn a_refused_call_stays_in_its_run_as_its_own_denied_row() {
         let mut app = app();
         called(&mut app, "t1", "Edit");
         app.apply(&start("t2", "Edit", "{}", None));
@@ -6957,18 +14855,55 @@ mod tests {
         app.apply(&ended("t2", "Edit", ToolOutcome::Denied, 0));
         called(&mut app, "t3", "Edit");
 
-        assert_eq!(
-            heads(&app),
-            vec![
-                ("Edit".to_owned(), 2),
-                ("denied".to_owned(), 0),
-                ("Edit".to_owned(), 1),
-            ]
-        );
+        assert_eq!(heads(&app), vec![("Edit".to_owned(), 3)]);
+        assert_eq!(app.entries()[0].calls[1].outcome, Some(ToolOutcome::Denied));
+    }
+
+    /// Refuses the call `id` at the prompt, with the operator's written
+    /// answer where there is one.
+    fn refused(app: &mut App, id: &str, said: Option<&str>) {
+        app.apply(&asked_by(id, None));
+        app.apply(&Event::PermissionResponse {
+            id: id.into(),
+            decision: PermissionDecision::Deny,
+            message: said.map(str::to_owned),
+        });
+    }
+
+    #[test]
+    fn a_refusal_the_backend_also_ends_the_call_for_reads_as_one_row() {
+        let mut app = app();
+        app.apply(&start("t1", "Bash", "{}", Some("touch b.txt")));
+        refused(&mut app, "t1", Some("Do not create b.txt."));
+        app.apply(&ended("t1", "Bash", ToolOutcome::Denied, 0));
+
+        assert_eq!(heads(&app), vec![("Bash".to_owned(), 1)]);
+        let call = &app.entries()[0].calls[0];
+        assert_eq!(call.outcome, Some(ToolOutcome::Denied));
+        assert_eq!(call.answer.as_deref(), Some("Do not create b.txt."));
+        assert_eq!(app.entries()[0].kind, EntryKind::Failure);
+    }
+
+    #[test]
+    fn a_refusal_the_backend_says_nothing_more_about_still_reads_as_one_denied_row() {
+        let mut app = app();
+        app.apply(&start("t1", "Bash", "{}", Some("touch b.txt")));
+        refused(&mut app, "t1", Some("Do not create b.txt."));
+        app.apply(&Event::TurnEnded);
+
+        assert_eq!(heads(&app)[0], ("Bash".to_owned(), 1));
+        let call = &app.entries()[0].calls[0];
+        assert_eq!(call.outcome, Some(ToolOutcome::Denied));
+        assert!(!call.interrupted, "a refused call was not cut short");
+        assert!(!app.entries()[0].streaming);
+        assert_eq!(call.answer.as_deref(), Some("Do not create b.txt."));
     }
 
     fn millis(ms: u64) -> Stamp {
-        Stamp::new(SystemTime::UNIX_EPOCH + Duration::from_millis(ms), None)
+        Stamp::new(
+            std::time::SystemTime::UNIX_EPOCH + Duration::from_millis(ms),
+            None,
+        )
     }
 
     fn said(text: &str) -> Event {
@@ -7012,6 +14947,144 @@ mod tests {
         app.tick(Instant::now(), Some(millis(259_200_000)));
 
         assert_eq!(app.worked(), Some(Duration::from_secs(20)));
+    }
+
+    /// A record that stops in the middle of a turn — the session was quit
+    /// while it ran — taken up again forty-seven minutes later.
+    fn resumed_after_leaving_mid_turn() -> App {
+        let mut app = app();
+        app.apply_at(&said("slow"), millis(1_000));
+        app.apply_at(
+            &Event::AssistantDelta {
+                text: "tick 0 tick 1".to_owned(),
+            },
+            millis(6_000),
+        );
+        app.apply_at(&Event::SessionLeft, millis(2_826_000));
+        app.apply_at(&said("again"), millis(2_826_000));
+        app.apply_at(&Event::TurnEnded, millis(2_826_100));
+        app
+    }
+
+    /// A record that ends on a question nobody answered was left by a
+    /// process that is gone, and the CLI a resume starts asked nothing: the
+    /// question does not come up again, nothing says a call is waiting, and
+    /// no answer nobody gave is written for it.
+    #[test]
+    fn a_question_the_record_ends_on_is_not_put_to_the_resumed_session() {
+        let mut app = app();
+        app.apply(&said("clean up"));
+        app.apply(&prompt(None));
+        assert!(app.asking().is_some(), "the question came up live");
+
+        app.resumed();
+        app.leave();
+
+        assert!(app.asking().is_none(), "the question was put again");
+        assert!(app.session().pending_permissions().is_empty());
+        assert!(!app.session().turn_running());
+        let produced = app.take_produced();
+        assert!(
+            !produced
+                .iter()
+                .any(|event| matches!(event, Event::PermissionResponse { .. })),
+            "{produced:?}"
+        );
+        assert!(produced.contains(&Event::SessionLeft), "{produced:?}");
+        let notices: Vec<&str> = app
+            .entries()
+            .iter()
+            .filter(|entry| entry.kind == EntryKind::Notice)
+            .map(|entry| entry.body.as_str())
+            .collect();
+        assert_eq!(
+            notices,
+            [
+                "The question about Bash was never answered: the session that asked it ended, \
+              and no call is waiting on it now."
+            ]
+        );
+    }
+
+    /// The process that ran a command is gone with the session that started
+    /// it, so a record that never saw the command end is one that cannot
+    /// still be running it.
+    #[test]
+    fn a_command_the_record_never_saw_end_is_ended_when_the_session_is_resumed() {
+        let mut app = app();
+        app.apply(&Event::ToolCallStart {
+            id: "op1".into(),
+            name: crate::shell::OPERATOR_SHELL.to_owned(),
+            input: "sleep 100".to_owned(),
+            summary: None,
+            agent: None,
+        });
+
+        app.resumed();
+
+        let produced = app.said();
+        assert!(
+            matches!(
+                produced.as_slice(),
+                [Event::ToolCallEnd { id, error: Some(error), .. }]
+                    if id.as_str() == "op1" && error.contains("stopped")
+            ),
+            "{produced:?}"
+        );
+        assert!(app.session().in_flight_tools().is_empty());
+    }
+
+    #[test]
+    fn a_turn_a_quit_left_open_is_closed_where_its_record_stops() {
+        let app = resumed_after_leaving_mid_turn();
+
+        let rules: Vec<(bool, Option<Duration>)> = app
+            .entries()
+            .iter()
+            .filter_map(|entry| match &entry.kind {
+                EntryKind::Turn(rule) => Some((rule.cut, rule.took)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            rules,
+            [
+                (true, Some(Duration::from_secs(5))),
+                (false, Some(Duration::from_millis(100)))
+            ],
+            "the first turn is timed to its last recorded event, and cut"
+        );
+        assert_eq!(
+            app.worked(),
+            Some(Duration::from_millis(5_100)),
+            "the time niobe was not running was counted as work"
+        );
+    }
+
+    #[test]
+    fn a_reply_the_session_left_half_written_says_it_was_cut_off() {
+        let app = resumed_after_leaving_mid_turn();
+
+        let reply = app
+            .entries()
+            .iter()
+            .find(|entry| entry.kind == EntryKind::Agent)
+            .expect("the reply is drawn");
+        assert!(!reply.streaming);
+        assert!(reply.meta.contains("cut off"), "{reply:?}");
+    }
+
+    #[test]
+    fn leaving_records_the_turn_it_cuts_and_nothing_when_none_runs() {
+        let mut idle = app();
+        idle.leave();
+        assert!(idle.said().is_empty());
+
+        let mut app = sent(app().attached(), "go");
+        app.said();
+        app.leave();
+        assert_eq!(app.said(), [Event::SessionLeft]);
+        assert!(!app.session().turn_running());
     }
 
     #[test]
@@ -7085,6 +15158,8 @@ mod tests {
                 tool: "Bash".to_owned(),
                 input: "{}".to_owned(),
                 target: None,
+                proposal: None,
+                reason: None,
                 agent: None,
             },
             millis(1_100),
@@ -7137,6 +15212,8 @@ mod tests {
             summary: None,
             exit_code: Some(2),
             error: Some("no such file".to_owned()),
+            command: None,
+            untrimmed: None,
         });
         app.apply(&Event::AssistantMessage {
             text: "then".to_owned(),
@@ -7149,6 +15226,7 @@ mod tests {
             added: Some(4),
             removed: None,
             hunks: Vec::new(),
+            scope: niobe_core::event::ChangeScope::Project,
         });
 
         let shell = &app.entries()[0].calls[0];
@@ -7178,6 +15256,10 @@ mod tests {
         app.on_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
     }
 
+    fn ctrl_f(app: &mut App) {
+        app.on_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+    }
+
     #[test]
     fn ctrl_t_opens_every_cut_diff_and_cuts_them_again() {
         let mut app = app();
@@ -7194,7 +15276,7 @@ mod tests {
     #[test]
     fn ctrl_t_opens_the_diffs_while_a_search_is_open_and_leaves_the_query_alone() {
         let mut app = app();
-        press(&mut app, KeyCode::Char('/'));
+        ctrl_f(&mut app);
         press(&mut app, KeyCode::Char('x'));
 
         ctrl_t(&mut app);
@@ -7213,7 +15295,7 @@ mod tests {
 
         assert!(app.diffs_open());
         assert!(app.asking().is_some(), "the key answered the question");
-        assert!(app.take_produced().is_empty(), "{:?}", app.take_produced());
+        assert!(app.said().is_empty(), "{:?}", app.said());
     }
 
     /// Hands `bytes` to the shell the way the event loop does: decoded as one
@@ -7232,6 +15314,63 @@ mod tests {
         app.on_keys_read(&keys, Arrival { at, alone });
     }
 
+    /// The answer field is for words, so words that arrive in one read — a
+    /// text expander, dictation — go into it; an Enter among them still does
+    /// not send.
+    #[test]
+    fn keys_read_together_go_into_the_answer_being_written() {
+        let mut app = asked(Some("ls"));
+        let at = Instant::now();
+        read(&mut app, b"\t", at + ASK_QUIET * 2);
+        assert_eq!(app.ask_focus(), AskFocus::Writing);
+
+        read(&mut app, b"use rg instead\r", at + ASK_QUIET * 4);
+
+        assert_eq!(app.ask_draft(), "use rg instead");
+        assert!(
+            app.asking().is_some(),
+            "an Enter in a burst sent the answer"
+        );
+    }
+
+    #[test]
+    fn keys_read_together_go_to_an_open_menu_and_not_into_the_prompt() {
+        let mut menu = app();
+        let mut sheet = app();
+        read(&mut menu, b"\x1bv", Instant::now());
+        assert!(menu.menu().is_some());
+        read(&mut menu, b"t\r", Instant::now());
+        assert_eq!(
+            menu.picking().map(|picker| picker.purpose),
+            Some(Purpose::Theme)
+        );
+        assert_eq!(menu.composer().lines(), [""]);
+
+        sheet.on_key(key(KeyCode::F(1)));
+        read(&mut sheet, b"xy\r", Instant::now());
+        assert_eq!(sheet.composer().lines(), [""], "nor past an open sheet");
+        assert_eq!(sheet.sheet(), None, "whose Enter closes it");
+    }
+
+    #[test]
+    fn a_completed_path_with_a_space_goes_in_quoted() {
+        let mut app = App::new(Repo {
+            name: "niobe".to_owned(),
+            files: vec!["dir with space/file name.txt".to_owned()],
+            ..Default::default()
+        });
+        for c in "see @file".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+
+        app.on_key(key(KeyCode::Tab));
+
+        assert_eq!(
+            app.composer().lines(),
+            [r#"see @"dir with space/file name.txt" "#]
+        );
+    }
+
     /// What typing `text` a key at a time leaves in the composer.
     fn typed_alone(text: &str) -> Vec<String> {
         let mut app = app();
@@ -7240,6 +15379,64 @@ mod tests {
             read(&mut app, &[byte], at);
         }
         app.composer().lines().to_vec()
+    }
+
+    /// A terminal that does not bracket pastes sends a pasted line break as
+    /// Enter, in the same read as the text around it.
+    /// A second `!` right behind the one that opens the command line is a
+    /// key of its own: the line is empty, so it is pressed rather than
+    /// batched in as text, and a command line it leaves is a prompt holding
+    /// `!x`, as typing the keys one at a time makes it.
+    #[test]
+    fn a_second_bang_read_with_the_first_is_pressed_not_batched_into_the_command_line() {
+        let mut together = app().runs_commands();
+        read(&mut together, b"!!x", Instant::now());
+
+        let mut apart = app().runs_commands();
+        for c in ['!', '!', 'x'] {
+            read(&mut apart, c.to_string().as_bytes(), Instant::now());
+        }
+
+        assert_eq!(
+            (together.shell_mode(), together.composed()),
+            (apart.shell_mode(), apart.composed())
+        );
+        assert_eq!(together.composed(), "!x");
+    }
+
+    #[test]
+    fn an_enter_pasted_after_a_bang_runs_no_command() {
+        let mut app = app().runs_commands();
+
+        read(&mut app, b"!echo pwned\r", Instant::now());
+
+        assert!(app.take_commands().is_empty(), "a pasted line ran");
+        assert_eq!(app.composer().lines(), ["echo pwned", ""]);
+    }
+
+    #[test]
+    fn an_enter_pasted_into_a_prompt_sends_nothing() {
+        let mut app = app();
+
+        read(&mut app, b"hello\rworld\r", Instant::now());
+
+        let sent: Vec<Event> = app
+            .said()
+            .into_iter()
+            .filter(|event| matches!(event, Event::UserMessage { .. }))
+            .collect();
+        assert!(sent.is_empty(), "{sent:?}");
+        assert_eq!(app.composer().lines(), ["hello", "world", ""]);
+    }
+
+    #[test]
+    fn an_enter_pressed_alone_still_sends() {
+        let mut app = app();
+        read(&mut app, b"hello", Instant::now());
+
+        read(&mut app, b"\r", Instant::now());
+
+        assert!(app.composer().is_empty());
     }
 
     #[test]
@@ -7255,28 +15452,44 @@ mod tests {
     }
 
     #[test]
-    fn a_slash_that_opens_a_read_searches_for_the_rest_of_it() {
+    fn a_slash_that_opens_a_read_starts_a_command_with_the_rest_of_it() {
         let mut app = app();
 
         read(&mut app, b"/build", Instant::now());
 
-        let query = app.finding().expect("the slash opened the search");
-        assert_eq!(query.lines(), ["build"]);
-        assert!(app.composer().is_empty(), "the query went into the prompt");
+        assert!(app.finding().is_none(), "the slash opened the search");
+        assert_eq!(app.composer().lines(), ["/build"]);
     }
 
     #[test]
-    fn an_enter_read_with_the_keys_before_it_sends_them() {
+    fn ctrl_f_searches_with_a_prompt_half_written_and_esc_gives_it_back() {
+        let mut app = app();
+        read(&mut app, b"half a", Instant::now());
+
+        ctrl_f(&mut app);
+        press(&mut app, KeyCode::Char('x'));
+
+        let query = app.finding().expect("Ctrl+F opened the search");
+        assert_eq!(query.lines(), ["x"]);
+        assert_eq!(app.composer().lines(), ["half a"]);
+        press(&mut app, KeyCode::Esc);
+        assert!(app.finding().is_none());
+        assert_eq!(app.composer().lines(), ["half a"]);
+    }
+
+    /// Typed quickly while the shell was busy, `run it` and its Enter can
+    /// come in one read; so does a paste of the same bytes from a terminal
+    /// that does not bracket pastes, and nothing tells the two apart. The
+    /// Enter is taken as the paste's line break: a prompt left unsent costs
+    /// one more press, a pasted line sent or run costs whatever it said.
+    #[test]
+    fn an_enter_read_with_the_keys_before_it_is_a_line_break() {
         let mut app = app();
 
         read(&mut app, b"run it\r", Instant::now());
 
-        assert_eq!(
-            app.take_produced(),
-            [Event::UserMessage {
-                text: "run it".to_owned()
-            }]
-        );
+        assert!(app.said().is_empty());
+        assert_eq!(app.composer().lines(), ["run it", ""]);
     }
 
     /// A prompt for `rm -rf build`, put on screen by the tick at `shown`.
@@ -7308,7 +15521,7 @@ mod tests {
         );
 
         assert!(app.asking().is_some(), "the paste answered the question");
-        assert!(app.take_produced().is_empty());
+        assert!(app.said().is_empty());
         assert!(app.take_rules().is_empty());
         assert_eq!(
             app.ask_selected(),
@@ -7319,7 +15532,7 @@ mod tests {
 
     #[test]
     fn a_three_line_paste_is_one_three_line_prompt_and_sends_nothing() {
-        let mut app = app();
+        let mut app = app().attached();
 
         app.on_paste("here is the log:\rerror: boom\rat foo.rs:3");
 
@@ -7327,11 +15540,11 @@ mod tests {
             app.composer().lines(),
             ["here is the log:", "error: boom", "at foo.rs:3"]
         );
-        assert!(app.take_produced().is_empty(), "the paste sent a turn");
+        assert!(app.said().is_empty(), "the paste sent a turn");
 
         app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(
-            app.take_produced(),
+            app.said(),
             [Event::UserMessage {
                 text: "here is the log:\nerror: boom\nat foo.rs:3".to_owned()
             }]
@@ -7361,11 +15574,11 @@ mod tests {
     #[test]
     fn a_paste_into_the_search_is_one_line_of_query() {
         let mut app = app();
-        app.on_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+        ctrl_f(&mut app);
 
         app.on_paste("two\rwords");
 
-        let query = app.finding().expect("the slash opened the search");
+        let query = app.finding().expect("Ctrl+F opened the search");
         assert_eq!(query.lines(), ["two words"]);
         assert!(
             app.composer().is_empty(),
@@ -7415,7 +15628,7 @@ mod tests {
         read(&mut app, b"\r", shown + Duration::from_millis(550));
 
         assert!(app.asking().is_some(), "typing ahead answered the question");
-        assert!(app.take_produced().is_empty());
+        assert!(app.said().is_empty());
         assert!(app.take_rules().is_empty());
         assert_eq!(app.ask_selected(), Answer::Once);
         assert!(app.hint().is_some(), "nothing said the keys were not taken");
@@ -7431,7 +15644,7 @@ mod tests {
 
         assert!(app.asking().is_none());
         assert_eq!(
-            app.take_produced(),
+            app.said(),
             [Event::PermissionResponse {
                 id: "t1".into(),
                 decision: PermissionDecision::AllowAlways,
@@ -7452,7 +15665,7 @@ mod tests {
 
         read(&mut app, b"\r", shown + Duration::from_millis(1800));
         assert_eq!(
-            app.take_produced(),
+            app.said(),
             [Event::PermissionResponse {
                 id: "t1".into(),
                 decision: PermissionDecision::Allow,
@@ -7471,7 +15684,156 @@ mod tests {
         read(&mut app, b"\r", first + Duration::from_millis(2100));
 
         assert_eq!(app.asking().map(|ask| ask.id.as_str()), Some("t2"));
-        assert_eq!(app.take_produced().len(), 1);
+        assert_eq!(app.said().len(), 1);
+    }
+
+    /// Types `text` a key at a time, `every` apart from `from`, and gives
+    /// back when the last key was read.
+    fn typed_apart(app: &mut App, text: &str, from: Instant, every: Duration) -> Instant {
+        let mut at = from;
+        for c in text.chars() {
+            at += every;
+            read(app, c.to_string().as_bytes(), at);
+        }
+        at
+    }
+
+    /// What the operator was writing as the question went is theirs: beside a
+    /// draft it goes after it, and behind another question it waits in the
+    /// prompt.
+    #[test]
+    fn an_answer_being_written_is_kept_when_its_question_is_withdrawn() {
+        let mut app = asked(Some("ls"));
+        typed(&mut app, "my next idea");
+        app.apply(&Event::PermissionWithdrawn { id: "t1".into() });
+        assert_eq!(app.composed(), "my next idea");
+
+        // An answer being written beside a draft: after it, on its own line.
+        let mut beside = asked(Some("ls"));
+        beside.composer.insert_str("my next idea");
+        beside.on_key(key(KeyCode::Tab));
+        typed(&mut beside, "no, use rg");
+        beside.apply(&Event::PermissionWithdrawn { id: "t1".into() });
+        assert_eq!(beside.composed(), "my next idea\nno, use rg");
+
+        // Another question queued behind: the answer waits in the prompt.
+        let mut queued = asked(Some("ls"));
+        queued.apply(&Event::PermissionRequest {
+            id: "t2".into(),
+            tool: "Bash".to_owned(),
+            input: r#"{"command":"pwd"}"#.to_owned(),
+            target: Some("pwd".to_owned()),
+            proposal: None,
+            reason: None,
+            agent: None,
+        });
+        queued.on_key(key(KeyCode::Tab));
+        typed(&mut queued, "no, use rg");
+        queued.apply(&Event::PermissionWithdrawn { id: "t1".into() });
+        assert_eq!(queued.composed(), "no, use rg");
+    }
+
+    #[test]
+    fn a_question_brought_up_by_withdrawing_the_one_being_answered_waits_for_a_quiet_keyboard() {
+        let shown = Instant::now();
+        let mut app = asked(Some("ls"));
+        app.tick(shown, None);
+        let every = Duration::from_millis(150);
+        read(&mut app, b"\t", shown + ASK_QUIET * 2);
+        let written = typed_apart(&mut app, "use rg", shown + ASK_QUIET * 2, every);
+
+        let withdrawn = written + every;
+        app.tick(withdrawn, None);
+        app.apply(&Event::PermissionWithdrawn { id: "t1".into() });
+        assert_eq!(app.hint(), Some(QUESTION_WITHDRAWN_HINT));
+        let last = typed_apart(&mut app, " instead", withdrawn, every);
+        read(&mut app, b"\r", last + every);
+
+        // The words went on into the prompt behind the question, which waits:
+        // letters answer nothing, so none of them was held back, and the
+        // Enter that ended them sent nothing.
+        assert_eq!(app.said(), []);
+        assert_eq!(app.asking().map(|ask| ask.id.as_str()), Some("t2"));
+        assert_eq!(app.ask_focus(), AskFocus::Deferred);
+        // What was being written for the question that went is not lost to
+        // the one that came up behind it: the words go on in the prompt.
+        assert_eq!(app.composed(), "use rg instead");
+        read(&mut app, b"\x1b", last + every + ASK_QUIET * 2);
+        read(&mut app, b"\r", last + every + ASK_QUIET * 4);
+        assert_eq!(
+            app.said(),
+            [Event::PermissionResponse {
+                id: "t2".into(),
+                decision: PermissionDecision::Allow,
+                message: None,
+            }]
+        );
+    }
+
+    /// A shell whose only question was being answered when `ended` took it
+    /// away, the operator typing on through it to an Enter; with when the
+    /// Enter was read.
+    fn written_through_a_withdrawal(ended: &Event) -> (App, Instant) {
+        let shown = Instant::now();
+        let mut app = sent(app().attached(), "go");
+        app.said();
+        app.tick(shown, None);
+        app.apply(&prompt(Some("rm -rf build")));
+        let every = Duration::from_millis(150);
+        read(&mut app, b"\t", shown + ASK_QUIET * 2);
+        let written = typed_apart(&mut app, "no, use", shown + ASK_QUIET * 2, every);
+
+        let withdrawn = written + every;
+        app.tick(withdrawn, None);
+        app.apply(ended);
+        assert!(app.asking().is_none());
+        assert_eq!(app.hint(), Some(QUESTION_WITHDRAWN_HINT));
+        let last = typed_apart(&mut app, " rg", withdrawn, every);
+        read(&mut app, b"\r", last + every);
+        (app, last + every)
+    }
+
+    #[test]
+    fn an_enter_typed_through_a_withdrawn_question_sends_nothing() {
+        let (mut app, pressed) =
+            written_through_a_withdrawal(&Event::PermissionWithdrawn { id: "t1".into() });
+
+        assert_eq!(app.said(), []);
+        assert_eq!(app.hint(), Some(WITHDRAWN_NOT_SENT_HINT));
+        assert_eq!(app.composed(), "no, use rg");
+        read(&mut app, b"\r", pressed + ASK_QUIET * 2);
+        assert_eq!(
+            app.said(),
+            [Event::UserMessage {
+                text: "no, use rg".to_owned()
+            }]
+        );
+    }
+
+    /// Keys that arrive together are not an operator's deliberate Enter: a
+    /// burst read after the quiet has passed does not end the guard, so an
+    /// Enter inside it still sends nothing.
+    #[test]
+    fn a_burst_read_after_the_quiet_does_not_end_the_withdrawal_guard() {
+        let (mut app, pressed) =
+            written_through_a_withdrawal(&Event::PermissionWithdrawn { id: "t1".into() });
+        assert_eq!(app.said(), []);
+
+        let burst = pressed + ASK_QUIET * 2;
+        read(&mut app, b"xy", burst);
+        read(&mut app, b"\r", burst + Duration::from_millis(150));
+
+        assert_eq!(app.said(), []);
+        assert_eq!(app.hint(), Some(WITHDRAWN_NOT_SENT_HINT));
+    }
+
+    #[test]
+    fn an_enter_typed_through_a_question_its_turn_ended_on_sends_nothing() {
+        let (mut app, _) = written_through_a_withdrawal(&Event::TurnEnded);
+
+        assert_eq!(app.said(), []);
+        assert_eq!(app.hint(), Some(WITHDRAWN_NOT_SENT_HINT));
+        assert_eq!(app.composed(), "no, use rg");
     }
 
     #[test]
@@ -7491,34 +15853,2445 @@ mod tests {
         );
     }
 
+    /// A shell asking whether to trust the repository's config, drawn first
+    /// by the tick at `shown`.
+    fn trusting_at(shown: Instant) -> App {
+        let mut app = app().asking_trust(crate::trust::Question {
+            path: "/r/.niobe/config.toml".to_owned(),
+            grants: vec![("permissions".to_owned(), "allow Bash".to_owned())],
+        });
+        app.tick(shown, None);
+        app
+    }
+
     #[test]
-    #[allow(clippy::print_stdout)]
-    fn one_line_performance_benchmark() {
-        let sample_inputs = [
-            "",
-            "   \t\n\r  ",
-            "short_arg",
-            "   hello   world   from   niobe   tui   ",
-            "{\n  \"command\": \"cargo test\",\n  \"args\": [\n    \"--workspace\",\n    \"--all-targets\"\n  ],\n  \"env\": {\n    \"RUST_LOG\": \"info\"\n  }\n}",
-        ];
-        let iterations = if std::env::var_os("BENCHMARK").is_some() {
-            200_000
-        } else {
-            1
+    fn answering_the_trust_question_ends_the_shell_with_the_answer() {
+        let shown = Instant::now();
+        let mut app = trusting_at(shown);
+        assert!(app.trusting().is_some());
+
+        read(&mut app, b"\x1b[A", shown + ASK_QUIET * 2);
+        read(&mut app, b"\r", shown + ASK_QUIET * 3);
+
+        assert_eq!(app.trust_answer(), Some(crate::trust::Answer::Trust));
+        assert!(app.trusting().is_none());
+        assert!(app.should_quit());
+    }
+
+    #[test]
+    fn enter_held_with_a_modifier_trusts_nothing() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut app = trusting_at(Instant::now());
+
+        for held in [
+            KeyModifiers::SHIFT,
+            KeyModifiers::ALT,
+            KeyModifiers::CONTROL,
+        ] {
+            app.on_key(KeyEvent::new(KeyCode::Enter, held));
+        }
+        app.on_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL));
+
+        assert_eq!(app.trust_answer(), None);
+        assert_eq!(
+            app.trusting().map(crate::trust::Asking::selected),
+            Some(crate::trust::Answer::NotNow)
+        );
+    }
+
+    #[test]
+    fn a_prompt_typed_at_the_trust_question_and_sent_trusts_nothing() {
+        let shown = Instant::now();
+        let mut app = trusting_at(shown);
+
+        let mut at = shown + ASK_QUIET * 6;
+        for key in b"hello" {
+            read(&mut app, &[*key], at);
+            at += Duration::from_millis(150);
+        }
+        read(&mut app, b"\r", at + Duration::from_secs(1));
+
+        assert_eq!(app.trust_answer(), None);
+        assert!(app.trusting().is_some());
+        assert_eq!(app.hint(), Some(TYPED_AT_TRUST_HINT));
+        assert!(!app.should_quit());
+    }
+
+    #[test]
+    fn a_prompt_that_is_the_digit_one_typed_and_sent_at_the_trust_question_trusts_nothing() {
+        let shown = Instant::now();
+        let mut app = trusting_at(shown);
+
+        read(&mut app, b"1", shown + ASK_QUIET * 6);
+        read(
+            &mut app,
+            b"\r",
+            shown + ASK_QUIET * 6 + Duration::from_millis(150),
+        );
+
+        assert_eq!(app.trust_answer(), None);
+        assert!(app.trusting().is_some());
+        assert_eq!(
+            app.trusting().map(crate::trust::Asking::selected),
+            Some(crate::trust::Answer::NotNow)
+        );
+        assert_eq!(app.hint(), Some(HASTY_AT_TRUST_HINT));
+        assert!(!app.should_quit());
+    }
+
+    #[test]
+    fn trust_chosen_with_its_digit_is_given_by_an_enter_after_a_pause() {
+        let shown = Instant::now();
+        let mut app = trusting_at(shown);
+
+        read(&mut app, b"1", shown + ASK_QUIET * 6);
+        read(&mut app, b"\r", shown + ASK_QUIET * 7);
+
+        assert_eq!(app.trust_answer(), Some(crate::trust::Answer::Trust));
+    }
+
+    #[test]
+    fn trust_is_given_by_moving_to_it_and_pressing_enter_after_typing() {
+        let shown = Instant::now();
+        let mut app = trusting_at(shown);
+
+        read(&mut app, b"x", shown + ASK_QUIET * 2);
+        read(&mut app, b"\x1b[A", shown + ASK_QUIET * 4);
+        read(&mut app, b"\r", shown + ASK_QUIET * 6);
+
+        assert_eq!(app.trust_answer(), Some(crate::trust::Answer::Trust));
+    }
+
+    #[test]
+    fn an_enter_typed_as_the_trust_question_came_up_trusts_nothing() {
+        let shown = Instant::now();
+        let mut app = trusting_at(shown);
+
+        read(&mut app, b"\r", shown + ASK_QUIET / 5);
+        assert_eq!(app.trust_answer(), None);
+        assert_eq!(app.hint(), Some(TOO_SOON_HINT));
+        // Each key held back starts the wait again.
+        read(&mut app, b"\r", shown + ASK_QUIET);
+        assert_eq!(app.trust_answer(), None);
+
+        read(&mut app, b"\r", shown + ASK_QUIET * 3);
+        assert_eq!(app.trust_answer(), Some(crate::trust::Answer::NotNow));
+    }
+
+    #[test]
+    fn a_key_read_before_the_trust_question_was_drawn_trusts_nothing() {
+        let mut app = app().asking_trust(crate::trust::Question {
+            path: "/r/.niobe/config.toml".to_owned(),
+            grants: Vec::new(),
+        });
+
+        read(&mut app, b"\r", Instant::now());
+
+        assert_eq!(app.trust_answer(), None);
+        assert!(!app.should_quit());
+    }
+
+    #[test]
+    fn neither_a_paste_nor_typing_reaches_a_prompt_behind_the_trust_question() {
+        let shown = Instant::now();
+        let mut app = trusting_at(shown);
+
+        app.on_paste("fix the build");
+        read(&mut app, b"x", shown + ASK_QUIET * 2);
+
+        assert_eq!(app.composer().lines(), [""]);
+        assert_eq!(app.trust_answer(), None);
+        assert!(app.trusting().is_some());
+    }
+
+    #[test]
+    fn quitting_from_the_trust_question_takes_two_ctrl_c_and_leaves_it_unanswered() {
+        let shown = Instant::now();
+        let mut app = trusting_at(shown);
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        let at = |millis| Arrival {
+            at: shown + Duration::from_millis(millis),
+            alone: true,
         };
-        let start = Instant::now();
-        for _ in 0..iterations {
-            for input in &sample_inputs {
-                std::hint::black_box(one_line(std::hint::black_box(input)));
+
+        app.on_key_read(ctrl_c, at(100));
+        assert!(!app.should_quit());
+        assert!(app.trusting().is_some());
+
+        app.on_key_read(ctrl_c, at(200));
+        assert!(app.should_quit());
+        assert_eq!(app.trust_answer(), None);
+    }
+
+    /// `app`, attached to a backend that lists `names` as its commands.
+    fn offering(names: &[&str]) -> App {
+        let mut app = app().attached();
+        app.apply(&Event::Commands {
+            commands: names
+                .iter()
+                .map(|name| SlashCommand {
+                    name: (*name).to_owned(),
+                    description: String::new(),
+                    argument_hint: None,
+                    mid_prompt: false,
+                })
+                .collect(),
+        });
+        app
+    }
+
+    fn alt(c: char) -> ratatui::crossterm::event::KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT)
+    }
+
+    /// The action the cursor of the open menu is on.
+    fn under_cursor(app: &App) -> Option<crate::menu::Action> {
+        app.menu()
+            .and_then(|open| open.item())
+            .map(|item| item.action)
+    }
+
+    #[test]
+    fn esc_then_a_menus_letter_opens_that_menu_on_its_first_item() {
+        let mut app = app();
+        app.on_key(key(KeyCode::Esc));
+        assert!(
+            app.hint().is_some_and(|hint| hint.contains("V View")),
+            "Esc says the letters open menus: {:?}",
+            app.hint()
+        );
+        app.on_key(key(KeyCode::Char('v')));
+        assert_eq!(app.menu().map(|open| open.menu().name), Some("View"));
+        assert_eq!(under_cursor(&app), Some(crate::menu::Action::Diff));
+        assert_eq!(app.composer().lines(), [""]);
+    }
+
+    #[test]
+    fn alt_and_a_menus_letter_opens_it_too() {
+        let mut app = app();
+        app.on_key(alt('s'));
+        assert_eq!(app.menu().map(|open| open.menu().name), Some("Session"));
+    }
+
+    #[test]
+    fn a_letter_typed_without_esc_is_typed() {
+        let mut app = app();
+        app.on_key(key(KeyCode::Char('v')));
+        assert_eq!(app.menu(), None);
+        assert_eq!(app.composer().lines(), ["v"]);
+    }
+
+    #[test]
+    fn the_arrows_walk_an_open_menu_and_enter_runs_the_item() {
+        let mut app = app();
+        app.on_key(alt('v'));
+        app.on_key(key(KeyCode::Down));
+        assert_eq!(under_cursor(&app), Some(crate::menu::Action::GroupByAgent));
+        app.on_key(key(KeyCode::Enter));
+        assert!(app.grouped_by_agent());
+        assert_eq!(app.menu(), None, "running an item closes its menu");
+
+        app.on_key(alt('v'));
+        app.on_key(key(KeyCode::Right));
+        assert_eq!(app.menu().map(|open| open.menu().name), Some("Help"));
+        app.on_key(key(KeyCode::Left));
+        app.on_key(key(KeyCode::Left));
+        assert_eq!(app.menu().map(|open| open.menu().name), Some("Model"));
+    }
+
+    #[test]
+    fn a_letter_in_an_open_menu_moves_the_cursor_and_runs_nothing() {
+        let mut app = offering(&["clear"]);
+        app.on_key(alt('s'));
+        app.on_key(key(KeyCode::Char('n')));
+        assert_eq!(under_cursor(&app), Some(crate::menu::Action::NewSession));
+        assert_eq!(app.said(), [], "nothing is sent until Enter");
+        assert_eq!(app.composer().lines(), [""], "and nothing is typed");
+    }
+
+    #[test]
+    fn esc_closes_a_menu_and_leaves_the_prompt_as_it_was() {
+        let mut app = app();
+        app.on_key(key(KeyCode::Char('x')));
+        app.on_key(alt('h'));
+        app.on_key(key(KeyCode::Esc));
+        assert_eq!(app.menu(), None);
+        assert_eq!(app.composer().lines(), ["x"]);
+        app.on_key(key(KeyCode::Char('5')));
+        assert_eq!(
+            app.composer().lines(),
+            ["x5"],
+            "the Esc that closed it arms no F-key"
+        );
+    }
+
+    #[test]
+    fn a_click_on_a_menus_name_opens_it_and_a_click_on_an_item_runs_it() {
+        let mut app = app();
+        app.drew_bars(Rect::new(0, 0, 120, 1), Rect::new(0, 29, 120, 1));
+        let (view, _) = crate::menu::title_columns()[4];
+        app.on_mouse(click_at(view + 1, 0));
+        assert_eq!(app.menu().map(|open| open.menu().name), Some("View"));
+
+        app.drew_menu_list(Some(Rect::new(view, 1, 30, 8)));
+        app.on_mouse(click_at(view + 2, 3));
+        assert!(app.grouped_by_agent(), "the second item, under the border");
+        assert_eq!(app.menu(), None);
+
+        app.on_mouse(click_at(view + 1, 0));
+        app.on_mouse(click_at(60, 15));
+        assert_eq!(app.menu(), None, "a click anywhere else closes it");
+        assert!(app.grouped_by_agent(), "and runs nothing");
+    }
+
+    #[test]
+    fn a_click_on_the_f_key_bar_presses_that_key() {
+        let mut app = app();
+        app.drew_bars(Rect::new(0, 0, 120, 1), Rect::new(0, 29, 120, 1));
+        let widths = crate::menu::fkey_widths(120);
+        let start = |n: usize| crate::menu::stop_columns() + widths[..n].iter().sum::<u16>();
+        app.on_mouse(click_at(start(4) + 2, 29));
+        assert!(app.diffs_open(), "5 Diff");
+        app.on_mouse(click_at(start(9) + 2, 29));
+        assert!(app.should_quit(), "0 Quit");
+    }
+
+    /// Whether anything that takes keys of its own, or answers for the
+    /// operator, is open over the shell.
+    fn opened_over(app: &App) -> Vec<&'static str> {
+        [
+            (app.picking().is_some(), "a list"),
+            (app.finding().is_some(), "the search"),
+            (app.menu().is_some(), "a menu"),
+            (app.sheet().is_some(), "a sheet"),
+            (app.memory().is_some(), "the Memory view"),
+            (app.mcp().is_some(), "the MCP view"),
+            (app.browser().is_some(), "the history"),
+            (app.diffs_open(), "the cut diffs"),
+        ]
+        .into_iter()
+        .filter_map(|(open, what)| open.then_some(what))
+        .collect()
+    }
+
+    #[test]
+    fn no_click_on_the_bars_opens_anything_while_a_question_waits() {
+        for focus in [AskFocus::Choosing, AskFocus::Deferred] {
+            for (row, columns) in [(0, 0..60), (29, 0..120)] {
+                for column in columns {
+                    let mut app = under_a_profile(&["opus", "sonnet"]);
+                    app.drew_bars(Rect::new(0, 0, 120, 1), Rect::new(0, 29, 120, 1));
+                    app.apply(&prompt(Some("rm -rf build")));
+                    if focus == AskFocus::Deferred {
+                        app.on_key(key(KeyCode::Esc));
+                    }
+
+                    app.on_mouse(click_at(column, row));
+
+                    assert_eq!(
+                        opened_over(&app),
+                        [] as [&str; 0],
+                        "{focus:?} {column},{row}"
+                    );
+                    assert_eq!(app.ask_focus(), focus, "{column},{row}");
+                    assert!(app.asking().is_some(), "{column},{row}");
+                    assert_eq!(app.said(), [], "{column},{row}");
+                    assert!(app.take_handoffs().is_empty(), "{column},{row}");
+                }
             }
         }
-        let elapsed = start.elapsed();
-        if std::env::var_os("BENCHMARK").is_some() {
-            println!(
-                "Benchmark: {} total calls took {:?}",
-                iterations * sample_inputs.len(),
-                elapsed
+    }
+
+    #[test]
+    fn a_click_on_the_bars_while_a_question_waits_says_to_answer_it_first() {
+        let mut app = under_a_profile(&["opus", "sonnet"]);
+        app.drew_bars(Rect::new(0, 0, 120, 1), Rect::new(0, 29, 120, 1));
+        app.apply(&prompt(Some("rm -rf build")));
+        let widths = crate::menu::fkey_widths(120);
+        let model = crate::menu::stop_columns() + widths[..3].iter().sum::<u16>() + 2;
+
+        app.on_mouse(click_at(model, 29));
+
+        assert_eq!(app.hint(), Some(QUESTION_FIRST_HINT));
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(
+            app.said(),
+            [Event::PermissionResponse {
+                id: "t1".into(),
+                decision: PermissionDecision::AllowAlways,
+                message: None,
+            }],
+            "the keys went to the question the operator was looking at"
+        );
+    }
+
+    #[test]
+    fn quitting_from_the_f_key_bar_still_works_while_a_question_waits() {
+        let mut app = app();
+        app.drew_bars(Rect::new(0, 0, 120, 1), Rect::new(0, 29, 120, 1));
+        app.apply(&prompt(Some("rm -rf build")));
+        let widths = crate::menu::fkey_widths(120);
+        let quit = crate::menu::stop_columns() + widths[..9].iter().sum::<u16>() + 2;
+
+        app.on_mouse(click_at(quit, 29));
+
+        assert!(app.should_quit());
+    }
+
+    #[test]
+    fn no_item_of_a_menu_open_when_a_question_comes_runs_from_a_click_but_quit() {
+        use crate::menu::{Action, MENUS};
+        for (at, menu) in MENUS.iter().enumerate() {
+            for (row, item) in (2..).zip(menu.items) {
+                let mut app = under_a_profile(&["opus", "sonnet"]);
+                app.drew_bars(Rect::new(0, 0, 120, 1), Rect::new(0, 29, 120, 1));
+                let (title, _) = crate::menu::title_columns()[at];
+                app.on_mouse(click_at(title + 1, 0));
+                app.apply(&prompt(Some("rm -rf build")));
+                let rows = u16::try_from(menu.items.len()).expect("a menu holds a few items");
+                app.drew_menu_list(Some(Rect::new(title, 1, 30, rows + 2)));
+
+                app.on_mouse(click_at(title + 2, row));
+
+                assert_eq!(opened_over(&app), [] as [&str; 0], "{}", item.label);
+                assert!(app.asking().is_some(), "{}", item.label);
+                assert_eq!(app.said(), [], "{}", item.label);
+                assert!(app.take_handoffs().is_empty(), "{}", item.label);
+                assert_eq!(
+                    app.should_quit(),
+                    item.action == Action::Quit,
+                    "{}",
+                    item.label
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_click_on_the_bars_opens_anything_under_the_trust_question() {
+        for (row, columns) in [(0, 0..60), (29, 0..120)] {
+            for column in columns {
+                let shown = Instant::now();
+                let mut app = trusting_at(shown);
+                app.drew_bars(Rect::new(0, 0, 120, 1), Rect::new(0, 29, 120, 1));
+
+                app.on_mouse(click_at(column, row));
+                read(&mut app, b"\x1b[B", shown + ASK_QUIET * 2);
+
+                assert_eq!(opened_over(&app), [] as [&str; 0], "{column},{row}");
+                assert_eq!(app.trust_answer(), None, "{column},{row}");
+                assert!(app.take_handoffs().is_empty(), "{column},{row}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_list_open_when_a_question_comes_takes_its_keys_and_answers_nothing() {
+        let mut app = under_a_profile(&["opus", "sonnet"]);
+        app.on_key(key(KeyCode::F(4)));
+        app.apply(&prompt(Some("rm -rf build")));
+
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Enter));
+
+        assert_eq!(
+            app.said(),
+            [Event::ModelSelected {
+                model: "sonnet".to_owned()
+            }]
+        );
+        assert!(app.picking().is_none());
+        assert!(app.asking().is_some());
+        assert_eq!(
+            app.ask_selected(),
+            Answer::Once,
+            "Down moved the question's answer"
+        );
+    }
+
+    #[test]
+    fn the_search_open_when_a_question_comes_takes_typing_and_enter_and_answers_nothing() {
+        let mut app = app();
+        app.on_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        app.apply(&prompt(Some("rm -rf build")));
+
+        app.on_key(key(KeyCode::Char('2')));
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Enter));
+
+        assert_eq!(
+            app.finding().map(|query| query.lines().to_vec()),
+            Some(vec!["2".to_owned()])
+        );
+        assert_eq!(app.said(), []);
+        assert!(app.asking().is_some());
+        assert_eq!(
+            app.ask_selected(),
+            Answer::Once,
+            "Down moved the question's answer"
+        );
+    }
+
+    #[test]
+    fn a_paste_into_the_search_open_over_a_question_goes_into_the_search() {
+        let mut app = app();
+        app.on_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        app.apply(&prompt(Some("rm -rf build")));
+
+        app.on_paste("error");
+
+        assert_eq!(
+            app.finding().map(|query| query.lines().to_vec()),
+            Some(vec!["error".to_owned()])
+        );
+        assert!(app.asking().is_some());
+    }
+
+    #[test]
+    fn esc_closes_a_list_opened_under_a_question_put_aside_and_leaves_it_aside() {
+        let mut app = under_a_profile(&["opus", "sonnet"]);
+        app.apply(&prompt(Some("rm -rf build")));
+        app.on_key(key(KeyCode::Esc));
+        app.on_key(key(KeyCode::F(4)));
+        assert!(app.picking().is_some());
+
+        app.on_key(key(KeyCode::Esc));
+
+        assert!(app.picking().is_none());
+        assert_eq!(app.ask_focus(), AskFocus::Deferred);
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(app.said(), []);
+        assert!(app.asking().is_some());
+    }
+
+    #[test]
+    fn esc_closes_a_search_opened_under_a_question_put_aside_and_leaves_it_aside() {
+        let mut app = app();
+        app.apply(&prompt(Some("rm -rf build")));
+        app.on_key(key(KeyCode::Esc));
+        app.on_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        assert!(app.finding().is_some());
+        app.on_key(key(KeyCode::Char('e')));
+
+        app.on_key(key(KeyCode::Esc));
+
+        assert!(app.finding().is_none());
+        assert_eq!(app.ask_focus(), AskFocus::Deferred);
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(app.said(), []);
+        assert!(app.asking().is_some());
+    }
+
+    #[test]
+    fn a_question_uncovered_by_closing_a_list_waits_for_a_quiet_keyboard_again() {
+        let shown = Instant::now();
+        let mut app = under_a_profile(&["opus", "sonnet"]);
+        app.tick(shown, None);
+        app.on_key(key(KeyCode::F(4)));
+        app.apply(&prompt(Some("rm -rf build")));
+        let alone = |at| Arrival { at, alone: true };
+
+        app.on_key_read(key(KeyCode::Esc), alone(shown + ASK_QUIET * 2));
+        app.on_key_read(
+            key(KeyCode::Enter),
+            alone(shown + ASK_QUIET * 2 + ASK_QUIET / 5),
+        );
+
+        assert!(app.picking().is_none());
+        assert_eq!(app.said(), []);
+        assert_eq!(app.hint(), Some(TOO_SOON_HINT));
+        app.on_key_read(key(KeyCode::Enter), alone(shown + ASK_QUIET * 5));
+        assert_eq!(
+            app.said(),
+            [Event::PermissionResponse {
+                id: "t1".into(),
+                decision: PermissionDecision::Allow,
+                message: None,
+            }]
+        );
+    }
+
+    /// Folds in a `Read` of `path` that returned `output`, start and end.
+    fn read_call(app: &mut App, id: &str, path: &str, output: &str) {
+        app.apply(&Event::ToolCallStart {
+            id: id.into(),
+            name: "Read".to_owned(),
+            input: format!("{{\"file_path\":\"{path}\"}}"),
+            summary: Some(path.to_owned()),
+            agent: None,
+        });
+        app.apply(&Event::ToolCallEnd {
+            id: id.into(),
+            name: "Read".to_owned(),
+            input: format!("{{\"file_path\":\"{path}\"}}"),
+            output: output.to_owned(),
+            bytes: output.len() as u64,
+            outcome: ToolOutcome::Ok,
+            summary: Some(path.to_owned()),
+            exit_code: None,
+            error: None,
+            command: None,
+            untrimmed: None,
+        });
+    }
+
+    #[test]
+    fn d_in_a_side_pane_lists_the_calls_on_the_newest_and_enter_reads_it_whole() {
+        let mut app = app();
+        read_call(&mut app, "t1", "a.rs", "fn a() {}");
+        read_call(&mut app, "t2", "b.rs", "fn b() {}\n\tfn c() {}\n");
+        app.focus = Focus::Pane(Pane::Activity);
+
+        app.on_key(key(KeyCode::Char('d')));
+        let picker = app.picking().expect("d opens the list of calls");
+        assert_eq!(picker.purpose, Purpose::Call);
+        assert_eq!(picker.options.len(), 2);
+        assert_eq!(picker.at, 1, "the list opens on the newest call");
+        app.on_key(key(KeyCode::Enter));
+
+        let detail = app.detail().expect("Enter reads the call under the cursor");
+        assert_eq!(
+            detail.text(),
+            "{\"file_path\":\"b.rs\"}fn b() {}\n\tfn c() {}\n"
+        );
+        assert_eq!(app.overlay(), Some(Overlay::Detail));
+    }
+
+    #[test]
+    fn o_in_a_side_pane_opens_the_overview_and_asks_the_binary_for_it() {
+        use ratatui::crossterm::event::KeyCode;
+
+        let mut app = App::new(Repo::default());
+        app.focus = Focus::Pane(Pane::Activity);
+        app.on_key(key(KeyCode::Char('o')));
+        assert!(app.take_overview_request(), "the page is asked for");
+        assert!(!app.take_overview_request(), "once");
+        let open = app.detail().expect("the overview is open");
+        assert_eq!(open.title(), crate::overview::TITLE);
+
+        app.set_overview("# What has been built in niobe");
+        let open = app.detail().expect("the page is in it");
+        assert_eq!(open.text(), "# What has been built in niobe");
+    }
+
+    #[test]
+    fn a_page_that_lands_after_its_dialog_closed_opens_nothing() {
+        use ratatui::crossterm::event::KeyCode;
+
+        let mut app = App::new(Repo::default());
+        app.perform(crate::menu::Action::Overview);
+        app.on_key(key(KeyCode::Esc));
+        assert!(app.detail().is_none());
+        app.set_overview("late");
+        assert!(app.detail().is_none(), "a closed overview stays closed");
+    }
+
+    #[test]
+    fn an_empty_page_says_nothing_is_recorded() {
+        let mut app = App::new(Repo::default());
+        app.perform(crate::menu::Action::Overview);
+        app.set_overview("");
+        let open = app.detail().expect("the overview is open");
+        assert!(open.text().is_empty());
+    }
+
+    #[test]
+    fn asking_for_one_agent_before_there_are_any_says_so_and_opens_nothing() {
+        let mut app = app();
+
+        app.perform(crate::menu::Action::OneAgent);
+
+        assert!(app.picking().is_none());
+        assert_eq!(app.hint(), Some(NO_AGENTS_HINT));
+    }
+
+    #[test]
+    fn s_in_a_side_pane_narrows_the_transcript_to_one_agent_and_again_shows_all() {
+        let mut app = app();
+        app.apply(&Event::UserMessage {
+            text: "look around".to_owned(),
+        });
+        for (id, path) in [("a1", "one.rs"), ("a2", "two.rs")] {
+            app.apply(&Event::AgentSpawn {
+                id: id.into(),
+                parent: None,
+                kind: Some("Explore".to_owned()),
+                label: format!("read {path}"),
+            });
+            app.apply(&Event::AssistantMessage {
+                text: format!("Reading {path}."),
+                agent: Some(id.into()),
+            });
+        }
+        let everything = app.entries_shown().len();
+        app.focus = Focus::Pane(Pane::Activity);
+
+        app.on_key(key(KeyCode::Char('s')));
+        let picker = app.picking().expect("s opens the list of sub-agents");
+        assert_eq!(picker.purpose, Purpose::Agent);
+        assert_eq!(picker.at, 1, "the list opens on the newest agent");
+        app.on_key(key(KeyCode::Up));
+        app.on_key(key(KeyCode::Enter));
+
+        let bodies: Vec<&str> = app
+            .entries_shown()
+            .iter()
+            .map(|entry| entry.body.as_str())
+            .collect();
+        assert_eq!(bodies, ["Reading one.rs."]);
+        app.focus = Focus::Pane(Pane::Activity);
+        app.on_key(key(KeyCode::Char('s')));
+        assert!(app.only_agent_tag().is_none());
+        assert_eq!(app.entries_shown().len(), everything);
+    }
+
+    #[test]
+    fn asking_for_the_calls_before_there_are_any_says_so_and_opens_nothing() {
+        let mut app = app();
+
+        app.perform(crate::menu::Action::Calls);
+
+        assert!(app.picking().is_none());
+        assert_eq!(app.hint(), Some(NO_CALLS_HINT));
+    }
+
+    #[test]
+    fn a_call_whose_start_never_arrived_is_listed_from_its_end() {
+        let mut app = app();
+        app.apply(&Event::ToolCallEnd {
+            id: "orphan".into(),
+            name: "Bash".to_owned(),
+            input: "{\"command\":\"ls\"}".to_owned(),
+            output: "Cargo.toml".to_owned(),
+            bytes: 10,
+            outcome: ToolOutcome::Ok,
+            summary: Some("ls".to_owned()),
+            exit_code: Some(0),
+            error: None,
+            command: None,
+            untrimmed: None,
+        });
+
+        app.perform(crate::menu::Action::Calls);
+        app.on_key(key(KeyCode::Enter));
+
+        let detail = app.detail().expect("the call is listed");
+        assert_eq!(detail.text(), "{\"command\":\"ls\"}Cargo.toml");
+    }
+
+    #[test]
+    fn a_call_niobe_trimmed_opens_on_what_the_model_read_with_the_whole_a_key_away() {
+        let mut app = app();
+        app.apply(&Event::ToolCallStart {
+            id: "t1".into(),
+            name: "Bash".to_owned(),
+            input: "{\"command\":\"cargo build\"}".to_owned(),
+            summary: Some("cargo build".to_owned()),
+            agent: None,
+        });
+        app.apply(&Event::ToolCallEnd {
+            id: "t1".into(),
+            name: "Bash".to_owned(),
+            input: "{\"command\":\"cargo build\"}".to_owned(),
+            output: "Finished".to_owned(),
+            bytes: 19,
+            outcome: ToolOutcome::Ok,
+            summary: Some("cargo build".to_owned()),
+            exit_code: None,
+            error: None,
+            command: Some("cargo build".to_owned()),
+            untrimmed: Some("Compiling a\nFinished".to_owned()),
+        });
+
+        app.perform(crate::menu::Action::Calls);
+        app.on_key(key(KeyCode::Enter));
+
+        let detail = app.detail().expect("the call is listed");
+        assert_eq!(
+            detail.text(),
+            "{\"command\":\"cargo build\"}FinishedCompiling a\nFinished"
+        );
+    }
+
+    /// A shell with `overlay` open, and the key that closes it: the key an
+    /// operator holds or presses twice — Enter wherever Enter closes it.
+    ///
+    /// The match is exhaustive, so an overlay added without a way to open it
+    /// here does not compile, and the tests over [`Overlay::ALL`] cover it.
+    fn opened(overlay: Overlay) -> (App, KeyEvent) {
+        let (mut app, opening, closing) = match overlay {
+            Overlay::Menu => (
+                app().attached(),
+                KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT),
+                key(KeyCode::Enter),
+            ),
+            Overlay::Sheet => (app().attached(), key(KeyCode::F(1)), key(KeyCode::Enter)),
+            Overlay::Memory => (app().attached(), key(KeyCode::F(8)), key(KeyCode::Esc)),
+            Overlay::Mcp => (app().attached(), key(KeyCode::F(7)), key(KeyCode::Esc)),
+            Overlay::History => (
+                remembering(&[("rm the build dir and rebuild", "3")], &["3"]),
+                ctrl('r'),
+                key(KeyCode::Enter),
+            ),
+            Overlay::List => (
+                under_a_profile(&["opus", "sonnet"]),
+                key(KeyCode::F(4)),
+                key(KeyCode::Enter),
+            ),
+            Overlay::Search => (app(), ctrl('f'), key(KeyCode::Esc)),
+            Overlay::Detail => {
+                let mut app = app();
+                read_call(&mut app, "t1", "README.md", "# niobe");
+                app.pick_call();
+                (app, key(KeyCode::Enter), key(KeyCode::Esc))
+            }
+        };
+        app.on_key(opening);
+        assert_eq!(app.overlay(), Some(overlay), "{overlay:?} did not open");
+        (app, closing)
+    }
+
+    #[test]
+    fn keys_read_together_under_anything_open_type_nothing_into_the_composer() {
+        for overlay in Overlay::ALL {
+            let (mut app, _) = opened(overlay);
+            app.on_paste("draft");
+            let before = app.composed();
+
+            read(&mut app, b"jj\r", Instant::now());
+
+            assert_eq!(app.composed(), before, "{overlay:?}");
+        }
+    }
+
+    #[test]
+    fn keys_read_together_under_the_memory_view_move_it_and_type_nothing() {
+        use crate::memory::Scope;
+        let mut app = app();
+        typed(&mut app, "draft");
+        app.on_key(key(KeyCode::F(8)));
+        app.set_memory(vec![
+            remembered("CLAUDE.md", Scope::Project, 0),
+            remembered("AGENTS.md", Scope::Imported, 1),
+        ]);
+
+        read(&mut app, b"jj\x1b[B\r", Instant::now());
+
+        assert_eq!(app.composed(), "draft");
+        assert_eq!(app.memory().and_then(|view| view.reading), Some((1, 0)));
+    }
+
+    #[test]
+    fn keys_read_together_under_the_trust_question_type_nothing_into_the_composer() {
+        let shown = Instant::now();
+        let mut app = trusting_at(shown);
+
+        read(&mut app, b"jj\r", shown + ASK_QUIET * 2);
+
+        assert_eq!(app.composed(), "");
+        assert_eq!(app.trust_answer(), None);
+        assert!(app.trusting().is_some());
+    }
+
+    #[test]
+    fn a_question_uncovered_by_closing_anything_open_over_it_waits_for_a_quiet_keyboard() {
+        for overlay in Overlay::ALL {
+            let shown = Instant::now();
+            let (mut app, closing) = opened(overlay);
+            app.tick(shown, None);
+            app.apply(&prompt(Some("rm -rf build")));
+            let alone = |at| Arrival { at, alone: true };
+
+            app.on_key_read(closing, alone(shown + ASK_QUIET * 4));
+            assert_eq!(app.overlay(), None, "{overlay:?} stayed open");
+            assert!(
+                !app.said()
+                    .iter()
+                    .any(|event| matches!(event, Event::PermissionResponse { .. })),
+                "{overlay:?}"
+            );
+            app.on_key_read(
+                key(KeyCode::Enter),
+                alone(shown + ASK_QUIET * 4 + ASK_QUIET / 5),
+            );
+
+            assert_eq!(app.said(), [], "{overlay:?}");
+            assert!(app.asking().is_some(), "{overlay:?}");
+            assert_eq!(app.hint(), Some(TOO_SOON_HINT), "{overlay:?}");
+            app.on_key_read(key(KeyCode::Enter), alone(shown + ASK_QUIET * 7));
+            assert_eq!(
+                app.said(),
+                [Event::PermissionResponse {
+                    id: "t1".into(),
+                    decision: PermissionDecision::Allow,
+                    message: None,
+                }],
+                "{overlay:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_question_uncovered_by_a_click_that_closed_a_menu_waits_for_a_quiet_keyboard() {
+        let shown = Instant::now();
+        let mut app = app();
+        app.drew_bars(Rect::new(0, 0, 120, 1), Rect::new(0, 29, 120, 1));
+        app.tick(shown, None);
+        app.on_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT));
+        app.apply(&prompt(Some("rm -rf build")));
+
+        app.tick(shown + ASK_QUIET * 4, None);
+        app.on_mouse(click_at(60, 15));
+        assert_eq!(app.menu(), None);
+        app.on_key_read(
+            key(KeyCode::Enter),
+            Arrival {
+                at: shown + ASK_QUIET * 4 + ASK_QUIET / 5,
+                alone: true,
+            },
+        );
+
+        assert_eq!(app.said(), []);
+        assert_eq!(app.hint(), Some(TOO_SOON_HINT));
+    }
+
+    #[test]
+    fn f2_and_f3_send_the_backends_own_commands() {
+        let mut app = offering(&["compact", "clear"]);
+        app.on_key(key(KeyCode::F(2)));
+        assert_eq!(
+            app.said(),
+            [Event::UserMessage {
+                text: "/compact".to_owned()
+            }]
+        );
+        app.apply(&Event::TurnEnded);
+        app.on_key(key(KeyCode::F(3)));
+        assert_eq!(
+            app.said(),
+            [Event::UserMessage {
+                text: "/clear".to_owned()
+            }]
+        );
+    }
+
+    #[test]
+    fn a_command_the_backend_does_not_list_is_not_sent_and_says_why() {
+        let mut app = offering(&["compact"]);
+        app.perform(crate::menu::Action::Doctor);
+        assert_eq!(app.said(), []);
+        assert!(
+            app.hint().is_some_and(|hint| hint.contains("/doctor")),
+            "{:?}",
+            app.hint()
+        );
+    }
+
+    #[test]
+    fn a_backend_command_waits_for_the_running_turn() {
+        let mut app = offering(&["compact", "clear"]);
+        typed_then_enter(&mut app, "go", KeyModifiers::NONE);
+        app.said();
+        app.on_key(key(KeyCode::F(3)));
+        assert_eq!(app.said(), [], "a /clear mid-turn is not sent");
+        assert!(app.hint().is_some_and(|hint| hint.contains("Esc")));
+    }
+
+    #[test]
+    fn a_backend_command_leaves_the_images_of_the_prompt_being_written() {
+        let mut app = offering(&["compact"]);
+        app.on_key(key(KeyCode::F(2)));
+        app.said();
+        assert_eq!(app.take_turn_images(), Vec::new());
+    }
+
+    #[test]
+    fn f9_shows_the_settings_and_the_files_they_come_from() {
+        let mut app = app().with_places(Places {
+            config_files: vec![
+                ConfigFile {
+                    path: "/home/me/.config/niobe/config.toml".to_owned(),
+                    exists: true,
+                    openable: true,
+                },
+                ConfigFile {
+                    path: "/work/repo/.niobe/config.toml".to_owned(),
+                    exists: false,
+                    openable: false,
+                },
+            ],
+        });
+        app.on_key(key(KeyCode::F(9)));
+        let sheet = app.sheet().expect("F9 opens the settings");
+        assert_eq!(sheet.title, "Settings");
+        let text = sheet.rows.join("\n");
+        assert!(
+            text.contains("/home/me/.config/niobe/config.toml"),
+            "{text}"
+        );
+        assert!(text.contains("not there"), "{text}");
+        assert!(text.contains("cyber"), "the theme in force: {text}");
+
+        app.on_key(key(KeyCode::Char('o')));
+        assert_eq!(
+            app.take_handoffs(),
+            [crate::desktop::Handoff::Open(
+                "/home/me/.config/niobe/config.toml".to_owned()
+            )],
+            "o opens the file that is there"
+        );
+        app.on_key(key(KeyCode::Esc));
+        assert_eq!(app.sheet(), None);
+        assert_eq!(app.composer().lines(), [""]);
+    }
+
+    #[test]
+    fn the_permissions_sheet_lists_the_standing_answers() {
+        let mut allowed = Allowlist::new();
+        allowed.insert(Rule::prefixed("Bash", "cargo test"));
+        let mut app = app().with_rules(allowed);
+        app.on_key(alt('n'));
+        app.on_key(key(KeyCode::Char('p')));
+        app.on_key(key(KeyCode::Enter));
+        let sheet = app.sheet().expect("the permissions");
+        assert!(
+            sheet.rows.iter().any(|row| row.contains("Bash(cargo test")),
+            "{:?}",
+            sheet.rows
+        );
+    }
+
+    fn remembered(
+        path: &str,
+        scope: crate::memory::Scope,
+        depth: usize,
+    ) -> crate::memory::MemoryFile {
+        crate::memory::MemoryFile {
+            scope,
+            path: path.to_owned(),
+            named: path.to_owned(),
+            depth,
+            text: Some(format!("{path} says\n")),
+            bytes: Some(9),
+            note: None,
+            editable: Some(format!("/work/repo/{path}")),
+        }
+    }
+
+    #[test]
+    fn f8_opens_the_memory_view_in_the_shell_and_hands_nothing_to_the_desktop() {
+        use crate::memory::Scope;
+        let mut app = app();
+        assert!(app.can(crate::menu::Action::Memory));
+
+        app.on_key(key(KeyCode::F(8)));
+        assert!(app.memory().is_some(), "F8 opened nothing in the shell");
+        assert_eq!(app.take_handoffs(), [], "F8 left the shell");
+        assert!(app.take_memory_request(), "nothing was asked to be read");
+
+        app.set_memory(vec![
+            remembered("CLAUDE.md", Scope::Project, 0),
+            remembered("AGENTS.md", Scope::Imported, 1),
+        ]);
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(app.memory().and_then(|view| view.reading), Some((1, 0)));
+        assert_eq!(app.take_handoffs(), []);
+
+        app.on_key(key(KeyCode::Char('e')));
+        assert_eq!(
+            app.take_handoffs(),
+            [crate::desktop::Handoff::Edit(
+                "/work/repo/AGENTS.md".to_owned()
+            )],
+            "e hands the file being read to a text editor, never to the opener"
+        );
+        app.on_key(key(KeyCode::Esc));
+        app.on_key(key(KeyCode::Esc));
+        assert_eq!(app.memory(), None);
+        assert_eq!(app.composer().lines(), [""], "a key reached the composer");
+    }
+
+    fn mcp_server(
+        name: &str,
+        status: niobe_core::event::McpStatus,
+        tools: &[&str],
+    ) -> niobe_core::event::McpServer {
+        niobe_core::event::McpServer {
+            name: name.to_owned(),
+            status,
+            source: Some("project".to_owned()),
+            tools: tools.iter().map(|tool| (*tool).to_owned()).collect(),
+            scope: None,
+            error: None,
+            endpoint: None,
+            reports_as: None,
+        }
+    }
+
+    /// A shell attached to a backend that reported a connected and a failed
+    /// server.
+    fn with_mcp_servers() -> App {
+        use niobe_core::event::McpStatus;
+        let mut app = offering(&["mcp"]);
+        app.apply(&Event::McpServers {
+            servers: vec![
+                mcp_server("notes", McpStatus::Connected, &["search", "fetch"]),
+                mcp_server("remote docs", McpStatus::Failed, &[]),
+            ],
+        });
+        app
+    }
+
+    /// What the open MCP view shows, a line a row.
+    fn mcp_shown(app: &App) -> String {
+        crate::mcp::shown(app, 90).join("\n")
+    }
+
+    fn rebound(pairs: &[(niobe_core::Bindable, niobe_core::Chord)]) -> App {
+        app()
+            .attached()
+            .with_keymap(niobe_core::Keymap::new(pairs.iter().copied()).expect("valid bindings"))
+    }
+
+    #[test]
+    fn an_action_rebound_to_an_f_key_is_pressed_by_it_and_the_bar_and_menu_say_so() {
+        use niobe_core::{Bindable, Chord};
+        let mut app = rebound(&[(Bindable::Mcp, Chord::F(11))]);
+
+        app.on_key(key(KeyCode::F(11)));
+
+        assert!(app.mcp().is_some(), "F11 did not open the MCP view");
+        let labels = app.fkey_labels();
+        assert_eq!(labels[6], "11", "the bar still draws 7: {labels:?}");
+        assert_eq!(labels[7], "8");
+        let item = crate::menu::MENUS
+            .iter()
+            .flat_map(|menu| menu.items)
+            .find(|item| item.action == crate::menu::Action::Mcp)
+            .expect("MCP is in a menu");
+        assert!(
+            app.item_keys(item).contains("F11"),
+            "{}",
+            app.item_keys(item)
+        );
+        assert!(
+            !app.item_keys(item).contains("F7"),
+            "{}",
+            app.item_keys(item)
+        );
+    }
+
+    #[test]
+    fn an_action_rebound_to_a_ctrl_letter_is_pressed_by_it() {
+        use niobe_core::{Bindable, Chord};
+        let mut app = rebound(&[(Bindable::Memory, Chord::Ctrl('s'))]);
+
+        app.on_key(ctrl('s'));
+
+        assert!(
+            app.memory().is_some(),
+            "Ctrl+S did not open the memory view"
+        );
+        assert_eq!(app.fkey_labels()[7], "^S");
+    }
+
+    #[test]
+    fn two_actions_that_trade_keys_each_answer_to_the_key_they_were_given() {
+        use niobe_core::{Bindable, Chord};
+        let mut app = rebound(&[
+            (Bindable::Mcp, Chord::F(8)),
+            (Bindable::Memory, Chord::F(7)),
+        ]);
+
+        app.on_key(key(KeyCode::F(8)));
+        assert!(app.mcp().is_some(), "F8 is MCP now");
+        app.on_key(key(KeyCode::Esc));
+        app.on_key(key(KeyCode::F(7)));
+        assert!(app.memory().is_some(), "F7 is memory now");
+    }
+
+    #[test]
+    fn with_nothing_rebound_the_bar_draws_its_digits_and_the_keys_are_unchanged() {
+        let mut app = app().attached();
+
+        assert_eq!(
+            app.fkey_labels(),
+            ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"].map(str::to_owned)
+        );
+        app.on_key(key(KeyCode::F(11)));
+        assert!(app.mcp().is_none());
+        app.on_key(ctrl('s'));
+        assert!(app.memory().is_none());
+    }
+
+    #[test]
+    fn f7_lists_the_mcp_servers_in_the_shell_mid_turn_and_sends_nothing() {
+        let mut app = with_mcp_servers();
+        typed_then_enter(&mut app, "go", KeyModifiers::NONE);
+        app.said();
+        assert!(app.working(), "the turn is not running");
+
+        app.on_key(key(KeyCode::F(7)));
+        assert_eq!(app.said(), [], "F7 sent a turn");
+        assert!(app.mcp().is_some(), "F7 opened no view");
+        let shown = mcp_shown(&app);
+        for said in ["notes", "connected", "2 tools", "remote docs", "failed"] {
+            assert!(shown.contains(said), "{said}:\n{shown}");
+        }
+        app.on_key(key(KeyCode::Esc));
+        assert_eq!(app.mcp(), None);
+        assert!(app.working(), "Esc closed the view and stopped the turn");
+    }
+
+    #[test]
+    fn the_mcp_view_says_where_no_server_has_been_reported() {
+        let mut app = app();
+        assert!(app.can(crate::menu::Action::Mcp));
+        app.perform(crate::menu::Action::Mcp);
+        let shown = mcp_shown(&app);
+        assert!(shown.contains("No MCP server"), "{shown}");
+    }
+
+    #[test]
+    fn a_typed_mcp_command_opens_the_mcp_view_as_f7_does() {
+        typed_as_asked(|| offering(&["mcp"]), "/mcp", crate::menu::Action::Mcp);
+        let mut typed = offering(&["mcp"]);
+        assert_eq!(submitted(&mut typed, "/mcp"), []);
+        assert!(typed.mcp().is_some());
+    }
+
+    #[test]
+    fn enter_in_the_mcp_view_shows_why_the_server_under_the_cursor_failed() {
+        let mut app = with_mcp_servers();
+        app.apply(&Event::McpServers {
+            servers: vec![
+                mcp_server(
+                    "notes",
+                    niobe_core::event::McpStatus::Connected,
+                    &["search"],
+                ),
+                niobe_core::event::McpServer {
+                    error: Some("ECONNREFUSED: Unable to connect.".to_owned()),
+                    endpoint: Some("http · http://127.0.0.1:9/mcp".to_owned()),
+                    ..mcp_server("remote docs", niobe_core::event::McpStatus::Failed, &[])
+                },
+            ],
+        });
+        app.on_key(key(KeyCode::F(7)));
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Enter));
+        let shown = mcp_shown(&app);
+        for said in [
+            "ECONNREFUSED: Unable to connect.",
+            "http · http://127.0.0.1:9/mcp",
+            "project",
+        ] {
+            assert!(shown.contains(said), "{said}:\n{shown}");
+        }
+        app.on_key(key(KeyCode::Esc));
+        assert!(app.mcp().is_some_and(|view| view.detail.is_none()));
+    }
+
+    #[test]
+    fn an_open_mcp_view_shows_the_newest_report_of_the_servers() {
+        use niobe_core::event::McpStatus;
+        let mut app = with_mcp_servers();
+        app.on_key(key(KeyCode::F(7)));
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Enter));
+        assert!(mcp_shown(&app).contains("failed"));
+
+        app.apply(&Event::McpServers {
+            servers: vec![
+                mcp_server(
+                    "remote docs",
+                    niobe_core::event::McpStatus::Connected,
+                    &["lookup"],
+                ),
+                mcp_server("notes", McpStatus::Connected, &["search", "fetch"]),
+            ],
+        });
+        let shown = mcp_shown(&app);
+        assert!(shown.contains("connected"), "{shown}");
+        assert!(shown.contains("lookup"), "{shown}");
+        assert!(!shown.contains("failed"), "{shown}");
+    }
+
+    #[test]
+    fn r_in_the_mcp_view_asks_the_backend_to_reconnect_the_server_and_sends_no_turn() {
+        let mut app = with_mcp_servers();
+        app.on_key(key(KeyCode::F(7)));
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Char('r')));
+        assert_eq!(app.take_mcp_reconnects(), ["remote docs"]);
+        assert_eq!(app.said(), []);
+        assert!(app.mcp().is_some(), "r closed the view");
+        assert!(
+            app.hint().is_some_and(|hint| hint.contains("remote docs")),
+            "{:?}",
+            app.hint()
+        );
+
+        let mut replayed = app_with_servers_unattached();
+        replayed.on_key(key(KeyCode::F(7)));
+        replayed.on_key(key(KeyCode::Char('r')));
+        assert_eq!(replayed.take_mcp_reconnects(), Vec::<String>::new());
+        assert!(!mcp_shown(&replayed).contains("r reconnect"));
+    }
+
+    #[test]
+    fn a_reconnect_the_backend_refused_names_the_failure_in_place_of_reconnecting() {
+        let mut app = with_mcp_servers();
+        app.on_key(key(KeyCode::F(7)));
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Char('r')));
+        assert!(
+            app.hint().is_some_and(|hint| hint.contains("Reconnecting")),
+            "{:?}",
+            app.hint()
+        );
+
+        app.apply(&Event::Notice {
+            message: "the MCP server `remote docs` could not be reconnected: ECONNREFUSED"
+                .to_owned(),
+        });
+
+        let hint = app.hint().expect("the answer is on the bar");
+        assert!(!hint.contains("Reconnecting"), "{hint}");
+        assert!(hint.contains("ECONNREFUSED"), "{hint}");
+    }
+
+    #[test]
+    fn a_reconnect_the_backend_took_says_how_the_server_stands_now() {
+        let mut app = with_mcp_servers();
+        app.on_key(key(KeyCode::F(7)));
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Char('r')));
+
+        app.apply(&Event::McpServers {
+            servers: vec![mcp_server(
+                "remote docs",
+                niobe_core::event::McpStatus::Connected,
+                &["lookup"],
+            )],
+        });
+
+        let hint = app.hint().expect("the answer is on the bar");
+        assert!(!hint.contains("Reconnecting"), "{hint}");
+        assert!(
+            hint.contains("remote docs") && hint.contains("connected"),
+            "{hint}"
+        );
+    }
+
+    #[test]
+    fn a_report_that_arrives_after_a_key_replaced_the_hint_does_not_bring_it_back() {
+        let mut app = with_mcp_servers();
+        app.on_key(key(KeyCode::F(7)));
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Char('r')));
+        app.on_key(key(KeyCode::Down));
+        assert!(app.hint().is_none(), "{:?}", app.hint());
+
+        app.apply(&Event::McpServers {
+            servers: vec![mcp_server(
+                "remote docs",
+                niobe_core::event::McpStatus::Connected,
+                &["lookup"],
+            )],
+        });
+
+        assert!(app.hint().is_none(), "{:?}", app.hint());
+    }
+
+    /// A shell with servers reported and no backend listening, as a recorded
+    /// session is read back.
+    fn app_with_servers_unattached() -> App {
+        let mut app = app();
+        app.apply(&Event::McpServers {
+            servers: vec![mcp_server(
+                "notes",
+                niobe_core::event::McpStatus::Connected,
+                &[],
+            )],
+        });
+        app
+    }
+
+    #[test]
+    fn a_memory_file_the_session_changed_is_known_by_the_path_the_backend_named() {
+        let mut app = app();
+        assert!(!app.changed_in_session("AGENTS.md"));
+        app.apply(&Event::FileChange {
+            path: "AGENTS.md".to_owned(),
+            added: Some(1),
+            removed: Some(0),
+            hunks: Vec::new(),
+            scope: niobe_core::event::ChangeScope::Project,
+        });
+        assert!(app.changed_in_session("AGENTS.md"));
+        assert!(!app.changed_in_session("CLAUDE.md"));
+    }
+
+    #[test]
+    fn the_theme_list_switches_to_the_theme_chosen() {
+        use crate::theme::{CYBER, NEO};
+
+        let mut app = app();
+        app.on_key(alt('v'));
+        app.on_key(key(KeyCode::Char('t')));
+        app.on_key(key(KeyCode::Enter));
+        let picker = app.picking().expect("the theme list");
+        assert_eq!(picker.purpose, Purpose::Theme);
+        assert_eq!(
+            picker.options[picker.at].value, CYBER.name,
+            "on the theme in force"
+        );
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(app.theme().name, NEO.name);
+        assert_eq!(
+            app.composer().style(),
+            Style::new().fg(NEO.fg).bg(NEO.pane_bg),
+            "the composer is repainted in it"
+        );
+        assert_eq!(app.picking(), None);
+    }
+
+    #[test]
+    fn the_effort_list_sends_the_level_chosen() {
+        let mut app = offering(&["effort"]);
+        app.on_key(alt('m'));
+        app.on_key(key(KeyCode::Char('e')));
+        app.on_key(key(KeyCode::Enter));
+        let picker = app.picking().expect("the effort list");
+        assert_eq!(picker.purpose, Purpose::Effort);
+        assert_eq!(values(picker), EFFORTS);
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(
+            app.said(),
+            [Event::UserMessage {
+                text: "/effort medium".to_owned()
+            }]
+        );
+    }
+
+    #[test]
+    fn a_pane_hidden_from_the_view_menu_is_not_drawn_or_focused() {
+        use crate::menu::SidePane;
+
+        let mut app = app();
+        assert!(app.shows(SidePane::Changes));
+        app.on_key(alt('v'));
+        app.on_key(key(KeyCode::Char('c')));
+        app.on_key(key(KeyCode::Enter));
+        assert!(!app.shows(SidePane::Changes));
+        assert!(app.shows(SidePane::Activity));
+
+        app.on_key(alt('v'));
+        app.on_key(key(KeyCode::Char('c')));
+        app.on_key(key(KeyCode::Enter));
+        assert!(app.shows(SidePane::Changes), "and shown again");
+    }
+
+    #[test]
+    fn f1_lists_the_keys_and_esc_closes_the_list() {
+        let mut app = app();
+        app.on_key(key(KeyCode::F(1)));
+        let sheet = app.sheet().expect("the shortcuts");
+        assert!(sheet.rows.iter().any(|row| row.contains("Ctrl+O")));
+        app.on_key(key(KeyCode::Char('x')));
+        assert_eq!(app.composer().lines(), [""], "the list has the keyboard");
+        app.on_key(key(KeyCode::Esc));
+        assert_eq!(app.sheet(), None);
+    }
+
+    #[test]
+    fn what_the_shell_cannot_do_says_why_rather_than_doing_nothing() {
+        use crate::menu::Action;
+
+        for action in [
+            Action::SignIn,
+            Action::Resume,
+            Action::Rewind,
+            Action::Hooks,
+        ] {
+            let mut app = app();
+            app.perform(action);
+            assert!(
+                app.hint().is_some_and(|hint| hint.len() > 20),
+                "{action:?}: {:?}",
+                app.hint()
+            );
+            assert_eq!(app.said(), [], "{action:?}");
+        }
+    }
+
+    #[test]
+    fn f6_offers_the_prompts_sent_from_here_newest_first_and_hands_out_the_one_chosen() {
+        use ratatui::crossterm::event::KeyCode;
+        let mut app = app();
+        app.sent_to_backend("make mean() return 0\nand say why");
+        app.sent_to_backend("now the median");
+
+        app.on_key(key(KeyCode::F(6)));
+        let picker = app.picking().expect("the prompts are offered");
+        assert_eq!(picker.purpose, Purpose::Rewind);
+        let named: Vec<_> = picker
+            .options
+            .iter()
+            .map(|choice| choice.name.as_deref())
+            .collect();
+        assert_eq!(
+            named,
+            [Some("now the median"), Some("make mean() return 0")]
+        );
+
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(app.take_rewinds(), [0]);
+        assert!(app.picking().is_none());
+        assert!(
+            app.hint()
+                .is_some_and(|hint| hint.contains("make mean() return 0")),
+            "{:?}",
+            app.hint()
+        );
+
+        app.apply(&Event::Notice {
+            message: "Files put back as they were before \"make mean() return 0\": a.py."
+                .to_owned(),
+        });
+        assert_eq!(app.hint(), None, "the transcript says what went back");
+    }
+
+    #[test]
+    fn a_conversation_started_over_offers_no_prompt_from_before_it() {
+        let mut app = app();
+        app.sent_to_backend("before");
+        app.apply(&Event::Cleared);
+        app.sent_to_backend("after");
+
+        app.perform(crate::menu::Action::Rewind);
+
+        let picker = app.picking().expect("the prompt since is offered");
+        assert_eq!(picker.options.len(), 1);
+        assert_eq!(picker.options[0].name.as_deref(), Some("after"));
+        assert_eq!(
+            picker.options[0].value, "1",
+            "counted among every prompt sent"
+        );
+    }
+
+    #[test]
+    fn add_file_starts_an_at_word_and_commands_a_slash() {
+        let mut naming = app();
+        naming.perform(crate::menu::Action::AddFile);
+        assert_eq!(naming.composer().lines(), ["@"]);
+
+        let mut commanding = app();
+        commanding.perform(crate::menu::Action::Commands);
+        assert_eq!(commanding.composer().lines(), ["/"]);
+    }
+
+    #[test]
+    fn reporting_a_bug_asks_for_the_diagnostics_and_the_bug_form_and_says_so_in_the_bar() {
+        let mut app = app();
+
+        app.perform(crate::menu::Action::ReportBug);
+
+        let handoffs = app.take_handoffs();
+        let [crate::desktop::Handoff::Report(link)] = handoffs.as_slice() else {
+            panic!("one report was asked for: {handoffs:?}");
+        };
+        assert!(link.ends_with("/issues/new?template=bug.yml"), "{link}");
+        app.handed_off(&handoffs[0], Ok(()));
+        let said = app.hint().expect("the bar says what was copied");
+        assert!(said.contains("Copied the diagnostics"), "{said}");
+        assert!(said.contains(link.as_str()), "{said}");
+
+        app.handed_off(
+            &handoffs[0],
+            Err("this needs one of pbcopy installed".to_owned()),
+        );
+        let said = app.hint().expect("the bar says why nothing was reported");
+        assert!(said.starts_with("Nothing reported"), "{said}");
+    }
+
+    #[test]
+    fn the_links_open_this_projects_pages() {
+        let mut app = app();
+        app.perform(crate::menu::Action::ReportBug);
+        app.perform(crate::menu::Action::ReleaseNotes);
+        let opened: Vec<String> = app
+            .take_handoffs()
+            .into_iter()
+            .map(|handoff| match handoff {
+                crate::desktop::Handoff::Open(link) | crate::desktop::Handoff::Report(link) => link,
+                crate::desktop::Handoff::Copy(text) => panic!("copied {text}"),
+                crate::desktop::Handoff::Edit(path) => panic!("edited {path}"),
+            })
+            .collect();
+        assert_eq!(opened.len(), 2);
+        assert!(
+            opened.iter().all(|link| link.starts_with("https://")),
+            "{opened:?}"
+        );
+    }
+
+    #[test]
+    fn stop_from_the_menu_stops_a_running_turn_and_says_so_when_none_is() {
+        let mut app = app().attached();
+        app.perform(crate::menu::Action::Stop);
+        assert!(app.hint().is_some_and(|hint| hint.contains("Nothing")));
+
+        typed_then_enter(&mut app, "go", KeyModifiers::NONE);
+        app.perform(crate::menu::Action::Stop);
+        assert!(app.take_interrupt());
+    }
+
+    /// A `cargo test` call `id` that starts at `from` seconds and, where
+    /// `counted`, ends at `to` with a run whose counts were read.
+    fn test_call(app: &mut App, id: &str, command: &str, from: u64, to: u64, counted: bool) {
+        let input = format!(r#"{{"command":"{command}"}}"#);
+        app.apply_at(&start(id, "Bash", &input, Some(command)), at(from, 9, 0));
+        app.apply_at(&ended(id, "Bash", ToolOutcome::Ok, 10), at(to, 9, 1));
+        app.apply_at(
+            &Event::TestRun {
+                id: id.into(),
+                counts: counted.then_some(niobe_core::TestCounts {
+                    passed: 3,
+                    failed: 0,
+                    ignored: 0,
+                    suites: 1,
+                }),
+                exit_code: Some(0),
+                failed: false,
+                failures: Vec::new(),
+            },
+            at(to, 9, 1),
+        );
+    }
+
+    fn last_call(app: &App) -> &Call {
+        app.entries()
+            .iter()
+            .rev()
+            .find_map(|entry| entry.calls.last())
+            .expect("a call was made")
+    }
+
+    #[test]
+    fn a_call_that_runs_the_tests_is_known_as_one_from_its_start() {
+        let mut app = app();
+        app.apply_at(
+            &start(
+                "t1",
+                "Bash",
+                r#"{"command":"cargo test"}"#,
+                Some("cargo test"),
+            ),
+            at(100, 9, 0),
+        );
+        assert!(last_call(&app).testing);
+        assert_eq!(last_call(&app).began(), Some(at(100, 9, 0)));
+
+        app.apply(&start("l1", "Bash", r#"{"command":"ls"}"#, Some("ls")));
+        assert!(!last_call(&app).testing, "a listing runs no tests");
+    }
+
+    #[test]
+    fn a_test_run_carries_how_long_the_last_counted_run_of_its_command_took() {
+        let mut app = app();
+        test_call(&mut app, "t1", "cargo test", 100, 142, true);
+        assert_eq!(last_call(&app).last_run, None, "nothing ran before it");
+
+        // A run whose counts were not read may have stopped anywhere, and is
+        // nothing to measure the next one against.
+        test_call(&mut app, "t2", "cargo test", 200, 205, false);
+        test_call(&mut app, "t3", "cargo test -p niobe-tui", 300, 310, true);
+        app.apply_at(
+            &start(
+                "t4",
+                "Bash",
+                r#"{"command":"cargo test"}"#,
+                Some("cargo test"),
+            ),
+            at(400, 9, 0),
+        );
+
+        assert_eq!(
+            last_call(&app).last_run,
+            Some(Duration::from_secs(42)),
+            "the last counted run of the same command, not of another one"
+        );
+    }
+
+    fn ctrl(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+    }
+
+    fn typed(app: &mut App, text: &str) {
+        for c in text.chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+    }
+
+    fn send_prompt(app: &mut App, text: &str) {
+        typed(app, text);
+        app.on_key(key(KeyCode::Enter));
+        app.said();
+    }
+
+    fn earlier(text: &str, session: &str) -> crate::history::PastPrompt {
+        crate::history::PastPrompt {
+            text: text.to_owned(),
+            at: None,
+            session: Target::Recorded(session.to_owned()),
+        }
+    }
+
+    fn remembering(prompts: &[(&str, &str)], sessions: &[&str]) -> App {
+        let mut app = app().remembers();
+        assert!(
+            app.take_history_request(),
+            "the shell asks for its history as it opens"
+        );
+        app.set_past(crate::history::Past {
+            prompts: prompts
+                .iter()
+                .map(|(text, session)| earlier(text, session))
+                .collect(),
+            sessions: sessions
+                .iter()
+                .map(|id| crate::history::PastSession {
+                    target: Target::Recorded((*id).to_owned()),
+                    last: None,
+                    first_prompt: None,
+                    title: None,
+                    open_elsewhere: false,
+                })
+                .collect(),
+            unread: None,
+        });
+        app
+    }
+
+    #[test]
+    fn up_on_the_first_row_walks_back_through_the_prompts_and_down_brings_the_draft_back() {
+        let mut app = remembering(&[("from yesterday", "3")], &["3"]);
+        send_prompt(&mut app, "first");
+        send_prompt(&mut app, "second");
+        typed(&mut app, "half");
+
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(app.composed(), "second");
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(app.composed(), "first");
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(
+            app.composed(),
+            "from yesterday",
+            "earlier sessions come after this one"
+        );
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(
+            app.composed(),
+            "from yesterday",
+            "the oldest is where the walk stops"
+        );
+
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Down));
+        assert_eq!(app.composed(), "second");
+        app.on_key(key(KeyCode::Down));
+        assert_eq!(
+            app.composed(),
+            "half",
+            "past the newest is the draft, as it was"
+        );
+        assert!(app.said().is_empty(), "recalling sends nothing");
+    }
+
+    /// `/clear` starts a session of its own, and the prompts the operator
+    /// wrote before it are still theirs to go back to without opening the
+    /// history dialog to have the store read again.
+    #[test]
+    fn up_right_after_a_clear_recalls_the_prompts_sent_before_it() {
+        let mut app = remembering(&[], &[]);
+        send_prompt(&mut app, "first prompt");
+        send_prompt(&mut app, "second prompt");
+        app.apply(&Event::Cleared);
+        send_prompt(&mut app, "after the clear");
+
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(app.composed(), "after the clear");
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(app.composed(), "second prompt");
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(app.composed(), "first prompt");
+    }
+
+    #[test]
+    fn a_prompt_sent_in_this_session_and_an_earlier_one_is_recalled_once() {
+        let mut app = remembering(&[("run the tests", "3"), ("fix it", "3")], &["3"]);
+        send_prompt(&mut app, "run the tests");
+
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(app.composed(), "run the tests");
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(app.composed(), "fix it");
+    }
+
+    #[test]
+    fn up_below_the_first_row_of_the_composer_moves_the_cursor_and_recalls_nothing() {
+        let mut app = remembering(&[("earlier", "3")], &["3"]);
+        typed(&mut app, "one");
+        app.on_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL));
+        typed(&mut app, "two");
+
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(app.composed(), "one\ntwo");
+        assert_eq!(app.composer().cursor().0, 0);
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(app.composed(), "earlier", "the first row's Up recalls");
+        app.on_key(key(KeyCode::Down));
+        assert_eq!(app.composed(), "one\ntwo");
+    }
+
+    #[test]
+    fn a_recalled_multiline_prompt_walks_on_with_the_next_arrow_either_way() {
+        let mut app = remembering(
+            &[("newest", "3"), ("two\nlines", "3"), ("oldest", "3")],
+            &["3"],
+        );
+        app.on_key(key(KeyCode::Up));
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(app.composed(), "two\nlines");
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(
+            app.composed(),
+            "oldest",
+            "the cursor was left on the first row"
+        );
+        app.on_key(key(KeyCode::Down));
+        assert_eq!(app.composed(), "two\nlines");
+        app.on_key(key(KeyCode::Down));
+        assert_eq!(
+            app.composed(),
+            "newest",
+            "and on the last row going the other way"
+        );
+    }
+
+    #[test]
+    fn an_edit_to_a_recalled_prompt_ends_the_walk_and_down_leaves_it() {
+        let mut app = remembering(&[("earlier", "3")], &["3"]);
+        typed(&mut app, "draft");
+        app.on_key(key(KeyCode::Up));
+        typed(&mut app, " plus my edit");
+
+        app.on_key(key(KeyCode::Down));
+        assert_eq!(app.composed(), "earlier plus my edit");
+    }
+
+    #[test]
+    fn a_recalled_prompt_typed_over_whole_is_kept_on_down() {
+        let mut app = remembering(&[("earlier", "3")], &["3"]);
+        typed(&mut app, "draft");
+        app.on_key(key(KeyCode::Up));
+        for _ in 0.."earlier".len() {
+            app.on_key(key(KeyCode::Backspace));
+        }
+        typed(&mut app, "brand new");
+
+        app.on_key(key(KeyCode::Down));
+        assert_eq!(app.composed(), "brand new");
+    }
+
+    /// A walk begun from an empty composer set no draft aside: sending what
+    /// it showed gives back the draft an earlier edit left set aside, rather
+    /// than the empty one the walk began with.
+    #[test]
+    fn a_walk_begun_from_nothing_gives_back_the_draft_an_edit_left_set_aside() {
+        let mut app = remembering(&[("earlier", "3")], &["3"]);
+        app.drafts
+            .push((app.walk_draft, "kept for later".to_owned()));
+
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(app.composed(), "earlier");
+        app.on_key(key(KeyCode::Enter));
+        app.said();
+
+        assert_eq!(app.composed(), "kept for later");
+    }
+
+    #[test]
+    fn up_from_an_edited_recall_sets_the_edit_aside_as_a_draft() {
+        let mut app = remembering(&[("earlier", "3")], &["3"]);
+        typed(&mut app, "draft");
+        app.on_key(key(KeyCode::Up));
+        typed(&mut app, " edited");
+
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(app.composed(), "earlier");
+        app.on_key(key(KeyCode::Down));
+        assert_eq!(app.composed(), "earlier edited");
+    }
+
+    #[test]
+    fn sending_a_recalled_prompt_gives_the_draft_back_with_its_image() {
+        let mut app = remembering(&[("run the tests", "3")], &["3"]).attached();
+        app.fetched(Fetched {
+            source: Source::Clipboard,
+            image: Ok(png(b"a")),
+        });
+        typed(&mut app, "what is this");
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(app.composed(), "run the tests");
+
+        app.on_key(key(KeyCode::Enter));
+        app.said();
+        assert!(app.take_turn_images().is_empty());
+        assert_eq!(app.composed(), "[Image #1] what is this");
+
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(
+            app.said(),
+            [Event::UserMessage {
+                text: "[Image #1] what is this".to_owned()
+            }]
+        );
+        assert_eq!(app.take_turn_images(), [png(b"a")]);
+    }
+
+    /// An earlier session numbered its images from one as this one does, so
+    /// a prompt recalled from it can name the number the draft's image has.
+    /// The image is the draft's, attached where the draft was written, and it
+    /// goes with the draft, never with a prompt that happens to name it.
+    #[test]
+    fn a_recalled_prompt_does_not_take_the_drafts_image_by_its_number() {
+        let mut app = remembering(&[("compare [Image #1] with the mock", "3")], &["3"]).attached();
+        typed(&mut app, "look at");
+        app.fetched(Fetched {
+            source: Source::Clipboard,
+            image: Ok(png(b"a")),
+        });
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(app.composed(), "compare [Image #1] with the mock");
+
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(
+            app.said(),
+            [Event::UserMessage {
+                text: "compare [Image #1] with the mock".to_owned()
+            }]
+        );
+        assert!(
+            app.take_turn_images().is_empty(),
+            "the draft's image went with a recalled prompt"
+        );
+        assert_eq!(app.composed(), "look at[Image #1] ");
+
+        app.on_key(key(KeyCode::Enter));
+        app.said();
+        assert_eq!(app.take_turn_images(), [png(b"a")]);
+    }
+
+    /// An edit makes a recalled prompt the operator's, but the placeholders
+    /// it came with are still the earlier session's.
+    #[test]
+    fn an_edited_recalled_prompt_does_not_take_the_drafts_image_by_its_number() {
+        let mut app = remembering(&[("compare [Image #1] with the mock", "3")], &["3"]).attached();
+        typed(&mut app, "look at");
+        app.fetched(Fetched {
+            source: Source::Clipboard,
+            image: Ok(png(b"a")),
+        });
+        app.on_key(key(KeyCode::Up));
+        typed(&mut app, " again");
+
+        app.on_key(key(KeyCode::Enter));
+        app.said();
+        assert!(app.take_turn_images().is_empty());
+        assert_eq!(app.composed(), "look at[Image #1] ");
+
+        app.on_key(key(KeyCode::Enter));
+        app.said();
+        assert_eq!(app.take_turn_images(), [png(b"a")]);
+    }
+
+    /// An image attached while a recalled prompt is being edited is that
+    /// prompt's, and goes with it.
+    #[test]
+    fn an_image_attached_to_an_edited_recalled_prompt_goes_with_it() {
+        let mut app = remembering(&[("compare with the mock", "3")], &["3"]).attached();
+        typed(&mut app, "draft");
+        app.on_key(key(KeyCode::Up));
+        typed(&mut app, " ");
+        app.fetched(Fetched {
+            source: Source::Clipboard,
+            image: Ok(png(b"b")),
+        });
+
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(
+            app.said(),
+            [Event::UserMessage {
+                text: "compare with the mock [Image #1] ".to_owned()
+            }]
+        );
+        assert_eq!(app.take_turn_images(), [png(b"b")]);
+        assert_eq!(app.composed(), "draft");
+    }
+
+    #[test]
+    fn sending_an_edited_recalled_prompt_gives_the_draft_back() {
+        let mut app = remembering(&[("earlier", "3")], &["3"]);
+        typed(&mut app, "draft");
+        app.on_key(key(KeyCode::Up));
+        typed(&mut app, " edited");
+        app.on_key(key(KeyCode::Up));
+        app.on_key(key(KeyCode::Down));
+        assert_eq!(app.composed(), "earlier edited");
+
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(app.composed(), "draft");
+    }
+
+    #[test]
+    fn a_prompt_chosen_from_the_history_sets_the_draft_aside_for_down() {
+        let mut app = remembering(&[("add etag support", "3")], &["3"]);
+        typed(&mut app, "draft");
+        app.on_key(ctrl('r'));
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(app.composed(), "add etag support");
+
+        app.on_key(key(KeyCode::Down));
+        assert_eq!(app.composed(), "draft");
+    }
+
+    #[test]
+    fn a_prompt_chosen_from_the_history_walks_on_from_where_it_was_sent() {
+        let mut app = remembering(&[("newest", "3"), ("middle", "3"), ("oldest", "3")], &["3"]);
+        typed(&mut app, "draft");
+        app.on_key(ctrl('r'));
+        typed(&mut app, "middle");
+        app.on_key(key(KeyCode::Enter));
+
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(app.composed(), "oldest");
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Down));
+        assert_eq!(app.composed(), "newest");
+        app.on_key(key(KeyCode::Down));
+        assert_eq!(app.composed(), "draft");
+    }
+
+    #[test]
+    fn a_recalled_prompt_whose_first_line_wraps_walks_on_with_one_up() {
+        use ratatui::widgets::Widget;
+
+        let long = "a long first line that wraps over several rows of a narrow composer";
+        let mut app = remembering(&[("newest", "3"), (long, "3"), ("oldest", "3")], &["3"]);
+        let area = Rect::new(0, 0, 20, 6);
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        let mut up = |app: &mut App| {
+            app.composer().render(area, &mut buf);
+            app.on_key(key(KeyCode::Up));
+        };
+        up(&mut app);
+        up(&mut app);
+        assert_eq!(app.composed(), long);
+        up(&mut app);
+        assert_eq!(app.composed(), "oldest");
+    }
+
+    #[test]
+    fn up_on_the_last_wrapped_row_of_one_long_line_moves_the_cursor_and_recalls_nothing() {
+        use ratatui::widgets::Widget;
+
+        let mut app = remembering(&[("earlier", "3")], &["3"]);
+        let draft = "one draft line long enough to wrap onto three rows";
+        typed(&mut app, draft);
+        let area = Rect::new(0, 0, 22, 6);
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        app.composer().render(area, &mut buf);
+
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(
+            app.composed(),
+            draft,
+            "Up from the third row recalls nothing"
+        );
+        assert_eq!(app.composer().cursor().0, 0, "it is still the one line");
+        assert!(app.composer().cursor().1 > 0 && app.composer().cursor().1 < draft.len());
+    }
+
+    #[test]
+    fn a_recalled_prompt_says_where_it_is_in_the_history_until_it_is_edited() {
+        let mut app = remembering(&[("newest", "3"), ("oldest", "3")], &["3"]);
+        typed(&mut app, "draft");
+        assert_eq!(app.recalled(), None, "a draft is the operator's own");
+
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(app.recalled(), Some((1, 2)));
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(app.recalled(), Some((2, 2)));
+
+        typed(&mut app, " and mine");
+        assert_eq!(
+            app.recalled(),
+            None,
+            "an edit makes it the operator's text and ends the walk"
+        );
+    }
+
+    #[test]
+    fn esc_on_a_recalled_prompt_gives_the_draft_back_and_ends_the_walk() {
+        let mut app = remembering(&[("newest", "3"), ("oldest", "3")], &["3"]);
+        typed(&mut app, "my half-written draft");
+        app.on_key(key(KeyCode::Up));
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(app.composed(), "oldest");
+
+        app.on_key(key(KeyCode::Esc));
+        assert_eq!(app.composed(), "my half-written draft");
+        assert_eq!(app.recalled(), None);
+        assert_eq!(app.hint(), None, "this Esc is not the F-key prefix");
+        assert!(app.said().is_empty(), "nothing is sent");
+
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(app.composed(), "newest", "a new walk starts on the newest");
+    }
+
+    #[test]
+    fn esc_on_a_recalled_prompt_with_no_draft_set_aside_empties_the_composer() {
+        let mut app = remembering(&[("earlier", "3")], &["3"]);
+        app.on_key(key(KeyCode::Up));
+        app.on_key(key(KeyCode::Esc));
+        assert_eq!(app.composed(), "");
+    }
+
+    #[test]
+    fn ctrl_r_finds_a_prompt_by_its_words_and_puts_it_in_the_composer_unsent() {
+        let mut app = remembering(
+            &[("fix the resume race", "4"), ("add etag support", "3")],
+            &["4", "3"],
+        );
+        typed(&mut app, "draft");
+
+        app.on_key(ctrl('r'));
+        let browser = app.browser().expect("Ctrl+R opens the history");
+        assert_eq!(browser.view, View::Prompts);
+        typed(&mut app, "ETAG");
+        let listed = app.prompt_rows();
+        let rows: Vec<_> = listed.iter().collect();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].text, "add etag support");
+        assert_eq!(rows[0].session, Some(Target::Recorded("3".to_owned())));
+
+        app.on_key(key(KeyCode::Enter));
+        assert!(app.browser().is_none());
+        assert_eq!(app.composed(), "add etag support");
+        assert!(app.said().is_empty(), "choosing a prompt sends nothing");
+    }
+
+    #[test]
+    fn a_prompt_chosen_from_the_history_in_bang_mode_is_not_run_as_a_command() {
+        let mut app = remembering(&[("rm the build dir and rebuild", "3")], &["3"])
+            .runs_commands()
+            .attached();
+        typed(&mut app, "!");
+        assert!(app.shell_mode());
+
+        app.on_key(ctrl('r'));
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(app.composed(), "rm the build dir and rebuild");
+        assert!(!app.shell_mode(), "the prompt was left to be run by sh");
+        assert_eq!(app.hint(), Some(LEFT_BANG_FOR_HISTORY_HINT));
+        app.on_key(key(KeyCode::Enter));
+
+        assert_eq!(app.take_commands(), []);
+        assert_eq!(
+            app.said(),
+            [Event::UserMessage {
+                text: "rm the build dir and rebuild".to_owned()
+            }]
+        );
+    }
+
+    #[test]
+    fn a_prompt_chosen_from_session_history_in_bang_mode_is_not_run_as_a_command() {
+        let mut app = remembering(&[("rm the build dir and rebuild", "3")], &["3"]).runs_commands();
+        typed(&mut app, "!");
+        app.on_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::ALT));
+        for _ in 0..3 {
+            app.on_key(key(KeyCode::Down));
+        }
+        app.on_key(key(KeyCode::Enter));
+        assert!(app.browser().is_some(), "Session › History opened nothing");
+
+        app.on_key(key(KeyCode::Enter));
+        app.on_key(key(KeyCode::Enter));
+
+        assert_eq!(app.take_commands(), []);
+        assert!(!app.shell_mode());
+    }
+
+    #[test]
+    fn esc_closes_the_history_and_leaves_the_composer_as_it_was() {
+        let mut app = remembering(&[("earlier", "3")], &["3"]);
+        typed(&mut app, "draft");
+        app.on_key(ctrl('r'));
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Esc));
+
+        assert!(app.browser().is_none());
+        assert_eq!(app.composed(), "draft");
+    }
+
+    fn listed_prompts(app: &App) -> Vec<String> {
+        app.prompt_rows()
+            .iter()
+            .map(|row| row.text.clone())
+            .collect()
+    }
+
+    #[test]
+    fn the_open_history_lists_what_changes_under_it() {
+        let mut app = remembering(&[("earlier", "3"), ("older", "4")], &["3", "4"]);
+        app.on_key(ctrl('r'));
+        assert_eq!(listed_prompts(&app), ["earlier", "older"]);
+
+        app.apply(&Event::UserMessage {
+            text: "sent while it was open".to_owned(),
+        });
+        assert_eq!(
+            listed_prompts(&app),
+            ["sent while it was open", "earlier", "older"]
+        );
+
+        app.set_recorded_as(Some("4".to_owned()));
+        assert_eq!(
+            listed_prompts(&app),
+            ["sent while it was open", "earlier"],
+            "the record of this very session is not listed as another's"
+        );
+
+        app.set_past(crate::history::Past {
+            prompts: vec![earlier("landed later", "5")],
+            ..crate::history::Past::default()
+        });
+        assert_eq!(
+            listed_prompts(&app),
+            ["sent while it was open", "landed later"]
+        );
+    }
+
+    #[test]
+    fn the_history_filter_is_read_again_as_it_changes_in_any_case() {
+        let mut app = remembering(
+            &[("Add ETag support", "3"), ("fix the resume race", "4")],
+            &["3", "4"],
+        );
+        app.on_key(ctrl('r'));
+        typed(&mut app, "etag");
+        assert_eq!(listed_prompts(&app), ["Add ETag support"]);
+        app.on_key(key(KeyCode::Backspace));
+        app.on_key(key(KeyCode::Backspace));
+        typed(&mut app, "x");
+        assert!(listed_prompts(&app).is_empty());
+        app.on_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        assert_eq!(
+            listed_prompts(&app).len(),
+            2,
+            "a cleared filter keeps every prompt"
+        );
+    }
+
+    #[test]
+    fn the_history_lists_this_sessions_prompts_first_newest_first() {
+        let mut app = remembering(&[("earlier", "3")], &["3"]);
+        send_prompt(&mut app, "one");
+        send_prompt(&mut app, "two");
+        app.on_key(ctrl('r'));
+
+        let listed = app.prompt_rows();
+        let rows: Vec<_> = listed.iter().collect();
+        let texts: Vec<&str> = rows.iter().map(|row| row.text.as_str()).collect();
+        assert_eq!(texts, ["two", "one", "earlier"]);
+        assert_eq!(rows[0].session, None, "this session's own");
+    }
+
+    #[test]
+    fn the_history_says_it_is_reading_until_the_load_lands() {
+        let mut app = app().remembers();
+        app.on_key(ctrl('r'));
+        assert!(!app.history_read(), "nothing has arrived yet");
+        app.set_past(crate::history::Past::default());
+        assert!(app.history_read());
+    }
+
+    #[test]
+    fn opening_the_history_asks_for_it_to_be_read_again() {
+        let mut app = remembering(&[], &[]);
+        assert!(!app.take_history_request());
+        app.on_key(ctrl('r'));
+        assert!(
+            app.take_history_request(),
+            "a session another shell ended is listed"
+        );
+    }
+
+    #[test]
+    fn tab_turns_to_the_sessions_and_enter_opens_the_chosen_one_in_place_of_this() {
+        let mut app = remembering(&[("add etag support", "3")], &["3"]);
+        app.on_key(ctrl('r'));
+        app.on_key(key(KeyCode::Tab));
+        assert_eq!(app.browser().map(|b| b.view), Some(View::Sessions));
+
+        let listed = app.session_rows();
+        let rows: Vec<_> = listed.iter().collect();
+        assert_eq!(rows[0].target, None, "this session heads the list");
+        assert_eq!(rows[1].target, Some(Target::Recorded("3".to_owned())));
+        assert_eq!(rows[1].prompts, ["add etag support"]);
+
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Enter));
+        assert!(app.should_quit(), "this session ends");
+        assert_eq!(app.take_opening(), Some(Target::Recorded("3".to_owned())));
+    }
+
+    #[test]
+    fn the_session_open_now_is_not_opened_again() {
+        let mut app = remembering(&[("one", "5")], &["5"]);
+        app.set_recorded_as(Some("5".to_owned()));
+        app.perform(crate::menu::Action::Resume);
+        assert_eq!(app.browser().map(|b| b.view), Some(View::Sessions));
+
+        let listed = app.session_rows();
+        let rows: Vec<_> = listed.iter().collect();
+        assert_eq!(rows.len(), 1, "its record is this session, not another");
+        app.on_key(key(KeyCode::Enter));
+        assert!(!app.should_quit());
+        assert!(app.hint().is_some_and(|hint| hint.contains("open now")));
+    }
+
+    #[test]
+    fn a_titled_session_is_listed_and_found_by_its_title() {
+        let mut app = remembering(&[("add etag support", "3")], &[]);
+        app.set_past(crate::history::Past {
+            prompts: vec![earlier("add etag support", "3")],
+            sessions: vec![crate::history::PastSession {
+                target: Target::Recorded("3".to_owned()),
+                last: None,
+                first_prompt: None,
+                title: Some("Static file handler etag support".to_owned()),
+                open_elsewhere: false,
+            }],
+            unread: None,
+        });
+        app.extend(&[Event::Titled {
+            title: "Resume race fix".to_owned(),
+        }]);
+
+        let listed = app.session_rows();
+        let rows: Vec<_> = listed.iter().collect();
+        assert_eq!(rows[0].caption(), Some("Resume race fix"));
+        assert_eq!(rows[1].caption(), Some("Static file handler etag support"));
+        assert!(rows[1].matches("handler"));
+    }
+
+    #[test]
+    fn a_session_open_in_another_niobe_is_not_opened_and_the_draft_stays() {
+        let mut app = remembering(&[("add etag support", "3")], &[]);
+        app.set_past(crate::history::Past {
+            prompts: vec![earlier("add etag support", "3")],
+            sessions: vec![crate::history::PastSession {
+                target: Target::Recorded("3".to_owned()),
+                last: None,
+                first_prompt: None,
+                title: None,
+                open_elsewhere: true,
+            }],
+            unread: None,
+        });
+        typed(&mut app, "half a thought");
+        app.perform(crate::menu::Action::Resume);
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Enter));
+
+        assert!(!app.should_quit());
+        assert_eq!(app.take_opening(), None);
+        assert_eq!(
+            app.hint(),
+            Some("#3 is open in another niobe: quit it there to open it here")
+        );
+        app.on_key(key(KeyCode::Esc));
+        assert_eq!(app.composed(), "half a thought");
+    }
+
+    #[test]
+    fn another_session_is_not_opened_while_a_turn_runs() {
+        let mut app = remembering(&[], &["3"]).attached();
+        send_prompt(&mut app, "go");
+        assert!(app.working());
+        app.perform(crate::menu::Action::Resume);
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Enter));
+
+        assert!(!app.should_quit());
+        assert_eq!(app.take_opening(), None);
+        assert!(app.hint().is_some_and(|hint| hint.contains("stop")));
+    }
+
+    #[test]
+    fn a_shell_with_no_record_cannot_resume() {
+        let app = app();
+        assert!(!app.can(crate::menu::Action::Resume));
+        assert!(remembering(&[], &[]).can(crate::menu::Action::Resume));
+    }
+
+    #[test]
+    fn keys_read_together_while_the_history_is_open_go_to_it_not_the_composer() {
+        let mut app = remembering(&[("add etag support", "3"), ("fix it", "3")], &["3"]);
+        typed(&mut app, "draft");
+        app.on_key(ctrl('r'));
+
+        let keys: Vec<KeyEvent> = "etag\t\r"
+            .chars()
+            .map(|c| match c {
+                '\t' => key(KeyCode::Tab),
+                '\r' => key(KeyCode::Enter),
+                c => key(KeyCode::Char(c)),
+            })
+            .collect();
+        app.on_keys_read(
+            &keys[..4],
+            Arrival {
+                at: Instant::now(),
+                alone: false,
+            },
+        );
+        assert_eq!(app.browser().map(|b| b.query.as_str()), Some("etag"));
+        assert_eq!(app.composed(), "draft");
+        app.on_keys_read(
+            &keys[4..],
+            Arrival {
+                at: Instant::now(),
+                alone: false,
+            },
+        );
+        assert_eq!(
+            app.browser().map(|b| b.view),
+            None,
+            "the Enter chose a session"
+        );
+        assert_eq!(app.take_opening(), Some(Target::Recorded("3".to_owned())));
     }
 }

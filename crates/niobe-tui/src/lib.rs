@@ -23,46 +23,74 @@
 //!   from the kernel, and the draw at the top of a tick failing on a terminal
 //!   that went in the moment before it.
 
+pub mod alert;
 pub mod app;
+mod arguments;
 pub mod bridge;
+mod browse;
 mod calls;
+mod catch_up;
 pub mod clock;
+pub mod desktop;
+pub mod detail;
 mod find;
-mod fx;
+pub mod history;
 mod hunks;
+pub mod images;
 mod input;
 pub mod journal;
+// The shell reads the terminal itself only where `poll(2)` can see it, which
+// is on Unix; elsewhere crossterm reads it and the decoder goes unused. It is
+// still built there, so that its tests and the shell's that type through it
+// run on every platform.
+#[cfg_attr(not(unix), allow(dead_code))]
 mod keys;
 mod markdown;
+pub mod mcp;
+pub mod memory;
 mod mention;
+pub mod menu;
 mod meter;
+pub mod overview;
 pub mod prices;
+pub mod proposed;
 pub mod rules;
 pub mod run;
+mod select;
 pub mod shell;
 mod slash;
+pub mod snapshots;
+mod spike;
+mod tags;
 pub mod terminal;
 mod text;
 pub mod theme;
 mod tree;
+pub mod trust;
 mod turns;
 pub mod ui;
 pub mod usage;
 pub mod watch;
 
+pub use alert::{Alert, Alerts, Notification};
 pub use app::{
-    Answer, App, Arrival, Ask, Call, Commit, Entry, EntryKind, Picker, Repo, Section,
-    SelectedProfile, WorkingFile,
+    Answer, App, Arrival, Ask, Call, ConfigFile, Entry, EntryKind, Picker, Places, Purpose, Repo,
+    Section, SelectedProfile, Sheet, WorkingFile,
 };
 pub use bridge::{Bridge, BridgeError, Detached};
+pub use desktop::{Desktop, Handoff, NoDesktop};
+pub use history::{History, NoHistory, Past, PastPrompt, PastSession, Target};
+pub use images::{Fetched, Images, NoImages, Source};
 pub use journal::{Journal, JournalError, Unrecorded};
+pub use memory::{Memory, MemoryFile, NoMemory};
+pub use overview::{NoOverview, Overview};
 pub use prices::Prices;
 pub use rules::{Forgotten, Rules, RulesError};
-pub use run::{Ended, run};
+pub use run::{Around, Ended, ask_trust, run};
 pub use shell::{NoShell, OPERATOR_SHELL, Ran, Shell, ShellError};
 pub use terminal::{Shutdown, Stop, TerminalGuard, install_panic_hook};
 pub use theme::{CLASSIC, CYBER, MODERN, NEO, Theme};
-pub use ui::{MIN_SIZE, WIDE_COLUMNS, draw, session_cost};
+pub use ui::{Billed, MIN_SIZE, OLDER_RECORDING, WIDE_COLUMNS, cost_of, draw, session_cost};
 pub use watch::{Unwatched, Watch};
 
 #[cfg(test)]

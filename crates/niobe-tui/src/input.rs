@@ -17,7 +17,9 @@
 //! sends Shift+Enter in. Where `poll(2)` cannot see the terminal, crossterm
 //! both waits and reads.
 
-use std::io::{self, IsTerminal};
+use std::io;
+#[cfg(unix)]
+use std::io::IsTerminal;
 use std::time::Duration;
 
 use ratatui::crossterm::event::{self, Event};
@@ -40,6 +42,8 @@ pub(crate) enum Input {
     Idle,
     /// The terminal the shell reads from is gone; nothing will come from it
     /// again.
+    // Only `poll(2)` reports a hangup, and the shell polls only on Unix.
+    #[cfg_attr(not(unix), allow(dead_code))]
     HungUp,
 }
 
@@ -103,6 +107,29 @@ impl Wait {
         crossterm_read(events)
     }
 
+    /// Reads `typed` as the first keys of the session: what the operator
+    /// typed while the terminal was being asked about its keyboard.
+    pub(crate) fn prime(&mut self, typed: &[u8], events: &mut Vec<Event>) {
+        #[cfg(unix)]
+        if self.polls_the_terminal && !typed.is_empty() {
+            self.decoder.feed(typed, false, events);
+        }
+        #[cfg(not(unix))]
+        let _ = (typed, events);
+    }
+
+    /// Hands over what the terminal has left the shell waiting on, where
+    /// nothing has come to finish it: a paste whose closing marker never
+    /// arrived. Called when a wait found nothing to read.
+    pub(crate) fn settle(&mut self, events: &mut Vec<Event>) {
+        #[cfg(unix)]
+        if self.polls_the_terminal {
+            self.decoder.settle(events);
+        }
+        #[cfg(not(unix))]
+        let _ = events;
+    }
+
     /// The shell's own read of standard input.
     ///
     /// A read that ends the terminal — end-of-file, a hangup — reads as
@@ -118,11 +145,15 @@ impl Wait {
                 Err(errno) => return Err(errno.into()),
             };
             if read == 0 {
+                self.decoder.settle(events);
                 return Ok(());
             }
             self.decoder
                 .feed(&buffer[..read], read == buffer.len(), events);
             if poll_input(stdin.as_fd(), Duration::ZERO)? != Input::Ready {
+                // A read that filled the buffer said more was coming; nothing
+                // did, so an Esc it ended on was the key.
+                self.decoder.settle(events);
                 return Ok(());
             }
         }

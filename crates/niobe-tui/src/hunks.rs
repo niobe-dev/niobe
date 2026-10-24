@@ -16,7 +16,7 @@
 //! can read.
 
 use niobe_core::diff::{Hunk, Line as DiffLine};
-use ratatui::style::Style;
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 
 use crate::app::{Change, Gate};
@@ -45,10 +45,17 @@ pub const MAX_ROWS: usize = 20;
 /// as the marker under a cut diff names it. [`crate::app::App`] binds it.
 pub const OPEN_KEY: &str = "Ctrl+T";
 
-/// Whether a change of `hunks` has more rows than [`MAX_ROWS`], and so is
-/// drawn cut unless the operator has opened the diffs.
+/// Whether a change of `hunks` is drawn cut at [`MAX_ROWS`] unless the
+/// operator has opened the diffs.
 pub(crate) fn is_cut(hunks: &[Hunk]) -> bool {
-    rows(hunks).len() > MAX_ROWS
+    cuts(rows(hunks).len())
+}
+
+/// Whether a diff of `rows` rows is cut: where it has more than one row over
+/// [`MAX_ROWS`]. One row over is drawn rather than said, since saying so would
+/// take that row and hide it besides.
+fn cuts(rows: usize) -> bool {
+    rows > MAX_ROWS + 1
 }
 
 /// One row of a diff before it is drawn.
@@ -100,27 +107,40 @@ fn rows(hunks: &[Hunk]) -> Vec<Row<'_>> {
 }
 
 /// For each line, whether it is a change or within [`CONTEXT_LINES`] of one.
+///
+/// One pass each way, carrying how far back the last change was, so a file
+/// written from scratch — a change on every one of its lines — costs its
+/// length rather than its length squared.
 fn near_a_change(lines: &[DiffLine]) -> Vec<bool> {
-    let changed: Vec<usize> = lines
-        .iter()
-        .enumerate()
-        .filter(|(_, line)| !matches!(line, DiffLine::Context(_)))
-        .map(|(at, _)| at)
-        .collect();
-    (0..lines.len())
-        .map(|at| {
-            changed
-                .iter()
-                .any(|&change| at.abs_diff(change) <= CONTEXT_LINES)
-        })
-        .collect()
+    let mut near = vec![false; lines.len()];
+    let mut since = None;
+    for (line, near) in lines.iter().zip(near.iter_mut()) {
+        since = lines_since_a_change(line, since);
+        *near = since.is_some_and(|since| since <= CONTEXT_LINES);
+    }
+    let mut until = None;
+    for (line, near) in lines.iter().zip(near.iter_mut()).rev() {
+        until = lines_since_a_change(line, until);
+        *near |= until.is_some_and(|until| until <= CONTEXT_LINES);
+    }
+    near
+}
+
+/// How many lines `line` is from the nearest change on the side already
+/// walked, given how far the line before it was; `None` while no change has
+/// been walked past.
+fn lines_since_a_change(line: &DiffLine, before: Option<usize>) -> Option<usize> {
+    match line {
+        DiffLine::Context(_) => before.map(|before| before.saturating_add(1)),
+        DiffLine::Removed(_) | DiffLine::Added(_) => Some(0),
+    }
 }
 
 /// A change's rows, fitted to `width` cells, and the row under them that says
 /// how the call was let through.
 ///
-/// A change longer than [`MAX_ROWS`] stops there and says how many rows it
-/// left out, unless `open`, when it draws every row and says how to cut it
+/// A change more than a row longer than [`MAX_ROWS`] stops there and says
+/// how many rows it left out, unless `open`, when it draws every row and says how to cut it
 /// again.
 pub(crate) fn lines(
     change: &Change,
@@ -132,13 +152,14 @@ pub(crate) fn lines(
     let number_width = rows
         .iter()
         .filter_map(|row| match row {
-            Row::Line(number, _) => Some(number.to_string().len()),
+            Row::Line(number, _) => Some(*number),
             Row::Elided => None,
         })
         .max()
-        .unwrap_or(1);
+        .map_or(1, digits);
 
-    let shown = match open {
+    let cut = cuts(rows.len());
+    let shown = match open || !cut {
         true => rows.len(),
         false => MAX_ROWS,
     };
@@ -148,13 +169,149 @@ pub(crate) fn lines(
         .map(|row| draw_row(*row, number_width, width, theme))
         .collect();
     let beyond = rows.len().saturating_sub(MAX_ROWS);
-    if beyond > 0 {
+    if cut {
         lines.push(marker(beyond, open, width, theme));
     }
     if let Some(gate) = change.gate() {
         lines.push(footer(gate, width, theme));
     }
     lines
+}
+
+/// A change a permission question proposes, `width` cells wide: each line
+/// signed as [`lines`] signs it, unchanged lines more than [`CONTEXT_LINES`]
+/// from a change left out, and cut at [`MAX_ROWS`] rows unless `open`.
+///
+/// Unnumbered, since a proposed edit says what text it replaces and not
+/// where in the file that text is. And wrapped rather than cut at the edge,
+/// unlike a change already made: what is still to be approved is read whole.
+///
+/// With the rows, how many lines of the change the marker stands for and are
+/// not drawn: none where the change is whole or open.
+pub(crate) fn proposed(
+    lines: &[DiffLine],
+    width: usize,
+    open: bool,
+    theme: &Theme,
+) -> (Vec<Line<'static>>, usize) {
+    let mut rows = Vec::new();
+    let mut dropped = false;
+    // The rows laid out before the rest is only counted: a file of a hundred
+    // thousand lines is not laid out to draw twenty rows of it, nor to be
+    // scrolled through under Ctrl+T, which draws what a screenful of scrolling
+    // can reach.
+    let ceiling = match open {
+        true => OPEN_ROWS,
+        false => MAX_ROWS,
+    };
+    let mut uncounted = 0;
+    for (line, keep) in lines.iter().zip(near_a_change(lines)) {
+        if !keep {
+            dropped = true;
+            continue;
+        }
+        if rows.len() > ceiling {
+            uncounted += 1;
+            continue;
+        }
+        if dropped && !rows.is_empty() {
+            rows.push(elided(0, width, theme));
+        }
+        dropped = false;
+        rows.extend(wrapped_row(line, width, theme));
+    }
+    let total = rows.len() + uncounted;
+    if open && total > OPEN_ROWS + 1 {
+        let beyond = total - OPEN_ROWS;
+        rows.truncate(OPEN_ROWS);
+        rows.push(capped_marker(beyond, width, theme));
+        return (rows, beyond);
+    }
+    if !cuts(total) {
+        return (rows, 0);
+    }
+    let beyond = total - MAX_ROWS;
+    if !open {
+        rows.truncate(MAX_ROWS);
+    }
+    rows.push(marker(beyond, open, width, theme));
+    // What the marker stands for is not drawn only while the change is cut.
+    (rows, if open { 0 } else { beyond })
+}
+
+/// How many rows of a proposed change are laid out with the diffs open: more
+/// than a pane scrolls through in a reading, and a bound on what a frame
+/// costs however large the change is.
+const OPEN_ROWS: usize = 2_000;
+
+/// The marker under a proposed change too long to lay out whole even open: how
+/// many rows it leaves out.
+fn capped_marker(beyond: usize, width: usize, theme: &Theme) -> Line<'static> {
+    let rows = plural(beyond, "row", "rows");
+    let said = format!(
+        "▴ the first {OPEN_ROWS} rows are shown · {beyond} more {rows} are not drawn · \
+         {OPEN_KEY} hides them"
+    );
+    let said = text::truncate(&said, width);
+    Line::from(Span::styled(
+        text::pad(&said, width),
+        Style::new().fg(theme.dim).bg(theme.diff_bg),
+    ))
+}
+
+/// One line of a proposed change as the rows it wraps to: its sign on the
+/// first, and the rest under its text.
+fn wrapped_row(line: &DiffLine, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    let (sign, sign_colour, text_colour, bg) = look(line, theme);
+    let room = width.saturating_sub(2).max(1);
+    let mut parts = text::wrap_exact(line.text(), room);
+    if parts.is_empty() {
+        parts.push(String::new());
+    }
+    parts
+        .into_iter()
+        .enumerate()
+        .map(|(at, part)| {
+            let sign = match at {
+                0 => sign,
+                _ => " ",
+            };
+            Line::from(vec![
+                Span::styled(sign, Style::new().fg(sign_colour).bg(bg).bold()),
+                Span::styled(" ", Style::new().bg(bg)),
+                Span::styled(text::pad(&part, room), Style::new().fg(text_colour).bg(bg)),
+            ])
+            .style(Style::new().bg(bg))
+        })
+        .collect()
+}
+
+/// A line's sign, the colour of its sign or number, of its text, and of what
+/// it is drawn on.
+fn look(line: &DiffLine, theme: &Theme) -> (&'static str, Color, Color, Color) {
+    match line {
+        DiffLine::Context(_) => (" ", theme.dim, theme.fg, theme.diff_bg),
+        DiffLine::Removed(_) => ("-", theme.del, theme.del, theme.del_bg),
+        DiffLine::Added(_) => ("+", theme.add, theme.add, theme.add_bg),
+    }
+}
+
+/// The row standing for unchanged lines left out, under a gutter of
+/// `number_width` digits.
+fn elided(number_width: usize, width: usize, theme: &Theme) -> Line<'static> {
+    let gutter = text::pad("", number_width + 1);
+    Line::from(vec![
+        Span::styled(gutter, Style::new().bg(theme.diff_bg)),
+        Span::styled(
+            text::pad("…", width.saturating_sub(number_width + 1)),
+            Style::new().fg(theme.dim).bg(theme.diff_bg),
+        ),
+    ])
+}
+
+/// How many digits `number` is written in.
+fn digits(number: u64) -> usize {
+    number.checked_ilog10().map_or(1, |log| log as usize + 1)
 }
 
 /// One row: the number right-aligned in its column, the sign, and the line
@@ -164,20 +321,9 @@ pub(crate) fn lines(
 /// file is always one row and one number.
 fn draw_row(row: Row<'_>, number_width: usize, width: usize, theme: &Theme) -> Line<'static> {
     let Row::Line(number, line) = row else {
-        let gutter = " ".repeat(number_width + 1);
-        return Line::from(vec![
-            Span::styled(gutter, Style::new().bg(theme.diff_bg)),
-            Span::styled(
-                pad("…", width.saturating_sub(number_width + 1)),
-                Style::new().fg(theme.dim).bg(theme.diff_bg),
-            ),
-        ]);
+        return elided(number_width, width, theme);
     };
-    let (sign, number_colour, text_colour, bg) = match line {
-        DiffLine::Context(_) => (" ", theme.dim, theme.fg, theme.diff_bg),
-        DiffLine::Removed(_) => ("-", theme.del, theme.del, theme.del_bg),
-        DiffLine::Added(_) => ("+", theme.add, theme.add, theme.add_bg),
-    };
+    let (sign, number_colour, text_colour, bg) = look(line, theme);
     let room = width.saturating_sub(number_width + 3);
     let shown = text::truncate(&text::expand_tabs(line.text()), room);
     Line::from(vec![
@@ -187,12 +333,12 @@ fn draw_row(row: Row<'_>, number_width: usize, width: usize, theme: &Theme) -> L
         ),
         Span::styled(sign, Style::new().fg(number_colour).bg(bg).bold()),
         Span::styled(" ", Style::new().bg(bg)),
-        Span::styled(pad(&shown, room), Style::new().fg(text_colour).bg(bg)),
+        Span::styled(text::pad(&shown, room), Style::new().fg(text_colour).bg(bg)),
     ])
     .style(Style::new().bg(bg))
 }
 
-/// The row under a diff longer than [`MAX_ROWS`]: how many rows are beyond
+/// The row under a diff that is cut (see [`is_cut`]): how many rows are beyond
 /// the cut, and the key that shows or hides them.
 ///
 /// The key gives way whole where the pane is too narrow for it, so what is
@@ -215,7 +361,7 @@ fn marker(beyond: usize, open: bool, width: usize, theme: &Theme) -> Line<'stati
         false => text::truncate(&said, width),
     };
     Line::from(Span::styled(
-        pad(&said, width),
+        text::pad(&said, width),
         Style::new().fg(theme.dim).bg(theme.diff_bg),
     ))
 }
@@ -236,12 +382,6 @@ fn footer(gate: Gate, width: usize, theme: &Theme) -> Line<'static> {
             Style::new().fg(theme.dim),
         ),
     ])
-}
-
-/// `text` padded with spaces to `width` cells.
-fn pad(shown: &str, width: usize) -> String {
-    let fill = width.saturating_sub(text::width(shown));
-    format!("{shown}{}", " ".repeat(fill))
 }
 
 fn plural(count: usize, one: &'static str, many: &'static str) -> &'static str {
@@ -379,6 +519,40 @@ mod tests {
     }
 
     #[test]
+    fn unchanged_lines_before_the_first_change_and_after_the_last_keep_only_their_context() {
+        let diff = change(
+            vec![hunk(
+                1,
+                1,
+                vec![
+                    context("1"),
+                    context("2"),
+                    context("3"),
+                    context("4"),
+                    added("A"),
+                    context("5"),
+                    context("6"),
+                    context("7"),
+                ],
+            )],
+            None,
+        );
+
+        let rows = drawn(&diff, 12);
+
+        assert_eq!(
+            rows,
+            vec![
+                "3   3       ",
+                "4   4       ",
+                "5 + A       ",
+                "6   5       ",
+                "7   6       ",
+            ]
+        );
+    }
+
+    #[test]
     fn two_hunks_are_separated_by_an_elision_row_and_numbered_from_their_own_start() {
         let diff = change(
             vec![
@@ -446,6 +620,29 @@ mod tests {
         assert_eq!(rows.len(), MAX_ROWS + 1);
         assert_eq!(rows[0].trim_end(), " 1 + line 1");
         assert_eq!(rows[MAX_ROWS].trim_end(), "… 10 more rows");
+    }
+
+    fn created(lines: usize) -> Change {
+        let text: String = (1..=lines).map(|n| format!("line {n}\n")).collect();
+        change(vec![Hunk::created(&text).expect("lines of text")], None)
+    }
+
+    #[test]
+    fn a_diff_one_row_over_the_cap_is_drawn_whole_since_saying_so_takes_a_row() {
+        let rows = drawn(&created(MAX_ROWS + 1), 20);
+
+        assert!(!is_cut(created(MAX_ROWS + 1).hunks()));
+        assert_eq!(rows.len(), MAX_ROWS + 1);
+        assert_eq!(rows[MAX_ROWS].trim_end(), "21 + line 21");
+    }
+
+    #[test]
+    fn a_diff_two_rows_over_the_cap_is_cut_at_it() {
+        let rows = drawn(&created(MAX_ROWS + 2), 20);
+
+        assert!(is_cut(created(MAX_ROWS + 2).hunks()));
+        assert_eq!(rows.len(), MAX_ROWS + 1);
+        assert_eq!(rows[MAX_ROWS].trim_end(), "… 2 more rows");
     }
 
     fn thirty_lines() -> Change {

@@ -17,7 +17,7 @@
 //! taken on is exactly what the rename replaces: a second writer waiting on
 //! the old file would wake up holding a lock on nothing anybody reads.
 
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -29,29 +29,28 @@ use std::path::{Path, PathBuf};
 /// cannot leave a directory locked.
 #[derive(Debug)]
 pub(crate) struct Lock {
+    #[cfg(unix)]
     _held: File,
 }
 
 impl Lock {
     /// Waits until no other writer holds `directory`, then holds it.
+    #[cfg(unix)]
     pub(crate) fn directory(directory: &Path) -> io::Result<Self> {
         let directory = File::open(directory)?;
-        exclusive(&directory)?;
+        rustix::fs::flock(&directory, rustix::fs::FlockOperation::LockExclusive)
+            .map_err(io::Error::from)?;
         Ok(Self { _held: directory })
     }
-}
 
-#[cfg(unix)]
-fn exclusive(directory: &File) -> io::Result<()> {
-    rustix::fs::flock(directory, rustix::fs::FlockOperation::LockExclusive).map_err(io::Error::from)
-}
-
-/// Niobe runs on macOS and Linux; where there is no `flock` a writer goes
-/// unlocked and a second session's rule can be lost, but the file itself is
-/// still never left half written.
-#[cfg(not(unix))]
-fn exclusive(_directory: &File) -> io::Result<()> {
-    Ok(())
+    /// Niobe runs on macOS and Linux; where there is no `flock` a writer goes
+    /// unlocked and a second session's rule can be lost, but the file itself
+    /// is still never left half written. The directory is not opened at all,
+    /// since Windows refuses to open one as a file.
+    #[cfg(not(unix))]
+    pub(crate) fn directory(_directory: &Path) -> io::Result<Self> {
+        Ok(Self {})
+    }
 }
 
 /// The file `path` names once any symbolic link to it is followed, so that a
@@ -85,8 +84,19 @@ pub(crate) fn replace_with(
     bytes: &[u8],
     write: impl FnOnce(&mut File, &[u8]) -> io::Result<()>,
 ) -> io::Result<()> {
-    let staged = staging(path)?;
-    let written = stage(path, &staged, bytes, write).and_then(|()| std::fs::rename(&staged, path));
+    replace_staged(path, bytes, write, random_suffix)
+}
+
+/// [`replace_with`], with the staging file's suffix handed in so that a test
+/// can name the path a planted link already holds.
+fn replace_staged(
+    path: &Path,
+    bytes: &[u8],
+    write: impl FnOnce(&mut File, &[u8]) -> io::Result<()>,
+    suffix: impl FnMut() -> String,
+) -> io::Result<()> {
+    let (staged, file) = open_staging(path, suffix)?;
+    let written = stage(path, file, bytes, write).and_then(|()| std::fs::rename(&staged, path));
     if written.is_err() {
         // The staged file is ours and half of something; the error the
         // operator needs is the write's, not whether this cleanup worked.
@@ -100,30 +110,74 @@ pub(crate) fn replace_with(
     Ok(())
 }
 
-/// Where the new text is written before it replaces `path`: beside it, so the
-/// rename never crosses a file system, and hidden, so a crash between the two
-/// leaves nothing in the operator's listing. The process id keeps two
-/// processes apart; two writers in one process are kept apart by [`Lock`].
-fn staging(path: &Path) -> io::Result<PathBuf> {
+/// How many staging names are tried before giving up. Each one is random, so
+/// only a directory that already holds a file of every name tried can use
+/// them all up.
+const STAGING_ATTEMPTS: usize = 16;
+
+/// Creates the file the new text is written to before it replaces `path`:
+/// beside it, so the rename never crosses a file system, and hidden, so a
+/// crash between the two leaves nothing in the operator's listing.
+///
+/// The directory can be a repository's, which arrives with the clone and can
+/// hold symbolic links of the repository's choosing. So the file is created
+/// new or not at all — an existing file or link at the name is refused
+/// rather than opened, and never written through — under a name nobody can
+/// guess ahead of time, and a name that is taken is passed over for another.
+fn open_staging(path: &Path, mut suffix: impl FnMut() -> String) -> io::Result<(PathBuf, File)> {
+    for _ in 0..STAGING_ATTEMPTS {
+        let staged = staging(path, &suffix())?;
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&staged)
+        {
+            Ok(file) => return Ok((staged, file)),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "every staging name tried beside the file was already taken",
+    ))
+}
+
+/// The staging path for `path` with `suffix` in its name.
+fn staging(path: &Path, suffix: &str) -> io::Result<PathBuf> {
     let name = path.file_name().ok_or_else(|| {
         io::Error::new(io::ErrorKind::InvalidInput, "the path does not name a file")
     })?;
     let mut staged = std::ffi::OsString::from(".");
     staged.push(name);
-    staged.push(format!(".{}.tmp", std::process::id()));
+    staged.push(format!(".{suffix}.tmp"));
     Ok(parent(path).join(staged))
 }
 
-/// Writes `bytes` to `staged` and flushes it, with the permissions of the
-/// file it will replace, so that a config the operator keeps private stays
-/// private after Niobe has written it.
+/// A suffix nobody can predict, so a name cannot be planted ahead of the
+/// write. The standard library's hasher is keyed from the operating system's
+/// random source, which is all the randomness this needs.
+fn random_suffix() -> String {
+    use std::hash::{BuildHasher as _, Hasher as _};
+
+    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    hasher.write_u32(std::process::id());
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_nanos());
+    hasher.write_u128(now);
+    format!("{:016x}", hasher.finish())
+}
+
+/// Writes `bytes` to the staged `file` and flushes it, with the permissions
+/// of the file it will replace, so that a config the operator keeps private
+/// stays private after Niobe has written it.
 fn stage(
     path: &Path,
-    staged: &Path,
+    mut file: File,
     bytes: &[u8],
     write: impl FnOnce(&mut File, &[u8]) -> io::Result<()>,
 ) -> io::Result<()> {
-    let mut file = File::create(staged)?;
     match std::fs::metadata(path) {
         Ok(existing) => file.set_permissions(existing.permissions())?,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -156,11 +210,15 @@ mod tests {
     fn a_file_is_replaced_whole_and_nothing_is_left_beside_it() {
         let dir = tempfile::tempdir().expect("a temporary directory");
         let file = dir.path().join("config.toml");
-        std::fs::write(&file, "old").expect("written");
+        std::fs::write(&file, "old").expect("the temporary directory is writable");
 
         replace(&file, b"new").expect("the file is replaced");
 
-        assert_eq!(std::fs::read_to_string(&file).expect("read"), "new");
+        assert_eq!(
+            std::fs::read_to_string(&file)
+                .expect("the file is in a temporary directory and was just written"),
+            "new"
+        );
         assert_eq!(listing(dir.path()), ["config.toml"]);
     }
 
@@ -171,7 +229,11 @@ mod tests {
 
         replace(&file, b"first").expect("the file is created");
 
-        assert_eq!(std::fs::read_to_string(&file).expect("read"), "first");
+        assert_eq!(
+            std::fs::read_to_string(&file)
+                .expect("the file is in a temporary directory and was just written"),
+            "first"
+        );
     }
 
     #[cfg(unix)]
@@ -181,13 +243,16 @@ mod tests {
 
         let dir = tempfile::tempdir().expect("a temporary directory");
         let file = dir.path().join("config.toml");
-        std::fs::write(&file, "old").expect("written");
+        std::fs::write(&file, "old").expect("the temporary directory is writable");
         std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600))
             .expect("the mode is set");
 
         replace(&file, b"new").expect("the file is replaced");
 
-        let mode = std::fs::metadata(&file).expect("stat").permissions().mode();
+        let mode = std::fs::metadata(&file)
+            .expect("the file was just created")
+            .permissions()
+            .mode();
         assert_eq!(mode & 0o777, 0o600);
     }
 
@@ -197,7 +262,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temporary directory");
         let real = dir.path().join("dotfiles-config.toml");
         let link = dir.path().join("config.toml");
-        std::fs::write(&real, "old").expect("written");
+        std::fs::write(&real, "old").expect("the temporary directory is writable");
         std::os::unix::fs::symlink(&real, &link).expect("the link is made");
 
         let target = resolved(&link).expect("the link resolves");
@@ -205,12 +270,76 @@ mod tests {
 
         assert!(
             std::fs::symlink_metadata(&link)
-                .expect("stat")
+                .expect("the file was just created")
                 .file_type()
                 .is_symlink(),
             "the link was replaced by a file"
         );
-        assert_eq!(std::fs::read_to_string(&real).expect("read"), "new");
+        assert_eq!(
+            std::fs::read_to_string(&real)
+                .expect("the file is in a temporary directory and was just written"),
+            "new"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_planted_at_the_staging_name_is_passed_over_and_left_alone() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let file = dir.path().join("config.toml");
+        let victim = dir.path().join("victim.rc");
+        std::fs::write(&file, "old").expect("the temporary directory is writable");
+        std::fs::write(&victim, "the victim's own text")
+            .expect("the temporary directory is writable");
+        let planted = staging(&file, "planted").expect("a staging name");
+        std::os::unix::fs::symlink(&victim, &planted).expect("the link is planted");
+
+        let mut names = ["planted", "fresh"].into_iter().map(str::to_owned);
+        replace_staged(&file, b"new", io::Write::write_all, || {
+            names.next().expect("two names are enough")
+        })
+        .expect("the file is replaced through a fresh staging file");
+
+        assert_eq!(
+            std::fs::read_to_string(&file)
+                .expect("the file is in a temporary directory and was just written"),
+            "new"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&victim)
+                .expect("the file is in a temporary directory and was just written"),
+            "the victim's own text"
+        );
+        assert!(
+            std::fs::symlink_metadata(&file)
+                .expect("the file was just created")
+                .file_type()
+                .is_file(),
+            "the planted link was renamed over the file"
+        );
+    }
+
+    #[test]
+    fn a_staging_directory_full_of_taken_names_is_an_error_not_a_write() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let file = dir.path().join("config.toml");
+        std::fs::write(staging(&file, "taken").expect("a name"), "someone else's")
+            .expect("the temporary directory is writable");
+
+        let error = replace_staged(&file, b"new", io::Write::write_all, || "taken".to_owned())
+            .expect_err("no name was free");
+
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert!(!file.exists());
+    }
+
+    #[test]
+    fn the_staging_name_cannot_be_told_from_the_process_id() {
+        let first = random_suffix();
+        let second = random_suffix();
+
+        assert_ne!(first, second);
+        assert!(!first.contains(&std::process::id().to_string()));
     }
 
     #[test]

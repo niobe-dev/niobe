@@ -595,6 +595,7 @@ dependencies = [
  "defmt",
  "jiff-core",
  "jiff-static",
+ "jiff-tzdb-platform",
  "log",
  "portable-atomic",
  "portable-atomic-util",
@@ -622,6 +623,21 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "jiff-tzdb"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fa8377070c6bae868759445e5a77f66d84f0b72f3a054bfb00e6d038b8282da7"
+
+[[package]]
+name = "jiff-tzdb-platform"
+version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "875a5a69ac2bab1a891711cf5eccbec1ce0341ea805560dcd90b7a2e925132e8"
+dependencies = [
+ "jiff-tzdb",
 ]
 
 [[package]]
@@ -777,7 +793,7 @@ dependencies = [
 
 [[package]]
 name = "niobe-bridge-claude"
-version = "0.12.0"
+version = "0.16.0"
 dependencies = [
  "niobe-core",
  "rustix",
@@ -788,14 +804,14 @@ dependencies = [
 
 [[package]]
 name = "niobe-bridge-codex"
-version = "0.12.0"
+version = "0.16.0"
 dependencies = [
  "niobe-core",
 ]
 
 [[package]]
 name = "niobe-cli"
-version = "0.12.0"
+version = "0.16.0"
 dependencies = [
  "niobe-bridge-claude",
  "niobe-bridge-codex",
@@ -805,15 +821,17 @@ dependencies = [
  "niobe-store",
  "niobe-tui",
  "ratatui",
+ "rusqlite",
  "rustix",
  "serde_json",
  "sha2",
  "tempfile",
+ "toml",
 ]
 
 [[package]]
 name = "niobe-config"
-version = "0.12.0"
+version = "0.16.0"
 dependencies = [
  "niobe-core",
  "rustix",
@@ -824,7 +842,7 @@ dependencies = [
 
 [[package]]
 name = "niobe-core"
-version = "0.12.0"
+version = "0.16.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -832,7 +850,7 @@ dependencies = [
 
 [[package]]
 name = "niobe-ledger"
-version = "0.12.0"
+version = "0.16.0"
 dependencies = [
  "niobe-core",
  "tempfile",
@@ -841,17 +859,18 @@ dependencies = [
 
 [[package]]
 name = "niobe-store"
-version = "0.12.0"
+version = "0.16.0"
 dependencies = [
  "niobe-core",
  "rusqlite",
+ "rustix",
  "serde_json",
  "tempfile",
 ]
 
 [[package]]
 name = "niobe-tui"
-version = "0.12.0"
+version = "0.16.0"
 dependencies = [
  "jiff",
  "niobe-core",
@@ -859,7 +878,9 @@ dependencies = [
  "ratatui",
  "ratatui-textarea",
  "rustix",
+ "serde_json",
  "signal-hook 0.4.4",
+ "unicode-segmentation",
  "unicode-width",
 ]
 
@@ -2038,7 +2059,7 @@ checksum = "f17a85883d4e6d00e8a97c586de764dabcc06133f7f1d55dce5cdc070ad7fe59"
 
 [[package]]
 name = "xtask"
-version = "0.12.0"
+version = "0.16.0"
 
 [[package]]
 name = "zmij"

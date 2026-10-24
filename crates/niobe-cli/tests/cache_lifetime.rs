@@ -85,14 +85,14 @@ fn a_one_hour_write_and_a_five_minute_one_are_priced_at_their_own_rates() {
     // cache read, $2.50 cache write, $4.00 cache write for an hour, each per
     // million tokens.
     let hour = records.first().expect("the first message");
-    assert_eq!((hour.cache_write, hour.cache_write_1h), (100, 100));
+    assert_eq!((hour.cache_write, hour.cache_write_1h), (100, Some(100)));
     // 3×2.00 + 40×10.00 + 1000×0.20 + 100×4.00 = 1006 millionths of a dollar.
     assert_usd(usd(&table, hour), 0.001_006);
 
     let five_minutes = records.get(1).expect("the second message");
     assert_eq!(
         (five_minutes.cache_write, five_minutes.cache_write_1h),
-        (50, 0)
+        (50, Some(0))
     );
     // 2×2.00 + 25×10.00 + 1100×0.20 + 50×2.50 = 599 millionths of a dollar.
     assert_usd(usd(&table, five_minutes), 0.000_599);
@@ -104,7 +104,10 @@ fn the_recorded_sessions_writes_price_at_the_lifetimes_the_cli_reported() {
     let records = per_message_records();
 
     let written: u64 = records.iter().map(|usage| usage.cache_write).sum();
-    let for_an_hour: u64 = records.iter().map(|usage| usage.cache_write_1h).sum();
+    let for_an_hour: u64 = records
+        .iter()
+        .filter_map(|usage| usage.cache_write_1h)
+        .sum();
     assert_eq!((written, for_an_hour), (185, 135));
 
     // 9×2.00 + 115×10.00 + 5700×0.20 + 50×2.50 + 135×4.00
@@ -125,7 +128,7 @@ fn dropping_the_lifetime_prices_every_write_at_the_five_minute_rate() {
             usd(
                 &table,
                 &niobe_core::Usage {
-                    cache_write_1h: 0,
+                    cache_write_1h: Some(0),
                     ..usage
                 },
             )

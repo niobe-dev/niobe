@@ -22,6 +22,9 @@
 //!   a session started in plain Claude Code can be shown and continued here.
 //!   It writes nothing back.
 //!
+//! [`memory`] finds the files the CLI gives the agent as its memory, by the
+//! CLI's own lookup rules, since the CLI does not say which it loaded.
+//!
 //! [`conformance`] names the CLI releases those shapes were recorded from. It
 //! is what a session says when it is driving a release nobody recorded, and
 //! what the tests over `tests/fixtures/` are checked against.
@@ -33,7 +36,7 @@
 //! use niobe_bridge_claude::{Options, Session};
 //!
 //! let mut session = Session::spawn(&Options::new(".", "max"))?;
-//! session.send("what changed in the last commit?")?;
+//! session.send("what changed in the last commit?", &[])?;
 //! for event in session.drain() {
 //!     println!("{event:?}");
 //! }
@@ -42,16 +45,20 @@
 //!
 //! [`Event`]: niobe_core::event::Event
 
+mod base64;
 mod driver;
 mod spilled;
+mod stamp;
+mod tap;
 mod translate;
 mod wire;
 
 pub mod conformance;
+pub mod memory;
 pub mod transcript;
 
 pub use driver::{BINARY, Options, Session, SpawnError};
-pub use translate::{Asked, Translator};
+pub use translate::{Asked, Spent, Translator};
 
 #[cfg(test)]
 mod tests {
@@ -59,6 +66,8 @@ mod tests {
 
     #[test]
     fn drives_the_official_binary() {
+        let options = Options::new("/repo", "max");
+        assert_eq!(options.binary, std::path::PathBuf::from(BINARY));
         assert_eq!(BINARY, "claude");
     }
 }

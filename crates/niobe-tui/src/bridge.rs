@@ -14,6 +14,7 @@
 //! backend waiting for a reply.
 
 use niobe_core::event::{Event, Mode, PermissionDecision, ToolCallId};
+use niobe_core::image::Image;
 
 /// Why a turn could not be sent. Shown to the operator as it reads.
 pub type BridgeError = Box<dyn std::error::Error + Send + Sync>;
@@ -24,9 +25,10 @@ pub type BridgeError = Box<dyn std::error::Error + Send + Sync>;
 /// asks every public type to be printable, and a backend handle is one of the
 /// few things a bug report wants named.
 pub trait Bridge: std::fmt::Debug {
-    /// Sends one turn. Returns once the backend has it, not once it has
-    /// answered: the answer arrives through [`Bridge::drain`].
-    fn send(&mut self, prompt: &str) -> Result<(), BridgeError>;
+    /// Sends one turn, with the images the operator attached to it in the
+    /// order they were attached. Returns once the backend has it, not once it
+    /// has answered: the answer arrives through [`Bridge::drain`].
+    fn send(&mut self, prompt: &str, images: &[Image]) -> Result<(), BridgeError>;
 
     /// Answers a permission prompt the backend raised, by the id of the call
     /// it gated. Returns once the backend has the answer.
@@ -67,6 +69,43 @@ pub trait Bridge: std::fmt::Debug {
         Err("this backend cannot be asked to change model".into())
     }
 
+    /// Asks the backend to stop the turn it is running, keeping the session
+    /// and everything said so far.
+    ///
+    /// Returns once the backend has the request; the turn's end arrives
+    /// through [`Bridge::drain`] like any other. The default refuses, for the
+    /// reason [`Bridge::answer`] does: a stop nobody took must be reported, or
+    /// the operator would wait on a turn that is not stopping.
+    fn interrupt(&mut self) -> Result<(), BridgeError> {
+        Err("this backend cannot be asked to stop a turn".into())
+    }
+
+    /// Asks the backend to connect to the MCP server `server` again, changing
+    /// nothing it keeps past the session.
+    ///
+    /// Returns once the backend has the request; how the server then stands
+    /// arrives through [`Bridge::drain`] as a newer list of the servers. The
+    /// default refuses, for the reason [`Bridge::answer`] does: a reconnect
+    /// nobody took must be said, or the operator would wait on a server that
+    /// is not being connected to.
+    fn reconnect_mcp(&mut self, server: &str) -> Result<(), BridgeError> {
+        let _ = server;
+        Err("this backend cannot be asked to reconnect an MCP server".into())
+    }
+
+    /// Asks the backend to put the files its agent changed back as they were
+    /// before the `prompt`th prompt sent through this bridge, counted from
+    /// the first at zero, keeping everything said since.
+    ///
+    /// Returns once the backend has the request; what went back arrives
+    /// through [`Bridge::drain`]. The default refuses, for the reason
+    /// [`Bridge::answer`] does: a rewind nobody took must be said, or the
+    /// operator would take files for put back that are not.
+    fn rewind(&mut self, prompt: usize) -> Result<(), BridgeError> {
+        let _ = prompt;
+        Err("this backend keeps no files to put back as they were before a prompt".into())
+    }
+
     /// Everything the backend has produced since the last call, oldest first.
     /// Never blocks; an empty answer means nothing has arrived yet, never that
     /// the session is over.
@@ -79,7 +118,7 @@ pub trait Bridge: std::fmt::Debug {
 pub struct Detached;
 
 impl Bridge for Detached {
-    fn send(&mut self, _prompt: &str) -> Result<(), BridgeError> {
+    fn send(&mut self, _prompt: &str, _images: &[Image]) -> Result<(), BridgeError> {
         Err("this session is not attached to a backend".into())
     }
 

@@ -8,6 +8,10 @@ on:
     branches: [main]
   pull_request:
 
+# Reading the code is all a check needs.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
@@ -20,42 +24,74 @@ jobs:
       fail-fast: false
       matrix:
         os: [macos-latest, ubuntu-latest]
+    env:
+      # The gate's compiler, pinned: each stable release brings lints that
+      # `-D warnings` turns into failures, which would turn main red with no
+      # change of ours. It moves in a commit that fixes what the new one finds.
+      RUSTUP_TOOLCHAIN: "1.99.1"
     steps:
-      - uses: actions/checkout@v4.2.2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Install the toolchain
-        run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
+        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component rustfmt,clippy
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
-      - name: Format
-        run: cargo fmt --all --check
+      # The same gate, in the same order, as `cargo xtask ci` runs on a
+      # developer's machine: a step added there runs here without anyone
+      # having to add it twice. It lints install.sh with shellcheck, which
+      # `CI` makes mandatory, so the step below installs it where an image
+      # lacks it.
+      - name: Install shellcheck where the image lacks it
+        run: command -v shellcheck || { if [ "$RUNNER_OS" = macOS ]; then brew install shellcheck; else sudo apt-get install -y shellcheck; fi; }
 
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Gate
+        run: cargo xtask ci
 
-      - name: Test
-        run: cargo test --workspace
+  # The crates that hold no process or terminal of their own, tested on
+  # Windows. The binary and the claude bridge are not: the bridge starts the
+  # CLI in a process group and its tests drive a stand-in `sh`, the binary's
+  # `!` commands, reaper and pty tests stand on Unix process groups, and a
+  # native Windows build has none, so both are tested on macOS and Linux
+  # only.
+  windows:
+    name: windows-latest
+    runs-on: windows-latest
+    env:
+      # The gate's compiler, for the same reason as there.
+      RUSTUP_TOOLCHAIN: "1.99.1"
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      # The frame budgets hold for what ships, so they are timed in an
-      # optimised build; the debug run above skips them.
-      - name: Frame budgets
-        run: cargo test --release -p niobe-tui --test frame_budget
+      - name: Install the toolchain
+        shell: bash
+        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
 
-      - name: Crate layering
-        run: cargo xtask layering
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
-      - name: Copyright headers
-        run: cargo xtask headers
+      - name: Test the crates without a process of their own
+        run: cargo test --no-fail-fast -p niobe-core -p niobe-ledger -p niobe-config -p niobe-store -p niobe-tui
 
-      - name: Workspace version
-        run: cargo xtask version --check
+  # The manifest's `rust-version` is a promise to anyone building from
+  # source: the oldest compiler the workspace builds on. The gate builds on
+  # a recent stable only, so without this a dependency or a language feature that
+  # needs a newer one makes the promise false without anything failing.
+  rust-version:
+    name: rust-version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      - name: Release binary size
-        run: cargo xtask size
+      - name: Install the toolchain the manifest names
+        run: |
+          version=$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml)
+          test -n "$version"
+          rustup toolchain install "$version" --profile minimal
+          echo "RUST_VERSION=$version" >> "$GITHUB_ENV"
 
-      # The installer runs on machines with nothing but a POSIX sh, so it is
-      # linted as one. shellcheck is on the Ubuntu image, not the macOS one.
-      - name: Installer
-        if: runner.os == 'Linux'
-        run: shellcheck -s sh install.sh
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+
+      # Tests, not only a check: a test that uses a newer standard library
+      # item compiles on stable and is what the promise breaks on.
+      - name: Test on it
+        run: cargo +"$RUST_VERSION" test --workspace

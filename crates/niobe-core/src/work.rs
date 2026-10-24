@@ -1,0 +1,1154 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) Viacheslav Shynkarenko
+
+//! What kind of work a tool call was: exploring the code, editing files,
+//! building and testing, and so on, with the programs and tools that did it.
+//!
+//! A count of calls by tool name says little where most of them go to one
+//! shell tool: `Bash 73` is the agent reading, editing, building and
+//! committing alike. Read from the command each call ran, the same calls say
+//! what the agent was doing. The kind is a label put on a measured count of
+//! calls, and every call is put under exactly one.
+//!
+//! A tool that is not a shell is put under the kind its name says — `Read`
+//! explores, `Edit` edits, `Agent` delegates — and a tool an MCP server
+//! provides under that server. A shell command is read as
+//! [`crate::test_run`] reads one: split into its simple commands where `&&`,
+//! `||`, `;`, `|` or a newline separate them, with nothing inside quotes, a
+//! `$(…)` or a here-document's body read as a command. Each is named by its
+//! program's base name, after `cd`, `NAME=value` assignments and the wrappers
+//! that only run the command after them (`env`, `time`, `sudo`, `timeout`,
+//! `rtk`, and `xargs`, which runs it on what it reads); the shell's own
+//! grammar — `for … in`, `do`, `done`, `fi`, `}` — is never a program. A
+//! `find` is named with what its `-exec` runs, and with `-delete` it edits.
+//! A launcher is named by what it launches — `npx jest`, `pnpm exec`,
+//! `bundle exec`, `python -m pytest` — and a shell handed a command line
+//! with `-c` by the commands on that line. A subcommand is added where it
+//! decides the kind — `git log` reads, `git commit` does not, and `cargo
+//! test` is named as such, past the options and their values before it —
+//! and `-i` where `sed` or `perl` edits in place.
+//!
+//! A command of several parts goes under the strongest kind among them:
+//! editing, then version control, then building and testing, then the web,
+//! then exploring, and a program nothing here knows last. Output saved to a
+//! file — `>`, `>>`, `tee` — is an edit where what it saved only printed
+//! something, and part of the work where it was a build's, a commit's or a
+//! download's: `cargo test > log` is a test run. A script handed to an
+//! interpreter inline — `python3 <<EOF`, `node -e` — is named `script`,
+//! since what it does is not in the command line.
+
+use std::collections::BTreeSet;
+
+use crate::event::OPERATOR_SHELL;
+use crate::test_run::{RESERVED, Word, Wrapper, is_assignment, simple_commands_marked};
+
+/// A kind of work, which the Activity pane counts calls under.
+///
+/// Ordered as the pane lists kinds that tie on calls.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Work {
+    /// Reading the code: files, searches, listings, read-only `git`.
+    Exploring,
+    /// Changing files.
+    Editing,
+    /// Compiling, testing, linting, formatting.
+    Building,
+    /// Commits, branches, worktrees, pushes, pull requests.
+    VersionControl,
+    /// Fetching from or searching the web.
+    Web,
+    /// Handing work to a sub-agent, or to one already running.
+    Delegating,
+    /// The tools of one MCP server, named as a person reads it: `Notion`.
+    Server(String),
+    /// The agent's own bookkeeping: finding a tool, keeping a to-do list,
+    /// scheduling itself, watching what it left running.
+    Housekeeping,
+    /// A command or a tool none of the above recognises. Never a guess at
+    /// one of them: its own names are what is shown for it.
+    Other,
+}
+
+impl Work {
+    /// What the kind is called on screen. A built-in kind's label is sixteen
+    /// columns at most, so that a pane's column of kinds is never cut for
+    /// one; a server's is its name, as long as that is, which the pane cuts
+    /// to its column.
+    pub fn label(&self) -> &str {
+        match self {
+            Self::Exploring => "Exploring code",
+            Self::Editing => "Editing files",
+            Self::Building => "Build and test",
+            Self::VersionControl => "Version control",
+            Self::Web => "Web",
+            Self::Delegating => "Delegating",
+            Self::Server(name) => name,
+            Self::Housekeeping => "Housekeeping",
+            Self::Other => "Other",
+        }
+    }
+
+    /// How strongly a part of a shell command says what the whole was doing:
+    /// the part that ranks highest names the command's kind.
+    fn rank(&self) -> u8 {
+        match self {
+            Self::Editing => 6,
+            Self::VersionControl => 5,
+            Self::Building => 4,
+            Self::Web => 3,
+            Self::Exploring => 2,
+            Self::Other => 1,
+            Self::Delegating | Self::Server(_) | Self::Housekeeping => 0,
+        }
+    }
+}
+
+/// What one call was: its kind, and the programs or tools that did it, each
+/// once however many times the call ran it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reading {
+    /// The kind of work it is counted under.
+    pub work: Work,
+    /// What did it, in the order the command named them: `grep`, `git log`,
+    /// `sed -i`, `cargo test`, or the tool's own name. Never empty.
+    pub specifics: Vec<String>,
+}
+
+/// The kind of work a call to `tool` was.
+///
+/// `command` is the whole shell command the call ran, where it ran one. A
+/// record kept before calls carried it has only the call's `input`, which for
+/// the operator's `!` commands is the command, and its one-line `summary`,
+/// which for the session's own shell tool is the command's first line; those
+/// are read instead.
+pub fn of_call(tool: &str, command: Option<&str>, summary: Option<&str>, input: &str) -> Reading {
+    if let Some(command) = command_of(tool, command, summary) {
+        return of_command(command);
+    }
+    if let Some(reading) = of_tool(tool) {
+        return reading;
+    }
+    match tool {
+        OPERATOR_SHELL => of_command(input),
+        _ => Reading {
+            work: Work::Other,
+            specifics: vec![tool.to_owned()],
+        },
+    }
+}
+
+/// The shell command a call of the agent's ran, as far as it is known: the
+/// whole command where the backend reported it, and otherwise the one line of
+/// it its shell tool's `summary` holds, without the mark that says it was
+/// cut. `None` for a call that ran no command, and for one the operator ran
+/// with `!`, whose command is its input.
+pub fn command_of<'a>(
+    tool: &str,
+    command: Option<&'a str>,
+    summary: Option<&'a str>,
+) -> Option<&'a str> {
+    match (command, tool, summary) {
+        (Some(command), _, _) => Some(command),
+        (None, "Bash", Some(summary)) => Some(summary.trim_end_matches('…').trim_end()),
+        (None, _, _) => None,
+    }
+}
+
+/// A tool that is not a shell, by its name.
+fn of_tool(tool: &str) -> Option<Reading> {
+    if let Some((server, name)) = mcp_tool(tool) {
+        return Some(Reading {
+            work: Work::Server(server),
+            specifics: vec![name],
+        });
+    }
+    // The CLI renames and adds tools of its own between releases: its to-do
+    // list went from `TodoWrite` to the `Task…` tools and its scheduling to
+    // the `Cron…` ones. The names here are those its `init` lists, which the
+    // bridge's conformance test holds every recorded list to.
+    let work = match tool {
+        "Read" | "Grep" | "Glob" | "LS" | "NotebookRead" | "LSP" => Work::Exploring,
+        "Edit" | "MultiEdit" | "Write" | "NotebookEdit" => Work::Editing,
+        "EnterWorktree" | "ExitWorktree" => Work::VersionControl,
+        "WebFetch" | "WebSearch" => Work::Web,
+        "Agent" | "Task" | "SendMessage" | "ListAgents" | "Workflow" | "RemoteTrigger" => {
+            Work::Delegating
+        }
+        "ToolSearch" | "TodoWrite" | "TodoRead" | "TaskCreate" | "TaskGet" | "TaskList"
+        | "TaskUpdate" | "ScheduleWakeup" | "CronCreate" | "CronDelete" | "CronList"
+        | "BashOutput" | "KillShell" | "KillBash" | "TaskOutput" | "TaskStop" | "Monitor"
+        | "PushNotification" | "ExitPlanMode" | "EnterPlanMode" | "Skill" | "SlashCommand"
+        | "AskUserQuestion" => Work::Housekeeping,
+        _ => return None,
+    };
+    Some(Reading {
+        work,
+        specifics: vec![tool.to_owned()],
+    })
+}
+
+/// An MCP tool's server and tool, as a person reads them.
+///
+/// An MCP tool arrives as `mcp__<server>__<tool>`, and the server as the
+/// client registered it (`claude_ai_Notion`). It reads as the server's last
+/// word, or for a claude.ai connector its whole name, words apart (`Google
+/// Drive`); and the tool with the server's name taken off its front where it
+/// repeats it: `Notion` and `search`.
+///
+/// A server is never named with nothing, and never with the label of a kind
+/// of work, which its row in the Activity pane would be read as: a server
+/// named `Web` reads as `Web MCP`.
+pub fn mcp_tool(name: &str) -> Option<(String, String)> {
+    let (registered, tool) = name.strip_prefix("mcp__")?.split_once("__")?;
+    let server = server_name(registered);
+    let prefix = format!("{}-", server.to_lowercase());
+    let tool = match tool.to_lowercase().starts_with(&prefix) {
+        true => tool.get(prefix.len()..).unwrap_or(tool),
+        false => tool,
+    };
+    Some((server, tool.to_owned()))
+}
+
+/// What the server `registered` is called on screen: see [`mcp_tool`].
+fn server_name(registered: &str) -> String {
+    let read = match registered.strip_prefix("claude_ai_") {
+        Some(connector) => connector.replace('_', " ").trim().to_owned(),
+        None => registered.rsplit('_').next().unwrap_or_default().to_owned(),
+    };
+    let read = match (read.is_empty(), registered.trim_matches('_')) {
+        (false, _) => read,
+        (true, "") => return "MCP".to_owned(),
+        (true, whole) => whole.to_owned(),
+    };
+    let built_in = [
+        Work::Exploring,
+        Work::Editing,
+        Work::Building,
+        Work::VersionControl,
+        Work::Web,
+        Work::Delegating,
+        Work::Housekeeping,
+        Work::Other,
+    ];
+    match built_in
+        .iter()
+        .any(|kind| kind.label().eq_ignore_ascii_case(&read))
+    {
+        true => format!("{read} MCP"),
+        false => read,
+    }
+}
+
+/// The kind of work a shell command was.
+pub fn of_command(command: &str) -> Reading {
+    let parts: Vec<Part> = simple_commands_marked(command)
+        .iter()
+        .flat_map(|words| parts_of(words))
+        .collect();
+    let strongest = parts
+        .iter()
+        .filter(|part| !part.quiet)
+        .map(|part| &part.work)
+        .max_by_key(|work| work.rank())
+        .cloned();
+    let saved = parts.iter().any(|part| part.saves);
+    let work = match strongest {
+        Some(work @ (Work::Editing | Work::VersionControl | Work::Building | Work::Web)) => work,
+        _ if saved => Work::Editing,
+        Some(work) => work,
+        None => Work::Other,
+    };
+    let mut seen = BTreeSet::new();
+    // A condition that is always met — `while true` — says nothing even
+    // beside other quiet programs, where there are any.
+    let named: Vec<&Part> = match (
+        parts.iter().any(|part| !part.quiet),
+        parts.iter().any(|part| !part.empty),
+    ) {
+        (true, _) => parts.iter().filter(|part| !part.quiet).collect(),
+        (false, true) => parts.iter().filter(|part| !part.empty).collect(),
+        (false, false) => parts.iter().collect(),
+    };
+    let mut specifics: Vec<String> = named
+        .into_iter()
+        .filter(|part| seen.insert(part.name.clone()))
+        .map(|part| part.name.clone())
+        .collect();
+    if specifics.is_empty() {
+        specifics.push("shell".to_owned());
+    }
+    Reading { work, specifics }
+}
+
+/// One simple command of a shell command, read.
+#[derive(Debug)]
+struct Part {
+    /// The program, with the subcommand or option that decides its kind.
+    name: String,
+    work: Work,
+    /// Whether it says nothing about the work — `cd`, `echo` — and is named
+    /// only where nothing else in the command is.
+    quiet: bool,
+    /// Whether it saves output to a file: `> file`, `>> file`, `tee file`.
+    saves: bool,
+    /// Whether it does nothing at all — `true`, `:` — and is named only
+    /// where nothing else, quiet or not, is.
+    empty: bool,
+}
+
+/// The simple command `words`, read: the program it runs and, where that
+/// runs others on what it found — `find -exec` — those too. Nothing where it
+/// runs no program.
+fn parts_of(marked: &[Word]) -> Vec<Part> {
+    // A quoted word is text however it begins: `grep '>>>' file` redirects
+    // nothing. A target may be quoted, as in `> "out file"`; an operator may
+    // not.
+    let saves = marked.iter().enumerate().any(|(at, word)| {
+        !word.quoted
+            && redirect_target(
+                &word.text,
+                marked.get(at + 1).map(|next| next.text.as_str()),
+            )
+            .is_some_and(is_a_file)
+    });
+    // A here-document or a here-string is what the program reads, which for
+    // an interpreter is its script.
+    let fed = marked
+        .iter()
+        .any(|word| !word.quoted && word.text.starts_with("<<"));
+    let Some(words) = program_words(marked) else {
+        return Vec::new();
+    };
+    let Some((program, rest)) = words.split_first() else {
+        return Vec::new();
+    };
+    let program = program.rsplit('/').next().unwrap_or(program);
+    if let Some(line) = shell_line(program, rest) {
+        return simple_commands_marked(line)
+            .iter()
+            .flat_map(|words| parts_of(words))
+            .map(|part| Part {
+                saves: part.saves || saves,
+                ..part
+            })
+            .collect();
+    }
+    let (program, rest) = launched(program, rest);
+    let mut parts = vec![part(program, rest, saves, fed)];
+    if program == "find" {
+        for run in find_runs(rest) {
+            if let Some((program, rest)) = run.split_first() {
+                parts.push(part(
+                    program.rsplit('/').next().unwrap_or(program),
+                    rest,
+                    false,
+                    false,
+                ));
+            }
+        }
+    }
+    parts
+}
+
+/// `program`, run with `rest`, read as one part of a command; `fed` where a
+/// here-document or a here-string is its input.
+fn part(program: &str, rest: &[&str], saves: bool, fed: bool) -> Part {
+    let (name, work, quiet) = classify(program, rest, fed);
+    Part {
+        // `tee` with no file, or only a device, saves nothing.
+        saves: saves
+            || (program == "tee"
+                && rest
+                    .iter()
+                    .any(|word| !word.starts_with('-') && is_a_file(word))),
+        empty: matches!(program, "true" | "false" | ":"),
+        name,
+        work,
+        quiet,
+    }
+}
+
+/// The command line a shell is handed with `-c`, which is read as the
+/// command it is rather than as a script nobody can see: `bash -c 'cargo
+/// test'` runs `cargo test`.
+fn shell_line<'a>(program: &str, rest: &[&'a str]) -> Option<&'a str> {
+    if !matches!(program, "sh" | "bash" | "zsh" | "dash" | "ksh") {
+        return None;
+    }
+    let mut words = rest.iter();
+    while let Some(word) = words.next() {
+        let flags = word.strip_prefix(['-', '+'])?;
+        if matches!(flags, "o" | "O") {
+            words.next();
+        } else if flags.chars().all(|c| c.is_ascii_alphabetic()) && flags.contains('c') {
+            return words.next().copied();
+        }
+    }
+    None
+}
+
+/// The program a launcher runs, and what it runs it with: `npx jest`,
+/// `pnpm exec vitest`, `bundle exec rspec` and `python -m pytest` are the
+/// work of `jest`, `vitest`, `rspec` and `pytest`. Anything else is itself.
+fn launched<'a, 'b>(program: &'a str, rest: &'b [&'a str]) -> (&'a str, &'b [&'a str]) {
+    let after = |from: usize, takes_a_value: &[&str]| {
+        let mut at = from;
+        while let Some(word) = rest.get(at).filter(|word| word.starts_with('-')) {
+            at += if takes_a_value.contains(word) { 2 } else { 1 };
+        }
+        rest.get(at)
+            .map(|program| (*program, rest.get(at + 1..).unwrap_or_default()))
+    };
+    let inner = match program {
+        "npx" | "bunx" => after(0, &["-p", "--package"]),
+        "pnpm" if matches!(rest.first(), Some(&("exec" | "dlx"))) => after(1, &[]),
+        "bundle" | "yarn" if rest.first() == Some(&"exec") => after(1, &[]),
+        "python" | "python3" => {
+            let module = rest
+                .iter()
+                .take_while(|word| word.starts_with('-') && **word != "-c")
+                .position(|word| *word == "-m");
+            module.and_then(|at| {
+                rest.get(at + 1)
+                    .map(|module| (*module, rest.get(at + 2..).unwrap_or_default()))
+            })
+        }
+        _ => None,
+    };
+    match inner {
+        Some((program, rest)) => (program.rsplit('/').next().unwrap_or(program), rest),
+        None => (program, rest),
+    }
+}
+
+/// The commands `find`, run with `rest`, runs on what it finds: each
+/// `-exec`, `-execdir`, `-ok` or `-okdir` up to the `;` or `+` that ends it.
+fn find_runs<'a>(rest: &[&'a str]) -> Vec<Vec<&'a str>> {
+    let mut runs = Vec::new();
+    let mut words = rest.iter().copied();
+    while let Some(word) = words.next() {
+        if matches!(word, "-exec" | "-execdir" | "-ok" | "-okdir") {
+            runs.push(
+                words
+                    .by_ref()
+                    .take_while(|word| !matches!(*word, ";" | "+"))
+                    .collect(),
+            );
+        }
+    }
+    runs
+}
+
+/// The words that close a compound command, which stand as commands of
+/// their own once a command is split into its simple commands: the shell's
+/// grammar, never a program.
+const CLOSES: &[&str] = &["fi", "done", "esac", "}"];
+
+/// The heads of a compound command that run nothing themselves — `for f in
+/// *.rs`, `case $x in` — whose whole simple command is the shell's.
+const HEADS_ONLY: &[&str] = &["for", "select", "case"];
+
+/// The options `xargs` takes that are followed by a value of their own.
+const XARGS_TAKES_A_VALUE: &[&str] = &[
+    "-n",
+    "-I",
+    "-P",
+    "-L",
+    "-d",
+    "-s",
+    "-E",
+    "-a",
+    "--max-args",
+    "--max-procs",
+    "--max-lines",
+    "--delimiter",
+    "--max-chars",
+    "--arg-file",
+];
+
+/// The words from the program on: past the shell's own words, assignments
+/// and the wrappers that run the command after them as it is — `xargs`
+/// among them, which runs it on what it reads, so that what is counted is
+/// what it ran.
+fn program_words(words: &[Word]) -> Option<Vec<&str>> {
+    // The word after a redirection operator that stands alone — `> out`,
+    // `<<EOF` — is where it goes, not a word of the command. A quoted word
+    // is not an operator, whatever it begins with.
+    let mut target_next = false;
+    let mut words = words
+        .iter()
+        .filter(move |word| {
+            if std::mem::take(&mut target_next) {
+                return false;
+            }
+            if !word.quoted && is_redirection(&word.text) {
+                target_next = stands_alone(&word.text);
+                return false;
+            }
+            true
+        })
+        .map(|word| word.text.as_str())
+        .skip_while(|word| RESERVED.contains(word))
+        .peekable();
+    if words
+        .peek()
+        .is_some_and(|word| CLOSES.contains(word) || HEADS_ONLY.contains(word))
+    {
+        return None;
+    }
+    // `function name {` opens a body whose first command follows the brace.
+    if words.next_if_eq(&"function").is_some() {
+        words.find(|word| *word == "{")?;
+    }
+    loop {
+        let word = *words.peek()?;
+        let base = word.rsplit('/').next().unwrap_or(word);
+        if is_assignment(word) {
+            words.next();
+        } else if base == "xargs" {
+            // With no command after it, `xargs` runs `echo`, and is named
+            // as itself.
+            let mut after = words.clone();
+            after.next();
+            skip_xargs_options(&mut after);
+            if after.peek().is_none() {
+                break;
+            }
+            words = after;
+        } else if base == "rtk" {
+            words.next();
+            words.next_if(|word| *word == "proxy");
+        } else if let Some(wrapper) = Wrapper::named(base) {
+            words.next();
+            if !wrapper.skip_its_own(&mut words) {
+                return None;
+            }
+        } else {
+            break;
+        }
+    }
+    Some(words.collect())
+}
+
+/// Moves `words` past the options `xargs` takes before its command.
+fn skip_xargs_options<'a>(words: &mut std::iter::Peekable<impl Iterator<Item = &'a str>>) {
+    while let Some(option) = words.next_if(|word| word.starts_with('-')) {
+        if XARGS_TAKES_A_VALUE.contains(&option) {
+            words.next();
+        }
+    }
+}
+
+/// What `program`, run with `rest`, is named and counted as, and whether it
+/// is quiet.
+fn classify(program: &str, rest: &[&str], fed: bool) -> (String, Work, bool) {
+    let named = |work| (program.to_owned(), work, false);
+    match program {
+        "cd" | "pushd" | "popd" | "echo" | "printf" | "true" | "false" | ":" | "sleep"
+        | "export" | "set" | "unset" | "source" | "." | "exit" | "wait" | "clear" | "[" | "[["
+        | "test" => (program.to_owned(), Work::Other, true),
+        "find" if rest.contains(&"-delete") => ("find -delete".to_owned(), Work::Editing, false),
+        "git" => git(rest),
+        "gh" | "hub" | "glab" => (
+            with_subcommand(program, rest, &[]),
+            Work::VersionControl,
+            false,
+        ),
+        "svn" | "hg" => named(Work::VersionControl),
+        "cargo" => {
+            let rest: Vec<&str> = rest
+                .iter()
+                .copied()
+                .skip_while(|word| word.starts_with('+'))
+                .collect();
+            (
+                with_subcommand(
+                    program,
+                    &rest,
+                    &["--color", "--config", "-Z", "-C", "--manifest-path"],
+                ),
+                Work::Building,
+                false,
+            )
+        }
+        "npm" | "pnpm" | "yarn" | "bun" | "go" | "dotnet" | "swift" | "mix" | "uv" | "poetry"
+        | "pip" | "pip3" => (
+            with_subcommand(program, rest, PACKAGE_MANAGERS_TAKE_A_VALUE),
+            Work::Building,
+            false,
+        ),
+        "deno"
+            if matches!(
+                with_subcommand(program, rest, &[]).strip_prefix("deno "),
+                Some("test" | "lint" | "fmt" | "check" | "bench" | "compile")
+            ) =>
+        {
+            (with_subcommand(program, rest, &[]), Work::Building, false)
+        }
+        "make" | "cmake" | "ninja" | "bazel" | "mvn" | "gradle" | "gradlew" | "pytest" | "tox"
+        | "jest" | "vitest" | "tsc" | "rustc" | "rustfmt" | "clippy-driver" | "gcc" | "g++"
+        | "clang" | "clang++" | "javac" | "shellcheck" | "eslint" | "prettier" | "ruff"
+        | "mypy" | "black" | "xcodebuild" | "rspec" => named(Work::Building),
+        "sed" | "perl" if in_place(program, rest) => {
+            (format!("{program} -i"), Work::Editing, false)
+        }
+        "python" | "python3" | "node" | "perl" | "ruby" | "bash" | "sh" | "zsh" | "deno"
+        | "osascript" => match fed || inline_script(rest) {
+            true => ("script".to_owned(), Work::Other, false),
+            false => named(Work::Other),
+        },
+        "grep" | "egrep" | "fgrep" | "rg" | "ag" | "ack" | "find" | "fd" | "ls" | "tree"
+        | "cat" | "head" | "tail" | "less" | "more" | "wc" | "sed" | "awk" | "jq" | "yq"
+        | "sort" | "uniq" | "cut" | "tr" | "diff" | "cmp" | "file" | "stat" | "du" | "df"
+        | "pwd" | "which" | "whereis" | "realpath" | "readlink" | "dirname" | "basename"
+        | "xxd" | "od" | "hexdump" | "strings" | "column" | "nl" | "bat" | "date" | "env"
+        | "printenv" | "uname" | "ps" | "lsof" | "shasum" | "sha256sum" | "md5" | "md5sum" => {
+            named(Work::Exploring)
+        }
+        "mv" | "cp" | "rm" | "mkdir" | "rmdir" | "touch" | "ln" | "chmod" | "chown" | "patch"
+        | "truncate" | "install" | "rsync" | "unzip" | "tar" => named(Work::Editing),
+        // What `tee` saves is an edit only where nothing stronger made it: see
+        // `Part::saves`.
+        "tee" => named(Work::Other),
+        "curl" | "wget" | "http" | "https" => named(Work::Web),
+        _ => named(Work::Other),
+    }
+}
+
+/// The options package managers take before their subcommand that are
+/// followed by a value of their own: `npm --prefix web run build` runs `run`.
+const PACKAGE_MANAGERS_TAKE_A_VALUE: &[&str] = &[
+    "--prefix",
+    "-C",
+    "--dir",
+    "--cwd",
+    "--filter",
+    "-F",
+    "-w",
+    "--workspace",
+    "--directory",
+    "--project",
+];
+
+/// `git` and its subcommand, which decides whether it only read.
+fn git(rest: &[&str]) -> (String, Work, bool) {
+    let name = with_subcommand("git", rest, &["-C", "-c", "--git-dir", "--work-tree"]);
+    let reads = matches!(
+        name.strip_prefix("git ").unwrap_or_default(),
+        "log"
+            | "diff"
+            | "status"
+            | "show"
+            | "blame"
+            | "grep"
+            | "ls-files"
+            | "ls-tree"
+            | "rev-parse"
+            | "describe"
+            | "shortlog"
+            | "reflog"
+            | "cat-file"
+            | "whatchanged"
+    );
+    let work = match reads {
+        true => Work::Exploring,
+        false => Work::VersionControl,
+    };
+    (name, work, false)
+}
+
+/// `program` and the first word after its options, where there is one:
+/// `git log`, `cargo test`, `npm run`. `takes_a_value` are the options
+/// before it that are followed by a value of their own.
+fn with_subcommand(program: &str, rest: &[&str], takes_a_value: &[&str]) -> String {
+    let mut words = rest.iter();
+    while let Some(word) = words.next() {
+        if takes_a_value.contains(word) {
+            words.next();
+        } else if !word.starts_with('-') {
+            return format!("{program} {word}");
+        }
+    }
+    program.to_owned()
+}
+
+/// Whether `sed` or `perl` is told to edit its files in place: `-i`, `-i ''`,
+/// `-i.bak`, `--in-place`, or `-i` among other single-letter options (`-pi`).
+///
+/// An `i` after an option that takes a value is part of the value:
+/// `perl -Mstrict` loads a module, and `perl -I lib -e …` reads its script
+/// from the word after `-e`.
+fn in_place(program: &str, rest: &[&str]) -> bool {
+    // The options whose value is the rest of the word or, where nothing is
+    // left of it, the next word; and those whose value can only be the rest.
+    let (valued, attached_only) = match program {
+        "perl" => ("eEIMm", "0CdDxF"),
+        _ => ("efl", ""),
+    };
+    let mut words = rest.iter();
+    while let Some(word) = words.next() {
+        if word.starts_with("--in-place") {
+            return true;
+        }
+        let Some(flags) = word
+            .strip_prefix('-')
+            .filter(|flags| !flags.starts_with('-'))
+        else {
+            continue;
+        };
+        for (at, flag) in flags.char_indices() {
+            if flag == 'i' {
+                return true;
+            }
+            if valued.contains(flag) {
+                if at + flag.len_utf8() == flags.len() {
+                    words.next();
+                }
+                break;
+            }
+            if attached_only.contains(flag) {
+                break;
+            }
+        }
+    }
+    false
+}
+
+/// Whether an interpreter is handed its script inline rather than by a file:
+/// `-c`, `-e`, or `-`, its standard input. A here-document never reaches
+/// here, being a redirection: see `fed` in [`part`].
+fn inline_script(rest: &[&str]) -> bool {
+    rest.iter()
+        .any(|word| matches!(*word, "-c" | "-e" | "-" | "-ne" | "-pe" | "-lne"))
+}
+
+/// Whether `word` is a redirection the program never sees: `2>&1`, `>`,
+/// `>>`, `<`, `>file`, `<<` and the like.
+fn is_redirection(word: &str) -> bool {
+    let rest = word.trim_start_matches(|c: char| c.is_ascii_digit() || c == '&');
+    rest.starts_with('>') || rest.starts_with('<')
+}
+
+/// Whether the redirection `word` is the operator alone, its target the next
+/// word: `>`, `2>>`, `&>`, `<<`, but not `2>&1` or `>out`.
+fn stands_alone(word: &str) -> bool {
+    word.trim_start_matches(|c: char| c.is_ascii_digit())
+        .chars()
+        .all(|c| matches!(c, '<' | '>' | '|' | '&' | '-'))
+}
+
+/// Where `word` sends the command's standard output, where it is a
+/// redirection of it: the rest of the word, or `next` where the word is the
+/// operator alone. `None` for one of standard error alone, or of input.
+fn redirect_target<'a>(word: &'a str, next: Option<&'a str>) -> Option<&'a str> {
+    let rest = match word.strip_prefix('&') {
+        Some(rest) => rest,
+        None => word.strip_prefix('1').unwrap_or(word),
+    };
+    let target = rest
+        .strip_prefix(">>")
+        .or_else(|| rest.strip_prefix(">|"))
+        .or_else(|| rest.strip_prefix('>'))?;
+    match target.is_empty() {
+        true => next,
+        false => Some(target),
+    }
+}
+
+/// Whether a redirection's target is a file, rather than another descriptor
+/// or a device that keeps nothing.
+fn is_a_file(target: &str) -> bool {
+    !target.starts_with('&') && !target.starts_with("/dev/")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn read(command: &str) -> (Work, Vec<String>) {
+        let reading = of_command(command);
+        (reading.work, reading.specifics)
+    }
+
+    fn named(names: &[&str]) -> Vec<String> {
+        names.iter().map(|name| (*name).to_owned()).collect()
+    }
+
+    /// Commands as agents wrote them in this repository's own sessions.
+    #[test]
+    fn commands_from_real_sessions_are_put_under_the_work_they_did() {
+        let cases: &[(&str, Work, &[&str])] = &[
+            (
+                "cd crates && grep -n 'fn tool_rows' niobe-tui/src/ui.rs | head -5",
+                Work::Exploring,
+                &["grep", "head"],
+            ),
+            (
+                "sed -n 1,80p crates/niobe-core/src/session.rs",
+                Work::Exploring,
+                &["sed"],
+            ),
+            (
+                "sed -i '' -e 's/old/new/' crates/niobe-tui/src/app.rs",
+                Work::Editing,
+                &["sed -i"],
+            ),
+            ("git status --short", Work::Exploring, &["git status"]),
+            (
+                "git commit -m \"fix: count a reply; and say so\"",
+                Work::VersionControl,
+                &["git commit"],
+            ),
+            ("cargo test --workspace", Work::Building, &["cargo test"]),
+            (
+                "rtk cargo clippy --workspace --all-targets -- -D warnings",
+                Work::Building,
+                &["cargo clippy"],
+            ),
+            (
+                "python3 - <<'EOF'\nimport os\nos.remove('x')\nEOF",
+                Work::Other,
+                &["script"],
+            ),
+            (
+                "jq -c '.type' crates/fixtures/a.jsonl",
+                Work::Exploring,
+                &["jq"],
+            ),
+        ];
+        for (command, work, specifics) in cases {
+            assert_eq!(read(command), (work.clone(), named(specifics)), "{command}");
+        }
+    }
+
+    #[test]
+    fn a_compound_command_goes_under_its_strongest_kind_and_names_every_program() {
+        let cases: &[(&str, Work, &[&str])] = &[
+            (
+                "git add a.rs && git commit -m x && git push",
+                Work::VersionControl,
+                &["git add", "git commit", "git push"],
+            ),
+            (
+                "cargo fmt --all && git diff --stat",
+                Work::Building,
+                &["cargo fmt", "git diff"],
+            ),
+            (
+                "mkdir -p out && cargo build && mv target/x out/",
+                Work::Editing,
+                &["mkdir", "cargo build", "mv"],
+            ),
+            (
+                "curl -s https://example.com | jq .",
+                Work::Web,
+                &["curl", "jq"],
+            ),
+            ("ls -la | wc -l", Work::Exploring, &["ls", "wc"]),
+            (
+                "grep -rl foo . | python3 -c 'import sys'",
+                Work::Exploring,
+                &["grep", "script"],
+            ),
+        ];
+        for (command, work, specifics) in cases {
+            assert_eq!(read(command), (work.clone(), named(specifics)), "{command}");
+        }
+    }
+
+    #[test]
+    fn wrappers_assignments_and_paths_are_read_past_to_the_program() {
+        let cases: &[(&str, Work, &[&str])] = &[
+            (
+                "/usr/bin/env cargo test -p niobe-core",
+                Work::Building,
+                &["cargo test"],
+            ),
+            (
+                "RUST_LOG=debug timeout 60 cargo +nightly build",
+                Work::Building,
+                &["cargo build"],
+            ),
+            ("sudo -u me ls /root", Work::Exploring, &["ls"]),
+            (
+                "git -C crates log --oneline -3",
+                Work::Exploring,
+                &["git log"],
+            ),
+            ("./target/debug/niobe --version", Work::Other, &["niobe"]),
+            ("time make", Work::Building, &["make"]),
+        ];
+        for (command, work, specifics) in cases {
+            assert_eq!(read(command), (work.clone(), named(specifics)), "{command}");
+        }
+    }
+
+    #[test]
+    fn output_saved_to_a_file_is_an_edit_unless_it_is_a_builds_or_a_downloads() {
+        let cases: &[(&str, Work, &[&str])] = &[
+            ("cat > notes.txt <<EOF\nhello\nEOF", Work::Editing, &["cat"]),
+            ("echo done >> log.txt", Work::Editing, &["echo"]),
+            ("echo done > /dev/null", Work::Other, &["echo"]),
+            ("ls 2>/dev/null", Work::Exploring, &["ls"]),
+            (
+                "cargo test 2>&1 | tee /tmp/run.txt",
+                Work::Building,
+                &["cargo test", "tee"],
+            ),
+            (
+                "cargo test > /tmp/run.txt 2>&1",
+                Work::Building,
+                &["cargo test"],
+            ),
+            (
+                "curl -o page.html https://example.com",
+                Work::Web,
+                &["curl"],
+            ),
+        ];
+        for (command, work, specifics) in cases {
+            assert_eq!(read(command), (work.clone(), named(specifics)), "{command}");
+        }
+    }
+
+    #[test]
+    fn in_place_edits_and_inline_scripts_are_told_apart_from_reading_and_running() {
+        let cases: &[(&str, Work, &[&str])] = &[
+            ("perl -pi -e 's/a/b/' f.rs", Work::Editing, &["perl -i"]),
+            ("sed -i.bak s/a/b/ f.rs", Work::Editing, &["sed -i"]),
+            ("sed --in-place s/a/b/ f.rs", Work::Editing, &["sed -i"]),
+            ("sed -n '/fn/p' f.rs", Work::Exploring, &["sed"]),
+            ("node -e 'console.log(1)'", Work::Other, &["script"]),
+            ("python3 scripts/check.py", Work::Other, &["python3"]),
+        ];
+        for (command, work, specifics) in cases {
+            assert_eq!(read(command), (work.clone(), named(specifics)), "{command}");
+        }
+    }
+
+    #[test]
+    fn a_bulk_edit_through_xargs_or_find_is_an_edit_named_by_what_it_ran() {
+        let cases: &[(&str, Work, &[&str])] = &[
+            (
+                "find . -name '*.rs' | xargs sed -i 's/a/b/'",
+                Work::Editing,
+                &["find", "sed -i"],
+            ),
+            (
+                "git ls-files | xargs rm",
+                Work::Editing,
+                &["git ls-files", "rm"],
+            ),
+            (
+                "find . -name '*.tmp' -delete",
+                Work::Editing,
+                &["find -delete"],
+            ),
+            (
+                "find . -name '*.rs' -exec sed -i s/a/b/ {} +",
+                Work::Editing,
+                &["find", "sed -i"],
+            ),
+            (
+                "find . -name '*.orig' -exec rm {} \\;",
+                Work::Editing,
+                &["find", "rm"],
+            ),
+            (
+                "find . -print0 | xargs -0 -n 10 -P 4 grep foo",
+                Work::Exploring,
+                &["find", "grep"],
+            ),
+            ("ls | xargs -I {} cp {} out/", Work::Editing, &["ls", "cp"]),
+            (
+                "find . -type f -exec wc -l {} +",
+                Work::Exploring,
+                &["find", "wc"],
+            ),
+            ("ls | xargs", Work::Exploring, &["ls", "xargs"]),
+        ];
+        for (command, work, specifics) in cases {
+            assert_eq!(read(command), (work.clone(), named(specifics)), "{command}");
+        }
+    }
+
+    #[test]
+    fn the_shells_own_grammar_is_never_named_as_a_program() {
+        let cases: &[(&str, Work, &[&str])] = &[
+            (
+                "for f in *.rs; do sed -i 's/a/b/' \"$f\"; done",
+                Work::Editing,
+                &["sed -i"],
+            ),
+            (
+                "if grep -q x f; then echo y; fi",
+                Work::Exploring,
+                &["grep"],
+            ),
+            ("while true; do sleep 1; done", Work::Other, &["sleep"]),
+            ("{ cargo test; }", Work::Building, &["cargo test"]),
+            ("case x in a) ls;; esac", Work::Exploring, &["ls"]),
+            ("[ -f x ] && cargo test", Work::Building, &["cargo test"]),
+            ("[[ -n $x ]] || test -d y", Work::Other, &["[[", "test"]),
+            ("select x in a b; do pwd; done", Work::Exploring, &["pwd"]),
+            ("until false; do ls; done", Work::Exploring, &["ls"]),
+            ("function f { ls; }", Work::Exploring, &["ls"]),
+        ];
+        for (command, work, specifics) in cases {
+            assert_eq!(read(command), (work.clone(), named(specifics)), "{command}");
+        }
+    }
+
+    #[test]
+    fn a_command_of_nothing_but_quiet_programs_names_them_under_other() {
+        assert_eq!(read("cd /tmp"), (Work::Other, named(&["cd"])));
+        assert_eq!(read("echo ---"), (Work::Other, named(&["echo"])));
+        assert_eq!(
+            read("cd crates && echo hi && grep x y"),
+            (Work::Exploring, named(&["grep"]))
+        );
+        assert_eq!(read(""), (Work::Other, named(&["shell"])));
+    }
+
+    #[test]
+    fn a_tool_that_is_not_a_shell_is_put_under_what_its_name_says() {
+        let cases: &[(&str, Work, &str)] = &[
+            ("Read", Work::Exploring, "Read"),
+            ("Glob", Work::Exploring, "Glob"),
+            ("Edit", Work::Editing, "Edit"),
+            ("Write", Work::Editing, "Write"),
+            ("WebFetch", Work::Web, "WebFetch"),
+            ("Agent", Work::Delegating, "Agent"),
+            ("ToolSearch", Work::Housekeeping, "ToolSearch"),
+            ("ScheduleWakeup", Work::Housekeeping, "ScheduleWakeup"),
+            (
+                "mcp__claude_ai_Notion__notion-fetch",
+                Work::Server("Notion".to_owned()),
+                "fetch",
+            ),
+            ("SomethingNew", Work::Other, "SomethingNew"),
+        ];
+        for (tool, work, specific) in cases {
+            let reading = of_call(tool, None, None, "{}");
+            assert_eq!(
+                (reading.work, reading.specifics),
+                (work.clone(), named(&[specific])),
+                "{tool}"
+            );
+        }
+    }
+
+    /// The CLI's own tools as its `init` lists them from 2.1.278 on, where
+    /// its to-do list and its scheduling moved to tools of other names.
+    #[test]
+    fn the_clis_newer_tools_are_put_under_the_work_they_do() {
+        let cases: &[(&str, Work)] = &[
+            ("TaskCreate", Work::Housekeeping),
+            ("TaskUpdate", Work::Housekeeping),
+            ("TaskList", Work::Housekeeping),
+            ("TaskGet", Work::Housekeeping),
+            ("CronCreate", Work::Housekeeping),
+            ("CronDelete", Work::Housekeeping),
+            ("CronList", Work::Housekeeping),
+            ("Monitor", Work::Housekeeping),
+            ("PushNotification", Work::Housekeeping),
+            ("LSP", Work::Exploring),
+            ("SendMessage", Work::Delegating),
+            ("ListAgents", Work::Delegating),
+            ("Workflow", Work::Delegating),
+            ("RemoteTrigger", Work::Delegating),
+            ("EnterWorktree", Work::VersionControl),
+            ("ExitWorktree", Work::VersionControl),
+        ];
+        for (tool, work) in cases {
+            let reading = of_call(tool, None, None, "{}");
+            assert_eq!(
+                (reading.work, reading.specifics),
+                (work.clone(), named(&[tool])),
+                "{tool}"
+            );
+        }
+    }
+
+    #[test]
+    fn output_tee_saves_is_an_edit_where_nothing_stronger_made_it() {
+        assert_eq!(
+            read("ls | tee out.txt"),
+            (Work::Editing, named(&["ls", "tee"]))
+        );
+    }
+
+    #[test]
+    fn rtk_proxy_is_read_past_to_the_program_it_runs() {
+        assert_eq!(
+            read("rtk proxy cargo test"),
+            (Work::Building, named(&["cargo test"]))
+        );
+    }
+
+    #[test]
+    fn a_long_option_or_one_with_a_value_is_not_an_in_place_edit() {
+        let cases: &[(&str, Work, &[&str])] = &[
+            ("perl --version", Work::Other, &["perl"]),
+            // The `i` is the module's name, which `-m` takes the rest of the
+            // word for.
+            ("perl -mbigint scripts/check.pl", Work::Other, &["perl"]),
+            ("sed --quiet -n '/fn/p' f.rs", Work::Exploring, &["sed"]),
+            (
+                "perl -I/usr/lib/perl5 scripts/check.pl",
+                Work::Other,
+                &["perl"],
+            ),
+        ];
+        for (command, work, specifics) in cases {
+            assert_eq!(read(command), (work.clone(), named(specifics)), "{command}");
+        }
+    }
+
+    #[test]
+    fn a_dash_m_after_dash_c_is_the_code_not_a_module() {
+        let (work, specifics) = read("python3 -c -m pytest");
+        assert_ne!(work, Work::Building, "{specifics:?}");
+        assert!(
+            !specifics.iter().any(|name| name.contains("pytest")),
+            "{specifics:?}"
+        );
+    }
+
+    #[test]
+    fn output_sent_to_another_descriptor_saves_nothing_and_to_a_file_by_number_does() {
+        assert_eq!(read("echo oops >&2"), (Work::Other, named(&["echo"])));
+        assert_eq!(read("echo x 1>out.txt"), (Work::Editing, named(&["echo"])));
+    }
+
+    #[test]
+    fn git_show_only_reads() {
+        assert_eq!(
+            read("git show HEAD~1"),
+            (Work::Exploring, named(&["git show"]))
+        );
+    }
+
+    #[test]
+    fn the_ellipsis_an_older_records_line_ends_with_is_not_a_program() {
+        let older = of_call("Bash", None, Some("cargo test | …"), "{}");
+        assert_eq!(
+            (older.work, older.specifics),
+            (Work::Building, named(&["cargo test"]))
+        );
+    }
+
+    #[test]
+    fn a_shell_call_is_read_from_its_command_or_from_the_line_an_older_record_kept() {
+        let reading = of_call("Bash", Some("cd x\ncargo build"), Some("cd x …"), "{}");
+        assert_eq!(reading.work, Work::Building);
+
+        let older = of_call("Bash", None, Some("git status …"), "{}");
+        assert_eq!(
+            (older.work, older.specifics),
+            (Work::Exploring, named(&["git status"]))
+        );
+        let operator = of_call(OPERATOR_SHELL, None, None, "git log");
+        assert_eq!(operator.work, Work::Exploring);
+    }
+}

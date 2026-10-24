@@ -1,0 +1,24 @@
+ Niobe  Session  Context  Model  View  Help                             ○ idle
+┏━ > /compact ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ > you                                                                        ┃
+┃   /compact                                                                   ┃
+┃                                                                              ┃
+┃ ⇣ context compacted · 192k → 18k tokens                                      ┃
+┃                                                                              ┃
+┃ ── compact ───────────────────────────────────────────────────────────────── ┃
+┃                                                                              ┃
+┃                                                                              ┃
+┃                                                                              ┃
+┃                                                                              ┃
+┃                                                                              ┃
+┃                                                                              ┃
+┃                                                                              ┃
+┃                                                                              ┃
+┃                                                                              ┃
+┃                                                                              ┃
+┃                                                                              ┃
+┃                                                                              ┃
+┃ ──────────────────────────────────────────────────────────────────────────── ┃
+┃  —  >  Ask for a change · / command or skill Shift+Tab mode · Ctrl+J newline ┃
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+EscStop 1Help 2Compact 3Clear 4Model 5Diff 6Rewind 7MCP 8Memory 9Settings 0Quit

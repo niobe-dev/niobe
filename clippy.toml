@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) Viacheslav Shynkarenko
 
-allow-unwrap-in-tests = true
+# AGENTS.md §3: a test may `expect`, with a message saying why it cannot
+# fail, and may not `unwrap`.
+allow-unwrap-in-tests = false
 allow-expect-in-tests = true

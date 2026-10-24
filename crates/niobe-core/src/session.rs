@@ -21,12 +21,15 @@
 //! far. That record says so ([`crate::event::Usage::settles_model`]), and the
 //! records it covers stop being owed for.
 
+use crate::decision;
 use crate::test_run::{self, FailedTests, TestCounts};
+use crate::work::{self, Work};
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::event::{
-    AgentId, AgentOutcome, Billing, CheckpointId, Context, Event, Mode, OPERATOR_SHELL,
-    SessionMeta, SlashCommand, ToolCallId, ToolOutcome, Usage, UsageWindow, UsageWindows,
+    AgentId, AgentOutcome, Billing, ChangeScope, CompactTrigger, Context, Event, McpServer, Mode,
+    ModelOption, OPERATOR_SHELL, SessionMeta, SlashCommand, TokenCounts, ToolCallId, ToolOutcome,
+    Usage, UsageWindow, UsageWindows,
 };
 
 /// Token and cost totals, summed from every [`Event::Usage`] in the stream.
@@ -46,6 +49,10 @@ pub struct Totals {
     /// hour at a higher rate, and a consumer that prices the session needs the
     /// share to price it at all.
     pub cache_write_1h: u64,
+    /// Of [`Totals::cache_write`], the tokens in records whose backend did not
+    /// say how long they were bought for, so that a share of the hour is never
+    /// read off writes nobody split.
+    pub cache_write_unsplit: u64,
     /// Reasoning tokens.
     pub reasoning: u64,
     /// How many usage records were folded in.
@@ -56,6 +63,10 @@ pub struct Totals {
     /// by one that did. While this is non-zero,
     /// [`Totals::reported_cost_usd`] is a floor, not the session's cost.
     pub records_unsettled: u64,
+    /// How many usage records reported a cost without saying whether it
+    /// settles the model's earlier records: records stored before the backend
+    /// said so.
+    pub costs_unsaid: u64,
     /// Those records, per model.
     ///
     /// A backend that reports money once per turn leaves the turn priced by
@@ -108,12 +119,12 @@ impl Owed {
                 output: 0,
                 cache_read: 0,
                 cache_write: 0,
-                cache_write_1h: 0,
+                cache_write_1h: None,
                 reasoning: 0,
                 model: model.to_owned(),
                 cost_usd: None,
-                cost_basis: None,
-                settles_model: false,
+                settles_model: Some(false),
+                fast: false,
             },
             records: Vec::new(),
         }
@@ -125,7 +136,10 @@ impl Owed {
         total.output = total.output.saturating_add(usage.output);
         total.cache_read = total.cache_read.saturating_add(usage.cache_read);
         total.cache_write = total.cache_write.saturating_add(usage.cache_write);
-        total.cache_write_1h = total.cache_write_1h.saturating_add(usage.cache_write_1h);
+        total.cache_write_1h = match (total.cache_write_1h, usage.cache_write_1h) {
+            (None, None) => None,
+            (sum, more) => Some(sum.unwrap_or(0).saturating_add(more.unwrap_or(0))),
+        };
         total.reasoning = total.reasoning.saturating_add(usage.reasoning);
         self.records.push(usage.clone());
     }
@@ -164,14 +178,28 @@ impl Totals {
         self.records_unsettled == 0
     }
 
+    /// Whether the floor may be lower than the bill only because the session
+    /// was recorded before its records said what they settle, so what reads
+    /// as owed for was quite possibly covered. Read off the records, not off
+    /// the day they were made. `false` where nothing is owed for.
+    pub fn settlement_unrecorded(&self) -> bool {
+        !self.cost_fully_reported() && self.costs_unsaid > 0
+    }
+
     fn add(&mut self, usage: &Usage) {
         self.input = self.input.saturating_add(usage.input);
         self.output = self.output.saturating_add(usage.output);
         self.cache_read = self.cache_read.saturating_add(usage.cache_read);
         self.cache_write = self.cache_write.saturating_add(usage.cache_write);
-        self.cache_write_1h = self.cache_write_1h.saturating_add(usage.cache_write_1h);
+        match usage.cache_write_1h {
+            Some(one_hour) => self.cache_write_1h = self.cache_write_1h.saturating_add(one_hour),
+            None => {
+                self.cache_write_unsplit =
+                    self.cache_write_unsplit.saturating_add(usage.cache_write);
+            }
+        }
         self.reasoning = self.reasoning.saturating_add(usage.reasoning);
-        self.records += 1;
+        bump(&mut self.records);
         self.tokens_by_model
             .entry(usage.model.clone())
             .and_modify(|spent| *spent = spent.saturating_add(usage.tokens()))
@@ -182,17 +210,24 @@ impl Totals {
         // Claude bridge emits for tokens no message reported — leaves nothing
         // owed rather than owing for itself.
         let cost = reported_cost(usage);
-        if usage.settles_model && cost.is_some() {
+        if usage.settles_model == Some(true) && cost.is_some() {
             self.clear_unsettled(&usage.model);
+        }
+        if usage.settles_model.is_none() && cost.is_some() {
+            bump(&mut self.costs_unsaid);
         }
 
         match cost {
+            // Each cost is finite, and so is what they add up to: a sum of
+            // two that overflows stops at the largest there is rather than
+            // drawing as infinite money.
             Some(cost) => {
-                self.reported_cost_usd += cost;
-                *self
+                self.reported_cost_usd = finite_sum(self.reported_cost_usd, cost);
+                let by_model = self
                     .reported_cost_by_model
                     .entry(usage.model.clone())
-                    .or_default() += cost;
+                    .or_default();
+                *by_model = finite_sum(*by_model, cost);
             }
             None => self.owe(usage),
         }
@@ -200,7 +235,7 @@ impl Totals {
 
     /// Records tokens that no reported cost covers.
     fn owe(&mut self, usage: &Usage) {
-        self.records_unsettled += 1;
+        bump(&mut self.records_unsettled);
         self.unsettled
             .entry(usage.model.clone())
             .or_insert_with(|| Owed::new(&usage.model))
@@ -250,22 +285,31 @@ pub struct ToolTotals {
     /// Ends that arrived without a matching start. A non-zero count means the
     /// producer is dropping events, so it is surfaced rather than swallowed.
     pub unmatched_ends: u64,
-    /// Calls the session ended under: still running when a fatal error ended
-    /// the backend, so no end will arrive for them. Neither finished nor
-    /// failed — the agent did not fail them, the session stopped them.
+    /// Finished calls by the kind of work they did ([`crate::work`]). Every
+    /// finished call is under exactly one kind, so the kinds' calls add up to
+    /// [`ToolTotals::finished`] and their failures to [`ToolTotals::failed`].
+    pub by_work: BTreeMap<Work, WorkTotals>,
+    /// Calls the session or their turn ended under: still running when a
+    /// fatal error ended the backend, or when the backend ended the turn
+    /// without reporting their end, so no end will arrive for them. Neither
+    /// finished nor failed — the agent did not fail them, the session stopped
+    /// them.
     pub interrupted: u64,
 }
 
-/// A recorded `decide` event, kept in order for the changes pane and for the
-/// commit and PR bodies it is exported into.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DecisionRecord {
-    /// One line.
-    pub summary: String,
-    /// The reasoning, where there was more of it.
-    pub rationale: Option<String>,
-    /// What was considered and rejected.
-    pub rejected: Vec<String>,
+/// The calls of one kind of work.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorkTotals {
+    /// Calls that finished, however they finished.
+    pub calls: u64,
+    /// Of those, the calls that reported failure.
+    pub failed: u64,
+    /// Of those, the calls the operator denied.
+    pub denied: u64,
+    /// How many of the calls each program or tool took part in: once per
+    /// call however often the call ran it, so a pipeline of two `grep`s is
+    /// one call that used `grep`.
+    pub specifics: BTreeMap<String, u64>,
 }
 
 /// What a session did to one file: how much of it changed, and the model's own
@@ -316,13 +360,17 @@ impl FileChanges {
     }
 }
 
-/// A restore point the undo list can return to.
+/// A decision a reply stated, as the agent tells it.
+///
+/// The agent's own account of its reasoning, read out of its words by
+/// [`crate::decision`], and so never more than what it says it did: whatever
+/// shows one says whose account it is.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CheckpointRecord {
-    /// Names the point.
-    pub id: CheckpointId,
-    /// What was about to happen when it was taken.
-    pub label: String,
+pub struct DecisionRecord {
+    /// One line, as the reply stated it.
+    pub summary: String,
+    /// The sub-agent whose reply stated it, or `None` for the session's own.
+    pub agent: Option<AgentId>,
 }
 
 /// A test run the session made, as it reported itself.
@@ -341,6 +389,37 @@ pub struct TestRunRecord {
     /// its whole list was left: each is its binary's, and together they are
     /// never known to be the run's whole list.
     pub failures: Vec<FailedTests>,
+}
+
+/// A session's test runs, by how each came out. Every run is under exactly
+/// one of the three, so they add up to every run the session made.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TestRuns {
+    /// Runs whose whole output was read and counted no test failing.
+    pub passed: u64,
+    /// Runs known to have failed after their tests started.
+    pub failed: u64,
+    /// Runs neither: their output was cut before a summary, or they stopped
+    /// before a test ran. Not a pass, which nothing read.
+    pub unread: u64,
+}
+
+impl TestRuns {
+    fn count(&mut self, run: &TestRunRecord) {
+        let under = match (run.failed, run.counts) {
+            (true, _) => &mut self.failed,
+            (false, Some(_)) => &mut self.passed,
+            (false, None) => &mut self.unread,
+        };
+        *under = under.saturating_add(1);
+    }
+
+    /// Every run, however it came out.
+    pub fn all(&self) -> u64 {
+        self.passed
+            .saturating_add(self.failed)
+            .saturating_add(self.unread)
+    }
 }
 
 impl TestRunRecord {
@@ -370,7 +449,7 @@ impl TestRunRecord {
     /// whether the run failed from what is left: the start of a run is what
     /// survives a cut from the end.
     pub fn read(command: &str, output: &str, whole: Option<&str>, exit_code: Option<i32>) -> Self {
-        let counts = whole.and_then(|whole| test_run::counts(whole, exit_code));
+        let counts = whole.and_then(|whole| test_run::counts(command, whole, exit_code));
         let failed = match counts {
             Some(counts) => counts.failing(),
             None => test_run::failed(command, output, exit_code),
@@ -395,8 +474,9 @@ pub struct TurnRecord {
     ///
     /// `None` where no usage record landed in that span — a turn interrupted
     /// or failed before its first message was reported nothing, and a zero
-    /// would read as a measurement. `Some(0)` is a turn whose records said it
-    /// spent none.
+    /// would read as a measurement — and where the session's total had
+    /// reached the largest count there is, which it stays at whatever is
+    /// added. `Some(0)` is a turn whose records said it spent none.
     pub tokens: Option<u64>,
     /// How far the five-hour window moved across the turn, as a share of the
     /// window: `0.01` is one percent of it.
@@ -421,6 +501,13 @@ pub struct TurnRecord {
     /// The window is the account's, not the session's: anything else the
     /// account ran during the turn moved it too.
     pub five_hour_share: Option<f64>,
+    /// Whether the turn was cut off rather than ended by the backend: the
+    /// session failed under it, or the process running it stopped.
+    pub cut: bool,
+    /// What started the compaction of the conversation the turn ran, where it
+    /// ran one: a turn the operator opened to compact, or one the backend
+    /// compacted part-way through.
+    pub compacted: Option<CompactTrigger>,
 }
 
 /// Where a turn began: what the session had spent, and the window as last
@@ -450,12 +537,30 @@ pub struct SessionState {
     /// How the session is billed, as last reported. `None` until something
     /// has said — never assumed from the backend's name.
     billing: Option<Billing>,
+    /// Whether the session has been billed more than one way: resumed under
+    /// a profile billed differently from the one it was recorded under.
+    billing_changed: bool,
+    /// The usage folded while the session was billed by use.
+    metered: Totals,
     /// The main agent's last request. `None` until one has been reported.
     context: Option<Context>,
+    /// Whether `context` is a compaction's report of what it left rather
+    /// than a request's measurement: a floor under the next prompt.
+    context_floor: bool,
     tools: ToolTotals,
     in_flight_tools: BTreeMap<ToolCallId, String>,
+    /// The calls cut short, until each ends: see [`SessionState::cut_calls`].
+    cut_tools: BTreeSet<ToolCallId>,
+    /// The calls whose end has been counted, so that an end said again for
+    /// one of them is not a second call.
+    ended_tools: BTreeSet<ToolCallId>,
     /// Whether the backend is still answering the last prompt.
     turn_running: bool,
+    /// Whether the backend is compacting the conversation now.
+    compacting: bool,
+    /// What started a compaction since the last turn ended, for the record
+    /// of the turn it ran in.
+    compacted: Option<CompactTrigger>,
     /// Every turn that has ended, oldest first.
     turns: Vec<TurnRecord>,
     /// Where the running turn began. `None` between turns, and for a turn the
@@ -466,6 +571,10 @@ pub struct SessionState {
     turn_last_ended: TurnMark,
     /// Whether a window has been reported since the last turn began or ended.
     window_reported: bool,
+    /// Whether the last event folded ended a turn — its end, or a fatal
+    /// error — which an end straight after it repeats rather than closes a
+    /// turn of its own.
+    ended_last: bool,
     /// Whether a usage record has landed since the last turn began or ended,
     /// which is the span a turn's tokens are counted over.
     usage_reported: bool,
@@ -495,11 +604,14 @@ pub struct SessionState {
     /// list that reorders itself under the operator is a list nobody can read.
     files: Vec<FileChanges>,
     files_at: BTreeMap<String, usize>,
+    /// Every decision the session's replies stated, in the order they were
+    /// stated.
     decisions: Vec<DecisionRecord>,
-    checkpoints: Vec<CheckpointRecord>,
     /// The latest test run, which replaces the one before it: an earlier
     /// run's result says nothing about the code as it is now.
     test_run: Option<TestRunRecord>,
+    /// Every test run the session made, by how each came out.
+    test_runs: TestRuns,
     agents_spawned: u64,
     agents_completed: u64,
     agents_failed: u64,
@@ -507,14 +619,35 @@ pub struct SessionState {
     /// Sub-agents still running when a fatal error ended the session.
     agents_interrupted: u64,
     running_agents: BTreeSet<AgentId>,
+    /// The sub-agents whose end has been counted, by their exit or by the
+    /// session ending under them, so that an exit said after it is not a
+    /// second end.
+    ended_agents: BTreeSet<AgentId>,
     peak_running_agents: u64,
     errors: u64,
+    /// What the backend's own turn totals carried beyond what the turns'
+    /// messages reported, summed over the session.
+    beyond_messages: TokenCounts,
     fatal_error: Option<String>,
     /// The commands the backend last said it runs from a prompt.
     commands: Vec<SlashCommand>,
+    /// The models the backend last said it offers.
+    models: Vec<ModelOption>,
+    /// The MCP servers the backend last said it has configured.
+    mcp_servers: Vec<McpServer>,
+    /// Whether the turn that typed a clear has not ended: its end belongs to
+    /// the conversation that was cleared, and is not a turn of the new one.
+    clear_open: bool,
 }
 
 impl SessionState {
+    /// What the backend's turn totals reported beyond what the turns'
+    /// messages did, summed over the session: tokens the session's totals
+    /// hold only where a bill carried them, and no message accounts for.
+    pub fn beyond_messages(&self) -> &TokenCounts {
+        &self.beyond_messages
+    }
+
     /// An empty session.
     pub fn new() -> Self {
         Self::default()
@@ -533,8 +666,25 @@ impl SessionState {
     ///
     /// Every case is total: an end without a start, an exit without a spawn, a
     /// response without a request are all counted rather than dropped, because
-    /// a silently ignored event is a total that cannot be defended.
+    /// a silently ignored event is a total that cannot be defended. What
+    /// changes nothing is an event said again: a turn's end straight after
+    /// the end it repeats, and a call's end or an agent's exit once that
+    /// call or agent has ended.
     pub fn apply(&mut self, event: &Event) {
+        // A prompt that reached no backend, and the operator looking, are not
+        // things that happened in the session's conversation, so an end said
+        // again after either is still said again.
+        if let Event::PromptNotSent { .. } | Event::Looked = event {
+            return;
+        }
+        self.fold(event);
+        self.ended_last = matches!(
+            event,
+            Event::TurnEnded | Event::Error { fatal: true, .. } | Event::SessionLeft
+        );
+    }
+
+    fn fold(&mut self, event: &Event) {
         match event {
             Event::SessionMeta(meta) => {
                 self.model = Some(meta.model.clone());
@@ -544,17 +694,31 @@ impl SessionState {
             Event::ModeSelected { mode } => self.mode = Some(*mode),
 
             // The operator's choice stands until the backend says what it
-            // resolved that to, which is the next `SessionMeta`. Showing the
-            // model it has moved off instead would tell the operator their
-            // choice did not land.
+            // resolved that to, which is the next `SessionMeta`, or refuses
+            // it. Showing the model it has moved off instead would tell the
+            // operator their choice did not land.
             Event::ModelSelected { model } => self.model = Some(model.clone()),
+
+            // Back to what the backend is running: the model a change it took
+            // put it on where the refusal says so, otherwise what it last
+            // reported, or no model where it has reported none. The choice it
+            // refused never ran.
+            Event::ModelRefused { back_to } => {
+                self.model = back_to
+                    .clone()
+                    .or_else(|| self.meta.as_ref().map(|meta| meta.model.clone()));
+            }
+
+            Event::Titled { title } => self.title = Some(title.clone()),
+
+            // Nothing was asked, so nothing is counted: no turn, no prompt
+            // and no caption. `apply` passes it over before it reaches here.
+            Event::PromptNotSent { .. } => {}
 
             // A prompt sent while a turn runs joins it: the turn began with
             // the first one.
-            Event::Titled { title } => self.title = Some(title.clone()),
-
             Event::UserMessage { text } => {
-                self.user_messages += 1;
+                bump(&mut self.user_messages);
                 if self.first_prompt.is_none() {
                     self.first_prompt = Some(text.clone());
                 }
@@ -566,89 +730,181 @@ impl SessionState {
                 self.turn_running = true;
             }
 
-            Event::TurnEnded => self.end_turn(),
+            // An end with no turn running is still a turn, one the fold did
+            // not see begin — a command the CLI answers itself sends no
+            // prompt — as long as anything came between it and the last end.
+            // With nothing between, it is the last turn's end said again,
+            // and a turn recorded for it would be one nobody ran.
+            Event::TurnEnded if self.ended_last => {}
+            Event::TurnEnded if self.clear_open => self.end_clear(),
+            Event::TurnEnded => self.end_turn(false),
 
             Event::AssistantDelta { text } => self.pending_assistant.push_str(text),
 
             Event::AssistantMessage { text, agent: None } => {
-                self.assistant_messages += 1;
+                bump(&mut self.assistant_messages);
                 self.pending_assistant.clear();
                 self.last_assistant = Some(text.clone());
+                self.decided(text, None);
             }
             Event::AssistantMessage {
                 text,
                 agent: Some(agent),
             } => {
                 self.agents_said.insert(agent.clone(), text.clone());
+                self.decided(text, Some(agent));
             }
 
             Event::ToolCallStart {
                 id, name, agent, ..
             } => {
-                self.tools.started += 1;
-                self.in_flight_tools.insert(id.clone(), name.clone());
+                // A start said again for a call already running is one call;
+                // one for a call that has ended starts it again.
+                self.ended_tools.remove(id);
+                if self
+                    .in_flight_tools
+                    .insert(id.clone(), name.clone())
+                    .is_none()
+                {
+                    bump(&mut self.tools.started);
+                }
                 if let Some(agent) = agent {
                     self.agent_calls.insert(id.clone(), agent.clone());
                 }
             }
 
+            // An end said again for a call already ended is the same call
+            // ending, as a start said twice is one start.
+            Event::ToolCallEnd { id, .. } if self.ended_tools.contains(id) => {}
             Event::ToolCallEnd {
                 id,
                 name,
+                input,
                 bytes,
                 outcome,
+                summary,
+                command,
                 ..
             } => {
-                self.tools.finished += 1;
+                self.ended_tools.insert(id.clone());
+                bump(&mut self.tools.finished);
                 self.tools.output_bytes = self.tools.output_bytes.saturating_add(*bytes);
-                *self.tools.by_name.entry(name.clone()).or_default() += 1;
+                bump(self.tools.by_name.entry(name.clone()).or_default());
+                let reading = work::of_call(name, command.as_deref(), summary.as_deref(), input);
+                let kind = self.tools.by_work.entry(reading.work).or_default();
+                bump(&mut kind.calls);
+                for specific in reading.specifics {
+                    bump(kind.specifics.entry(specific).or_default());
+                }
                 match outcome {
                     ToolOutcome::Ok => {}
                     ToolOutcome::Failed => {
-                        self.tools.failed += 1;
-                        *self.tools.failed_by_name.entry(name.clone()).or_default() += 1;
+                        bump(&mut self.tools.failed);
+                        bump(self.tools.failed_by_name.entry(name.clone()).or_default());
+                        bump(&mut kind.failed);
                     }
-                    ToolOutcome::Denied => self.tools.denied += 1,
+                    ToolOutcome::Denied => {
+                        bump(&mut self.tools.denied);
+                        bump(&mut kind.denied);
+                    }
+                    // The operator's own stop: the tool neither failed nor
+                    // was refused, so it counts against neither.
+                    ToolOutcome::Interrupted => {}
                 }
                 if self.in_flight_tools.remove(id).is_none() {
-                    self.tools.unmatched_ends += 1;
+                    // A call that was cut short and has now ended: it ran to
+                    // its end after the turn or the agent that left it
+                    // running, so it is one call that finished, and not one
+                    // that was interrupted as well, nor an end with no start.
+                    match self.cut_tools.remove(id) {
+                        true => {
+                            self.tools.interrupted = self.tools.interrupted.saturating_sub(1);
+                        }
+                        false => bump(&mut self.tools.unmatched_ends),
+                    }
                 }
                 self.ended_by = self.agent_calls.remove(id);
             }
 
             Event::Usage(usage) => {
                 self.totals.add(usage);
+                if self.billing == Some(Billing::Metered) {
+                    self.metered.add(usage);
+                }
                 self.usage_reported = true;
             }
 
             // The last report replaces the one before it: a window is a level,
             // not a quantity, so summing two reports of it would be nonsense.
+            // A report that names no window says only whether the plan is
+            // spending beyond its fee; the levels before it still stand. One
+            // that does not say whether extra is allowed leaves what was last
+            // said: silence is not a change of mind.
             Event::UsageWindows(windows) => {
-                self.usage_windows = Some(*windows);
-                self.window_reported = true;
+                let measured = !windows.is_empty();
+                let said = match (windows.overage, self.usage_windows) {
+                    (crate::event::Overage::Unreported, Some(before)) => before.overage,
+                    (overage, _) => overage,
+                };
+                let windows = match (windows.is_empty(), self.usage_windows) {
+                    (true, Some(before)) => UsageWindows {
+                        using_overage: windows.using_overage,
+                        ..before
+                    },
+                    _ => *windows,
+                };
+                self.usage_windows = Some(UsageWindows {
+                    overage: said,
+                    ..windows
+                });
+                self.window_reported |= measured;
             }
 
-            Event::Billing { billing } => self.billing = Some(*billing),
+            // The last report stands for what the session is billed from here
+            // on; what was spent before a change was spent the other way.
+            Event::Billing { billing } => {
+                if self.billing.is_some_and(|before| before != *billing) {
+                    self.billing_changed = true;
+                }
+                self.billing = Some(*billing);
+            }
 
             // A level again, and the last one stands — including after a
             // compaction, when it drops: a high-water mark would keep showing
             // a context the model no longer has.
-            Event::Context(context) => self.context = Some(context.clone()),
+            Event::Context(context) => {
+                self.context = Some(context.clone());
+                self.context_floor = false;
+            }
 
-            // Nothing has measured the conversation that starts here, and the
-            // last figure is of one the model no longer has: no figure is
-            // what is true until the next request reports one.
-            Event::Cleared => self.context = None,
+            // The conversation started over is a new session in everything
+            // but the process: see `started_over`.
+            Event::Cleared => *self = self.started_over(),
+
+            // As a fatal error does, without being one: the process stopped,
+            // and whatever it was running will report nothing more.
+            Event::SessionLeft => {
+                self.pending_permissions.clear();
+                self.pending_assistant.clear();
+                self.interrupt_backend_work();
+                if self.turn_running {
+                    self.end_turn(true);
+                }
+            }
 
             Event::PermissionRequest { id, .. } => {
-                self.permission_requests += 1;
+                bump(&mut self.permission_requests);
                 self.pending_permissions.insert(id.clone());
+            }
+
+            Event::PermissionWithdrawn { id } => {
+                self.pending_permissions.remove(id);
             }
 
             Event::PermissionResponse { id, decision, .. } => {
                 self.pending_permissions.remove(id);
                 if !decision.allowed() {
-                    self.permissions_denied += 1;
+                    bump(&mut self.permissions_denied);
                 }
             }
 
@@ -656,23 +912,14 @@ impl SessionState {
                 path,
                 added,
                 removed,
+                scope,
                 ..
-            } => self.change_file(path, *added, *removed),
-
-            Event::Decision {
-                summary,
-                rationale,
-                rejected,
-            } => self.decisions.push(DecisionRecord {
-                summary: summary.clone(),
-                rationale: rationale.clone(),
-                rejected: rejected.clone(),
-            }),
-
-            Event::Checkpoint { id, label } => self.checkpoints.push(CheckpointRecord {
-                id: id.clone(),
-                label: label.clone(),
-            }),
+            } => match scope {
+                ChangeScope::Project => self.change_file(path, *added, *removed),
+                // The agent's own notes are not what is being built: the
+                // session's files and their line counts are the project's.
+                ChangeScope::AgentMemory => {}
+            },
 
             Event::TestRun {
                 counts,
@@ -681,17 +928,19 @@ impl SessionState {
                 failures,
                 ..
             } => {
-                self.test_run = Some(TestRunRecord::new(
-                    *counts,
-                    *exit_code,
-                    *failed,
-                    failures.clone(),
-                ));
+                let run = TestRunRecord::new(*counts, *exit_code, *failed, failures.clone());
+                self.test_runs.count(&run);
+                self.test_run = Some(run);
             }
 
+            // A spawn said again for an agent already running is the same
+            // agent, as an exit said twice is one exit. One for an agent that
+            // has ended runs it again, and its next exit is that run's.
             Event::AgentSpawn { id, .. } => {
-                self.agents_spawned += 1;
-                self.running_agents.insert(id.clone());
+                self.ended_agents.remove(id);
+                if self.running_agents.insert(id.clone()) {
+                    bump(&mut self.agents_spawned);
+                }
                 let running = self.running_agents.len() as u64;
                 self.peak_running_agents = self.peak_running_agents.max(running);
             }
@@ -701,29 +950,45 @@ impl SessionState {
             // session's usage records, so nothing here counts them again.
             Event::AgentProgress { .. } => {}
 
+            // An exit without a spawn is still an agent that ended. One the
+            // backend's end already counted as interrupted did not also
+            // complete, and an exit reported twice is one exit. A call the
+            // agent still had running reports no end now that it has gone.
+            Event::AgentExit { id, .. } if self.ended_agents.contains(id) => {}
             Event::AgentExit { id, outcome } => {
                 self.running_agents.remove(id);
+                self.ended_agents.insert(id.clone());
+                let cut: Vec<ToolCallId> = self
+                    .agent_calls
+                    .iter()
+                    .filter(|(call, agent)| {
+                        *agent == id && self.in_flight_tools.contains_key(*call)
+                    })
+                    .map(|(call, _)| call.clone())
+                    .collect();
+                self.cut_calls(cut);
                 match outcome {
-                    AgentOutcome::Completed => self.agents_completed += 1,
-                    AgentOutcome::Failed => self.agents_failed += 1,
-                    AgentOutcome::Cancelled => self.agents_cancelled += 1,
+                    AgentOutcome::Completed => bump(&mut self.agents_completed),
+                    AgentOutcome::Failed => bump(&mut self.agents_failed),
+                    AgentOutcome::Cancelled => bump(&mut self.agents_cancelled),
                 }
             }
 
             Event::Error { message, fatal } => {
-                self.errors += 1;
+                bump(&mut self.errors);
                 if *fatal {
                     self.fatal_error = Some(message.clone());
                     // Nothing is left to take an answer: a prompt the session
                     // ended on was asked and never answered, and waits on no
                     // one now.
                     self.pending_permissions.clear();
+                    self.pending_assistant.clear();
                     self.interrupt_backend_work();
                     // The turn it cut short spent what it spent, and is
                     // recorded with it; with no turn running there is none
                     // to end.
                     if self.turn_running {
-                        self.end_turn();
+                        self.end_turn(true);
                     }
                 }
             }
@@ -731,8 +996,50 @@ impl SessionState {
             // A notice changes nothing that is counted: it explains the
             // numbers around it, and the transcript is where it is read.
             Event::Notice { .. } => {}
+            // Passed over in `apply`, before the fold.
+            Event::Looked => {}
+            // Kept apart rather than added to the totals: where the backend
+            // bills what its messages did not report, the turn's bill already
+            // carries it, and adding it here would count it twice.
+            Event::TurnTotalDiffers {
+                per_message,
+                reported,
+                ..
+            } => {
+                self.beyond_messages = self.beyond_messages.plus(&per_message.short_of(reported));
+            }
             Event::Commands { commands } => self.commands = commands.clone(),
+            Event::McpServers { servers } => self.mcp_servers = servers.clone(),
+            Event::CompactionStarted => self.compacting = true,
+            Event::CompactionEnded => self.compacting = false,
+            // The boundary is the compaction done, which a backend may report
+            // without having said it ended.
+            Event::Compacted { trigger, after, .. } => {
+                self.compacting = false;
+                self.compacted = Some(*trigger);
+                self.context_compacted(*after);
+            }
+            Event::Models { models } => self.models = models.clone(),
         }
+    }
+
+    /// The context once a compaction has ended, `after` being what the
+    /// backend says it left.
+    ///
+    /// The last request's figure is of a conversation the model no longer
+    /// has, so it goes whatever happens. What the backend says is left stands
+    /// in as a floor, on the model and window that request measured; without
+    /// that request there is no window to read it against, and without the
+    /// backend's figure there is nothing, as after [`Event::Cleared`]. The
+    /// next request's measurement replaces either.
+    fn context_compacted(&mut self, after: Option<u64>) {
+        let last = self.context.take();
+        self.context = last.zip(after).map(|(last, tokens)| Context {
+            tokens,
+            model: last.model,
+            window: last.window,
+        });
+        self.context_floor = self.context.is_some();
     }
 
     /// Records every call and sub-agent the backend had running as cut short
@@ -748,13 +1055,49 @@ impl SessionState {
             .filter(|(_, name)| name.as_str() != OPERATOR_SHELL)
             .map(|(id, _)| id.clone())
             .collect();
+        self.cut_calls(cut);
+        let agents = std::mem::take(&mut self.running_agents);
+        self.agents_interrupted = self.agents_interrupted.saturating_add(agents.len() as u64);
+        self.ended_agents.extend(agents);
+    }
+
+    /// Records every call the ending turn left running as cut short: the
+    /// backend has said the turn is over, and an end it did not send before
+    /// that — a call whose permission prompt the stop withdrew — it will not
+    /// send after it.
+    ///
+    /// A sub-agent still running goes on past the turn that spawned it, in
+    /// the background, and its calls with it; so does a command the operator
+    /// ran with `!`.
+    fn interrupt_what_the_turn_left(&mut self) {
+        let cut: Vec<ToolCallId> = self
+            .in_flight_tools
+            .iter()
+            .filter(|(id, name)| {
+                name.as_str() != OPERATOR_SHELL
+                    && !self
+                        .agent_calls
+                        .get(*id)
+                        .is_some_and(|agent| self.running_agents.contains(agent))
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        self.cut_calls(cut);
+    }
+
+    /// Records each of `cut` as cut short: no end will arrive for it.
+    ///
+    /// Each is remembered, since an end that was only late — a sub-agent's
+    /// own records are folded in by their stamps, and one can come after its
+    /// agent's exit — is still the end of the call and moves it from
+    /// interrupted to finished.
+    fn cut_calls(&mut self, cut: Vec<ToolCallId>) {
         for id in cut {
             self.in_flight_tools.remove(&id);
             self.agent_calls.remove(&id);
-            self.tools.interrupted += 1;
+            self.cut_tools.insert(id);
+            bump(&mut self.tools.interrupted);
         }
-        let agents = std::mem::take(&mut self.running_agents);
-        self.agents_interrupted = self.agents_interrupted.saturating_add(agents.len() as u64);
     }
 
     /// Where the session stands now, as a turn beginning or ending here would
@@ -766,20 +1109,124 @@ impl SessionState {
         }
     }
 
+    /// What the session is once its conversation has been started over: a
+    /// new one, which has said and spent nothing, on the same backend.
+    ///
+    /// What stays is what the backend and the account say rather than what
+    /// the session did — the conversation's identity, the mode and model, the
+    /// plan's windows, how it is billed, the commands, models and servers on
+    /// offer — and what is in flight and cannot be forgotten without
+    /// dropping it: a question waiting on the operator, a sub-agent still
+    /// running with the calls it has running, a command the operator ran.
+    /// Each is counted as started in the conversation it goes on in, so that
+    /// its end is an end and not one without a start. The turn that typed the
+    /// clear is still open, and its end is the old conversation's.
+    /// Keeps each decision `reply` states, under the agent that stated it.
+    fn decided(&mut self, reply: &str, agent: Option<&AgentId>) {
+        self.decisions
+            .extend(
+                decision::decisions(reply)
+                    .into_iter()
+                    .map(|summary| DecisionRecord {
+                        summary,
+                        agent: agent.cloned(),
+                    }),
+            );
+    }
+
+    fn started_over(&mut self) -> Self {
+        let running_agents = std::mem::take(&mut self.running_agents);
+        let pending_permissions = std::mem::take(&mut self.pending_permissions);
+        let in_flight_tools: BTreeMap<ToolCallId, String> = self
+            .in_flight_tools
+            .iter()
+            .filter(|(id, name)| {
+                name.as_str() == OPERATOR_SHELL
+                    || self
+                        .agent_calls
+                        .get(*id)
+                        .is_some_and(|agent| running_agents.contains(agent))
+            })
+            .map(|(id, name)| (id.clone(), name.clone()))
+            .collect();
+        let agent_calls: BTreeMap<ToolCallId, AgentId> = self
+            .agent_calls
+            .iter()
+            .filter(|(id, _)| in_flight_tools.contains_key(*id))
+            .map(|(id, agent)| (id.clone(), agent.clone()))
+            .collect();
+        let running = running_agents.len() as u64;
+        Self {
+            meta: self.meta.take(),
+            mode: self.mode,
+            model: self.model.take(),
+            usage_windows: self.usage_windows.take(),
+            billing: self.billing.take(),
+            commands: std::mem::take(&mut self.commands),
+            models: std::mem::take(&mut self.models),
+            mcp_servers: std::mem::take(&mut self.mcp_servers),
+            permission_requests: pending_permissions.len() as u64,
+            pending_permissions,
+            agents_spawned: running,
+            peak_running_agents: running,
+            running_agents,
+            tools: ToolTotals {
+                started: in_flight_tools.len() as u64,
+                ..ToolTotals::default()
+            },
+            in_flight_tools,
+            agent_calls,
+            turn_running: self.turn_running,
+            clear_open: self.turn_running,
+            ..Self::default()
+        }
+    }
+
+    /// Ends the turn that typed a clear, which is no turn of the conversation
+    /// it started: nothing is recorded, and nothing it left open is carried
+    /// into the new one.
+    fn end_clear(&mut self) {
+        // A prompt sent, or tokens spent, after the clear belong to the new
+        // conversation, and the turn that carried them ends here: it is its
+        // first, and the turns would otherwise not add up to the session's
+        // total.
+        if self.user_messages > 0 || self.usage_reported {
+            self.end_turn(false);
+            return;
+        }
+        self.clear_open = false;
+        self.turn_running = false;
+    }
+
     /// Ends the running turn, and records what it spent.
-    fn end_turn(&mut self) {
+    /// Records the running turn as ended, and whether it was `cut` off rather
+    /// than ended by the backend.
+    fn end_turn(&mut self, cut: bool) {
+        self.clear_open = false;
+        // Nothing more comes until the next prompt, so a question the turn
+        // left open waits on nobody: an answer to it would reach nothing. A
+        // reply it left half-streamed is not the start of the next one.
+        self.pending_permissions.clear();
+        self.pending_assistant.clear();
+        self.interrupt_what_the_turn_left();
+        self.compacting = false;
         let ended = self.mark();
         let began = self.turn_began.take().unwrap_or(self.turn_last_ended);
         let five_hour_share = match self.window_reported {
             true => window_share(began.five_hour, ended.five_hour),
             false => None,
         };
+        // A total pinned at the largest count has stopped counting, so what
+        // the turn spent cannot be read off it.
+        let counted = self.usage_reported && ended.tokens != u64::MAX;
         self.turns.push(TurnRecord {
-            number: self.turns.len() as u64 + 1,
-            tokens: self
-                .usage_reported
-                .then(|| ended.tokens.saturating_sub(began.tokens)),
+            number: u64::try_from(self.turns.len())
+                .unwrap_or(u64::MAX)
+                .saturating_add(1),
+            tokens: counted.then(|| ended.tokens.saturating_sub(began.tokens)),
             five_hour_share,
+            cut,
+            compacted: self.compacted.take(),
         });
         self.turn_last_ended = ended;
         self.window_reported = false;
@@ -826,14 +1273,14 @@ impl SessionState {
         let Some(file) = self.files.get_mut(at) else {
             return;
         };
-        file.changes += 1;
+        bump(&mut file.changes);
         match added {
             Some(lines) => file.added = file.added.saturating_add(lines),
-            None => file.added_unstated += 1,
+            None => bump(&mut file.added_unstated),
         }
         match removed {
             Some(lines) => file.removed = file.removed.saturating_add(lines),
-            None => file.removed_unstated += 1,
+            None => bump(&mut file.removed_unstated),
         }
         // A change the model said nothing before keeps whatever it said before
         // the last one: an explanation that disappeared on the second edit to
@@ -885,11 +1332,38 @@ impl SessionState {
         self.billing
     }
 
+    /// Whether the session has been billed more than one way, so that its
+    /// cost is part list-price work on a plan and part money spent: the
+    /// money is in [`SessionState::metered_totals`].
+    pub fn billing_changed(&self) -> bool {
+        self.billing_changed
+    }
+
+    /// Token and cost totals of the usage folded while the session was billed
+    /// by use: of a session billed both ways, the part whose cost is money
+    /// spent. A plan's part is left out, because its figure is what the work
+    /// would have cost on the API and not what anyone paid.
+    ///
+    /// Usage is taken to be billed the way the session was last said to be
+    /// when it arrived, so a record folded before anything said is in no
+    /// part. A turn's cost settles only the records of its own part.
+    pub fn metered_totals(&self) -> &Totals {
+        &self.metered
+    }
+
     /// The prompt the main agent's last request sent, and the window it went
     /// into where the backend said. `None` until a request has been reported,
     /// which is not an empty context: nothing has been measured.
     pub fn context(&self) -> Option<&Context> {
         self.context.as_ref()
+    }
+
+    /// Whether [`Self::context`] is what a compaction said it left — the
+    /// summary and what was kept, without the system prompt and tools the
+    /// next request sends beside them — rather than a request's measurement.
+    /// Such a figure is a floor, and the next request replaces it.
+    pub fn context_is_a_floor(&self) -> bool {
+        self.context_floor
     }
 
     /// Tool call counters.
@@ -912,6 +1386,13 @@ impl SessionState {
     /// about a live process, which a fold of a record cannot answer.
     pub fn turn_running(&self) -> bool {
         self.turn_running
+    }
+
+    /// Whether the backend is compacting the conversation: between its word
+    /// that it began and its word that it stopped, or the end of the turn it
+    /// was compacting in.
+    pub fn compacting(&self) -> bool {
+        self.compacting
     }
 
     /// Every turn that has ended, oldest first. A turn still running is not
@@ -958,6 +1439,12 @@ impl SessionState {
         &self.pending_permissions
     }
 
+    /// The title the backend last gave the session. `None` where it has
+    /// given none.
+    pub fn title(&self) -> Option<&str> {
+        self.title.as_deref()
+    }
+
     /// What the session is about, on one line: the last title the backend
     /// gave it, or else the first line of the operator's first message.
     ///
@@ -977,20 +1464,21 @@ impl SessionState {
             .or_else(|| self.first_prompt.as_deref().and_then(words))
     }
 
-    /// The decisions log, in order.
+    /// Every decision the session's replies stated, oldest first: the
+    /// agent's account of what it chose, never a fact the fold checked.
     pub fn decisions(&self) -> &[DecisionRecord] {
         &self.decisions
-    }
-
-    /// The checkpoints taken, in order.
-    pub fn checkpoints(&self) -> &[CheckpointRecord] {
-        &self.checkpoints
     }
 
     /// The latest test run the session made. `None` where it has made none,
     /// which is not a run of no tests.
     pub fn test_run(&self) -> Option<&TestRunRecord> {
         self.test_run.as_ref()
+    }
+
+    /// Every test run the session made, by how each came out.
+    pub fn test_runs(&self) -> &TestRuns {
+        &self.test_runs
     }
 
     /// How many sub-agents were spawned.
@@ -1041,6 +1529,18 @@ impl SessionState {
         &self.commands
     }
 
+    /// The MCP servers the backend last said it has configured, in its
+    /// order. Empty until it has said, or where it has none.
+    pub fn mcp_servers(&self) -> &[McpServer] {
+        &self.mcp_servers
+    }
+
+    /// The models the backend last said it offers, in its order. Empty until
+    /// it has said, which is not a backend with none.
+    pub fn models(&self) -> &[ModelOption] {
+        &self.models
+    }
+
     /// The error that ended the session, if one did.
     pub fn fatal_error(&self) -> Option<&str> {
         self.fatal_error.as_deref()
@@ -1069,6 +1569,21 @@ fn first_line(text: &str) -> Option<&str> {
     text.lines().map(str::trim).find(|line| !line.is_empty())
 }
 
+/// Adds one to a counter, stopping at its largest value rather than wrapping:
+/// a count that wrapped would read as a session that did almost nothing.
+fn bump(counter: &mut u64) {
+    *counter = counter.saturating_add(1);
+}
+
+/// `a + b`, stopped at the largest finite value where it would overflow.
+fn finite_sum(a: f64, b: f64) -> f64 {
+    let sum = a + b;
+    match sum.is_finite() {
+        true => sum,
+        false => f64::MAX,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1084,12 +1599,12 @@ mod tests {
             output,
             cache_read: 0,
             cache_write: 0,
-            cache_write_1h: 0,
+            cache_write_1h: Some(0),
             reasoning: 0,
             model: model.to_owned(),
             cost_usd: cost,
-            cost_basis: None,
-            settles_model: false,
+            settles_model: Some(false),
+            fast: false,
         })
     }
 
@@ -1100,7 +1615,7 @@ mod tests {
         let Event::Usage(mut usage) = on_model(model, 0, 0, Some(cost)) else {
             unreachable!("on_model builds a usage event")
         };
-        usage.settles_model = true;
+        usage.settles_model = Some(true);
         Event::Usage(usage)
     }
 
@@ -1148,6 +1663,42 @@ mod tests {
         assert!((totals.reported_cost_usd - 0.75).abs() < f64::EPSILON);
     }
 
+    /// A record that reported a cost before the bridge said what it settles:
+    /// what every stored record of a session recorded before then is.
+    fn unsaid(model: &str, cost: f64) -> Event {
+        let Event::Usage(mut usage) = on_model(model, 0, 0, Some(cost)) else {
+            unreachable!("on_model builds a usage event")
+        };
+        usage.settles_model = None;
+        Event::Usage(usage)
+    }
+
+    #[test]
+    fn a_floor_left_by_records_that_never_said_what_they_settle_is_marked_so() {
+        let state = SessionState::replay(&[usage(100, 10, None), unsaid("opus-5", 0.75)]);
+
+        let totals = state.totals();
+        assert_eq!(totals.records_unsettled, 1);
+        assert!(totals.settlement_unrecorded());
+    }
+
+    #[test]
+    fn a_floor_under_records_that_said_they_settle_nothing_is_not_marked() {
+        let state = SessionState::replay(&[usage(100, 10, None), usage(0, 0, Some(0.75))]);
+
+        let totals = state.totals();
+        assert_eq!(totals.records_unsettled, 1);
+        assert!(!totals.settlement_unrecorded());
+    }
+
+    #[test]
+    fn a_whole_bill_is_not_marked_however_old_its_records_are() {
+        let state = SessionState::replay(&[unsaid("opus-5", 0.75)]);
+
+        assert!(state.totals().cost_fully_reported());
+        assert!(!state.totals().settlement_unrecorded());
+    }
+
     #[test]
     fn a_settlement_leaves_another_models_records_unsettled() {
         let state = SessionState::replay(&[
@@ -1166,6 +1717,57 @@ mod tests {
             .total();
         assert_eq!((owed.input, owed.output), (300, 30));
         assert!(!totals.unsettled.contains_key("opus-5"));
+    }
+
+    /// Two models each settled by their own record leave nothing owed,
+    /// whichever settles first, and each keeps its own bill.
+    #[test]
+    fn two_models_settle_in_either_order() {
+        for (first, second) in [("opus-5", "haiku-4-5"), ("haiku-4-5", "opus-5")] {
+            let owing = [
+                on_model("opus-5", 100, 10, None),
+                on_model("haiku-4-5", 300, 30, None),
+                on_model("opus-5", 200, 20, None),
+            ];
+            let halfway = SessionState::replay(owing.iter().chain([&settlement(first, 0.5)]));
+            let owed: Vec<&String> = halfway.totals().unsettled.keys().collect();
+            assert_eq!(owed, [second], "{first} settled first");
+            let expected = if second == "opus-5" { 2 } else { 1 };
+            assert_eq!(
+                halfway.totals().records_unsettled,
+                expected,
+                "{first} first"
+            );
+
+            let settled = SessionState::replay(
+                owing
+                    .iter()
+                    .chain([&settlement(first, 0.5), &settlement(second, 0.25)]),
+            );
+            let totals = settled.totals();
+            assert_eq!(totals.records_unsettled, 0, "{first} first");
+            assert!(totals.unsettled.is_empty(), "{first} first");
+            assert!((totals.reported_cost_by_model[first] - 0.5).abs() < 1e-9);
+            assert!((totals.reported_cost_by_model[second] - 0.25).abs() < 1e-9);
+        }
+    }
+
+    /// A settlement for a model nothing is owed for takes nothing off what
+    /// another model owes: the count of records owed for never goes below
+    /// the records that are.
+    #[test]
+    fn a_settlement_with_nothing_owed_leaves_what_is_owed_alone() {
+        let state = SessionState::replay(&[
+            on_model("haiku-4-5", 300, 30, None),
+            on_model("haiku-4-5", 300, 30, None),
+            settlement("opus-5", 0.75),
+            settlement("opus-5", 0.75),
+        ]);
+
+        let totals = state.totals();
+        assert_eq!(totals.records_unsettled, 2);
+        assert_eq!(totals.unsettled["haiku-4-5"].records().len(), 2);
+        assert!((totals.reported_cost_usd - 1.5).abs() < 1e-9);
     }
 
     #[test]
@@ -1244,6 +1846,49 @@ mod tests {
         assert_eq!(state.billing(), Some(Billing::Metered));
     }
 
+    #[test]
+    fn what_a_session_billed_both_ways_spent_by_use_is_kept_apart() {
+        for [first, then] in [
+            [Billing::Plan, Billing::Metered],
+            [Billing::Metered, Billing::Plan],
+        ] {
+            let mut events = vec![Event::Billing { billing: first }];
+            events.extend([usage(100, 10, None), settlement("opus-5", 0.25)]);
+            events.push(Event::Billing { billing: then });
+            events.extend([usage(200, 20, None), settlement("opus-5", 0.5)]);
+            let state = SessionState::replay(&events);
+
+            let metered = state.metered_totals();
+            let (tokens, cost) = match first {
+                Billing::Metered => (110, 0.25),
+                Billing::Plan => (220, 0.5),
+            };
+            assert_eq!(metered.tokens(), tokens, "{first:?} then {then:?}");
+            assert_eq!(metered.records, 2, "{first:?} then {then:?}");
+            assert!(metered.cost_fully_reported(), "{first:?} then {then:?}");
+            assert!(
+                (metered.reported_cost_usd - cost).abs() < 1e-9,
+                "{first:?} then {then:?}: {}",
+                metered.reported_cost_usd
+            );
+            assert_eq!(state.totals().tokens(), 330, "{first:?} then {then:?}");
+        }
+    }
+
+    #[test]
+    fn a_session_never_billed_by_use_spent_nothing_by_use() {
+        for billing in [None, Some(Billing::Plan)] {
+            let mut events: Vec<Event> = billing
+                .map(|billing| Event::Billing { billing })
+                .into_iter()
+                .collect();
+            events.extend([usage(100, 10, None), settlement("opus-5", 0.25)]);
+            let state = SessionState::replay(&events);
+
+            assert_eq!(state.metered_totals(), &Totals::default(), "{billing:?}");
+        }
+    }
+
     /// Who spent the session's tokens is a different question from what is
     /// still owed for: a model whose cost has landed has not stopped having
     /// spent them. `unsettled` empties as money arrives, so it cannot answer
@@ -1276,12 +1921,12 @@ mod tests {
                 output: 300,
                 cache_read: 18_000,
                 cache_write: 900,
-                cache_write_1h: 400,
+                cache_write_1h: Some(400),
                 reasoning: 120,
                 model: "opus-5".to_owned(),
                 cost_usd: Some(0.04),
-                cost_basis: None,
-                settles_model: false,
+                settles_model: Some(false),
+                fast: false,
             }),
             on_model("haiku-4-5", 300, 30, None),
         ]);
@@ -1290,6 +1935,24 @@ mod tests {
         // 2,000 + 300 + 18,000 + 900 + 120 for opus; the hour is a share of
         // the writes, not more of them.
         assert_eq!(totals.tokens_by_model.get("opus-5"), Some(&21_320));
+        assert_eq!(
+            totals.tokens_by_model.values().sum::<u64>(),
+            totals.tokens()
+        );
+    }
+
+    #[test]
+    fn a_models_tokens_add_up_over_every_record_of_it() {
+        let state = SessionState::replay(&[
+            on_model("opus-5", 100, 10, None),
+            on_model("haiku-4-5", 300, 30, None),
+            on_model("opus-5", 200, 20, None),
+            on_model("haiku-4-5", 3, 0, None),
+        ]);
+
+        let totals = state.totals();
+        assert_eq!(totals.tokens_by_model.get("opus-5"), Some(&330));
+        assert_eq!(totals.tokens_by_model.get("haiku-4-5"), Some(&333));
         assert_eq!(
             totals.tokens_by_model.values().sum::<u64>(),
             totals.tokens()
@@ -1332,18 +1995,27 @@ mod tests {
                 reasoning: 0,
                 model: "opus-5".to_owned(),
                 cost_usd: None,
-                cost_basis: None,
-                settles_model: false,
+                settles_model: Some(false),
+                fast: false,
             })
         };
-        let state = SessionState::replay(&[write(100, 100), write(50, 0), write(10, 4)]);
+        let state = SessionState::replay(&[
+            write(100, Some(100)),
+            write(50, Some(0)),
+            write(10, Some(4)),
+            write(30, None),
+        ]);
 
         let totals = state.totals();
-        assert_eq!(totals.cache_write, 160);
+        assert_eq!(totals.cache_write, 190);
         assert_eq!(totals.cache_write_1h, 104);
         assert_eq!(
+            totals.cache_write_unsplit, 30,
+            "the writes no record split are neither lifetime"
+        );
+        assert_eq!(
             totals.tokens(),
-            160,
+            190,
             "the one-hour writes are already in the write total"
         );
     }
@@ -1369,6 +2041,56 @@ mod tests {
             Some("Reading fetch.ts and its callers.")
         );
         assert_eq!(state.assistant_messages(), 1);
+    }
+
+    #[test]
+    fn a_decision_a_reply_states_is_kept_with_the_agent_that_stated_it() {
+        let mut state = SessionState::new();
+        state.apply(&Event::AssistantMessage {
+            text: "Done.\nDECISION: left the exporter alone; out of scope.".to_owned(),
+            agent: None,
+        });
+        state.apply(&Event::AssistantMessage {
+            text: "DECISION: read only the parser".to_owned(),
+            agent: Some("a1".into()),
+        });
+        state.apply(&Event::AssistantDelta {
+            text: "DECISION: still streaming".to_owned(),
+        });
+
+        let kept: Vec<_> = state
+            .decisions()
+            .iter()
+            .map(|d| (d.summary.as_str(), d.agent.as_ref().map(AgentId::as_str)))
+            .collect();
+        assert_eq!(
+            kept,
+            [
+                ("left the exporter alone; out of scope.", None),
+                ("read only the parser", Some("a1")),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_clear_starts_the_decisions_over_and_a_compaction_does_not() {
+        let mut state = SessionState::new();
+        let said = |text: &str| Event::AssistantMessage {
+            text: text.to_owned(),
+            agent: None,
+        };
+        state.apply(&said("DECISION: before"));
+        state.apply(&Event::CompactionStarted);
+        state.apply(&Event::CompactionEnded);
+        assert_eq!(state.decisions().len(), 1, "a compaction keeps them");
+
+        state.apply(&Event::Cleared);
+        assert!(
+            state.decisions().is_empty(),
+            "a clear is a new conversation"
+        );
+        state.apply(&said("DECISION: after"));
+        assert_eq!(state.decisions()[0].summary, "after");
     }
 
     #[test]
@@ -1430,6 +2152,8 @@ mod tests {
             summary: None,
             exit_code: None,
             error: None,
+            command: None,
+            untrimmed: None,
         });
         state.apply(&Event::ToolCallEnd {
             id: "t9".into(),
@@ -1441,6 +2165,8 @@ mod tests {
             summary: None,
             exit_code: None,
             error: None,
+            command: None,
+            untrimmed: None,
         });
 
         let tools = state.tools();
@@ -1466,6 +2192,8 @@ mod tests {
             tool: "Bash".to_owned(),
             input: r#"{"command":"rm -rf build"}"#.to_owned(),
             target: Some("rm -rf build".to_owned()),
+            proposal: None,
+            reason: None,
             agent: None,
         });
         assert_eq!(state.pending_permissions().len(), 1);
@@ -1480,6 +2208,50 @@ mod tests {
         assert_eq!(state.permissions_denied(), 1);
     }
 
+    fn asked(id: &str) -> Event {
+        Event::PermissionRequest {
+            id: id.into(),
+            tool: "Bash".to_owned(),
+            input: r#"{"command":"ls"}"#.to_owned(),
+            target: Some("ls".to_owned()),
+            proposal: None,
+            reason: None,
+            agent: None,
+        }
+    }
+
+    #[test]
+    fn a_prompt_left_open_when_the_turn_ends_waits_on_nobody() {
+        let state = SessionState::replay(&[
+            Event::UserMessage {
+                text: "go".to_owned(),
+            },
+            asked("a"),
+            Event::TurnEnded,
+            Event::UserMessage {
+                text: "again".to_owned(),
+            },
+        ]);
+
+        assert!(state.pending_permissions().is_empty());
+        assert_eq!(state.permission_requests(), 1);
+    }
+
+    #[test]
+    fn a_withdrawn_prompt_waits_on_nobody_and_was_not_denied() {
+        let state = SessionState::replay(&[
+            asked("a"),
+            asked("b"),
+            Event::PermissionWithdrawn { id: "a".into() },
+        ]);
+
+        assert_eq!(
+            state.pending_permissions().iter().collect::<Vec<_>>(),
+            [&ToolCallId::from("b")]
+        );
+        assert_eq!(state.permissions_denied(), 0);
+    }
+
     #[test]
     fn a_fatal_error_leaves_no_prompt_waiting_and_a_recoverable_one_does() {
         let mut state = SessionState::new();
@@ -1488,6 +2260,8 @@ mod tests {
             tool: "Bash".to_owned(),
             input: r#"{"command":"ls"}"#.to_owned(),
             target: Some("ls".to_owned()),
+            proposal: None,
+            reason: None,
             agent: None,
         });
         state.apply(&Event::Error {
@@ -1519,11 +2293,121 @@ mod tests {
     }
 
     #[test]
+    fn a_spawn_or_a_start_said_twice_is_one_agent_and_one_call() {
+        let mut state = SessionState::new();
+        for _ in 0..2 {
+            state.apply(&Event::AgentSpawn {
+                id: "a1".into(),
+                parent: None,
+                kind: None,
+                label: "test-writer".to_owned(),
+            });
+            state.apply(&start("t1", "Bash", None));
+        }
+
+        assert_eq!(state.agents_spawned(), 1);
+        assert_eq!(state.tools().started, 1);
+    }
+
+    fn end(id: &str, name: &str) -> Event {
+        Event::ToolCallEnd {
+            id: id.into(),
+            name: name.to_owned(),
+            input: String::new(),
+            output: String::new(),
+            bytes: 64,
+            outcome: ToolOutcome::Failed,
+            summary: None,
+            exit_code: None,
+            error: None,
+            command: None,
+            untrimmed: None,
+        }
+    }
+
+    #[test]
+    fn an_end_said_twice_is_one_finished_call() {
+        let state = SessionState::replay(&[
+            start("t1", "Bash", None),
+            end("t1", "Bash"),
+            end("t1", "Bash"),
+            end("t9", "Read"),
+            end("t9", "Read"),
+        ]);
+
+        let tools = state.tools();
+        assert_eq!(tools.started, 1);
+        assert_eq!(tools.finished, 2);
+        assert_eq!(tools.unmatched_ends, 1);
+        assert_eq!(tools.failed, 2);
+        assert_eq!(tools.output_bytes, 128);
+        assert_eq!(tools.by_name["Bash"], 1);
+        assert_eq!(tools.by_name["Read"], 1);
+        assert_eq!(tools.failed_by_name["Bash"], 1);
+    }
+
+    #[test]
+    fn a_call_started_again_after_its_end_ends_again() {
+        let state = SessionState::replay(&[
+            start("t1", "Bash", None),
+            end("t1", "Bash"),
+            start("t1", "Bash", None),
+            end("t1", "Bash"),
+        ]);
+
+        let tools = state.tools();
+        assert_eq!(tools.started, 2);
+        assert_eq!(tools.finished, 2);
+        assert_eq!(tools.unmatched_ends, 0);
+        assert!(state.in_flight_tools().is_empty());
+    }
+
+    fn exit(id: &str, outcome: AgentOutcome) -> Event {
+        Event::AgentExit {
+            id: id.into(),
+            outcome,
+        }
+    }
+
+    #[test]
+    fn an_exit_without_a_spawn_is_counted_and_an_exit_said_again_is_not() {
+        let state = SessionState::replay(&[
+            exit("a1", AgentOutcome::Completed),
+            exit("a1", AgentOutcome::Completed),
+            exit("a2", AgentOutcome::Failed),
+        ]);
+
+        assert_eq!(state.agents_spawned(), 0);
+        assert_eq!(state.agents_completed(), 1);
+        assert_eq!(state.agents_failed(), 1);
+        assert!(state.running_agents().is_empty());
+    }
+
+    #[test]
+    fn an_agent_the_session_ended_under_does_not_also_exit() {
+        let state = SessionState::replay(&[
+            Event::AgentSpawn {
+                id: "a1".into(),
+                parent: None,
+                kind: None,
+                label: "test-writer".to_owned(),
+            },
+            Event::SessionLeft,
+            exit("a1", AgentOutcome::Completed),
+        ]);
+
+        assert_eq!(state.agents_spawned(), 1);
+        assert_eq!(state.agents_interrupted(), 1);
+        assert_eq!(state.agents_completed(), 0);
+    }
+
+    #[test]
     fn a_fatal_error_records_the_calls_it_cut_short_and_leaves_none_running() {
         let mut state = SessionState::new();
         state.apply(&Event::AgentSpawn {
             id: "a1".into(),
             parent: None,
+            kind: None,
             label: "test-writer".to_owned(),
         });
         state.apply(&start("t1", "Bash", None));
@@ -1547,6 +2431,308 @@ mod tests {
         assert_eq!(tools.finished, 0);
         assert_eq!(tools.failed, 0);
         assert_eq!(tools.unmatched_ends, 0);
+    }
+
+    #[test]
+    fn a_turn_that_ends_before_a_call_does_records_the_call_as_cut_short() {
+        let mut state = SessionState::new();
+        state.apply(&start("t1", "Bash", None));
+
+        state.apply(&Event::TurnEnded);
+
+        let tools = state.tools();
+        assert!(state.in_flight_tools().is_empty());
+        assert_eq!(tools.interrupted, 1);
+        assert_eq!(tools.finished, 0);
+        assert_eq!(tools.failed, 0);
+    }
+
+    #[test]
+    fn a_turn_end_leaves_a_running_sub_agents_calls_and_the_operators_commands_running() {
+        let mut state = SessionState::new();
+        for id in ["a1", "a2"] {
+            state.apply(&Event::AgentSpawn {
+                id: id.into(),
+                parent: None,
+                kind: None,
+                label: "explorer".to_owned(),
+            });
+        }
+        state.apply(&start("t1", "Read", Some("a1")));
+        state.apply(&start("t2", "Read", Some("a2")));
+        state.apply(&Event::AgentExit {
+            id: "a2".into(),
+            outcome: AgentOutcome::Completed,
+        });
+        state.apply(&start("op1", OPERATOR_SHELL, None));
+
+        state.apply(&Event::TurnEnded);
+
+        assert_eq!(
+            state.in_flight_tools().keys().collect::<Vec<_>>(),
+            [&ToolCallId::from("op1"), &ToolCallId::from("t1")],
+            "an agent working in the background and the operator's command go on"
+        );
+        assert_eq!(state.tools().interrupted, 1);
+        assert_eq!(state.running_agents().len(), 1);
+        assert_eq!(state.agents_interrupted(), 0);
+    }
+
+    #[test]
+    fn an_agent_that_exits_cuts_the_calls_it_left_running_and_no_others() {
+        let mut state = SessionState::new();
+        for id in ["a1", "a2"] {
+            state.apply(&Event::AgentSpawn {
+                id: id.into(),
+                parent: None,
+                kind: None,
+                label: "explorer".to_owned(),
+            });
+        }
+        state.apply(&Event::TurnEnded);
+        state.apply(&start("c1", "Bash", Some("a1")));
+        state.apply(&start("c2", "Read", Some("a2")));
+        state.apply(&start("c3", "Read", None));
+
+        state.apply(&Event::AgentExit {
+            id: "a1".into(),
+            outcome: AgentOutcome::Cancelled,
+        });
+
+        assert_eq!(
+            state.in_flight_tools().keys().collect::<Vec<_>>(),
+            [&ToolCallId::from("c2"), &ToolCallId::from("c3")],
+            "an agent that has gone reports no end for its calls"
+        );
+        assert_eq!(state.tools().interrupted, 1);
+        assert_eq!(state.agents_cancelled(), 1);
+    }
+
+    #[test]
+    fn a_call_a_gone_agent_started_late_is_cut_at_the_turn_end_while_a_running_agents_goes_on() {
+        let mut state = SessionState::new();
+        for id in ["a1", "a2"] {
+            state.apply(&Event::AgentSpawn {
+                id: id.into(),
+                parent: None,
+                kind: None,
+                label: "explorer".to_owned(),
+            });
+        }
+        state.apply(&Event::AgentExit {
+            id: "a2".into(),
+            outcome: AgentOutcome::Completed,
+        });
+        // A sub-agent's own records are folded in by their stamps, so a call
+        // can arrive after its agent's exit.
+        state.apply(&start("late", "Read", Some("a2")));
+        state.apply(&start("live", "Read", Some("a1")));
+
+        state.apply(&Event::TurnEnded);
+
+        assert_eq!(
+            state.in_flight_tools().keys().collect::<Vec<_>>(),
+            [&ToolCallId::from("live")]
+        );
+        assert_eq!(state.tools().interrupted, 1);
+    }
+
+    #[test]
+    fn a_turn_end_straight_after_the_session_was_left_records_no_turn() {
+        let state = SessionState::replay(&[
+            Event::UserMessage {
+                text: "go".to_owned(),
+            },
+            Event::SessionLeft,
+            Event::TurnEnded,
+        ]);
+
+        assert_eq!(state.turns().len(), 1);
+    }
+
+    #[test]
+    fn agents_cut_by_two_endings_are_both_counted() {
+        let state = SessionState::replay(&[
+            spawn("a1"),
+            Event::SessionLeft,
+            spawn("a2"),
+            Event::Error {
+                message: "the CLI exited".to_owned(),
+                fatal: true,
+            },
+            spawn("a3"),
+            Event::SessionLeft,
+        ]);
+
+        assert_eq!(state.agents_interrupted(), 3);
+    }
+
+    fn spawn(id: &str) -> Event {
+        Event::AgentSpawn {
+            id: id.into(),
+            parent: None,
+            kind: None,
+            label: "explorer".to_owned(),
+        }
+    }
+
+    fn ended_ok(id: &str, name: &str) -> Event {
+        let Event::ToolCallEnd {
+            id,
+            name,
+            input,
+            output,
+            bytes,
+            summary,
+            exit_code,
+            error,
+            command,
+            ..
+        } = end(id, name)
+        else {
+            unreachable!("end builds a call's end");
+        };
+        Event::ToolCallEnd {
+            id,
+            name,
+            input,
+            output,
+            bytes,
+            outcome: ToolOutcome::Ok,
+            summary,
+            exit_code,
+            error,
+            command,
+            untrimmed: None,
+        }
+    }
+
+    #[test]
+    fn what_runs_across_a_clear_is_carried_with_its_calls_and_counted_in_the_new_conversation() {
+        let mut state = SessionState::new();
+        state.apply(&Event::UserMessage {
+            text: "go".to_owned(),
+        });
+        state.apply(&spawn("a1"));
+        state.apply(&start("a1c", "Read", Some("a1")));
+        state.apply(&start("op1", OPERATOR_SHELL, None));
+        state.apply(&start("t1", "Bash", None));
+        state.apply(&asked("q1"));
+
+        state.apply(&Event::Cleared);
+
+        assert_eq!(
+            state.in_flight_tools().keys().collect::<Vec<_>>(),
+            [&ToolCallId::from("a1c"), &ToolCallId::from("op1")],
+            "the agent's call and the operator's command go on; the turn's own call does not"
+        );
+        assert_eq!(state.agents_spawned(), 1);
+        assert_eq!(state.peak_running_agents(), 1);
+        assert_eq!(state.permission_requests(), 1);
+
+        state.apply(&ended_ok("op1", OPERATOR_SHELL));
+        state.apply(&ended_ok("a1c", "Read"));
+        state.apply(&Event::AgentExit {
+            id: "a1".into(),
+            outcome: AgentOutcome::Completed,
+        });
+        state.apply(&Event::PermissionResponse {
+            id: "q1".into(),
+            decision: PermissionDecision::Deny,
+            message: None,
+        });
+
+        assert_eq!(state.tools().unmatched_ends, 0);
+        assert_eq!(state.tools().started, 2);
+        assert_eq!(state.tools().finished, 2);
+        assert!(
+            state.agents_completed()
+                + state.agents_failed()
+                + state.agents_cancelled()
+                + state.agents_interrupted()
+                <= state.agents_spawned()
+        );
+        assert!(state.permissions_denied() <= state.permission_requests());
+    }
+
+    #[test]
+    fn a_prompt_sent_while_the_clears_turn_runs_is_a_turn_with_what_it_spent() {
+        let mut state = SessionState::new();
+        for event in [
+            Event::UserMessage {
+                text: "first".to_owned(),
+            },
+            Event::TurnEnded,
+            Event::UserMessage {
+                text: "/clear".to_owned(),
+            },
+            Event::Cleared,
+            Event::UserMessage {
+                text: "next".to_owned(),
+            },
+            usage(5, 4, None),
+            Event::TurnEnded,
+        ] {
+            state.apply(&event);
+        }
+
+        let turns = state.turns();
+        assert_eq!(turns.len(), 1, "{turns:?}");
+        assert_eq!(turns[0].tokens, Some(9));
+        assert_eq!(state.totals().tokens(), 9);
+    }
+
+    #[test]
+    fn the_turn_that_typed_a_clear_and_nothing_else_is_still_no_turn() {
+        let mut state = SessionState::new();
+        for event in [
+            Event::UserMessage {
+                text: "/clear".to_owned(),
+            },
+            Event::Cleared,
+            Event::TurnEnded,
+        ] {
+            state.apply(&event);
+        }
+
+        assert!(state.turns().is_empty());
+    }
+
+    /// A call counted as cut short whose end then comes is one call, and
+    /// finished: the figures never say it was interrupted as well, nor that
+    /// its end had no start.
+    #[test]
+    fn a_call_cut_short_and_ended_late_is_one_call_that_finished() {
+        let sequences: [Vec<Event>; 2] = [
+            vec![
+                prompt(),
+                start("c1", "Read", None),
+                Event::TurnEnded,
+                ended_ok("c1", "Read"),
+            ],
+            vec![
+                spawn("a1"),
+                start("c1", "Read", Some("a1")),
+                Event::AgentExit {
+                    id: "a1".into(),
+                    outcome: AgentOutcome::Completed,
+                },
+                ended_ok("c1", "Read"),
+            ],
+        ];
+        for events in sequences {
+            let state = SessionState::replay(&events);
+            let tools = state.tools();
+
+            assert_eq!(tools.started, 1, "{events:?}");
+            assert_eq!(
+                tools.finished + tools.interrupted,
+                tools.started,
+                "{events:?}"
+            );
+            assert_eq!(tools.interrupted, 0, "{events:?}");
+            assert_eq!(tools.unmatched_ends, 0, "{events:?}");
+        }
     }
 
     #[test]
@@ -1577,6 +2763,8 @@ mod tests {
             summary: None,
             exit_code: Some(0),
             error: None,
+            command: None,
+            untrimmed: None,
         });
         assert!(state.in_flight_tools().is_empty());
         assert_eq!(state.tools().unmatched_ends, 0);
@@ -1589,6 +2777,7 @@ mod tests {
             state.apply(&Event::AgentSpawn {
                 id: id.into(),
                 parent: None,
+                kind: None,
                 label: "test-writer".to_owned(),
             });
         }
@@ -1617,6 +2806,7 @@ mod tests {
             state.apply(&Event::AgentSpawn {
                 id: id.into(),
                 parent: None,
+                kind: None,
                 label: "test-writer".to_owned(),
             });
         }
@@ -1634,6 +2824,47 @@ mod tests {
         assert_eq!(state.agents_cancelled(), 1);
         assert_eq!(state.running_agents().len(), 1);
         assert_eq!(state.peak_running_agents(), 3);
+    }
+
+    #[test]
+    fn the_peak_of_running_agents_stands_after_fewer_run_again() {
+        let spawn = |id: &str| Event::AgentSpawn {
+            id: id.into(),
+            parent: None,
+            kind: None,
+            label: "test-writer".to_owned(),
+        };
+        let state = SessionState::replay(&[
+            spawn("a1"),
+            spawn("a2"),
+            spawn("a3"),
+            exit("a1", AgentOutcome::Completed),
+            exit("a2", AgentOutcome::Completed),
+            spawn("a4"),
+        ]);
+
+        assert_eq!(state.running_agents().len(), 2);
+        assert_eq!(state.peak_running_agents(), 3);
+    }
+
+    #[test]
+    fn an_agent_spawned_again_after_its_exit_ends_again() {
+        let spawn = Event::AgentSpawn {
+            id: "a1".into(),
+            parent: None,
+            kind: None,
+            label: "test-writer".to_owned(),
+        };
+        let state = SessionState::replay(&[
+            spawn.clone(),
+            exit("a1", AgentOutcome::Completed),
+            spawn,
+            exit("a1", AgentOutcome::Failed),
+        ]);
+
+        assert!(state.running_agents().is_empty());
+        assert_eq!(state.agents_completed(), 1);
+        assert_eq!(state.agents_failed(), 1);
     }
 
     #[test]
@@ -1712,13 +2943,88 @@ mod tests {
         assert_eq!(state.model(), Some("claude-haiku-4-5-20251001"));
     }
 
+    #[test]
+    fn a_refused_model_gives_way_to_the_one_the_backend_last_reported() {
+        let mut state = SessionState::new();
+        state.apply(&Event::SessionMeta(SessionMeta {
+            backend: Backend::Claude,
+            profile: "max".to_owned(),
+            model: "claude-opus-5".to_owned(),
+            backend_session: None,
+        }));
+        state.apply(&Event::ModelSelected {
+            model: "no-such-model".to_owned(),
+        });
+        assert_eq!(state.model(), Some("no-such-model"));
+
+        state.apply(&Event::ModelRefused { back_to: None });
+
+        assert_eq!(state.model(), Some("claude-opus-5"));
+    }
+
+    #[test]
+    fn a_refusal_goes_back_to_the_model_a_change_the_backend_took_put_it_on() {
+        let mut state = SessionState::new();
+        state.apply(&Event::SessionMeta(SessionMeta {
+            backend: Backend::Claude,
+            profile: "max".to_owned(),
+            model: "claude-haiku-4-5-20251001".to_owned(),
+            backend_session: None,
+        }));
+        state.apply(&Event::ModelSelected {
+            model: "claude-opus-4-8".to_owned(),
+        });
+        state.apply(&Event::ModelSelected {
+            model: "refuse".to_owned(),
+        });
+
+        state.apply(&Event::ModelRefused {
+            back_to: Some("claude-opus-4-8".to_owned()),
+        });
+
+        assert_eq!(state.model(), Some("claude-opus-4-8"));
+    }
+
+    #[test]
+    fn a_model_refused_before_the_backend_reported_one_leaves_no_model() {
+        let mut state = SessionState::new();
+        state.apply(&Event::ModelSelected {
+            model: "no-such-model".to_owned(),
+        });
+
+        state.apply(&Event::ModelRefused { back_to: None });
+
+        assert_eq!(state.model(), None);
+    }
+
     fn changed(path: &str, added: Option<u64>, removed: Option<u64>) -> Event {
         Event::FileChange {
             path: path.to_owned(),
             added,
             removed,
             hunks: Vec::new(),
+            scope: ChangeScope::Project,
         }
+    }
+
+    #[test]
+    fn a_change_to_the_agents_own_notes_is_left_out_of_the_files_the_session_changed() {
+        let mut state = SessionState::new();
+        state.apply(&changed("src/lib.rs", Some(3), Some(1)));
+        state.apply(&Event::FileChange {
+            path: "/home/me/.claude/projects/-w-app/memory/MEMORY.md".to_owned(),
+            added: Some(2),
+            removed: Some(1),
+            hunks: Vec::new(),
+            scope: ChangeScope::AgentMemory,
+        });
+
+        let files: Vec<_> = state
+            .files()
+            .iter()
+            .map(|file| (file.path.as_str(), file.added, file.removed))
+            .collect();
+        assert_eq!(files, [("src/lib.rs", 3, 1)]);
     }
 
     fn tested(counts: Option<TestCounts>, exit_code: Option<i32>) -> Event {
@@ -1753,6 +3059,27 @@ mod tests {
             }),
             "an earlier run's counts are not carried over a run that was not read"
         );
+    }
+
+    #[test]
+    fn every_test_run_is_counted_as_passed_failed_or_unread() {
+        assert_eq!(SessionState::replay(&[]).test_runs(), &TestRuns::default());
+
+        let counted = |failed| TestCounts {
+            passed: 3,
+            failed,
+            ignored: 0,
+            suites: 1,
+        };
+        let state = SessionState::replay(&[
+            tested(Some(counted(1)), Some(101)),
+            tested(Some(counted(0)), Some(0)),
+            tested(Some(counted(0)), Some(0)),
+            tested(None, Some(0)),
+        ]);
+        let runs = state.test_runs();
+        assert_eq!((runs.passed, runs.failed, runs.unread), (2, 1, 1));
+        assert_eq!(runs.all(), 4);
     }
 
     #[test]
@@ -1951,6 +3278,8 @@ mod tests {
                 summary: None,
                 exit_code: None,
                 error: None,
+                command: None,
+                untrimmed: None,
             },
             changed(path, Some(1), Some(1)),
         ]
@@ -2001,10 +3330,92 @@ mod tests {
         assert_eq!(state.pending_assistant(), "Reading fetch");
     }
 
+    /// A sub-agent that said nothing before editing a file the session had
+    /// explained leaves the explanation where it was.
+    #[test]
+    fn a_file_changed_again_with_nothing_said_keeps_the_explanation_it_had() {
+        let mut events = vec![Event::AssistantMessage {
+            text: "Adding the etag header.".to_owned(),
+            agent: None,
+        }];
+        events.extend(edited_by(None, "t1", "src/fetch.rs"));
+        events.extend(edited_by(Some("toolu_a"), "t2", "src/fetch.rs"));
+        let state = SessionState::replay(&events);
+
+        assert_eq!(state.files()[0].changes, 2);
+        assert_eq!(
+            state.files()[0].why.as_deref(),
+            Some("Adding the etag header.")
+        );
+    }
+
     #[test]
     fn a_file_changed_before_the_model_said_anything_has_no_why_invented_for_it() {
         let state = SessionState::replay(&[changed("src/fetch.rs", Some(1), Some(1))]);
         assert_eq!(state.files()[0].why, None);
+    }
+
+    /// A report that names no window says only whether the plan is spending
+    /// beyond its fee; the levels last reported still stand.
+    #[test]
+    fn a_report_of_overage_alone_keeps_the_levels_before_it() {
+        use crate::event::{UsageWindow, UsageWindows};
+        let level = Some(UsageWindow {
+            utilization: 0.97,
+            resets_at: Some(1_789_779_600),
+        });
+        let mut state = SessionState::new();
+        state.apply(&Event::UsageWindows(UsageWindows {
+            five_hour: level,
+            seven_day: None,
+            using_overage: false,
+            overage: crate::event::Overage::Unreported,
+        }));
+
+        state.apply(&Event::UsageWindows(UsageWindows {
+            five_hour: None,
+            seven_day: None,
+            using_overage: true,
+            overage: crate::event::Overage::Unreported,
+        }));
+
+        assert_eq!(
+            state.usage_windows().copied(),
+            Some(UsageWindows {
+                five_hour: level,
+                seven_day: None,
+                using_overage: true,
+                overage: crate::event::Overage::Unreported,
+            })
+        );
+    }
+
+    /// Whether extra usage is allowed is a standing answer: a later report that
+    /// does not say leaves it, and one that does replaces it.
+    #[test]
+    fn what_was_said_about_extra_usage_stands_until_the_backend_says_otherwise() {
+        use crate::event::{Overage, OverageRefusal, UsageWindows};
+        let report = |overage| {
+            Event::UsageWindows(UsageWindows {
+                five_hour: None,
+                seven_day: None,
+                using_overage: false,
+                overage,
+            })
+        };
+        let mut state = SessionState::new();
+        state.apply(&report(Overage::Refused(OverageRefusal::OutOfCredits)));
+        state.apply(&report(Overage::Unreported));
+        assert_eq!(
+            state.usage_windows().map(|windows| windows.overage),
+            Some(Overage::Refused(OverageRefusal::OutOfCredits))
+        );
+
+        state.apply(&report(Overage::Allowed));
+        assert_eq!(
+            state.usage_windows().map(|windows| windows.overage),
+            Some(Overage::Allowed)
+        );
     }
 
     #[test]
@@ -2029,6 +3440,7 @@ mod tests {
                     resets_at: Some(1_790_118_000),
                 }),
                 using_overage: false,
+                overage: crate::event::Overage::Unreported,
             }));
         }
 
@@ -2058,18 +3470,63 @@ mod tests {
         assert_eq!(SessionState::new().context(), None);
     }
 
+    fn compacted(after: Option<u64>) -> Event {
+        Event::Compacted {
+            trigger: CompactTrigger::Manual,
+            before: Some(150_000),
+            after,
+        }
+    }
+
     /// A compaction shrinks the next prompt, and the fold follows it down:
     /// the context is the last request's, never the largest one's.
     #[test]
     fn the_context_is_the_last_requests_even_when_it_shrank() {
-        let state = SessionState::replay(&[
-            context(150_000),
-            Event::Notice {
-                message: "the context was compacted (auto).".to_owned(),
-            },
-            context(20_000),
-        ]);
+        let state =
+            SessionState::replay(&[context(150_000), compacted(Some(4_282)), context(20_000)]);
         assert_eq!(state.context().map(|c| c.tokens), Some(20_000));
+        assert!(!state.context_is_a_floor());
+    }
+
+    /// Between a compaction and the next request, the size the backend says
+    /// the conversation shrank to is all there is: a floor, on the model and
+    /// window the last request measured, and never the size it had before.
+    #[test]
+    fn a_compacted_context_is_the_size_it_shrank_to_until_the_next_request() {
+        let state = SessionState::replay(&[context(150_000), compacted(Some(4_282))]);
+        let context = state.context().expect("the compaction said what it left");
+        assert_eq!(context.tokens, 4_282);
+        assert_eq!(context.model, "opus-5");
+        assert_eq!(context.window, Some(1_000_000));
+        assert!(state.context_is_a_floor());
+    }
+
+    /// A compaction that does not say what it left leaves no figure: the
+    /// last one is of a conversation the model no longer has.
+    #[test]
+    fn a_compaction_that_says_nothing_of_what_it_left_leaves_no_context() {
+        let state = SessionState::replay(&[context(150_000), compacted(None)]);
+        assert_eq!(state.context(), None);
+        assert!(!state.context_is_a_floor());
+
+        let state = SessionState::replay(&[context(150_000), compacted(None), context(9_000)]);
+        assert_eq!(state.context().map(|c| c.tokens), Some(9_000));
+    }
+
+    /// With no request before it there is no model or window to put a floor
+    /// on, and a size alone would say nothing the next request will not.
+    #[test]
+    fn a_compaction_before_any_request_leaves_no_context() {
+        let state = SessionState::replay(&[compacted(Some(4_282))]);
+        assert_eq!(state.context(), None);
+    }
+
+    #[test]
+    fn a_cleared_conversation_after_a_compaction_has_no_floor() {
+        let state =
+            SessionState::replay(&[context(150_000), compacted(Some(4_282)), Event::Cleared]);
+        assert_eq!(state.context(), None);
+        assert!(!state.context_is_a_floor());
     }
 
     #[test]
@@ -2079,6 +3536,211 @@ mod tests {
 
         let state = SessionState::replay(&[context(150_000), Event::Cleared, context(9_000)]);
         assert_eq!(state.context().map(|c| c.tokens), Some(9_000));
+    }
+
+    fn before_a_clear() -> Vec<Event> {
+        vec![
+            prompt(),
+            start("t1", "Bash", None),
+            end("t1", "Bash"),
+            Event::AgentSpawn {
+                id: "a1".into(),
+                parent: None,
+                kind: None,
+                label: "test-writer".to_owned(),
+            },
+            exit("a1", AgentOutcome::Failed),
+            Event::Error {
+                message: "rate limited".to_owned(),
+                fatal: false,
+            },
+            Event::Titled {
+                title: "Old work".to_owned(),
+            },
+            on_model("opus-5", 100, 10, Some(0.5)),
+            on_model("haiku-4", 20, 2, Some(0.01)),
+            Event::TurnEnded,
+        ]
+    }
+
+    #[test]
+    fn a_cleared_conversation_starts_the_session_over() {
+        let mut events = before_a_clear();
+        events.extend([
+            Event::Cleared,
+            prompt(),
+            start("t2", "Read", None),
+            on_model("sonnet-5", 7, 3, Some(0.02)),
+            Event::TurnEnded,
+        ]);
+        let state = SessionState::replay(&events);
+
+        assert_eq!(state.tools().started, 1);
+        assert_eq!(state.tools().by_name.get("Bash"), None);
+        assert_eq!(state.agents_spawned(), 0);
+        assert_eq!(state.agents_failed(), 0);
+        assert_eq!(state.errors(), 0);
+        assert_eq!(state.title(), None);
+        assert_eq!(state.user_messages(), 1);
+        assert_eq!(state.turns().len(), 1);
+        assert_eq!(state.turns()[0].number, 1);
+        let models: Vec<&str> = state
+            .totals()
+            .tokens_by_model
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(models, ["sonnet-5"]);
+        assert!((state.totals().reported_cost_usd - 0.02).abs() < 1e-9);
+
+        let before = SessionState::replay(&before_a_clear());
+        assert_eq!(before.tools().started, 1);
+        assert_eq!(before.agents_failed(), 1);
+        assert_eq!(before.errors(), 1);
+        assert_eq!(before.title(), Some("Old work"));
+        assert_eq!(before.totals().tokens_by_model.len(), 2);
+    }
+
+    #[test]
+    fn what_the_account_says_survives_a_clear() {
+        let window = UsageWindow {
+            utilization: 0.4,
+            resets_at: None,
+        };
+        let state = SessionState::replay(&[
+            Event::UsageWindows(UsageWindows {
+                five_hour: Some(window),
+                seven_day: None,
+                using_overage: false,
+                overage: crate::event::Overage::Unreported,
+            }),
+            Event::ModeSelected { mode: Mode::Plan },
+            Event::Cleared,
+        ]);
+        assert!(state.usage_windows().is_some());
+        assert_eq!(state.mode(), Some(Mode::Plan));
+    }
+
+    /// What the backend offered once, at the start — its models, its commands
+    /// and its servers — is not said again after a clear, so a clear that
+    /// dropped it would leave the model picker empty for the rest of the
+    /// session; nor is how the account is billed.
+    #[test]
+    fn the_lists_and_the_billing_the_backend_gave_once_survive_a_clear() {
+        let model = |id: &str| ModelOption {
+            id: id.to_owned(),
+            name: None,
+            description: None,
+            resolves_to: None,
+            auto_mode: None,
+        };
+        let command = SlashCommand {
+            name: "review".to_owned(),
+            description: "Review a change".to_owned(),
+            argument_hint: None,
+            mid_prompt: false,
+        };
+        let server = McpServer {
+            name: "docs".to_owned(),
+            status: crate::event::McpStatus::Connected,
+            source: None,
+            tools: vec!["search".to_owned()],
+            scope: None,
+            error: None,
+            endpoint: None,
+            reports_as: None,
+        };
+        let state = SessionState::replay(&[
+            Event::Models {
+                models: vec![model("opus"), model("haiku")],
+            },
+            Event::Commands {
+                commands: vec![command.clone()],
+            },
+            Event::McpServers {
+                servers: vec![server.clone()],
+            },
+            Event::Billing {
+                billing: Billing::Metered,
+            },
+            prompt(),
+            Event::TurnEnded,
+            Event::Cleared,
+        ]);
+
+        assert_eq!(
+            state
+                .models()
+                .iter()
+                .map(|m| m.id.as_str())
+                .collect::<Vec<_>>(),
+            ["opus", "haiku"]
+        );
+        assert_eq!(state.commands(), [command]);
+        assert_eq!(state.mcp_servers(), [server]);
+        assert_eq!(state.billing(), Some(Billing::Metered));
+    }
+
+    /// The command that typed the clear is still a turn when the reset
+    /// arrives, and its end is not a turn of the conversation that follows.
+    #[test]
+    fn the_turn_that_typed_a_clear_is_not_a_turn_of_the_new_conversation() {
+        let state = SessionState::replay(&[
+            prompt(),
+            Event::TurnEnded,
+            Event::UserMessage {
+                text: "/clear".to_owned(),
+            },
+            Event::Cleared,
+            Event::TurnEnded,
+            prompt(),
+            Event::TurnEnded,
+        ]);
+        assert_eq!(state.turns().len(), 1);
+        assert_eq!(state.turns()[0].number, 1);
+        assert_eq!(state.user_messages(), 1);
+    }
+
+    #[test]
+    fn a_compaction_between_turns_numbers_the_next_turn_on() {
+        let mut events = Vec::new();
+        for _ in 0..3 {
+            events.extend([prompt(), Event::TurnEnded]);
+        }
+        events.extend([
+            Event::UserMessage {
+                text: "/compact".to_owned(),
+            },
+            Event::CompactionStarted,
+            Event::CompactionEnded,
+            Event::Compacted {
+                trigger: CompactTrigger::Manual,
+                before: Some(9_000),
+                after: Some(1_000),
+            },
+            Event::TurnEnded,
+            prompt(),
+            Event::TurnEnded,
+        ]);
+        let state = SessionState::replay(&events);
+        let numbers: Vec<u64> = state.turns().iter().map(|turn| turn.number).collect();
+        assert_eq!(numbers, [1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn a_question_and_a_sub_agent_in_flight_at_a_clear_are_not_dropped() {
+        let state = SessionState::replay(&[
+            Event::AgentSpawn {
+                id: "a1".into(),
+                parent: None,
+                kind: None,
+                label: "worker".to_owned(),
+            },
+            asked("t9"),
+            Event::Cleared,
+        ]);
+        assert_eq!(state.pending_permissions().len(), 1);
+        assert_eq!(state.running_agents().len(), 1);
     }
 
     fn said(text: &str) -> Event {
@@ -2110,6 +3772,24 @@ mod tests {
     }
 
     #[test]
+    fn a_prompt_that_reached_no_backend_is_no_turn_no_prompt_and_no_caption() {
+        let unsent = Event::PromptNotSent {
+            text: "hello".to_owned(),
+        };
+        let mut state = SessionState::replay(std::slice::from_ref(&unsent));
+        state.apply(&Event::SessionLeft);
+
+        assert_eq!(state.caption(), None);
+        assert_eq!(state.user_messages(), 0);
+        assert!(!state.turn_running());
+        assert!(state.turns().is_empty());
+
+        let later = SessionState::replay(&[unsent, said("fix the retry loop")]);
+        assert_eq!(later.caption().as_deref(), Some("fix the retry loop"));
+        assert_eq!(later.user_messages(), 1);
+    }
+
+    #[test]
     fn the_backends_latest_title_captions_the_session_over_the_first_prompt() {
         let state = SessionState::replay(&[
             said("fix it"),
@@ -2134,20 +3814,31 @@ mod tests {
         );
     }
 
+    /// Folding is a function of the events alone: the same events folded in
+    /// two runs, into a state that has already folded the first of them,
+    /// land where folding them all in one does.
     #[test]
-    fn replaying_the_same_events_twice_lands_in_the_same_place() {
+    fn folding_events_in_two_runs_lands_where_folding_them_in_one_does() {
         let events = vec![
             Event::UserMessage {
                 text: "add etags".to_owned(),
             },
             usage(1_000, 100, Some(0.04)),
-            Event::Decision {
-                summary: "Reuse the existing LRU".to_owned(),
-                rationale: None,
-                rejected: vec!["A second Map".to_owned()],
+            Event::TurnEnded,
+            Event::UserMessage {
+                text: "and the tests".to_owned(),
             },
+            usage(500, 50, None),
         ];
-        assert_eq!(SessionState::replay(&events), SessionState::replay(&events));
+        let (first, second) = events.split_at(3);
+        let mut state = SessionState::replay(first);
+        for event in second {
+            state.apply(event);
+        }
+
+        assert_eq!(state, SessionState::replay(&events));
+        assert_eq!(state.turns().len(), 1);
+        assert_eq!(state.totals().records, 2);
     }
 
     fn prompt() -> Event {
@@ -2164,12 +3855,12 @@ mod tests {
             output,
             cache_read,
             cache_write,
-            cache_write_1h: 0,
+            cache_write_1h: Some(0),
             reasoning: 0,
             model: "opus-5".to_owned(),
             cost_usd: None,
-            cost_basis: None,
-            settles_model: false,
+            settles_model: Some(false),
+            fast: false,
         })
     }
 
@@ -2181,6 +3872,7 @@ mod tests {
             }),
             seven_day: None,
             using_overage: false,
+            overage: crate::event::Overage::Unreported,
         })
     }
 
@@ -2227,6 +3919,24 @@ mod tests {
         assert_eq!(tokens, [Some(110), None, Some(0)]);
     }
 
+    /// A total that has reached the largest count there is stays there, so
+    /// what a later turn added cannot be told from it; that turn has no
+    /// token figure rather than a zero nothing measured.
+    #[test]
+    fn a_turn_after_the_total_is_pinned_at_its_largest_has_no_token_figure() {
+        let state = SessionState::replay(&[
+            prompt(),
+            cached(u64::MAX, 0, 0, 0),
+            Event::TurnEnded,
+            prompt(),
+            cached(1_000, 0, 0, 0),
+            Event::TurnEnded,
+        ]);
+
+        let tokens: Vec<Option<u64>> = state.turns().iter().map(|turn| turn.tokens).collect();
+        assert_eq!(tokens, [None, None]);
+    }
+
     /// Whether a turn's tokens were measured is decided over the same span
     /// its tokens are counted over: from the prompt that opened it where the
     /// fold saw one, and from the end of the turn before where it did not.
@@ -2246,9 +3956,146 @@ mod tests {
     }
 
     #[test]
+    fn a_reply_left_half_streamed_by_its_turn_is_not_the_start_of_the_next() {
+        let state = SessionState::replay(&[
+            prompt(),
+            Event::AssistantDelta {
+                text: "Hello wor".to_owned(),
+            },
+            Event::TurnEnded,
+            prompt(),
+            Event::AssistantDelta {
+                text: "New".to_owned(),
+            },
+        ]);
+        assert_eq!(state.pending_assistant(), "New");
+
+        let ended = SessionState::replay(&[
+            prompt(),
+            Event::AssistantDelta {
+                text: "cut".to_owned(),
+            },
+            Event::Error {
+                message: "the CLI exited".to_owned(),
+                fatal: true,
+            },
+        ]);
+        assert_eq!(ended.pending_assistant(), "");
+    }
+
+    #[test]
+    fn an_agent_the_end_interrupted_does_not_also_complete() {
+        let state = SessionState::replay(&[
+            Event::AgentSpawn {
+                id: "a1".into(),
+                parent: None,
+                kind: None,
+                label: "review".to_owned(),
+            },
+            Event::Error {
+                message: "the CLI exited".to_owned(),
+                fatal: true,
+            },
+            Event::AgentExit {
+                id: "a1".into(),
+                outcome: AgentOutcome::Completed,
+            },
+        ]);
+
+        assert_eq!(state.agents_spawned(), 1);
+        assert_eq!(state.agents_interrupted(), 1);
+        assert_eq!(state.agents_completed(), 0);
+    }
+
+    #[test]
+    fn token_totals_stop_at_their_largest_value_rather_than_wrapping() {
+        let huge = usage(u64::MAX, u64::MAX, None);
+        let state = SessionState::replay(&[huge.clone(), huge]);
+
+        assert_eq!(state.totals().input, u64::MAX);
+        assert_eq!(state.totals().output, u64::MAX);
+        assert_eq!(state.totals().tokens(), u64::MAX);
+        assert_eq!(state.totals().records, 2);
+    }
+
+    /// A backend that says a turn ended twice in a row has ended one turn,
+    /// so the second records no turn of its own. What makes it a repeat is
+    /// that nothing came between the two: any event between them, a notice
+    /// included, makes the second the end of a turn the fold did not see
+    /// begin (see [`only_an_end_straight_after_an_end_is_a_repeat`]).
+    #[test]
+    fn a_turn_end_said_again_straight_after_an_end_records_no_turn() {
+        let state = SessionState::replay(&[
+            prompt(),
+            usage(100, 0, None),
+            Event::TurnEnded,
+            Event::TurnEnded,
+        ]);
+        let turns: Vec<(u64, Option<u64>)> = state
+            .turns()
+            .iter()
+            .map(|turn| (turn.number, turn.tokens))
+            .collect();
+        assert_eq!(turns, [(1, Some(100))]);
+    }
+
+    /// The same holds for an end said after a fatal error already ended the
+    /// turn; and an end the fold never saw begin, with a reply before it, is
+    /// a turn — a command the CLI answers itself sends no prompt.
+    #[test]
+    fn only_an_end_straight_after_an_end_is_a_repeat() {
+        let state = SessionState::replay(&[
+            prompt(),
+            Event::Error {
+                message: "the CLI exited".to_owned(),
+                fatal: true,
+            },
+            Event::TurnEnded,
+            Event::AssistantMessage {
+                text: "## Context Usage".to_owned(),
+                agent: None,
+            },
+            Event::TurnEnded,
+            Event::TurnEnded,
+        ]);
+        assert_eq!(state.turns().len(), 2, "{:?}", state.turns());
+    }
+
+    #[test]
     fn a_turn_still_running_has_no_record() {
         let state = SessionState::replay(&[prompt(), cached(100, 10, 0, 0)]);
         assert!(state.turns().is_empty(), "{:?}", state.turns());
+    }
+
+    #[test]
+    fn what_a_turn_total_carried_beyond_its_messages_is_kept_apart_from_the_totals() {
+        let counts = |input, output, cache_read, cache_write| TokenCounts {
+            input,
+            output,
+            cache_read,
+            cache_write,
+            cache_write_1h: None,
+        };
+        let differs = |per_message, reported| Event::TurnTotalDiffers {
+            per_message,
+            reported,
+            backend_session: Some("cli-session".to_owned()),
+            unfinished: vec!["msg_1".to_owned()],
+        };
+
+        let state = SessionState::replay(&[
+            differs(
+                counts(38, 19_386, 1_832_928, 117_517),
+                counts(40, 19_394, 1_950_998, 120_328),
+            ),
+            // A turn whose messages reported more than its total adds nothing:
+            // there is nothing beyond the messages to account for.
+            differs(counts(5, 5, 5, 5), counts(4, 4, 4, 4)),
+        ]);
+
+        assert_eq!(*state.beyond_messages(), counts(2, 8, 118_070, 2_811));
+        assert_eq!(state.totals().tokens(), 0);
+        assert_eq!(state.errors(), 0);
     }
 
     #[test]
@@ -2353,6 +4200,28 @@ mod tests {
     }
 
     #[test]
+    fn a_turn_that_heard_only_of_overage_has_no_share() {
+        let state = SessionState::replay(&[
+            prompt(),
+            five_hour(0.14, RESET),
+            Event::TurnEnded,
+            prompt(),
+            Event::UsageWindows(UsageWindows {
+                five_hour: None,
+                seven_day: None,
+                using_overage: true,
+                overage: crate::event::Overage::Unreported,
+            }),
+            Event::TurnEnded,
+        ]);
+        assert_eq!(
+            state.turns()[1].five_hour_share,
+            None,
+            "a level nobody reported during the turn was read as its end"
+        );
+    }
+
+    #[test]
     fn a_window_that_started_over_during_the_turn_gives_no_share() {
         let state = SessionState::replay(&[
             prompt(),
@@ -2360,6 +4229,21 @@ mod tests {
             Event::TurnEnded,
             prompt(),
             five_hour(0.05, Some(1_789_797_600)),
+            Event::TurnEnded,
+        ]);
+        assert_eq!(state.turns()[1].five_hour_share, None);
+    }
+
+    /// The level falling within one reset is no measure of what the turn
+    /// spent, and a share of nothing would read as a measured one.
+    #[test]
+    fn a_level_that_fell_within_one_reset_gives_no_share() {
+        let state = SessionState::replay(&[
+            prompt(),
+            five_hour(0.15, RESET),
+            Event::TurnEnded,
+            prompt(),
+            five_hour(0.14, RESET),
             Event::TurnEnded,
         ]);
         assert_eq!(state.turns()[1].five_hour_share, None);
@@ -2396,6 +4280,7 @@ mod tests {
                     resets_at: RESET,
                 }),
                 using_overage: false,
+                overage: crate::event::Overage::Unreported,
             }),
             Event::TurnEnded,
         ]);
@@ -2419,11 +4304,93 @@ mod tests {
         assert_eq!(tokens, [Some(100), Some(30)]);
     }
 
+    /// What arrives between an end and the next prompt is in neither turn:
+    /// a turn the fold saw begin is measured from its prompt, not from the
+    /// end of the turn before.
+    #[test]
+    fn a_turn_with_a_prompt_counts_from_the_prompt_and_not_from_the_last_end() {
+        let state = SessionState::replay(&[
+            prompt(),
+            cached(100, 0, 0, 0),
+            Event::TurnEnded,
+            cached(20, 0, 0, 0),
+            prompt(),
+            cached(5, 0, 0, 0),
+            Event::TurnEnded,
+        ]);
+        let tokens: Vec<Option<u64>> = state.turns().iter().map(|turn| turn.tokens).collect();
+        assert_eq!(tokens, [Some(100), Some(5)]);
+    }
+
+    /// The same for a report of the window: a level reported between turns
+    /// is where the next turn began, not part of what it moved.
+    #[test]
+    fn a_window_reported_between_turns_is_where_the_next_one_began() {
+        let state = SessionState::replay(&[
+            prompt(),
+            five_hour(0.14, RESET),
+            Event::TurnEnded,
+            five_hour(0.16, RESET),
+            prompt(),
+            five_hour(0.17, RESET),
+            Event::TurnEnded,
+        ]);
+        let share = state.turns()[1]
+            .five_hour_share
+            .expect("both ends were reported");
+        assert!((share - 0.01).abs() < 1e-9, "{share}");
+    }
+
+    /// A turn that reported no window of its own has no share, even where a
+    /// report arrived between the turns: that one is where it began.
+    #[test]
+    fn a_window_reported_only_between_turns_gives_the_next_one_no_share() {
+        let state = SessionState::replay(&[
+            prompt(),
+            five_hour(0.14, RESET),
+            Event::TurnEnded,
+            five_hour(0.14, RESET),
+            prompt(),
+            cached(100, 10, 0, 0),
+            Event::TurnEnded,
+        ]);
+        assert_eq!(state.turns()[1].five_hour_share, None);
+    }
+
+    /// A level reported during the turn at the same height it began from is
+    /// a measured nothing, not a missing figure.
+    #[test]
+    fn a_level_that_held_through_a_turn_is_a_share_of_zero() {
+        let state = SessionState::replay(&[
+            prompt(),
+            five_hour(0.14, RESET),
+            Event::TurnEnded,
+            prompt(),
+            five_hour(0.14, RESET),
+            Event::TurnEnded,
+        ]);
+        assert_eq!(state.turns()[1].five_hour_share, Some(0.0));
+    }
+
+    #[test]
+    fn a_prompt_sent_mid_turn_leaves_the_tokens_spent_before_it_in_the_turn() {
+        let state = SessionState::replay(&[
+            prompt(),
+            cached(100, 10, 0, 0),
+            prompt(),
+            cached(20, 5, 0, 0),
+            Event::TurnEnded,
+        ]);
+        let tokens: Vec<Option<u64>> = state.turns().iter().map(|turn| turn.tokens).collect();
+        assert_eq!(tokens, [Some(135)]);
+    }
+
     fn command(name: &str) -> SlashCommand {
         SlashCommand {
             name: name.to_owned(),
             description: format!("what /{name} does"),
             argument_hint: None,
+            mid_prompt: false,
         }
     }
 
@@ -2441,5 +4408,265 @@ mod tests {
         let names: Vec<&str> = state.commands().iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, ["review_changes (MCP)"]);
         assert!(SessionState::new().commands().is_empty());
+    }
+
+    #[test]
+    fn the_last_mcp_server_list_the_backend_sent_replaces_the_one_before() {
+        use crate::event::{McpServer, McpStatus};
+
+        let server = |name: &str, status: McpStatus| McpServer {
+            name: name.to_owned(),
+            status,
+            source: Some("user".to_owned()),
+            tools: Vec::new(),
+            scope: None,
+            error: None,
+            endpoint: None,
+            reports_as: None,
+        };
+        let state = SessionState::replay(&[
+            Event::McpServers {
+                servers: vec![server("notes", McpStatus::Pending)],
+            },
+            prompt(),
+            Event::McpServers {
+                servers: vec![
+                    server("notes", McpStatus::Connected),
+                    server("broken", McpStatus::Failed),
+                ],
+            },
+        ]);
+        assert_eq!(
+            state.mcp_servers(),
+            [
+                server("notes", McpStatus::Connected),
+                server("broken", McpStatus::Failed)
+            ]
+        );
+        assert!(SessionState::new().mcp_servers().is_empty());
+    }
+
+    #[test]
+    fn a_turn_the_session_left_running_is_cut_and_the_next_prompt_opens_its_own() {
+        let said = |text: &str| Event::UserMessage {
+            text: text.to_owned(),
+        };
+        let state = SessionState::replay(&[
+            said("slow"),
+            Event::AssistantDelta {
+                text: "tick 0".to_owned(),
+            },
+            Event::SessionLeft,
+            said("again"),
+            Event::TurnEnded,
+        ]);
+
+        let cut: Vec<bool> = state.turns().iter().map(|turn| turn.cut).collect();
+        assert_eq!(cut, [true, false]);
+        assert!(!state.turn_running());
+    }
+
+    #[test]
+    fn a_session_left_with_no_turn_running_ends_no_turn() {
+        let state = SessionState::replay(&[
+            Event::UserMessage {
+                text: "go".to_owned(),
+            },
+            Event::TurnEnded,
+            Event::SessionLeft,
+        ]);
+
+        assert_eq!(state.turns().len(), 1);
+    }
+
+    #[test]
+    fn a_session_billed_one_way_and_then_the_other_says_so() {
+        let billed = |billing| Event::Billing { billing };
+        let once = SessionState::replay(&[billed(Billing::Plan), billed(Billing::Plan)]);
+        assert!(!once.billing_changed());
+
+        let twice = SessionState::replay(&[billed(Billing::Plan), billed(Billing::Metered)]);
+        assert!(twice.billing_changed());
+        assert_eq!(twice.billing(), Some(Billing::Metered));
+    }
+
+    #[test]
+    fn costs_that_add_up_past_what_a_float_holds_stay_finite() {
+        let costly = || {
+            Event::Usage(Usage {
+                input: 1,
+                output: 1,
+                cache_read: 0,
+                cache_write: 0,
+                cache_write_1h: Some(0),
+                reasoning: 0,
+                model: "opus-5".to_owned(),
+                cost_usd: Some(1e308),
+                settles_model: Some(false),
+                fast: false,
+            })
+        };
+        let state = SessionState::replay(&[costly(), costly()]);
+
+        assert!(state.totals().reported_cost_usd.is_finite());
+    }
+
+    #[test]
+    fn a_compaction_is_a_phase_from_its_start_to_its_end() {
+        let mut state = SessionState::new();
+        state.apply(&Event::UserMessage {
+            text: "/compact".to_owned(),
+        });
+        assert!(!state.compacting());
+
+        state.apply(&Event::CompactionStarted);
+        assert!(state.compacting());
+
+        state.apply(&Event::CompactionEnded);
+        assert!(!state.compacting());
+    }
+
+    #[test]
+    fn a_compaction_reported_done_without_its_end_is_no_longer_running() {
+        let state = SessionState::replay(&[
+            prompt(),
+            Event::CompactionStarted,
+            Event::Compacted {
+                trigger: CompactTrigger::Auto,
+                before: Some(23_193),
+                after: Some(4_282),
+            },
+        ]);
+        assert!(state.turn_running());
+        assert!(!state.compacting());
+    }
+
+    #[test]
+    fn a_compaction_still_running_when_its_turn_ends_ends_with_it() {
+        for end in [
+            Event::TurnEnded,
+            Event::SessionLeft,
+            Event::Cleared,
+            Event::Error {
+                message: "gone".to_owned(),
+                fatal: true,
+            },
+        ] {
+            let state = SessionState::replay(&[
+                Event::UserMessage {
+                    text: "/compact".to_owned(),
+                },
+                Event::CompactionStarted,
+                end.clone(),
+            ]);
+            assert!(!state.compacting(), "{end:?}");
+        }
+    }
+
+    #[test]
+    fn a_turn_that_compacted_the_conversation_is_recorded_with_what_started_it() {
+        for trigger in [
+            CompactTrigger::Manual,
+            CompactTrigger::Auto,
+            CompactTrigger::Unstated,
+        ] {
+            let state = SessionState::replay(&[
+                Event::UserMessage {
+                    text: "go".to_owned(),
+                },
+                Event::CompactionStarted,
+                Event::CompactionEnded,
+                Event::Compacted {
+                    trigger,
+                    before: Some(23_193),
+                    after: Some(4_282),
+                },
+                Event::TurnEnded,
+                Event::UserMessage {
+                    text: "again".to_owned(),
+                },
+                Event::TurnEnded,
+            ]);
+            let compacted: Vec<_> = state.turns().iter().map(|turn| turn.compacted).collect();
+            assert_eq!(compacted, [Some(trigger), None]);
+        }
+    }
+
+    fn ended(id: &str, name: &str, command: Option<&str>, outcome: ToolOutcome) -> [Event; 2] {
+        [
+            Event::ToolCallStart {
+                id: id.into(),
+                name: name.to_owned(),
+                input: "{}".to_owned(),
+                summary: None,
+                agent: None,
+            },
+            Event::ToolCallEnd {
+                id: id.into(),
+                name: name.to_owned(),
+                input: "{}".to_owned(),
+                output: String::new(),
+                bytes: 0,
+                outcome,
+                summary: None,
+                exit_code: None,
+                error: None,
+                command: command.map(str::to_owned),
+                untrimmed: None,
+            },
+        ]
+    }
+
+    #[test]
+    fn every_finished_call_is_counted_under_one_kind_of_work_with_what_did_it() {
+        let events: Vec<Event> = [
+            ended("a", "Bash", Some("grep -n x f | head"), ToolOutcome::Ok),
+            ended("b", "Bash", Some("grep y f"), ToolOutcome::Ok),
+            ended("c", "Read", None, ToolOutcome::Ok),
+            ended("d", "Bash", Some("cargo test"), ToolOutcome::Failed),
+            ended("e", "Bash", Some("rm -rf build"), ToolOutcome::Denied),
+            ended(
+                "f",
+                "mcp__claude_ai_Notion__notion-fetch",
+                None,
+                ToolOutcome::Ok,
+            ),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let state = SessionState::replay(&events);
+        let tools = state.tools();
+
+        let exploring = &tools.by_work[&Work::Exploring];
+        assert_eq!(exploring.calls, 3);
+        assert_eq!(
+            exploring.specifics,
+            BTreeMap::from([
+                ("grep".to_owned(), 2),
+                ("head".to_owned(), 1),
+                ("Read".to_owned(), 1),
+            ])
+        );
+        let building = &tools.by_work[&Work::Building];
+        assert_eq!((building.calls, building.failed), (1, 1));
+        let editing = &tools.by_work[&Work::Editing];
+        assert_eq!((editing.calls, editing.denied), (1, 1));
+        assert_eq!(tools.by_work[&Work::Server("Notion".to_owned())].calls, 1);
+
+        let calls: u64 = tools.by_work.values().map(|kind| kind.calls).sum();
+        let failed: u64 = tools.by_work.values().map(|kind| kind.failed).sum();
+        let denied: u64 = tools.by_work.values().map(|kind| kind.denied).sum();
+        assert_eq!(
+            (calls, failed, denied),
+            (tools.finished, tools.failed, tools.denied)
+        );
+    }
+
+    #[test]
+    fn an_end_said_again_is_not_a_second_call_of_its_kind() {
+        let [start, end] = ended("a", "Bash", Some("ls"), ToolOutcome::Ok);
+        let state = SessionState::replay(&[start, end.clone(), end]);
+        assert_eq!(state.tools().by_work[&Work::Exploring].calls, 1);
     }
 }

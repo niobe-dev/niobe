@@ -22,28 +22,44 @@
 //! CLI's own words rather than with an exit status. Both read bytes, not text:
 //! a line that is not UTF-8 is read with the bytes replaced, because a reader
 //! that stopped on one would lose the rest of the session and could leave the
-//! CLI blocked on a pipe nobody drains.
+//! CLI blocked on a pipe nobody drains. For the same reason a line past
+//! [`LINE_LIMIT`] is passed over, with a notice, rather than held whole.
 //!
 //! The CLI leads a process group of its own, and everything it starts — the
 //! shell a tool call runs in, an MCP server — is in it unless it leaves. That
 //! is what a closing session ends, rather than the CLI alone: something it
 //! started holds the pipes it inherited, so the readers would never see them
 //! close, and nobody would be left to see it end.
+//!
+//! A CLI that something outside stops with a signal while no turn is running
+//! loses no conversation: that is in its own transcript. Where the caller
+//! asked for it with [`Options::carry_on`], that stop is a notice, and
+//! [`Session::next`] says what to start a CLI with to take the conversation
+//! up again. What it does lose is any sub-agent it was running in the
+//! background, which ends with its process group; each is reported as
+//! cancelled ahead of the notice. A stop while a turn runs takes the turn with
+//! it, and still ends the session.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use niobe_core::event::{Billing, Event, Mode, PermissionDecision, ToolCallId};
+use niobe_core::event::{
+    AgentId, AgentOutcome, Billing, Event, Mode, PermissionDecision, ToolCallId,
+};
+use niobe_core::image::Image;
 
+use crate::base64;
 use crate::spilled;
-use crate::translate::Translator;
+use crate::tap::Tap;
+use crate::translate::{ModelAnswer, Spent, Translator};
 
 /// The binary this bridge drives, as looked up on `PATH`.
 pub const BINARY: &str = "claude";
@@ -86,6 +102,24 @@ const LET_GO: Duration = Duration::from_millis(100);
 /// that is busy; saying so sooner would fire on a slow machine.
 const STALLED: Duration = Duration::from_secs(5);
 
+/// The longest line of the CLI's standard output read, in bytes.
+///
+/// A line is one message, and the largest the CLI writes carry an image or a
+/// file's contents: a few megabytes. Anything a CLI writes past this without a
+/// line break is passed over a buffer at a time rather than held, so a CLI
+/// that never ends a line cannot fill memory with one.
+const LINE_LIMIT: u64 = 64 * 1024 * 1024;
+
+/// The most of the first prompt, in bytes, that the CLI is asked to make a
+/// title from.
+///
+/// The CLI hands the description to its small model whole, so without a cut
+/// a long paste is billed a second time for a title of a few words: a
+/// 45,656-character first prompt cost 21,897 input tokens for the title alone
+/// on Claude Code 2.1.292. The opening kilobyte says what the session is about
+/// as well as the rest would.
+const TITLE_DESCRIPTION: usize = 1024;
+
 /// What the CLI is told when the operator refuses a call.
 ///
 /// The CLI hands it to the model as the refused call's result, where it is
@@ -115,6 +149,68 @@ type Waiting = Arc<Mutex<BTreeMap<String, (String, serde_json::Value)>>>;
 /// it reads the call as a tool that broke. Written before the answer goes out
 /// and drained before every line, which is what puts it there first.
 type Refusals = Arc<Mutex<Vec<ToolCallId>>>;
+
+/// The `request_id`s of model changes asked for that the thread reading the
+/// CLI has not been told about yet.
+///
+/// The CLI's answer names only the request it answers, so the translator has
+/// to be told which requests were for a model before the answer arrives, or a
+/// refused change reads as any other refusal and the shell goes on showing the
+/// model it never moved to. Written before the request goes out and drained
+/// before every line, as [`Refusals`] is.
+type ModelRequests = Arc<Mutex<Vec<(String, String)>>>;
+
+/// The `request_id`s of title requests the thread reading the CLI has not
+/// been told about yet, for the reason [`ModelRequests`] has: the answer names
+/// only the request it answers.
+type TitleRequests = Arc<Mutex<Vec<String>>>;
+
+/// The requests about MCP servers the thread reading the CLI has not been told
+/// about yet, for the reason [`ModelRequests`] has.
+type McpRequests = Arc<Mutex<Vec<McpRequest>>>;
+
+/// The rewinds the thread reading the CLI has not been told about yet, for
+/// the reason [`ModelRequests`] has.
+type RewindRequests = Arc<Mutex<Vec<RewindRequest>>>;
+
+/// The control requests the CLI's answers called for, which the thread
+/// reading it leaves for the next drain to queue. The reader does not queue
+/// them itself: a sender it held would keep the CLI's standard input open
+/// after the session closed it, which is how the CLI is asked to leave.
+type FollowUps = Arc<Mutex<Vec<String>>>;
+
+/// A rewind asked for: its dry run's `request_id`, the one the request that
+/// puts the files back is to be asked as, and the prompt they go back to
+/// before.
+#[derive(Debug)]
+struct RewindRequest {
+    dry: String,
+    real: String,
+    sent: Sent,
+}
+
+/// A request about the MCP servers, as the thread reading the CLI is told of
+/// it.
+#[derive(Debug)]
+enum McpRequest {
+    /// `mcp_status`, by its `request_id`.
+    Status(String),
+    /// `mcp_reconnect`, by its `request_id`, and the server it names.
+    Reconnect { request_id: String, server: String },
+}
+
+/// The CLI's answers to model changes that the session has not yet seen,
+/// oldest first. Written by the thread reading the CLI before it hands on the
+/// events of the same line, and taken on every drain.
+type ModelAnswers = Arc<Mutex<Vec<ModelAnswer>>>;
+
+/// A model change asked for and not yet answered.
+#[derive(Debug)]
+struct ModelChange {
+    request_id: String,
+    /// The model a CLI started again would have run on without the change.
+    before: Option<String>,
+}
 
 /// The line being written to the CLI's standard input, what it is, and when
 /// the writing started; nothing while the writer is waiting for a line.
@@ -174,6 +270,9 @@ pub struct Options {
     pub budget_usd: Option<f64>,
     /// A session of the CLI's own to continue, rather than starting a new one.
     pub resume: Option<String>,
+    /// What the CLI had recorded the resumed session as spending, which its
+    /// first turn reports on top of; see [`Spent`]. Empty for a new session.
+    pub spent: Spent,
     /// Settings to run under, as the JSON document `--settings` takes or the
     /// path of a file holding one.
     pub settings: Option<String>,
@@ -183,7 +282,58 @@ pub struct Options {
     /// waits for an answer to every gated call, and a session with nothing to
     /// answer waits for ever.
     pub ask_over_stdio: bool,
+    /// Whether the caller starts the CLI again, from [`Session::next`], when
+    /// something stops it with a signal between turns.
+    ///
+    /// The conversation is not lost then: it is in the CLI's own transcript,
+    /// and `--resume` takes it up. A sub-agent the CLI was running in the
+    /// background is, and is reported cancelled. With this on, such a stop is
+    /// reported as a notice that the next prompt starts the CLI again; with
+    /// it off it ends the session, since nothing would.
+    pub carry_on: bool,
+    /// Whether the CLI is asked to title the session from the first prompt
+    /// sent that is not a slash command.
+    ///
+    /// The CLI makes the title with its small model, on the operator's
+    /// account, and bills it into the session's running totals: 899 input
+    /// tokens and 10 output for a short prompt, measured on Claude Code
+    /// 2.1.292 with haiku. Only the prompt's first kilobyte is sent, so a long
+    /// paste adds a few hundred input tokens to that rather than its own
+    /// length again. It writes the title into its own transcript too, and
+    /// starts no other session to make it. Off unless asked for.
+    pub ask_title: bool,
+    /// A directory to keep a copy of what crosses the CLI's pipes in, one
+    /// file per process, where one is asked for; see [`crate::tap`]. The file
+    /// holds the whole conversation, so the caller decides where it may go:
+    /// this creates the directory and writes to it wherever it is.
+    pub tap: Option<PathBuf>,
+    /// The prompts sent to the conversation so far, oldest first, each by the
+    /// id it was sent with, which is what a rewind names. Kept by the session
+    /// as it sends them, so a CLI started again on the conversation can still
+    /// be asked to go back before one.
+    pub sent: Vec<Sent>,
 }
+
+/// A prompt sent to the CLI: the id it was sent with and how it is named to
+/// the operator.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Sent {
+    /// The `uuid` the prompt's line carried, by which the CLI keeps the
+    /// files as they were before it.
+    pub id: String,
+    /// The prompt's first line, cut to [`SENT_LABEL`] characters.
+    pub label: String,
+}
+
+/// The most characters of a prompt a rewind names it by.
+const SENT_LABEL: usize = 60;
+
+/// What the CLI is started with so that it keeps the files as they were
+/// before each prompt, as Claude Code does in a terminal: run as an SDK
+/// process it does not unless told to. Its own
+/// `CLAUDE_CODE_DISABLE_FILE_CHECKPOINTING`, in a profile's `env`, still
+/// turns it off.
+const FILE_CHECKPOINTS: &str = "CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING";
 
 impl Options {
     /// A session in `cwd`, under `profile`, with everything else at its
@@ -200,8 +350,13 @@ impl Options {
             mode: Mode::Ask,
             budget_usd: None,
             resume: None,
+            spent: Spent::default(),
             settings: None,
             ask_over_stdio: false,
+            carry_on: false,
+            ask_title: false,
+            tap: None,
+            sent: Vec::new(),
         }
     }
 
@@ -256,9 +411,28 @@ pub enum SpawnError {
         /// The name that was looked up.
         binary: PathBuf,
     },
+    /// The directory the session is to run in is not there — deleted, as a
+    /// worktree removed under a terminal still in it is. Checked apart from
+    /// the binary because the operating system reports both as the same
+    /// "not found".
+    NoDirectory {
+        /// The directory the CLI was to run in.
+        directory: PathBuf,
+    },
+    /// The directory the stream was to be copied into could not be written
+    /// to. Reported before the CLI is started: a recording asked for and not
+    /// taken is not noticed until it is needed.
+    Tap {
+        /// The directory.
+        directory: PathBuf,
+        /// What the operating system said.
+        error: std::io::Error,
+    },
     /// The binary is there and could not be started.
     Failed {
-        /// The name that was looked up.
+        /// The file that was found for the name looked up, where `PATH` found
+        /// one — which of several on `PATH` is what the operator has to know
+        /// to fix it — and otherwise the name itself.
         binary: PathBuf,
         /// What the operating system said.
         error: std::io::Error,
@@ -276,6 +450,17 @@ impl std::fmt::Display for SpawnError {
                 binary.display(),
                 binary.display(),
             ),
+            Self::NoDirectory { directory } => write!(
+                f,
+                "the directory the session was to run in, {}, is not there; start niobe \
+                 again from one that is",
+                directory.display()
+            ),
+            Self::Tap { directory, error } => write!(
+                f,
+                "cannot keep the stream in {}: {error}",
+                directory.display()
+            ),
             Self::Failed { binary, error } => {
                 write!(f, "cannot start `{}`: {error}", binary.display())
             }
@@ -286,10 +471,27 @@ impl std::fmt::Display for SpawnError {
 impl std::error::Error for SpawnError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::NotInstalled { .. } => None,
-            Self::Failed { error, .. } => Some(error),
+            Self::NotInstalled { .. } | Self::NoDirectory { .. } => None,
+            Self::Tap { error, .. } | Self::Failed { error, .. } => Some(error),
         }
     }
+}
+
+/// The file `binary` names as a command would find it: itself where it has a
+/// directory in it, and otherwise the first file of that name in a directory
+/// of `path` — the child's own `PATH` where the profile sets one, as the
+/// spawn looks it up — or of this process's.
+fn found_on_path(binary: &Path, path: Option<&String>) -> Option<PathBuf> {
+    if binary.components().count() > 1 {
+        return Some(binary.to_path_buf());
+    }
+    let path = match path {
+        Some(path) => OsString::from(path),
+        None => std::env::var_os("PATH")?,
+    };
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(binary))
+        .find(|candidate| candidate.is_file())
 }
 
 /// A running `claude` session.
@@ -315,6 +517,22 @@ pub struct Session {
     events: Receiver<Event>,
     waiting: Waiting,
     refusals: Refusals,
+    model_requests: ModelRequests,
+    title_requests: TitleRequests,
+    mcp_requests: McpRequests,
+    rewind_requests: RewindRequests,
+    follow_ups: FollowUps,
+    /// Set by the thread reading the CLI where the MCP servers should be
+    /// asked about again (see [`Translator::take_mcp_status_wanted`]), and
+    /// acted on by the next drain: only this side writes to the CLI.
+    mcp_status_wanted: Arc<AtomicBool>,
+    /// Set by the thread reading the CLI when it reports the conversation
+    /// started over, which is a session with no title yet: the next prompt
+    /// that is not a command is asked about again.
+    cleared: Arc<AtomicBool>,
+    /// Whether [`Options::ask_title`] was on when the session started, which
+    /// is what a clear puts back.
+    titles_wanted: bool,
     stderr: Arc<Mutex<Tail>>,
     /// The threads reading standard output and standard error, in that
     /// order, and the one writing standard input.
@@ -327,6 +545,11 @@ pub struct Session {
     /// Whether the child's exit has already been turned into an event, so that
     /// a session that has ended says so once rather than on every drain.
     reported: bool,
+    /// Whether the process group the CLI led has been ended, which is done
+    /// once, as soon as the CLI has been reaped. Once the group is empty its
+    /// id is free for any process to lead a group under, and a signal sent to
+    /// it later — at the quit, hours on — could reach a stranger's group.
+    group_ended: bool,
     /// When the CLI's standard output was first found closed. The process
     /// leaving closes it a moment before it can be reaped, so the end is not
     /// reported until one or the other — the process gone, or [`GOODBYE`]
@@ -340,11 +563,46 @@ pub struct Session {
     /// How long a write waits before it is said to be stalled: [`STALLED`],
     /// but for tests that cannot wait that long.
     stalled_after: Duration,
+    /// What a CLI started after this one would be started with: these options,
+    /// kept to the conversation, the mode and the model in force now.
+    next: Options,
+    /// The model changes asked for that the CLI has not answered, oldest
+    /// first, each with the model in force before it: what is in force again
+    /// if the CLI refuses that change. Kept per request, since a second
+    /// change can be asked for before the first is answered, and a refusal of
+    /// the first then leaves the second standing.
+    model_changes: Vec<ModelChange>,
+    model_answers: ModelAnswers,
+    /// Whether a turn was sent that the CLI has not ended. A CLI stopped then
+    /// took the turn with it, and the session is not carried on.
+    turn_open: bool,
+    /// Whether the CLI was stopped by a signal between turns, with
+    /// [`Options::carry_on`]: the session goes on, in a CLI started again.
+    stopped_between_turns: bool,
+    /// The sub-agents the CLI has spawned and not said have ended. A CLI
+    /// stopped between turns takes those running in the background with it.
+    running_agents: BTreeSet<AgentId>,
 }
 
 impl Session {
     /// Spawns the CLI and starts reading it.
     pub fn spawn(options: &Options) -> Result<Self, SpawnError> {
+        if !options.cwd.is_dir() {
+            return Err(SpawnError::NoDirectory {
+                directory: options.cwd.clone(),
+            });
+        }
+        let tap = match &options.tap {
+            Some(directory) => {
+                Some(
+                    Tap::open(directory, &options.argv()).map_err(|error| SpawnError::Tap {
+                        directory: directory.clone(),
+                        error,
+                    })?,
+                )
+            }
+            None => None,
+        };
         let mut command = Command::new(&options.binary);
         command
             .args(options.argv().iter().map(OsString::from))
@@ -354,6 +612,7 @@ impl Session {
             .stderr(Stdio::piped());
         #[cfg(unix)]
         std::os::unix::process::CommandExt::process_group(&mut command, 0);
+        command.env(FILE_CHECKPOINTS, "1");
         for (name, value) in &options.env {
             command.env(name, value);
         }
@@ -365,7 +624,8 @@ impl Session {
                 }
             } else {
                 SpawnError::Failed {
-                    binary: options.binary.clone(),
+                    binary: found_on_path(&options.binary, options.env.get("PATH"))
+                        .unwrap_or_else(|| options.binary.clone()),
                     error,
                 }
             }
@@ -387,18 +647,51 @@ impl Session {
 
         let (sender, events) = mpsc::channel();
         let mut translator = Translator::new(options.profile.clone())
+            .resuming(&options.spent)
             .in_dir(options.cwd.clone())
-            .reading_spilled_with(spilled::read);
+            .reading_spilled_with(spilled::read)
+            .checking_files_with(file_exists);
         if let Some(billing) = options.billing {
             translator = translator.billed_as(billing);
+            // Said before the CLI says anything: the CLI writes its `init`
+            // with the first turn, and the Usage pane would read "billing not
+            // known" until then, for an account the profile says how it is
+            // billed.
+            let _ = sender.send(Event::Billing { billing });
         }
         let waiting: Waiting = Arc::new(Mutex::new(BTreeMap::new()));
         let asked = Arc::clone(&waiting);
         let refusals: Refusals = Arc::new(Mutex::new(Vec::new()));
         let refused = Arc::clone(&refusals);
+        let model_requests: ModelRequests = Arc::new(Mutex::new(Vec::new()));
+        let asked_for_model = Arc::clone(&model_requests);
+        let model_answers: ModelAnswers = Arc::new(Mutex::new(Vec::new()));
+        let answered_model = Arc::clone(&model_answers);
+        let title_requests: TitleRequests = Arc::new(Mutex::new(Vec::new()));
+        let asked_for_title = Arc::clone(&title_requests);
+        let mcp_requests: McpRequests = Arc::new(Mutex::new(Vec::new()));
+        let asked_about_mcp = Arc::clone(&mcp_requests);
+        let rewind_requests: RewindRequests = Arc::new(Mutex::new(Vec::new()));
+        let asked_to_rewind = Arc::clone(&rewind_requests);
+        let follow_ups: FollowUps = Arc::new(Mutex::new(Vec::new()));
+        let called_for = Arc::clone(&follow_ups);
+        let mcp_status_wanted = Arc::new(AtomicBool::new(false));
+        let wants_mcp_status = Arc::clone(&mcp_status_wanted);
+        let cleared = Arc::new(AtomicBool::new(false));
+        let was_cleared = Arc::clone(&cleared);
+        let out_tap = tap.clone();
         let reader = std::thread::spawn(move || {
             let mut stdout = BufReader::new(stdout);
-            while let Some((line, decoded)) = next_line(&mut stdout) {
+            while let Some(output) = next_line(&mut stdout, out_tap.as_ref()) {
+                let (line, decoded) = match output {
+                    Output::Line { text, decoded } => (text, decoded),
+                    Output::Overlong => {
+                        if sender.send(overlong()).is_err() {
+                            return;
+                        }
+                        continue;
+                    }
+                };
                 if line.trim().is_empty() {
                     continue;
                 }
@@ -410,17 +703,67 @@ impl Session {
                         translator.refused(&id);
                     }
                 }
+                if let Ok(mut asked) = asked_for_model.lock() {
+                    for (request_id, model) in asked.drain(..) {
+                        translator.asked_for_model(&request_id, &model);
+                    }
+                }
+                if let Ok(mut asked) = asked_for_title.lock() {
+                    for request_id in asked.drain(..) {
+                        translator.asked_for_title(&request_id);
+                    }
+                }
+                if let Ok(mut asked) = asked_about_mcp.lock() {
+                    for request in asked.drain(..) {
+                        match request {
+                            McpRequest::Status(request_id) => {
+                                translator.asked_for_mcp_status(&request_id);
+                            }
+                            McpRequest::Reconnect { request_id, server } => {
+                                translator.asked_to_reconnect(&request_id, &server);
+                            }
+                        }
+                    }
+                }
+                if let Ok(mut asked) = asked_to_rewind.lock() {
+                    for request in asked.drain(..) {
+                        translator.asked_to_rewind(
+                            &request.dry,
+                            &request.real,
+                            &request.sent.id,
+                            &request.sent.label,
+                        );
+                    }
+                }
                 let events = translator.line(&line);
+                if let Ok(mut called) = called_for.lock() {
+                    called.extend(translator.take_requests());
+                }
+                if translator.take_mcp_status_wanted() {
+                    wants_mcp_status.store(true, Ordering::Relaxed);
+                }
                 // Recorded before the events go out, never after: the shell
                 // learns of a prompt by draining the events, and an answer to
                 // one this side had not yet written down would be refused for
-                // a request that is in fact waiting.
+                // a request that is in fact waiting. A prompt the CLI withdrew
+                // is let go of here too, so that no answer is written to a
+                // request it cancelled and its end is not read as one that
+                // left a question open.
+                if let Ok(mut answered) = answered_model.lock() {
+                    answered.extend(translator.take_model_answers());
+                }
                 if let Ok(mut waiting) = asked.lock() {
                     for ask in translator.take_asked() {
                         waiting.insert(ask.id.as_str().to_owned(), (ask.request_id, ask.input));
                     }
+                    for id in translator.take_withdrawn() {
+                        waiting.remove(id.as_str());
+                    }
                 }
                 for event in events {
+                    if matches!(event, Event::Cleared) {
+                        was_cleared.store(true, Ordering::Release);
+                    }
                     // The receiver is gone: the session was dropped, and there
                     // is no one left to tell.
                     if sender.send(event).is_err() {
@@ -438,7 +781,9 @@ impl Session {
         let (failures, unsent) = mpsc::channel();
         let writing: Writing = Arc::new(Mutex::new(None));
         let progress = Arc::clone(&writing);
-        let writer = std::thread::spawn(move || write_lines(stdin, &queued, &progress, &failures));
+        let writer = std::thread::spawn(move || {
+            write_lines(stdin, &queued, &progress, &failures, tap.as_ref())
+        });
 
         let mut session = Self {
             child,
@@ -449,13 +794,31 @@ impl Session {
             events,
             waiting,
             refusals,
+            model_requests,
+            title_requests,
+            mcp_requests,
+            rewind_requests,
+            follow_ups,
+            mcp_status_wanted,
+            cleared,
+            titles_wanted: options.ask_title,
             stderr: kept,
             threads: vec![reader, errors, writer],
             control_requests: 0,
             reported: false,
+            group_ended: false,
             output_closed: None,
             exited: None,
             stalled_after: STALLED,
+            next: Options {
+                spent: Spent::default(),
+                ..options.clone()
+            },
+            model_changes: Vec::new(),
+            model_answers,
+            turn_open: false,
+            running_agents: BTreeSet::new(),
+            stopped_between_turns: false,
         };
         // The writer has only just been started, so the queue cannot be
         // closed yet; a CLI that has already left is reported by the next
@@ -479,18 +842,60 @@ impl Session {
         ))
     }
 
-    /// Sends one turn.
+    /// Sends one turn, with the images the operator attached to it.
     ///
     /// The CLI reads turns as JSON lines on its standard input for as long as
     /// the session lasts, so this queues one line and nothing else: it never
     /// waits on the CLI, and the reply — or word that the turn could not be
     /// sent — arrives through [`Session::drain`].
-    pub fn send(&mut self, prompt: &str) -> std::io::Result<()> {
-        let line = serde_json::json!({
-            "type": "user",
-            "message": { "role": "user", "content": prompt },
+    pub fn send(&mut self, prompt: &str, images: &[Image]) -> std::io::Result<()> {
+        let id = prompt_id();
+        self.queue(turn_line(prompt, images, &id).to_string(), "turn")?;
+        self.next.sent.push(Sent {
+            id,
+            label: label_of(prompt),
         });
-        self.queue(line.to_string(), "turn")
+        self.turn_open = true;
+        // The turn went in. A title that could not follow it is no reason to
+        // say it did not, and a closed input is reported by the next drain.
+        let _ = self.ask_for_title(prompt);
+        Ok(())
+    }
+
+    /// Asks the CLI to title the session from `prompt`, where
+    /// [`Options::ask_title`] says to and no prompt has been asked about yet.
+    ///
+    /// A slash command is passed over: it says what the CLI is to do, not
+    /// what the session is about, and the CLI makes no title from one. Asked
+    /// after the turn has gone in, so the turn is not held behind it, and with
+    /// `persist`, so the CLI keeps the title in its own transcript and answers
+    /// with the one it has rather than making another. Asked once a session:
+    /// a CLI started again carries the conversation on, title and all. A
+    /// conversation started over with `/clear` is a session of its own, and
+    /// is asked about again from its first prompt.
+    fn ask_for_title(&mut self, prompt: &str) -> std::io::Result<()> {
+        if self.cleared.swap(false, Ordering::AcqRel) {
+            self.next.ask_title = self.titles_wanted;
+        }
+        if !self.next.ask_title {
+            return Ok(());
+        }
+        let Some(about) = title_description(prompt) else {
+            return Ok(());
+        };
+        self.next.ask_title = false;
+        let id = self.next_request_id();
+        if let Ok(mut asked) = self.title_requests.lock() {
+            asked.push(id.clone());
+        }
+        self.ask(&control_request(
+            &id,
+            serde_json::json!({
+                "subtype": "generate_session_title",
+                "description": about,
+                "persist": true,
+            }),
+        ))
     }
 
     /// Answers a permission prompt the CLI is waiting on.
@@ -557,7 +962,9 @@ impl Session {
         self.ask(&control_request(
             &id,
             serde_json::json!({ "subtype": "set_permission_mode", "mode": spelt(mode) }),
-        ))
+        ))?;
+        self.next.mode = mode;
+        Ok(())
     }
 
     /// Asks the CLI to answer with a different model from its next turn.
@@ -565,13 +972,108 @@ impl Session {
     /// The conversation is kept: this is the running session being told to
     /// change, not a new one, so nothing of what has been said is lost. The
     /// CLI resolves the name — an alias such as `haiku`, or a full model id —
-    /// and announces what it ended up on with the next message it starts.
+    /// and announces what it ended up on with the next message it starts. A
+    /// name it will not take comes back as a refusal, which the reading
+    /// thread turns into a visible entry and [`Event::ModelRefused`].
     pub fn set_model(&mut self, model: &str) -> std::io::Result<()> {
         let id = self.next_request_id();
+        if let Ok(mut asked) = self.model_requests.lock() {
+            asked.push((id.clone(), model.to_owned()));
+        }
         self.ask(&control_request(
             &id,
             serde_json::json!({ "subtype": "set_model", "model": model }),
+        ))?;
+        let before = self.next.model.replace(model.to_owned());
+        self.model_changes.push(ModelChange {
+            request_id: id,
+            before,
+        });
+        Ok(())
+    }
+
+    /// Asks the CLI to stop the turn it is running.
+    ///
+    /// The session and its conversation are kept, as they are when Esc stops
+    /// a turn in the CLI's own interface. Recorded from 2.1.285 in
+    /// `tests/fixtures/interrupted.jsonl`: the CLI answers the request, cuts
+    /// off the call running or the reply being written, and closes the turn
+    /// with a `result` whose `terminal_reason` says it was aborted.
+    pub fn interrupt(&mut self) -> std::io::Result<()> {
+        let id = self.next_request_id();
+        self.ask(&control_request(
+            &id,
+            serde_json::json!({ "subtype": "interrupt" }),
         ))
+    }
+
+    /// Asks the CLI how its MCP servers stand: why one failed, where each is
+    /// configured, how each is reached and its tools, none of which `init`
+    /// says.
+    ///
+    /// Asked whenever an `init` lists a server standing otherwise than the
+    /// CLI last said, and after a reconnect: the CLI answers from what it
+    /// holds, at no cost and with no turn, which Claude Code 2.1.292 was
+    /// recorded doing in `tests/fixtures/mcp-status.jsonl`.
+    fn ask_mcp_status(&mut self) -> std::io::Result<()> {
+        let id = self.next_request_id();
+        if let Ok(mut asked) = self.mcp_requests.lock() {
+            asked.push(McpRequest::Status(id.clone()));
+        }
+        self.ask(&control_request(
+            &id,
+            serde_json::json!({ "subtype": "mcp_status" }),
+        ))
+    }
+
+    /// Asks the CLI to connect to the MCP server `server` again.
+    ///
+    /// Nothing is written to any configuration: the CLI drops the connection
+    /// it has, or the failure it is holding, and connects as it did at the
+    /// start. Recorded from Claude Code 2.1.292: a server that connects is
+    /// answered with a bare success, and one that cannot with the reason, as
+    /// a refusal — which the reading thread says with the server's name.
+    /// Either way the servers are asked about again, so the list shows how
+    /// each now stands.
+    pub fn reconnect_mcp(&mut self, server: &str) -> std::io::Result<()> {
+        let id = self.next_request_id();
+        if let Ok(mut asked) = self.mcp_requests.lock() {
+            asked.push(McpRequest::Reconnect {
+                request_id: id.clone(),
+                server: server.to_owned(),
+            });
+        }
+        self.ask(&control_request(
+            &id,
+            serde_json::json!({ "subtype": "mcp_reconnect", "serverName": server }),
+        ))
+    }
+
+    /// Asks the CLI to put the files back as they were before the `prompt`th
+    /// prompt sent to the conversation, counted from the first at zero,
+    /// keeping everything said since.
+    ///
+    /// Asked as a dry run first, which says which files would go back; the
+    /// request that puts them back follows its answer, and what went back
+    /// arrives through [`Self::drain`] as a notice. Refused for a prompt this
+    /// conversation was not sent.
+    pub fn rewind(&mut self, prompt: usize) -> std::io::Result<()> {
+        let Some(sent) = self.next.sent.get(prompt).cloned() else {
+            return Err(std::io::Error::other(format!(
+                "no prompt {} was sent to this conversation, so there is nothing to go back before",
+                prompt.saturating_add(1)
+            )));
+        };
+        let dry = self.next_request_id();
+        let real = self.next_request_id();
+        if let Ok(mut asked) = self.rewind_requests.lock() {
+            asked.push(RewindRequest {
+                dry: dry.clone(),
+                real,
+                sent: sent.clone(),
+            });
+        }
+        self.ask(&crate::translate::rewind_request(&dry, &sent.id, true))
     }
 
     /// Queues one control request for the CLI's standard input.
@@ -617,27 +1119,127 @@ impl Session {
     pub fn drain(&mut self) -> Vec<Event> {
         let mut events: Vec<Event> = self.unsent.try_iter().collect();
         events.extend(self.stalled());
+        self.settle_model_changes();
+        // A CLI whose input is closed has left, which the drain reports.
+        if self.mcp_status_wanted.swap(false, Ordering::Relaxed) {
+            let _ = self.ask_mcp_status();
+        }
+        let called_for = self
+            .follow_ups
+            .lock()
+            .map(|mut called| std::mem::take(&mut *called))
+            .unwrap_or_default();
+        for text in called_for {
+            // Refused only where the CLI's input is closed, which this drain
+            // reports.
+            let _ = self.queue(text, "request");
+        }
         loop {
             match self.events.try_recv() {
                 // Only a pipe held by something that left the CLI's group
                 // can still deliver a line after the end was reported, and
                 // it is not the CLI's.
                 Ok(_) if self.reported => {}
-                Ok(event) => events.push(event),
+                Ok(event) => {
+                    self.heard(&event);
+                    events.push(event);
+                }
                 Err(TryRecvError::Empty) => {
                     if let Some(ended) = self.left_holding_output() {
+                        events.extend(self.agents_cancelled());
                         events.push(ended);
                     }
                     return events;
                 }
                 Err(TryRecvError::Disconnected) => {
                     if let Some(ended) = self.ended() {
+                        events.extend(self.agents_cancelled());
                         events.push(ended);
                     }
                     return events;
                 }
             }
         }
+    }
+
+    /// Puts the model a CLI started again would run on back where the CLI
+    /// refused a change: to the model before it, or — where a later change
+    /// was asked for since — under that later change, which is then what a
+    /// refusal of it goes back to.
+    fn settle_model_changes(&mut self) {
+        let answers = match self.model_answers.lock() {
+            Ok(mut answers) => std::mem::take(&mut *answers),
+            Err(_) => return,
+        };
+        for answer in answers {
+            let Some(at) = self
+                .model_changes
+                .iter()
+                .position(|change| change.request_id == answer.request_id)
+            else {
+                continue;
+            };
+            let change = self.model_changes.remove(at);
+            if answer.taken {
+                continue;
+            }
+            match self.model_changes.get_mut(at) {
+                Some(later) => later.before = change.before,
+                None => self.next.model = change.before,
+            }
+        }
+    }
+
+    /// Keeps what `event` says the CLI is now in — its conversation, its mode,
+    /// its model, a turn ended — for a CLI started after it to be in too.
+    fn heard(&mut self, event: &Event) {
+        if let Event::SessionMeta(meta) = event
+            && let Some(conversation) = &meta.backend_session
+        {
+            self.next.resume = Some(conversation.clone());
+        }
+        if let Event::ModeSelected { mode } = event {
+            self.next.mode = *mode;
+        }
+        if matches!(event, Event::TurnEnded) {
+            self.turn_open = false;
+        }
+        if let Event::AgentSpawn { id, .. } = event {
+            self.running_agents.insert(id.clone());
+        }
+        if let Event::AgentExit { id, .. } = event {
+            self.running_agents.remove(id);
+        }
+    }
+
+    /// An exit, cancelled, for each sub-agent still running when the CLI was
+    /// stopped between turns, where the session carries on: the agents ran
+    /// in the CLI's process group, which has ended, and nothing will report
+    /// their end. Nothing where the session ends instead, since its end says
+    /// for itself that nothing it ran is running any more.
+    fn agents_cancelled(&mut self) -> Vec<Event> {
+        if !self.stopped_between_turns {
+            return Vec::new();
+        }
+        std::mem::take(&mut self.running_agents)
+            .into_iter()
+            .map(|id| Event::AgentExit {
+                id,
+                outcome: AgentOutcome::Cancelled,
+            })
+            .collect()
+    }
+
+    /// What to start a CLI with to carry the session on, where the one this
+    /// session ran was stopped by a signal between turns and
+    /// [`Options::carry_on`] was asked for; nothing otherwise.
+    ///
+    /// The options are the ones this session was started with, resuming its
+    /// conversation in the mode and on the model in force when it stopped.
+    /// What the CLI will restore as already spent is left empty: it is read
+    /// from the CLI's transcript, which is the caller's to find.
+    pub fn next(&self) -> Option<Options> {
+        self.stopped_between_turns.then(|| self.next.clone())
     }
 
     /// Word that the line being written has waited on the CLI for longer
@@ -685,6 +1287,7 @@ impl Session {
                 self.unanswered();
                 let _ = self.child.kill();
                 let _ = self.child.wait();
+                self.end_the_group();
                 return Some(Event::Error {
                     message: kept_running(&self.said()),
                     fatal: true,
@@ -700,9 +1303,25 @@ impl Session {
             }
         };
         self.reported = true;
+        self.end_the_group();
         let said = self.said();
         let unanswered = self.unanswered();
 
+        // Stopped from outside with nothing under way: what the conversation
+        // holds is in the CLI's transcript, and a CLI started on it again
+        // carries the conversation on, so the session is not over. The
+        // background agents that ended with it are reported cancelled
+        // ahead of this end; see [`Session::agents_cancelled`].
+        if self.next.carry_on
+            && !self.turn_open
+            && unanswered.is_empty()
+            && let Some(how) = stopped_by(status)
+        {
+            self.stopped_between_turns = true;
+            return Some(Event::Notice {
+                message: stopped_between_turns(&how, &said),
+            });
+        }
         if !status.success() || !said.is_empty() {
             return Some(Event::Error {
                 message: ended_because(status, &said),
@@ -759,6 +1378,15 @@ impl Session {
         self.ended()
     }
 
+    /// Ends what is left of the CLI's process group, the once: see
+    /// [`Session::group_ended`]. Called only once the CLI has been reaped.
+    fn end_the_group(&mut self) {
+        if !self.group_ended {
+            self.group_ended = true;
+            end_group(self.child.id());
+        }
+    }
+
     /// The tool calls the CLI was still waiting on an answer about, which are
     /// forgotten here: a session that has ended takes no answer, and one kept
     /// would be refused only when written to a closed pipe.
@@ -796,6 +1424,7 @@ fn write_lines(
     queued: &Receiver<Line>,
     writing: &Mutex<Option<(Instant, &'static str)>>,
     failures: &Sender<Event>,
+    tap: Option<&Tap>,
 ) {
     for Line { mut text, what } in queued {
         text.push('\n');
@@ -807,6 +1436,11 @@ fn write_lines(
             .and_then(|()| stdin.flush());
         if let Ok(mut writing) = writing.lock() {
             *writing = None;
+        }
+        if written.is_ok()
+            && let Some(tap) = tap
+        {
+            tap.sent(text.trim_end_matches('\n').as_bytes());
         }
         if let Err(error) = written {
             let behind = queued.try_iter().count();
@@ -859,10 +1493,10 @@ impl Tail {
     /// one.
     fn said(&self) -> String {
         let mut from = self.kept.len().saturating_sub(SAID);
-        let cut = self
+        let before = self
             .bytes
             .saturating_sub(u64::try_from(self.kept.len() - from).unwrap_or(u64::MAX));
-        if cut > 0 {
+        if before > 0 {
             while self
                 .kept
                 .get(from)
@@ -871,6 +1505,11 @@ impl Tail {
                 from += 1;
             }
         }
+        // Counted after the character the cut went through is left out, so
+        // that what is left out and what is shown add up to what was written.
+        let cut = self
+            .bytes
+            .saturating_sub(u64::try_from(self.kept.len() - from).unwrap_or(u64::MAX));
         let text = String::from_utf8_lossy(self.kept.get(from..).unwrap_or_default());
         let text = text.trim();
         match cut {
@@ -903,19 +1542,36 @@ fn read_tail(mut from: impl Read, into: &Mutex<Tail>) {
     }
 }
 
-/// The next line of one of the CLI's pipes, without its line ending, and
-/// whether it was UTF-8 as sent. `None` once the pipe is closed or cannot be
-/// read.
+/// What one read of the CLI's standard output came to.
+#[derive(Debug, PartialEq, Eq)]
+enum Output {
+    /// A line, without its line ending, and whether it was UTF-8 as sent.
+    Line { text: String, decoded: bool },
+    /// A line longer than [`LINE_LIMIT`], passed over unread.
+    Overlong,
+}
+
+/// The next line of one of the CLI's pipes. `None` once the pipe is closed or
+/// cannot be read.
 ///
 /// A line that is not UTF-8 is read with each byte that is not replaced by
 /// U+FFFD rather than ending the pipe: the bytes come from whatever a tool
 /// printed or a file held, and one of them must not cost the rest of the
 /// session — nor leave the CLI blocked writing to a pipe nobody reads.
-fn next_line(reader: &mut impl BufRead) -> Option<(String, bool)> {
+fn next_line(reader: &mut impl BufRead, tap: Option<&Tap>) -> Option<Output> {
     let mut bytes = Vec::new();
-    match reader.read_until(b'\n', &mut bytes) {
+    // One byte past the limit with no line break in it is a line past it.
+    match reader
+        .take(LINE_LIMIT.saturating_add(1))
+        .read_until(b'\n', &mut bytes)
+    {
         Ok(0) | Err(_) => return None,
         Ok(_) => {}
+    }
+    if bytes.last() != Some(&b'\n') && u64::try_from(bytes.len()).unwrap_or(u64::MAX) > LINE_LIMIT {
+        drop(bytes);
+        pass_over_line(reader);
+        return Some(Output::Overlong);
     }
     if bytes.last() == Some(&b'\n') {
         bytes.pop();
@@ -923,13 +1579,52 @@ fn next_line(reader: &mut impl BufRead) -> Option<(String, bool)> {
             bytes.pop();
         }
     }
+    if let Some(tap) = tap {
+        tap.out(&bytes);
+    }
     Some(match String::from_utf8(bytes) {
-        Ok(line) => (line, true),
-        Err(error) => (
-            String::from_utf8_lossy(error.as_bytes()).into_owned(),
-            false,
-        ),
+        Ok(text) => Output::Line {
+            text,
+            decoded: true,
+        },
+        Err(error) => Output::Line {
+            text: String::from_utf8_lossy(error.as_bytes()).into_owned(),
+            decoded: false,
+        },
     })
+}
+
+/// Reads `reader` up to and past the next line break, a buffer at a time,
+/// keeping none of it.
+fn pass_over_line(reader: &mut impl BufRead) {
+    loop {
+        let (used, ended) = match reader.fill_buf() {
+            Ok([]) => return,
+            Ok(buffer) => match buffer.iter().position(|&byte| byte == b'\n') {
+                Some(at) => (at + 1, true),
+                None => (buffer.len(), false),
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return,
+        };
+        reader.consume(used);
+        if ended {
+            return;
+        }
+    }
+}
+
+/// The warning for a line of the CLI's output too long to read.
+fn overlong() -> Event {
+    Event::Error {
+        message: format!(
+            "the CLI sent a line longer than {} MiB, which was passed over unread: whatever \
+             it carried — a reply, a tool call's result, a question — is missing from the \
+             session.",
+            LINE_LIMIT / (1024 * 1024)
+        ),
+        fatal: false,
+    }
 }
 
 /// The warning for a line of the CLI's output that was not UTF-8.
@@ -955,11 +1650,97 @@ fn kept_running(said: &str) -> String {
     message
 }
 
+/// The line that sends one turn.
+///
+/// A turn with no image is the prompt as a plain string, which is what every
+/// recorded session was sent. One with images is the prompt's text block and
+/// then an image block per image, in the order they were attached: the order
+/// Claude Code's own transcripts hold a pasted screenshot in, beside the
+/// `[Image #N]` its text keeps where the image went.
+fn turn_line(prompt: &str, images: &[Image], id: &str) -> serde_json::Value {
+    let content = if images.is_empty() {
+        serde_json::Value::from(prompt)
+    } else {
+        std::iter::once(serde_json::json!({ "type": "text", "text": prompt }))
+            .chain(images.iter().map(|image| {
+                serde_json::json!({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": image.media_type().as_str(),
+                        "data": base64::encode(image.data()),
+                    },
+                })
+            }))
+            .collect()
+    };
+    serde_json::json!({
+        "type": "user",
+        "uuid": id,
+        "message": { "role": "user", "content": content },
+    })
+}
+
+/// A fresh id for a prompt, in the form of a random UUID, which is what the
+/// CLI keys the files it keeps by. Drawn from the standard library's
+/// per-process random hash keys: it has to differ from every other prompt's,
+/// not be secret.
+fn prompt_id() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    let half = || {
+        let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+        hasher.write_u128(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |since| since.as_nanos()),
+        );
+        hasher.finish()
+    };
+    let (high, low) = (half(), half());
+    // Version 4 and the RFC 4122 variant, as a random UUID is written.
+    let high = (high & !0xf000) | 0x4000;
+    let low = (low & !(0b11 << 62)) | (0b10 << 62);
+    format!(
+        "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
+        high >> 32,
+        (high >> 16) & 0xffff,
+        high & 0xffff,
+        low >> 48,
+        low & 0xffff_ffff_ffff
+    )
+}
+
+/// How a prompt is named where a rewind goes back before it: its first line,
+/// cut to [`SENT_LABEL`] characters.
+fn label_of(prompt: &str) -> String {
+    let first = prompt.trim().lines().next().unwrap_or_default();
+    match first.char_indices().nth(SENT_LABEL) {
+        Some((at, _)) => format!("{}…", first[..at].trim_end()),
+        None => first.to_owned(),
+    }
+}
+
 /// The line that asks the CLI to change something about the running session.
 ///
 /// Written as its own function for the same reason as [`control_response`]:
 /// what reaches the CLI's standard input is the whole of the protocol on this
 /// side, and it can be checked without a subprocess.
+/// What the CLI is asked to title a session from: `prompt` without the
+/// space around it, cut on a character boundary to at most
+/// [`TITLE_DESCRIPTION`] bytes, or nothing where it is empty or a slash
+/// command.
+fn title_description(prompt: &str) -> Option<&str> {
+    let about = prompt.trim();
+    if about.is_empty() || about.starts_with('/') {
+        return None;
+    }
+    let mut end = about.len().min(TITLE_DESCRIPTION);
+    while !about.is_char_boundary(end) {
+        end -= 1;
+    }
+    Some(about[..end].trim_end())
+}
+
 fn control_request(request_id: &str, body: serde_json::Value) -> serde_json::Value {
     serde_json::json!({
         "type": "control_request",
@@ -1005,9 +1786,10 @@ fn control_response(
 /// never instead, and only when they read like an authentication failure —
 /// which is a guess about a string, so the operator sees both.
 fn ended_because(status: std::process::ExitStatus, said: &str) -> String {
+    let how = how_it_ended(status);
     let mut message = match said.is_empty() {
-        true => format!("the `claude` session ended with {status} and said nothing."),
-        false => format!("the `claude` session ended with {status}: {said}"),
+        true => format!("the `claude` session {how} and said nothing."),
+        false => format!("the `claude` session {how}: {said}"),
     };
     if looks_logged_out(said) {
         message.push_str(
@@ -1016,6 +1798,57 @@ fn ended_because(status: std::process::ExitStatus, said: &str) -> String {
         );
     }
     message
+}
+
+/// What to say about a CLI stopped between turns, `how` it was, in a session
+/// that goes on.
+fn stopped_between_turns(how: &str, said: &str) -> String {
+    let mut message = format!(
+        "the `claude` CLI {how} while no turn was running. The conversation is kept: the \
+         next prompt starts the CLI again on it."
+    );
+    if !said.is_empty() {
+        message.push_str(" It said: ");
+        message.push_str(said);
+    }
+    message
+}
+
+/// How the CLI's process ended, in words: by the signal that stopped it,
+/// where one did, and otherwise by its exit status as it stands.
+fn how_it_ended(status: std::process::ExitStatus) -> String {
+    stopped_by(status).unwrap_or_else(|| format!("ended with {status}"))
+}
+
+/// The signal that stopped the CLI, in words, or nothing where none did.
+///
+/// A process that handles a signal and then leaves — as Node does with
+/// SIGTERM — leaves with 128 and the signal's number as its exit status
+/// rather than by the signal, so a status read that way names it too. A
+/// status past 128 that is not one of those signals is left as it stands.
+fn stopped_by(status: std::process::ExitStatus) -> Option<String> {
+    #[cfg(unix)]
+    if let Some(signal) = std::os::unix::process::ExitStatusExt::signal(&status) {
+        return Some(format!("was stopped by {}", signal_name(signal)?));
+    }
+    let code = status.code()?;
+    let name = signal_name(code.checked_sub(128)?)?;
+    Some(format!("was stopped by {name} (exit status {code})"))
+}
+
+/// The name of signal `number`, for the signals that stop a process from
+/// outside — the operator, the system, another program — and that a process
+/// is reported as stopped by. The numbers are the same on Linux and macOS.
+fn signal_name(number: i32) -> Option<&'static str> {
+    match number {
+        1 => Some("SIGHUP"),
+        2 => Some("SIGINT"),
+        3 => Some("SIGQUIT"),
+        6 => Some("SIGABRT"),
+        9 => Some("SIGKILL"),
+        15 => Some("SIGTERM"),
+        _ => None,
+    }
 }
 
 /// Why a session that left with success is reported as a failure: it left
@@ -1072,7 +1905,7 @@ impl Drop for Session {
             }
         }
 
-        end_group(self.child.id());
+        self.end_the_group();
 
         // The threads end when their pipes close, which the group leaving
         // does: the writer too, whose queue is closed and whose last write
@@ -1095,9 +1928,11 @@ impl Drop for Session {
 /// Ends what is left of the process group the CLI led: asked with SIGTERM,
 /// then killed if anything is still in it after [`LEFTOVERS`].
 ///
-/// Called once the CLI has been reaped. A process group's id is not given to
-/// a new process while any member of the group is alive, so the group
-/// signalled is still the CLI's, or is gone and the signal finds nothing.
+/// Called once the CLI has been reaped, and straight after: a process group's
+/// id is not given to a new process while any member of the group is alive,
+/// so the group signalled is still the CLI's, or is gone and the signal finds
+/// nothing. Called later, the group could have emptied and its id been given
+/// to someone else's.
 #[cfg(unix)]
 fn end_group(leader: u32) {
     // A group with nobody left in it is what was wanted.
@@ -1155,12 +1990,66 @@ fn group_of(leader: u32) -> Option<rustix::process::Pid> {
         .and_then(rustix::process::Pid::from_raw)
 }
 
+/// Whether a file is at `path`, for a question about writing it: what the
+/// path leads to, a link followed, since a write to a link replaces what it
+/// leads to — and creates it where the link is dangling. Reads no file, so a
+/// FIFO there is not waited on. `None` where the answer is not that a file is
+/// there or that nothing is: a directory, which a write does not replace as a
+/// file, and a path that could not be looked at.
+fn file_exists(path: &Path) -> Option<bool> {
+    match std::fs::metadata(path) {
+        Ok(found) if found.is_dir() => None,
+        Ok(_) => Some(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(false),
+        Err(_) => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// How long a test waits on a stand-in to do what it was written to.
+    ///
+    /// Generous for the reason `tests/answers.rs` gives: a freshly written
+    /// script can be held at its first instruction for seconds, and with a
+    /// `yes` on every core thirty of them ran out. Every wait returns as soon
+    /// as what it waits for happens.
+    #[cfg(unix)]
+    const PATIENCE: Duration = Duration::from_secs(60);
+
     fn options() -> Options {
         Options::new("/repo", "max")
+    }
+
+    #[test]
+    fn a_line_past_the_limit_is_passed_over_and_the_next_one_read() {
+        let hundred_megabytes = std::io::repeat(b'x').take(100 * 1024 * 1024);
+        let mut stdout = BufReader::new(hundred_megabytes.chain(&b"\n{\"type\":\"result\"}\n"[..]));
+
+        assert!(
+            matches!(next_line(&mut stdout, None), Some(Output::Overlong)),
+            "the line was read whole"
+        );
+        assert_eq!(
+            next_line(&mut stdout, None),
+            Some(Output::Line {
+                text: r#"{"type":"result"}"#.to_owned(),
+                decoded: true
+            })
+        );
+        assert_eq!(next_line(&mut stdout, None), None);
+    }
+
+    #[test]
+    fn a_line_exactly_at_the_limit_is_read() {
+        let limit = usize::try_from(LINE_LIMIT).expect("64 MiB fits a usize");
+        let mut stdout = BufReader::new(std::io::repeat(b'x').take(LINE_LIMIT).chain(&b"\n"[..]));
+
+        let Some(Output::Line { text, decoded }) = next_line(&mut stdout, None) else {
+            panic!("the line is read");
+        };
+        assert_eq!((text.len(), decoded), (limit, true));
     }
 
     #[test]
@@ -1204,12 +2093,15 @@ mod tests {
 
         let argv = options.argv();
 
-        let resume = argv.iter().position(|a| a == "--resume").expect("resume");
+        let resume = argv
+            .iter()
+            .position(|a| a == "--resume")
+            .expect("the CLI is handed a --resume option");
         assert_eq!(argv[resume + 1], "1a3e0a35");
         let settings = argv
             .iter()
             .position(|a| a == "--settings")
-            .expect("settings");
+            .expect("the CLI is handed a --settings option");
         assert_eq!(argv[settings + 1], r#"{"env":{"A":"1"}}"#);
     }
 
@@ -1245,6 +2137,72 @@ mod tests {
         let said = error.to_string();
         assert!(said.contains("is not on PATH"), "{said}");
         assert!(said.contains("/login"), "{said}");
+    }
+
+    /// A `claude` that is there and cannot be run is named by where it was
+    /// found: the operator has to find the file to fix it, and PATH can hold
+    /// several.
+    #[cfg(unix)]
+    #[test]
+    fn a_binary_found_that_cannot_be_run_is_named_by_its_path() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let found = dir.path().join("claude");
+        std::fs::write(&found, "#!/bin/sh\n").expect("the file is written");
+        std::fs::set_permissions(&found, std::fs::Permissions::from_mode(0o644))
+            .expect("the mode can be set");
+        let mut options = options();
+        options.cwd = dir.path().to_path_buf();
+        options
+            .env
+            .insert("PATH".to_owned(), dir.path().display().to_string());
+
+        let error = Session::spawn(&options).expect_err("the file is not executable");
+
+        let said = error.to_string();
+        assert!(matches!(error, SpawnError::Failed { .. }), "{said}");
+        assert!(said.contains(&found.display().to_string()), "{said}");
+    }
+
+    #[test]
+    fn a_turn_without_images_is_sent_as_the_prompt_string() {
+        assert_eq!(
+            turn_line("what changed?", &[], "p-1"),
+            serde_json::json!({
+                "type": "user",
+                "uuid": "p-1",
+                "message": { "role": "user", "content": "what changed?" },
+            })
+        );
+    }
+
+    #[test]
+    fn a_turn_with_images_is_its_text_then_each_image_in_the_order_attached() {
+        let png = Image::from_bytes(b"\x89PNG\r\n\x1a\nfoo".to_vec()).expect("a PNG signature");
+        let jpeg = Image::from_bytes(b"\xff\xd8\xffbar".to_vec()).expect("a JPEG signature");
+
+        let line = turn_line("look: [Image #1] [Image #2]", &[png, jpeg], "p-1");
+
+        assert_eq!(
+            line,
+            serde_json::json!({
+                "type": "user",
+                "uuid": "p-1",
+                "message": { "role": "user", "content": [
+                    { "type": "text", "text": "look: [Image #1] [Image #2]" },
+                    { "type": "image", "source": {
+                        "type": "base64",
+                        "media_type": "image/png",
+                        "data": "iVBORw0KGgpmb28=",
+                    } },
+                    { "type": "image", "source": {
+                        "type": "base64",
+                        "media_type": "image/jpeg",
+                        "data": "/9j/YmFy",
+                    } },
+                ] },
+            })
+        );
     }
 
     #[test]
@@ -1370,6 +2328,15 @@ mod tests {
     /// hands it back untouched, with the directory the script is in.
     #[cfg(unix)]
     fn started(body: &str) -> (Session, tempfile::TempDir) {
+        started_with(body, |_| {})
+    }
+
+    /// [`started`], with the options `configure` leaves.
+    #[cfg(unix)]
+    fn started_with(
+        body: &str,
+        configure: impl FnOnce(&mut Options),
+    ) -> (Session, tempfile::TempDir) {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().expect("a scratch directory");
         let script = dir.path().join("claude");
@@ -1380,7 +2347,374 @@ mod tests {
         let mut options = options();
         options.binary = script;
         options.cwd = dir.path().to_path_buf();
+        configure(&mut options);
         (spawn_written(&options), dir)
+    }
+
+    /// With the tap on, the process leaves one file with the arguments it was
+    /// started with and every line that crossed its pipes, in the order they
+    /// crossed, byte for byte.
+    #[cfg(unix)]
+    #[test]
+    fn a_tap_keeps_the_argv_and_every_line_in_the_order_it_crossed() {
+        let taps = tempfile::tempdir().expect("a scratch directory");
+        let init = r#"{"type":"system","subtype":"init","session_id":"s"}"#;
+        let (mut session, _dir) = started_with(
+            &format!(
+                "read -r initialize\nread -r turn\nprintf '%s\\n' '{init}'\n\
+                 printf '%s\\n' 'not json, kept as it came'\n"
+            ),
+            |options| options.tap = Some(taps.path().to_path_buf()),
+        );
+        session.send("hello", &[]).expect("the stand-in is reading");
+
+        let started = Instant::now();
+        let kept = loop {
+            session.drain();
+            let files: Vec<_> = std::fs::read_dir(taps.path())
+                .expect("the tap directory was made")
+                .collect();
+            if let [Ok(file)] = files.as_slice() {
+                let text = std::fs::read_to_string(file.path()).unwrap_or_default();
+                if text.lines().count() >= 5 {
+                    break text;
+                }
+            }
+            assert!(started.elapsed() < PATIENCE, "the tap never held the lines");
+            std::thread::sleep(Duration::from_millis(5));
+        };
+
+        let lines: Vec<&str> = kept.lines().collect();
+        let argv: Vec<String> =
+            serde_json::from_str(lines[0]).expect("the first line is the arguments as JSON");
+        assert_eq!(argv, options().argv());
+        // What the CLI was asked, in order: the initialize request, then the turn.
+        assert!(
+            lines[1].starts_with("in {") && lines[1].contains("\"subtype\":\"initialize\""),
+            "{lines:?}"
+        );
+        assert!(
+            lines[2].starts_with("in {") && lines[2].contains("\"type\":\"user\""),
+            "{lines:?}"
+        );
+        assert!(lines[2].contains("hello"), "{lines:?}");
+        assert_eq!(lines[3], format!("out {init}"));
+        assert_eq!(lines[4], "out not json, kept as it came");
+    }
+
+    /// Off by default: no directory is made and no file written.
+    #[cfg(unix)]
+    #[test]
+    fn with_no_tap_nothing_is_written_beside_the_session() {
+        let (mut session, dir) = started("read -r a\nread -r b\nexit 0\n");
+        session.send("hello", &[]).expect("the stand-in is reading");
+
+        let entries: Vec<String> = std::fs::read_dir(dir.path())
+            .expect("the scratch directory reads")
+            .map(|entry| {
+                entry
+                    .expect("an entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+
+        assert_eq!(entries, ["claude"], "{entries:?}");
+    }
+
+    /// A directory that cannot be written to is said before the CLI starts.
+    #[cfg(unix)]
+    #[test]
+    fn a_tap_that_cannot_be_opened_stops_the_session_before_the_cli_starts() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let file = dir.path().join("a-file");
+        std::fs::write(&file, "").expect("a file is written");
+        let mut options = options();
+        options.cwd = dir.path().to_path_buf();
+        options.tap = Some(file.join("under-a-file"));
+
+        let error = Session::spawn(&options).expect_err("a file has nothing under it");
+
+        assert!(matches!(error, SpawnError::Tap { .. }), "{error}");
+        assert!(
+            error.to_string().contains("cannot keep the stream"),
+            "{error}"
+        );
+    }
+
+    /// An `init` that lists a server the CLI has said nothing more of has the
+    /// servers asked about, and the answer says why one failed; a reconnect
+    /// goes out naming the server, its refusal is said, and the servers are
+    /// asked about again.
+    #[cfg(unix)]
+    #[test]
+    fn the_cli_is_asked_why_a_server_failed_and_to_reconnect_one() {
+        let scratch = tempfile::tempdir().expect("a scratch directory");
+        let asked = scratch.path().join("asked");
+        let init = r#"{"type":"system","subtype":"init","session_id":"s","mcp_servers":[{"name":"docs","status":"failed","source":"project"}]}"#;
+        let status = r#"{"type":"control_response","response":{"subtype":"success","request_id":"niobe-2","response":{"mcpServers":[{"name":"docs","status":"failed","error":"ECONNREFUSED","scope":"project","config":{"type":"http","url":"http://127.0.0.1:9/mcp"}}]}}}"#;
+        let refused = r#"{"type":"control_response","response":{"subtype":"error","request_id":"niobe-3","error":"ECONNREFUSED"}}"#;
+        let (mut session, _dir) = started(&format!(
+            "read -r initialize\nread -r turn\nprintf '%s\\n' '{init}'\n\
+             read -r status\nprintf '%s\\n' '{status}'\n\
+             read -r reconnect\nprintf '%s\\n' '{refused}'\n\
+             read -r again\nprintf '%s\\n' \"$status\" \"$reconnect\" \"$again\" > '{asked}'\n",
+            asked = asked.display()
+        ));
+        session.send("hello", &[]).expect("the stand-in is reading");
+
+        let started = Instant::now();
+        let mut events = Vec::new();
+        let mut reconnected = false;
+        while !session.reported {
+            assert!(
+                started.elapsed() < PATIENCE,
+                "the stand-in never ended: {events:#?}"
+            );
+            events.extend(session.drain());
+            let failed_why = events.iter().any(|event| {
+                matches!(event, Event::McpServers { servers }
+                    if servers.iter().any(|server| server.error.as_deref() == Some("ECONNREFUSED")))
+            });
+            if failed_why && !reconnected {
+                session
+                    .reconnect_mcp("docs")
+                    .expect("the stand-in is reading");
+                reconnected = true;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        assert!(
+            reconnected,
+            "no answer said why the server failed: {events:#?}"
+        );
+        let said = std::fs::read_to_string(&asked).expect("the stand-in wrote what it read");
+        let requests: Vec<serde_json::Value> = said
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("each request is JSON"))
+            .collect();
+        let bodies: Vec<&serde_json::Value> =
+            requests.iter().map(|request| &request["request"]).collect();
+        assert_eq!(
+            bodies,
+            [
+                &serde_json::json!({ "subtype": "mcp_status" }),
+                &serde_json::json!({ "subtype": "mcp_reconnect", "serverName": "docs" }),
+                &serde_json::json!({ "subtype": "mcp_status" }),
+            ]
+        );
+        assert!(
+            events.iter().any(
+                |event| matches!(event, Event::Error { message, fatal: false }
+                if message == "the MCP server `docs` could not be reconnected: ECONNREFUSED")
+            ),
+            "{events:#?}"
+        );
+    }
+
+    /// The session is titled from the first prompt that is not a command, by
+    /// asking the CLI once, after that prompt has gone in.
+    #[cfg(unix)]
+    #[test]
+    fn the_cli_is_asked_once_for_a_title_from_the_first_prompt_that_is_not_a_command() {
+        let scratch = tempfile::tempdir().expect("a scratch directory");
+        let asked = scratch.path().join("asked");
+        let (mut session, _dir) = started_with(
+            &format!(
+                "read -r init\nread -r slash\nread -r turn\nread -r title\nread -r second\n\
+                 printf '%s\\n' \"$slash\" \"$turn\" \"$title\" \"$second\" > '{asked}'\n\
+                 id=$(printf '%s' \"$title\" | sed 's/.*\"request_id\":\"\\([^\"]*\\)\".*/\\1/')\n\
+                 printf '{{\"type\":\"control_response\",\"response\":{{\"subtype\":\"success\",\"request_id\":\"%s\",\"response\":{{\"title\":\"Etag support\"}}}}}}\\n' \"$id\"\n",
+                asked = asked.display()
+            ),
+            |options| options.ask_title = true,
+        );
+        for prompt in ["/model opus", "add etag support", "and a test for it"] {
+            session.send(prompt, &[]).expect("the stand-in is reading");
+        }
+
+        let started = Instant::now();
+        let mut events = Vec::new();
+        while !session.reported {
+            assert!(
+                started.elapsed() < PATIENCE,
+                "the stand-in never ended: {events:#?}"
+            );
+            events.extend(session.drain());
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        assert!(
+            events.contains(&Event::Titled {
+                title: "Etag support".to_owned()
+            }),
+            "{events:#?}"
+        );
+        let written = std::fs::read_to_string(&asked).expect("the stand-in kept what it read");
+        let lines: Vec<serde_json::Value> = written
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("each line is JSON"))
+            .collect();
+        assert_eq!(lines[0]["type"], "user", "{written}");
+        assert_eq!(lines[1]["type"], "user", "{written}");
+        assert_eq!(
+            lines[2]["request"],
+            serde_json::json!({
+                "subtype": "generate_session_title",
+                "description": "add etag support",
+                "persist": true,
+            }),
+            "{written}"
+        );
+        assert_eq!(lines[3]["type"], "user", "asked once: {written}");
+    }
+
+    /// A conversation started over is a session with no title, so the CLI is
+    /// asked for one again, from the first prompt that is not a command after
+    /// the clear.
+    #[cfg(unix)]
+    #[test]
+    fn the_cli_is_asked_for_a_title_again_after_a_clear() {
+        let scratch = tempfile::tempdir().expect("a scratch directory");
+        let asked = scratch.path().join("asked");
+        let reset =
+            r#"{"type":"conversation_reset","new_conversation_id":"s-2","trigger":"clear"}"#;
+        let (mut session, _dir) = started_with(
+            &format!(
+                "read -r init\nread -r one\nread -r title_one\nprintf '%s\\n' '{reset}'\n\
+                 read -r clear\nread -r two\nread -r title_two\nread -r three\n\
+                 printf '%s\\n' \"$one\" \"$title_one\" \"$clear\" \"$two\" \"$title_two\" \"$three\" > '{asked}'\n",
+                asked = asked.display()
+            ),
+            |options| options.ask_title = true,
+        );
+        session
+            .send("add etag support", &[])
+            .expect("the stand-in is reading");
+
+        let started = Instant::now();
+        let mut events = Vec::new();
+        while !events.contains(&Event::Cleared) {
+            assert!(
+                started.elapsed() < PATIENCE,
+                "the stand-in never reset: {events:#?}"
+            );
+            events.extend(session.drain());
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        for prompt in ["/clear", "a new thing", "and more"] {
+            session.send(prompt, &[]).expect("the stand-in is reading");
+        }
+        while !session.reported {
+            assert!(
+                started.elapsed() < PATIENCE,
+                "the stand-in never ended: {events:#?}"
+            );
+            events.extend(session.drain());
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        let written = std::fs::read_to_string(&asked).expect("the stand-in kept what it read");
+        let lines: Vec<serde_json::Value> = written
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("each line is JSON"))
+            .collect();
+        let described: Vec<&str> = lines
+            .iter()
+            .filter(|line| line["request"]["subtype"] == "generate_session_title")
+            .filter_map(|line| line["request"]["description"].as_str())
+            .collect();
+        assert_eq!(described, ["add etag support", "a new thing"], "{written}");
+        assert_eq!(lines[5]["type"], "user", "asked once more only: {written}");
+    }
+
+    #[test]
+    fn a_long_first_prompt_is_cut_on_a_character_boundary_before_it_is_sent_for_a_title() {
+        let prompt = "é".repeat(50 * 1024) + "x";
+
+        let about = title_description(&prompt).expect("the prompt says something");
+
+        // A literal, not the constant: a bound read off itself holds at any
+        // value, and what it keeps from a second bill is a kilobyte.
+        assert!(about.len() <= 1024, "{} bytes", about.len());
+        assert!(about.len() >= 1023, "{} bytes", about.len());
+        assert!(prompt.starts_with(about));
+    }
+
+    /// What is left out and what is shown add up to what was written, even
+    /// where the cut went through a character and its continuation bytes were
+    /// skipped.
+    #[test]
+    fn the_stderr_tail_counts_the_bytes_it_skips_as_left_out() {
+        let mut tail = Tail::default();
+        let written = "€".repeat(24_577 / 3).into_bytes();
+        let total = written.len() as u64;
+        tail.add(&written);
+
+        let said = tail.said();
+
+        let header = said
+            .strip_prefix("[the first ")
+            .and_then(|rest| rest.split_once(" of "))
+            .expect("the tail says how much it left out");
+        let left_out: u64 = header.0.parse().expect("a count");
+        let shown = said
+            .split_once("] ")
+            .map_or(0, |(_, text)| text.len() as u64);
+        assert_eq!(left_out + shown, total, "{left_out} + {shown} of {total}");
+    }
+
+    #[test]
+    fn a_short_first_prompt_is_sent_for_a_title_whole() {
+        assert_eq!(
+            title_description("  add etag support\n"),
+            Some("add etag support")
+        );
+        assert_eq!(title_description("/model opus"), None);
+        assert_eq!(title_description(" \n "), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_session_not_asked_to_title_itself_sends_the_cli_only_its_turns() {
+        let scratch = tempfile::tempdir().expect("a scratch directory");
+        let asked = scratch.path().join("asked");
+        let (mut session, _dir) = started(&format!(
+            "read -r init\nread -r turn\nread -r next\nprintf '%s\\n' \"$turn\" \"$next\" > '{asked}'\n",
+            asked = asked.display()
+        ));
+        for prompt in ["add etag support", "and a test for it"] {
+            session.send(prompt, &[]).expect("the stand-in is reading");
+        }
+        let started = Instant::now();
+        while !session.reported {
+            assert!(started.elapsed() < PATIENCE, "the stand-in never ended");
+            session.drain();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        let written = std::fs::read_to_string(&asked).expect("the stand-in kept what it read");
+        assert_eq!(
+            written.matches(r#""type":"user""#).count(),
+            2,
+            "the two turns, and nothing between them: {written}"
+        );
+    }
+
+    #[test]
+    fn a_directory_that_is_not_there_is_named_rather_than_the_binary() {
+        let mut options = options();
+        options.binary = PathBuf::from("/bin/sh");
+        options.cwd = PathBuf::from("/nonexistent/niobe-audit-dir");
+
+        let said = Session::spawn(&options)
+            .expect_err("there is nowhere to run it")
+            .to_string();
+
+        assert!(said.contains("/nonexistent/niobe-audit-dir"), "{said}");
+        assert!(!said.contains("PATH"), "{said}");
     }
 
     /// Spawns a `claude` that is the shell script `body`, sends it a turn,
@@ -1391,15 +2725,13 @@ mod tests {
         let (mut session, _dir) = started(body);
         // A stand-in that has already left cannot take the turn, and that is
         // reported by the drain rather than here.
-        let _ = session.send("list the files");
+        let _ = session.send("list the files", &[]);
 
-        // Generous for the reason `tests/answers.rs` gives: a freshly written
-        // script can be held at its first instruction for seconds.
         let started = Instant::now();
         let mut events = Vec::new();
         while !session.reported {
             assert!(
-                started.elapsed() < Duration::from_secs(60),
+                started.elapsed() < PATIENCE,
                 "the stand-in never ended: {events:#?}"
             );
             events.extend(session.drain());
@@ -1443,21 +2775,162 @@ mod tests {
         );
     }
 
+    /// What the CLI left running in its group is ended as soon as the CLI is
+    /// reaped, not at the quit: by then the group could have emptied and its
+    /// id been handed to a stranger's group, which the quit would signal.
+    #[cfg(unix)]
+    #[test]
+    fn the_clis_group_is_ended_when_the_cli_is_reaped_and_not_again_at_the_quit() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let pid = dir.path().join("left.pid");
+        let (session, _) = stand_in(&format!(
+            "sleep 77105 >/dev/null 2>&1 &\necho $! > '{pid}'\nread -r first\nread -r turn\nexit 0\n",
+            pid = pid.display()
+        ));
+
+        assert!(
+            session.group_ended,
+            "the group was left for the quit to end"
+        );
+        let left = std::fs::read_to_string(&pid)
+            .ok()
+            .and_then(|written| written.trim().parse().ok())
+            .and_then(rustix::process::Pid::from_raw)
+            .expect("the stand-in wrote the pid of what it left running");
+        let deadline = Instant::now() + PATIENCE;
+        while rustix::process::test_kill_process(left).is_ok() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            rustix::process::test_kill_process(left).is_err(),
+            "what the CLI left running outlived the CLI's end"
+        );
+        drop(session);
+    }
+
+    /// What the CLI left in its group that will not end when asked is killed.
+    #[cfg(unix)]
+    #[test]
+    fn what_the_cli_left_running_that_ignores_sigterm_is_killed() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let pid = dir.path().join("left.pid");
+        let (session, _) = stand_in(&format!(
+            "trap '' TERM\nsleep 77108 >/dev/null 2>&1 &\necho $! > '{pid}'\nread -r first\nread -r turn\nexit 0\n",
+            pid = pid.display()
+        ));
+
+        let left = std::fs::read_to_string(&pid)
+            .ok()
+            .and_then(|written| written.trim().parse().ok())
+            .and_then(rustix::process::Pid::from_raw)
+            .expect("the stand-in wrote the pid of what it left running");
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while rustix::process::test_kill_process(left).is_ok() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let outlived = rustix::process::test_kill_process(left).is_ok();
+        if outlived {
+            let _ = rustix::process::kill_process(left, rustix::process::Signal::KILL);
+        }
+        assert!(!outlived, "what ignored SIGTERM outlived the CLI's end");
+        drop(session);
+    }
+
+    /// What the CLI left in its group is asked to end before anything kills
+    /// it, so that it can let go of what it holds.
+    #[cfg(unix)]
+    #[test]
+    fn what_the_cli_left_running_is_asked_to_end_with_sigterm() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let pid = dir.path().join("left.pid");
+        let asked = dir.path().join("asked");
+        let (session, _) = stand_in(&format!(
+            "perl -e '$SIG{{TERM}} = sub {{ open(my $f, \">\", $ARGV[1]); close($f); exit 0 }}; open(my $p, \">\", $ARGV[0]); print $p $$; close($p); sleep 1 while 1' '{pid}' '{asked}' &\nwhile [ ! -s '{pid}' ]; do sleep 0.01; done\nread -r first\nread -r turn\nexit 0\n",
+            pid = pid.display(),
+            asked = asked.display()
+        ));
+
+        assert!(
+            session.group_ended,
+            "the group was left for the quit to end"
+        );
+        let left = std::fs::read_to_string(&pid)
+            .ok()
+            .and_then(|written| written.trim().parse().ok())
+            .and_then(rustix::process::Pid::from_raw)
+            .expect("the stand-in wrote the pid of what it left running");
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while rustix::process::test_kill_process(left).is_ok() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            rustix::process::test_kill_process(left).is_err(),
+            "what the CLI left running outlived the CLI's end"
+        );
+        assert!(asked.exists(), "what the CLI left was killed unasked");
+        drop(session);
+    }
+
+    /// Closing the CLI's standard input is how it is asked to leave, and a
+    /// CLI that does leaves on its own rather than being killed, with time to
+    /// write out the session `--resume` reads.
+    #[cfg(unix)]
+    #[test]
+    fn a_closing_session_lets_the_cli_see_its_input_end_and_leave() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let read = dir.path().join("read");
+        let left = dir.path().join("left");
+        let (mut session, _script) = started(&format!(
+            "read -r first\nread -r turn\n: > '{read}'\nwhile read -r line; do :; done\n: > '{left}'\nexit 0\n",
+            read = read.display(),
+            left = left.display()
+        ));
+        session
+            .send("list the files", &[])
+            .expect("the stand-in takes a turn");
+        let started = Instant::now();
+        while !read.exists() {
+            assert!(
+                started.elapsed() < Duration::from_secs(60),
+                "the stand-in never read the turn"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        drop(session);
+
+        assert!(left.exists(), "the CLI was killed before its input ended");
+    }
+
     /// Something that left the CLI's group cannot be ended with it, so its
     /// hold on the CLI's output is not waited out: the end is reported in the
     /// CLI's words, after what the CLI wrote before it, and nothing else.
+    ///
+    /// The wait is timed from the stand-in's last instruction rather than
+    /// from the spawn: starting a freshly written script takes seconds on a
+    /// loaded machine, and that is not the driver's to answer for. On an idle
+    /// machine the end is reported 510–520 ms after it, which is [`GOODBYE`]
+    /// and the drain's polling. With a `yes` on every core it came more than
+    /// two seconds after, so the bound is set against what a driver that
+    /// waited would wait on — the detached process, which sleeps for most of
+    /// a day — rather than against the idle figure.
     #[cfg(unix)]
     #[test]
     fn a_cli_that_dies_while_something_outside_its_group_holds_its_output_is_reported_ended() {
         let dir = tempfile::tempdir().expect("a scratch directory");
         let pid = dir.path().join("detached.pid");
+        let gone = dir.path().join("gone");
         let reply = r#"{"type":"assistant","message":{"model":"claude-opus-5","id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"replied first"}]}}"#;
-        let started = Instant::now();
         let (session, events) = stand_in(&format!(
-            "perl -e 'setpgrp(0, 0); open(my $f, \">\", $ARGV[0]); print $f $$; close($f); exec \"sleep\", \"77104\"' '{pid}' &\nwhile [ ! -s '{pid}' ]; do sleep 0.01; done\nread -r first\nread -r turn\nprintf '%s\\n' '{reply}'\necho 'fell over' >&2\nexit 1\n",
-            pid = pid.display()
+            "perl -e 'setpgrp(0, 0); open(my $f, \">\", $ARGV[0]); print $f $$; close($f); exec \"sleep\", \"77104\"' '{pid}' &\nwhile [ ! -s '{pid}' ]; do sleep 0.01; done\nread -r first\nread -r turn\nprintf '%s\\n' '{reply}'\necho 'fell over' >&2\ntouch '{gone}'\nexit 1\n",
+            pid = pid.display(),
+            gone = gone.display()
         ));
-        let took = started.elapsed();
+        let took = std::fs::metadata(&gone)
+            .and_then(|written| written.modified())
+            .ok()
+            .and_then(|left| std::time::SystemTime::now().duration_since(left).ok())
+            .expect("the stand-in marked its last instruction before it left");
         if let Some(detached) = std::fs::read_to_string(&pid)
             .ok()
             .and_then(|written| written.trim().parse().ok())
@@ -1467,7 +2940,10 @@ mod tests {
         }
         drop(session);
 
-        assert!(took < Duration::from_secs(10), "the end took {took:?}");
+        assert!(
+            took < Duration::from_secs(20),
+            "the end was reported {took:?} after the CLI left"
+        );
         assert!(
             events.iter().any(
                 |event| matches!(event, Event::AssistantMessage { text, .. } if text == "replied first")
@@ -1479,6 +2955,102 @@ mod tests {
                 if message == "the `claude` session ended with exit status: 1: fell over"),
             "{events:#?}"
         );
+    }
+
+    /// Two prompts the CLI sent without a call id are two questions, and an
+    /// answer to each reaches the request it was asked by.
+    #[cfg(unix)]
+    #[test]
+    fn two_prompts_with_no_call_id_are_both_answered() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let answers = dir.path().join("answers");
+        let ask = |request: &str| {
+            format!(
+                r#"{{"type":"control_request","request_id":"{request}","request":{{"subtype":"can_use_tool","tool_name":"Bash","input":{{"command":"ls"}}}}}}"#
+            )
+        };
+        let (mut session, _script) = started(&format!(
+            "read -r first\nread -r turn\nprintf '%s\\n' '{c1}' '{c2}'\nread -r one\nread -r two\nprintf '%s\\n%s\\n' \"$one\" \"$two\" > '{answers}'\n",
+            c1 = ask("c1"),
+            c2 = ask("c2"),
+            answers = answers.display(),
+        ));
+        let _ = session.send("list the files", &[]);
+
+        let started = Instant::now();
+        let mut asked = Vec::new();
+        while asked.len() < 2 {
+            assert!(
+                started.elapsed() < PATIENCE,
+                "the stand-in never asked twice: {asked:?}"
+            );
+            asked.extend(session.drain().into_iter().filter_map(|event| match event {
+                Event::PermissionRequest { id, .. } => Some(id),
+                _ => None,
+            }));
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        for id in &asked {
+            session
+                .answer(id, PermissionDecision::Allow, None)
+                .expect("each prompt is waiting on its own answer");
+        }
+        while !session.reported {
+            assert!(
+                started.elapsed() < PATIENCE,
+                "the stand-in never took both answers"
+            );
+            session.drain();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        let written =
+            std::fs::read_to_string(&answers).expect("the stand-in kept what it was sent");
+        assert!(written.contains(r#""request_id":"c1""#), "{written}");
+        assert!(written.contains(r#""request_id":"c2""#), "{written}");
+    }
+
+    /// What reaches the CLI's output after its end was reported was written
+    /// by something that left its group, and is not the CLI's to say.
+    #[cfg(unix)]
+    #[test]
+    fn a_line_written_after_the_end_was_reported_is_not_passed_on() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let at = |name: &str| dir.path().join(name).display().to_string();
+        let late = r#"{"type":"assistant","message":{"model":"claude-opus-5","id":"msg_2","type":"message","role":"assistant","content":[{"type":"text","text":"said late"}]}}"#;
+        let script = at("late.pl");
+        std::fs::write(
+            &script,
+            format!(
+                "setpgrp(0, 0);\n$| = 1;\nopen(my $f, '>', '{pid}'); print $f $$; close($f);\nselect(undef, undef, undef, 0.01) until -e '{go}';\nprint '{late}' . \"\\n\";\nopen(my $g, '>', '{done}'); close($g);\n",
+                pid = at("detached.pid"),
+                go = at("go"),
+                done = at("done"),
+            ),
+        )
+        .expect("the detached writer is written");
+        let (mut session, _) = stand_in(&format!(
+            "perl '{script}' &\nwhile [ ! -s '{pid}' ]; do sleep 0.01; done\nread -r first\nread -r turn\nexit 1\n",
+            pid = at("detached.pid"),
+        ));
+
+        std::fs::write(at("go"), "").expect("the writer is told to write");
+        let started = Instant::now();
+        while !dir.path().join("done").exists() {
+            assert!(
+                started.elapsed() < PATIENCE,
+                "the detached writer never wrote"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let mut after = Vec::new();
+        for _ in 0..40 {
+            after.extend(session.drain());
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        drop(session);
+
+        assert!(after.is_empty(), "{after:#?}");
     }
 
     #[cfg(unix)]
@@ -1529,6 +3101,52 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_cli_that_withdraws_its_prompt_and_leaves_cleanly_ends_cleanly() {
+        let request = r#"{"type":"control_request","request_id":"c1","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"ls"},"tool_use_id":"toolu_1"}}"#;
+        let cancel = r#"{"type":"control_cancel_request","request_id":"c1"}"#;
+        let (_, events) = stand_in(&format!(
+            "read -r first\nread -r turn\nprintf '%s\\n' '{request}' '{cancel}'\nexit 0\n"
+        ));
+
+        assert!(
+            matches!(
+                events.as_slice(),
+                [
+                    Event::PermissionRequest { .. },
+                    Event::PermissionWithdrawn { .. },
+                    Event::Notice { message },
+                ] if message == "the `claude` session ended."
+            ),
+            "{events:#?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_answer_to_a_prompt_the_cli_withdrew_is_refused_rather_than_written() {
+        let request = r#"{"type":"control_request","request_id":"c1","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"ls"},"tool_use_id":"toolu_1"}}"#;
+        let cancel = r#"{"type":"control_cancel_request","request_id":"c1"}"#;
+        let (mut session, _dir) = started(&format!(
+            "read -r first\nread -r turn\nprintf '%s\\n' '{request}' '{cancel}'\nexec sleep 300\n"
+        ));
+        session
+            .send("list the files", &[])
+            .expect("the turn is queued");
+        drained_until(&mut session, |event| {
+            matches!(event, Event::PermissionWithdrawn { .. })
+        });
+
+        let said = session
+            .answer(&ToolCallId::new("toolu_1"), PermissionDecision::Allow, None)
+            .expect_err("the CLI no longer waits on this call")
+            .to_string();
+
+        assert!(said.contains("not waiting on a decision"), "{said}");
+        assert!(said.contains("toolu_1"), "{said}");
+    }
+
     /// More than a pipe holds, so a CLI that is not reading cannot take it
     /// all: a pasted log, say.
     #[cfg(unix)]
@@ -1543,10 +3161,7 @@ mod tests {
         let started = Instant::now();
         let mut events = Vec::new();
         while !events.iter().any(&wanted) {
-            assert!(
-                started.elapsed() < Duration::from_secs(30),
-                "it never came: {events:#?}"
-            );
+            assert!(started.elapsed() < PATIENCE, "it never came: {events:#?}");
             events.extend(session.drain());
             std::thread::sleep(Duration::from_millis(5));
         }
@@ -1556,15 +3171,136 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_cli_that_is_not_reading_does_not_hold_up_whoever_writes_to_it() {
-        let (mut session, _dir) = started("exec sleep 30\n");
+        let (mut session, _dir) = started("exec sleep 300\n");
 
         let started = Instant::now();
-        session.send(&a_long_paste()).expect("the turn is queued");
+        session
+            .send(&a_long_paste(), &[])
+            .expect("the turn is queued");
         session.set_mode(Mode::Plan).expect("the request is queued");
         session.set_model("haiku").expect("the request is queued");
         let took = started.elapsed();
 
-        assert!(took < Duration::from_millis(100), "writing took {took:?}");
+        // A write that waited on the CLI would wait until it left, five
+        // minutes on; queued, the lines took 105 ms at worst with two
+        // whole-workspace test runs sharing the machine.
+        assert!(took < Duration::from_secs(10), "writing took {took:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_file_is_there_where_the_path_leads_to_one_and_not_where_it_leads_to_nothing() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let file = dir.path().join("there.txt");
+        std::fs::write(&file, "x").expect("the temporary directory is writable");
+        symlink(&file, dir.path().join("link-to-there")).expect("a link");
+        symlink(dir.path().join("gone"), dir.path().join("dangling")).expect("a link");
+        let fifo = dir.path().join("pipe");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("mkfifo runs");
+        assert!(made.success());
+
+        assert_eq!(file_exists(&file), Some(true));
+        assert_eq!(file_exists(&dir.path().join("link-to-there")), Some(true));
+        assert_eq!(
+            file_exists(&dir.path().join("dangling")),
+            Some(false),
+            "a write through it would create what it leads to"
+        );
+        assert_eq!(file_exists(&dir.path().join("missing")), Some(false));
+        assert_eq!(
+            file_exists(dir.path()),
+            None,
+            "a directory is not a file a write replaces"
+        );
+        // Looked at, not opened: a FIFO is there and nothing waits on it.
+        assert_eq!(file_exists(&fifo), Some(true));
+    }
+
+    /// The wiring, not the function: a prompt to write a file that exists says
+    /// so, and one for a file that does not says the other thing.
+    #[cfg(unix)]
+    #[test]
+    fn a_write_prompt_over_a_file_that_exists_says_it_is_replaced() {
+        let ask = |name: &str| {
+            format!(
+                r#"{{"type":"control_request","request_id":"w","request":{{"subtype":"can_use_tool","tool_name":"Write","input":{{"file_path":"{name}","content":"x"}},"tool_use_id":"toolu_w"}}}}"#
+            )
+        };
+        let (mut session, dir) = started(&format!(
+            "read -r initialize\nprintf '%s\n' '{}'\nprintf '%s\n' '{}'\nexec sleep 30\n",
+            ask("here.txt"),
+            ask("not-here.txt"),
+        ));
+        std::fs::write(dir.path().join("here.txt"), "old")
+            .expect("the temporary directory is writable");
+
+        let events = drained_until(
+            &mut session,
+            |event| matches!(event, Event::PermissionRequest { id, .. } if id.as_str() == "toolu_w"),
+        );
+        let existed = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::PermissionRequest {
+                    proposal: Some(proposal),
+                    ..
+                } => match proposal.action() {
+                    niobe_core::Action::Write { path, existed, .. } => {
+                        Some((path.clone(), *existed))
+                    }
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            existed.first().map(|(path, there)| (path.as_str(), *there)),
+            Some(("here.txt", Some(true))),
+            "{events:#?}"
+        );
+    }
+
+    /// The profile says how the account is billed, and the CLI says nothing
+    /// until it is given a turn: what the profile says is reported at once.
+    #[cfg(unix)]
+    #[test]
+    fn a_profile_that_names_its_billing_has_it_reported_before_the_first_turn() {
+        for billing in [Billing::Metered, Billing::Plan] {
+            let (mut session, _dir) = started_with("exec sleep 30\n", move |options| {
+                options.billing = Some(billing)
+            });
+
+            let events =
+                drained_until(&mut session, |event| matches!(event, Event::Billing { .. }));
+
+            assert_eq!(events, [Event::Billing { billing }]);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_model_the_cli_refuses_is_reported_as_refused() {
+        // `initialize` goes out as the session starts, so the model change is
+        // the second request.
+        let (mut session, _dir) = started(
+            "read -r initialize\nread -r model\nprintf '%s\\n' '{\"type\":\"control_response\",\"response\":{\"subtype\":\"error\",\"request_id\":\"niobe-2\",\"error\":\"model refuse is not available\"}}'\nexec sleep 30\n",
+        );
+
+        session.set_model("refuse").expect("the request is queued");
+        let events = drained_until(&mut session, |event| {
+            matches!(event, Event::ModelRefused { .. })
+        });
+
+        assert!(
+            matches!(events.as_slice(), [.., Event::Error { message, fatal: false }, Event::ModelRefused { .. }]
+                if message.contains("model refuse is not available")),
+            "{events:#?}"
+        );
     }
 
     #[cfg(unix)]
@@ -1573,7 +3309,9 @@ mod tests {
         let (mut session, _dir) = started("exec sleep 30\n");
         session.stalled_after = Duration::from_millis(200);
 
-        session.send(&a_long_paste()).expect("the turn is queued");
+        session
+            .send(&a_long_paste(), &[])
+            .expect("the turn is queued");
         let events = drained_until(&mut session, |event| {
             matches!(event, Event::Error { fatal: false, .. })
         });
@@ -1601,7 +3339,9 @@ mod tests {
     fn a_turn_the_cli_leaves_without_reading_is_reported_as_not_sent() {
         let (mut session, _dir) = started("exec sleep 1\n");
 
-        session.send(&a_long_paste()).expect("the turn is queued");
+        session
+            .send(&a_long_paste(), &[])
+            .expect("the turn is queued");
         let events = drained_until(
             &mut session,
             |event| matches!(event, Event::Error { message, .. } if message.contains("could not be sent")),
@@ -1680,6 +3420,105 @@ mod tests {
     }
 
     #[test]
+    fn each_prompt_is_sent_with_a_random_uuid_of_its_own() {
+        let first = prompt_id();
+        let second = prompt_id();
+
+        assert_ne!(first, second);
+        for id in [&first, &second] {
+            let groups: Vec<&str> = id.split('-').collect();
+            assert_eq!(
+                groups.iter().map(|group| group.len()).collect::<Vec<_>>(),
+                [8, 4, 4, 4, 12],
+                "{id}"
+            );
+            assert!(groups[2].starts_with('4'), "a version 4 UUID: {id}");
+            assert!(
+                matches!(groups[3].chars().next(), Some('8' | '9' | 'a' | 'b')),
+                "the RFC 4122 variant: {id}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_prompt_is_named_by_its_first_line_cut_short() {
+        assert_eq!(
+            label_of("  fix the parser\nand the tests"),
+            "fix the parser"
+        );
+        let long = "x".repeat(SENT_LABEL + 5);
+        assert_eq!(label_of(&long), format!("{}…", "x".repeat(SENT_LABEL)));
+    }
+
+    /// A stand-in that answers as Claude Code 2.1.309 did: a dry run that
+    /// says the file can go back, then the rewind itself.
+    #[cfg(unix)]
+    #[test]
+    fn a_rewind_asks_a_dry_run_then_puts_the_files_back_before_the_prompt_named() {
+        let scratch = tempfile::tempdir().expect("a scratch directory");
+        let seen = scratch.path().join("seen");
+        let (mut session, _dir) = started(&format!(
+            r#"read -r init
+read -r turn
+printf '%s\n' "$CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING" "$turn" > '{seen}'
+read -r dry
+printf '%s\n' "$dry" >> '{seen}'
+id=$(printf '%s' "$dry" | sed 's/.*"request_id":"\([^"]*\)".*/\1/')
+printf '%s\n' '{{"type":"control_response","response":{{"subtype":"success","request_id":"'"$id"'","response":{{"canRewind":true,"filesChanged":["'"$(dirname "$0")"'/stats.py"],"insertions":0,"deletions":2}}}}}}'
+read -r real
+printf '%s\n' "$real" >> '{seen}'
+id=$(printf '%s' "$real" | sed 's/.*"request_id":"\([^"]*\)".*/\1/')
+printf '%s\n' '{{"type":"control_response","response":{{"subtype":"success","request_id":"'"$id"'","response":{{"canRewind":true}}}}}}'
+read -r rest
+"#,
+            seen = seen.display()
+        ));
+
+        session
+            .send("make mean() return 0", &[])
+            .expect("the stand-in is reading");
+        session.rewind(0).expect("a prompt was sent");
+        let events = drained_until(&mut session, |event| matches!(event, Event::Notice { .. }));
+
+        let notice = events.iter().find_map(|event| match event {
+            Event::Notice { message } => Some(message.as_str()),
+            _ => None,
+        });
+        assert_eq!(
+            notice,
+            Some(
+                "Files put back as they were before \"make mean() return 0\": stats.py \
+                 (+0 −2). The conversation keeps everything said since."
+            )
+        );
+        let seen = std::fs::read_to_string(&seen).expect("the stand-in kept what it read");
+        let lines: Vec<&str> = seen.lines().collect();
+        assert_eq!(lines[0], "1", "the CLI is started keeping the files");
+        let line = |at: usize| -> serde_json::Value {
+            serde_json::from_str(lines[at]).expect("a line of the protocol")
+        };
+        let prompt = line(1)["uuid"].clone();
+        assert!(prompt.is_string(), "{}", lines[1]);
+        for (at, dry_run) in [(2, true), (3, false)] {
+            assert_eq!(line(at)["request"]["subtype"], "rewind_files");
+            assert_eq!(line(at)["request"]["user_message_id"], prompt);
+            assert_eq!(line(at)["request"]["dry_run"], dry_run);
+        }
+    }
+
+    #[test]
+    fn a_rewind_before_a_prompt_never_sent_is_refused() {
+        let mut options = options();
+        options.binary = PathBuf::from("/bin/echo");
+        options.cwd = std::env::temp_dir();
+        let mut session = Session::spawn(&options).expect("`/bin/echo` is on every unix");
+
+        let refused = session.rewind(0).expect_err("nothing was sent");
+
+        assert!(refused.to_string().contains("no prompt 1"), "{refused}");
+    }
+
+    #[test]
     fn each_request_is_addressed_by_an_id_of_its_own() {
         let mut options = options();
         options.binary = PathBuf::from("/bin/echo");
@@ -1714,10 +3553,12 @@ mod tests {
         assert!(text.ends_with("éx"), "{said}");
         assert_eq!(text.len(), SAID - 1, "{said}");
         let written = 2 * SAID + 1;
+        // What is left out is what is not shown, the byte of the character the
+        // cut went through included.
         assert!(
             said.starts_with(&format!(
                 "[the first {} of {written} bytes it wrote are left out]",
-                written - SAID
+                written - text.len()
             )),
             "{}",
             &said[..80]
@@ -1739,5 +3580,362 @@ mod tests {
         ));
         assert!(looks_logged_out("Invalid API key · Please run /login"));
         assert!(looks_logged_out("OAuth token has expired"));
+    }
+    /// The opening of a turn and its end, as the CLI writes them, for a
+    /// stand-in to say once it has read the turn: the conversation is `s-9`,
+    /// gated in plan mode.
+    #[cfg(unix)]
+    const ONE_TURN: &str = r#"printf '%s\n' '{"type":"system","subtype":"init","session_id":"s-9","model":"claude-sonnet-5","permissionMode":"plan"}' '{"type":"result","subtype":"success","is_error":false,"session_id":"s-9"}'"#;
+
+    /// Starts a stand-in whose caller carries a session on past a stop
+    /// between turns, sends it a turn, and drains it until the turn has ended.
+    #[cfg(unix)]
+    fn carried_on(body: &str, carry_on: bool) -> (Session, Vec<Event>, tempfile::TempDir) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let script = dir.path().join("claude");
+        std::fs::write(&script, format!("#!/bin/sh\n{body}")).expect("the stand-in is written");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+            .expect("the stand-in is made executable");
+        let mut options = options();
+        options.binary = script;
+        options.cwd = dir.path().to_path_buf();
+        options.carry_on = carry_on;
+        let mut session = spawn_written(&options);
+        session
+            .send("list the files", &[])
+            .expect("the turn is queued");
+        let events = drained_until(&mut session, |event| {
+            matches!(event, Event::TurnEnded | Event::Error { fatal: true, .. })
+        });
+        (session, events, dir)
+    }
+
+    /// Drains `session` until it has reported its end.
+    #[cfg(unix)]
+    fn drained_to_the_end(session: &mut Session) -> Vec<Event> {
+        let started = Instant::now();
+        let mut events = Vec::new();
+        while !session.reported {
+            assert!(
+                started.elapsed() < PATIENCE,
+                "the stand-in never ended: {events:#?}"
+            );
+            events.extend(session.drain());
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        events
+    }
+
+    /// A CLI that leaves between turns the way `leave` does, after the
+    /// operator asked for another model, and what its end said.
+    #[cfg(unix)]
+    fn stopped_between_turns(leave: &str) -> (Session, Vec<Event>) {
+        let (mut session, _, _dir) = carried_on(
+            &format!("read -r initialize\nread -r turn\n{ONE_TURN}\nread -r model\n{leave}\n"),
+            true,
+        );
+        session.set_model("haiku").expect("the request is queued");
+        let events = drained_to_the_end(&mut session);
+        (session, events)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_cli_stopped_between_turns_is_a_notice_and_carries_on_with_its_conversation() {
+        // The way Node leaves on a SIGTERM it handles: an exit status of its
+        // own, 128 and the signal's number, rather than death by the signal.
+        let (session, events) = stopped_between_turns("exit 143");
+
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Event::Error { fatal: true, .. })),
+            "{events:#?}"
+        );
+        assert!(
+            matches!(events.last(), Some(Event::Notice { message })
+                if message == "the `claude` CLI was stopped by SIGTERM (exit status 143) while no turn was running. The conversation is kept: the next prompt starts the CLI again on it."),
+            "{events:#?}"
+        );
+        let next = session.next().expect("the session can carry on");
+        assert_eq!(next.resume.as_deref(), Some("s-9"));
+        assert_eq!(next.mode, Mode::Plan);
+        assert_eq!(next.model.as_deref(), Some("haiku"));
+        assert!(next.spent.is_empty(), "the spend is the caller's to read");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_cli_killed_by_a_signal_between_turns_carries_on_too() {
+        let (session, events) = stopped_between_turns("kill -TERM $$");
+
+        assert!(
+            matches!(events.last(), Some(Event::Notice { message })
+                if message.starts_with("the `claude` CLI was stopped by SIGTERM while no turn was running.")),
+            "{events:#?}"
+        );
+        assert!(session.next().is_some());
+    }
+
+    /// A turn that launches a sub-agent in the background and ends while it
+    /// works, as the CLI writes it: the `Agent` call, its result saying the
+    /// agent was launched, and the turn's end.
+    #[cfg(unix)]
+    const BACKGROUND_AGENT: &str = r#"printf '%s\n' '{"type":"system","subtype":"init","session_id":"s-9","model":"claude-sonnet-5","permissionMode":"default"}' '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_bg","name":"Agent","input":{"subagent_type":"deep-reasoner","description":"Review catalog/fetch.py","prompt":"Review catalog/fetch.py for bugs."}}]}}' '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_bg","content":[{"type":"text","text":"Async agent launched successfully."}]}]},"tool_use_result":{"isAsync":true,"status":"async_launched","agentId":"a1","description":"Review catalog/fetch.py"}}' '{"type":"result","subtype":"success","is_error":false,"session_id":"s-9"}'"#;
+
+    /// The CLI's process group ends with it, and a sub-agent it ran in the
+    /// background with that: it will send no word of its end, so the session
+    /// is told it was cancelled before it is told the CLI carries on.
+    #[cfg(unix)]
+    #[test]
+    fn a_cli_stopped_between_turns_cancels_the_agents_it_left_running() {
+        let (mut session, mut events, _dir) = carried_on(
+            &format!("read -r initialize\nread -r turn\n{BACKGROUND_AGENT}\nkill -TERM $$\n"),
+            true,
+        );
+        events.extend(drained_to_the_end(&mut session));
+
+        let exits: Vec<&Event> = events
+            .iter()
+            .filter(|event| matches!(event, Event::AgentExit { .. }))
+            .collect();
+        assert_eq!(
+            exits,
+            [&Event::AgentExit {
+                id: "toolu_bg".into(),
+                outcome: AgentOutcome::Cancelled,
+            }],
+            "{events:#?}"
+        );
+        assert!(
+            matches!(events.last(), Some(Event::Notice { .. })),
+            "{events:#?}"
+        );
+        let state = niobe_core::session::SessionState::replay(&events);
+        assert!(state.running_agents().is_empty(), "{events:#?}");
+        assert!(session.next().is_some());
+    }
+
+    /// A turn that launches two sub-agents in the background, the second of
+    /// which reports its end before the turn does.
+    #[cfg(unix)]
+    const TWO_BACKGROUND_AGENTS: &str = r#"printf '%s\n' '{"type":"system","subtype":"init","session_id":"s-9","model":"claude-sonnet-5","permissionMode":"default"}' '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_bg","name":"Agent","input":{"subagent_type":"deep-reasoner","description":"Review catalog/fetch.py","prompt":"Review it."}},{"type":"tool_use","id":"toolu_done","name":"Agent","input":{"subagent_type":"deep-reasoner","description":"Check the docs","prompt":"Check them."}}]}}' '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_bg","content":[{"type":"text","text":"Async agent launched successfully."}]},{"type":"tool_result","tool_use_id":"toolu_done","content":[{"type":"text","text":"Async agent launched successfully."}]}]},"tool_use_result":{"isAsync":true,"status":"async_launched","agentId":"a1","description":"Review"}}' '{"type":"system","subtype":"task_notification","tool_use_id":"toolu_done","status":"completed","summary":"The docs are right."}' '{"type":"result","subtype":"success","is_error":false,"session_id":"s-9"}'"#;
+
+    /// An agent that exited before the stop is not cancelled by it as well:
+    /// its exit was already reported, and a second one would be counted
+    /// against the agents' figures.
+    #[cfg(unix)]
+    #[test]
+    fn an_agent_that_exited_before_the_stop_is_not_cancelled_by_it() {
+        let (mut session, mut events, _dir) = carried_on(
+            &format!("read -r initialize\nread -r turn\n{TWO_BACKGROUND_AGENTS}\nkill -TERM $$\n"),
+            true,
+        );
+        events.extend(drained_to_the_end(&mut session));
+
+        let exits: Vec<(String, AgentOutcome)> = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::AgentExit { id, outcome } => Some((id.to_string(), *outcome)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            exits,
+            [
+                ("toolu_done".to_owned(), AgentOutcome::Completed),
+                ("toolu_bg".to_owned(), AgentOutcome::Cancelled),
+            ],
+            "{events:#?}"
+        );
+    }
+
+    /// Where the session ends instead of carrying on, its end says for itself
+    /// that nothing it ran is running: no exit is made up for an agent.
+    #[cfg(unix)]
+    #[test]
+    fn a_cli_that_ends_the_session_cancels_no_agent_in_its_name() {
+        let (mut session, mut events, _dir) = carried_on(
+            &format!("read -r initialize\nread -r turn\n{BACKGROUND_AGENT}\nkill -TERM $$\n"),
+            false,
+        );
+        events.extend(drained_to_the_end(&mut session));
+
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Event::AgentExit { .. })),
+            "{events:#?}"
+        );
+        assert!(session.next().is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_cli_that_fails_between_turns_without_a_signal_still_ends_the_session() {
+        let (session, events) = stopped_between_turns("echo broke >&2\nexit 1");
+
+        assert!(
+            matches!(events.last(), Some(Event::Error { fatal: true, message })
+                if message == "the `claude` session ended with exit status: 1: broke"),
+            "{events:#?}"
+        );
+        assert!(session.next().is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_cli_stopped_while_a_turn_runs_ends_the_session_and_names_the_signal() {
+        let (session, events, _dir) =
+            carried_on("read -r initialize\nread -r turn\nexit 143\n", true);
+
+        assert!(
+            matches!(events.last(), Some(Event::Error { fatal: true, message })
+                if message == "the `claude` session was stopped by SIGTERM (exit status 143) and said nothing."),
+            "{events:#?}"
+        );
+        assert!(session.next().is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_stop_between_turns_ends_the_session_where_nothing_will_start_it_again() {
+        let (mut session, mut events, _dir) = carried_on(
+            &format!("read -r initialize\nread -r turn\n{ONE_TURN}\nexit 143\n"),
+            false,
+        );
+        events.extend(drained_to_the_end(&mut session));
+
+        assert!(
+            matches!(events.last(), Some(Event::Error { fatal: true, message })
+                if message == "the `claude` session was stopped by SIGTERM (exit status 143) and said nothing."),
+            "{events:#?}"
+        );
+        assert!(session.next().is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_model_the_cli_refused_is_not_the_one_it_is_started_again_on() {
+        let refused = r#"printf '%s\n' '{"type":"control_response","response":{"subtype":"error","request_id":"niobe-2","error":"model refuse is not available"}}'"#;
+        let (mut session, _, _dir) = carried_on(
+            &format!(
+                "read -r initialize\nread -r turn\n{ONE_TURN}\nread -r model\n{refused}\nexit 143\n"
+            ),
+            true,
+        );
+        session.set_model("refuse").expect("the request is queued");
+        let events = drained_to_the_end(&mut session);
+
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, Event::ModelRefused { .. })),
+            "{events:#?}"
+        );
+        assert_eq!(session.next().expect("it can carry on").model, None);
+    }
+
+    /// Two changes asked for before either is answered, both refused: the
+    /// model to carry on with is the one before either, which the second was
+    /// to go back to only through the first.
+    #[cfg(unix)]
+    #[test]
+    fn two_refused_model_changes_carry_on_with_the_model_before_both() {
+        let refused = |id: &str| {
+            format!(
+                r#"printf '%s\n' '{{"type":"control_response","response":{{"subtype":"error","request_id":"{id}","error":"model is not available"}}}}'"#
+            )
+        };
+        let (mut session, _, _dir) = carried_on(
+            &format!(
+                "read -r initialize\nread -r turn\n{ONE_TURN}\nread -r first\nread -r second\n{}\n{}\nexit 143\n",
+                refused("niobe-2"),
+                refused("niobe-3"),
+            ),
+            true,
+        );
+        session.set_model("bad-one").expect("the request is queued");
+        session.set_model("bad-two").expect("the request is queued");
+        drained_to_the_end(&mut session);
+
+        assert_eq!(session.next().expect("it can carry on").model, None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_refused_model_change_followed_by_one_taken_carries_on_with_the_one_taken() {
+        let refused = r#"printf '%s\n' '{"type":"control_response","response":{"subtype":"error","request_id":"niobe-2","error":"model bad is not available"}}'"#;
+        let taken = r#"printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"niobe-3"}}'"#;
+        let (mut session, _, _dir) = carried_on(
+            &format!(
+                "read -r initialize\nread -r turn\n{ONE_TURN}\nread -r first\nread -r second\n{refused}\n{taken}\nexit 143\n"
+            ),
+            true,
+        );
+        session.set_model("bad").expect("the request is queued");
+        session.set_model("good").expect("the request is queued");
+        let events = drained_to_the_end(&mut session);
+
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, Event::ModelRefused { .. })),
+            "{events:#?}"
+        );
+        assert_eq!(
+            session.next().expect("it can carry on").model.as_deref(),
+            Some("good")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_model_change_refused_after_a_taken_one_carries_on_with_the_one_taken() {
+        let taken = r#"printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"niobe-2"}}'"#;
+        let refused = r#"printf '%s\n' '{"type":"control_response","response":{"subtype":"error","request_id":"niobe-3","error":"model bad is not available"}}'"#;
+        let (mut session, _, _dir) = carried_on(
+            &format!(
+                "read -r initialize\nread -r turn\n{ONE_TURN}\nread -r first\nread -r second\n{taken}\n{refused}\nexit 143\n"
+            ),
+            true,
+        );
+        session.set_model("good").expect("the request is queued");
+        session.set_model("bad").expect("the request is queued");
+        let events = drained_to_the_end(&mut session);
+
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, Event::ModelRefused { .. })),
+            "{events:#?}"
+        );
+        assert_eq!(
+            session.next().expect("it can carry on").model.as_deref(),
+            Some("good")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_exit_status_past_128_is_read_as_the_signal_it_names_and_others_as_they_stand() {
+        use std::os::unix::process::ExitStatusExt;
+        let exited = |code: i32| std::process::ExitStatus::from_raw(code << 8);
+
+        assert_eq!(
+            how_it_ended(exited(143)),
+            "was stopped by SIGTERM (exit status 143)"
+        );
+        assert_eq!(
+            how_it_ended(exited(130)),
+            "was stopped by SIGINT (exit status 130)"
+        );
+        assert_eq!(
+            how_it_ended(std::process::ExitStatus::from_raw(9)),
+            "was stopped by SIGKILL"
+        );
+        assert_eq!(how_it_ended(exited(1)), "ended with exit status: 1");
+        assert_eq!(how_it_ended(exited(200)), "ended with exit status: 200");
     }
 }

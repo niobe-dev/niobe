@@ -1,0 +1,30 @@
+ Niobe  Session  Context  Model  View  Help                            opus-5  claude · default  ○ not attached  13:41
+ ┏━ > add etag support to the catalog fetcher so we stop re-downloading… ━━━┓ ┌──────────────── Usage ────────────────┐
+ ┃    44 +     headers.set("If-None-Match", cached.etag);                   ┃ │ 5h         62% ▓▓▓░░ resets 16:40     │
+ ┃    45 +   }                                                              ┃ │ 7d         18% ▓░░░░ resets Tue 15:00 │
+ ┃    46 +   const res = await fetch(url, { ...init, headers });            ┃ │ ───────────────────────────────────── │
+ ┃    47 +   if (res.status === 304 && cached) return cached.body;          ┃ │ opus-5    100% ▓▓▓▓▓▓▓▓▓▓▓▓   49k     │
+ ┃    48     return res;                                                    ┃ │ cache hit  86% ▓▓▓▓▓▓▓▓▓▓░░   40k     │
+ ┃       …                                                                  ┃ │ ───────────────────────────────────── │
+ ┃   115     cache.set(url, {                                               ┃ │ context    13% ▓░░░░░░░░░░ 25k / 200k │
+ ┃   116 +┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ MCP servers ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓────────┘
+ ┃   117  ┃                                                                                                  ┃────────┐
+ ┃   └ all┃  › github       connected      user                                                     2 tools  ┃        █
+ ┃        ┃    notes        connected      project                                                   1 tool  ┃7 −≥259 █
+ ┃ ◆ claud┃    linear       needs sign-in  user                                                    no tools  ┃        █
+ ┃   Rewri┃    remote docs  failed         local                                                   no tools  ┃  +0 −0 │
+ ┃        ┃                                                                                                  ┃        │
+ ┃ ◆ claud┃  Adding, removing or turning a server off and signing in to one are the claude CLI's own: run    ┃149 −12 │
+ ┃   The n┃  `claude` in a terminal and use /mcp there, or `claude mcp --help`. A change reaches the next    ┃+88 −41 │
+ ┃        ┃  session. Its servers are configured in ~/.claude.json, the user's and each project's own, and   ┃ +31 −9 │
+ ┃ ✗ Bash ┃  in the repository's .mcp.json.                                                                  ┃ +12 −0 │
+ ┃   └ 1 f┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ ↑↓ choose · Enter detail · Esc close ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛────────┘
+ ┃                                                                          █ ┌────────────── Activity ───────────────┐
+ ┃ ◆ claude                                                                 █ │ ▾ Sub-agents  1 running · 1 failed    █
+ ┃   Etags cached in the LRU; 304s short-circuit. One test still red — the  █ │ ◆ test Cover tests/fet… sonnet 1m 42s █
+ ┃   304 path asserts a body that is no longer sent.                        █ │   └ Reading tests/stream.rs           █
+ ┃                                                                          █ │ ▾ Decisions, as the agent says  0     │
+ ┃ ──────────────────────────────────────────────────────────────────────── ┃ │   none stated yet                     │
+ ┃  ask  >  Ask for a change · @ file · Ctrl+F find          Ctrl+J newline ┃ │ ▾ Tools  8 calls ✗ 2 · 0 denied       │
+ ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ └───────────────────────────────────────┘
+EscStop 1Help     2Compact     3Clear     4Model     5Diff     6Rewind     7MCP     8Memory     9Settings     0Quit

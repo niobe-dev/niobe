@@ -28,19 +28,30 @@ mod common;
 use std::path::PathBuf;
 
 use common::{
-    at_work, metered_session, paint, running_session, screen, session_with_a_long_write,
-    session_with_a_markdown_reply, session_with_a_tab_indented_reply, session_with_finished_turns,
-    session_with_test_records, session_with_test_runs, session_with_two_agents_at_work, style_at,
-    styles, unmetered_session,
+    at_work, metered_session, paint, running_session, screen, session_whose_turn_total_differs,
+    session_with_a_long_write, session_with_a_markdown_reply, session_with_a_tab_indented_reply,
+    session_with_finished_turns, session_with_test_records, session_with_two_agents_at_work,
+    style_at, styles, styles_at, svg, unmetered_session,
 };
 use niobe_core::event::{
-    AgentId, Backend, Event, Mode, PermissionDecision, Usage, UsageWindow, UsageWindows,
+    AgentId, Backend, CompactTrigger, Event, Mode, PermissionDecision, Usage, UsageWindow,
+    UsageWindows,
 };
-use niobe_core::{FailedTests, TestCounts, TestRunRecord};
+use niobe_core::{Action, FailedTests, Proposal, TestCounts, TestRunRecord};
 use niobe_tui::app::{App, Pane, Repo, Section, SelectedProfile};
 use niobe_tui::theme::{CLASSIC, CYBER, Depth, MODERN, NEO, THEMES, Theme};
-use niobe_tui::ui;
 use ratatui::style::{Color, Style};
+
+/// What the bridge reads a shell call's arguments as: the command, and no
+/// other argument.
+fn ran(command: &str) -> Option<Proposal> {
+    Some(Proposal::new(
+        Action::Command {
+            command: command.to_owned(),
+        },
+        ["command"],
+    ))
+}
 
 /// The same session, stopped on a permission prompt it is waiting on.
 ///
@@ -56,6 +67,8 @@ pub fn session_waiting_on_a_prompt() -> App {
         tool: "Read".to_owned(),
         input: r#"{"file_path":"/repo/notes.txt"}"#.to_owned(),
         target: Some("/repo/notes.txt".to_owned()),
+        proposal: None,
+        reason: None,
         agent: None,
     });
     app
@@ -103,7 +116,7 @@ fn assert_snapshot(name: &str, screen: &str) {
     let path = snapshot_path(name);
     let screen = format!("{screen}\n");
 
-    if std::env::var_os("UPDATE_SNAPSHOTS").is_some() {
+    if niobe_tui::snapshots::updating().unwrap_or_else(|refused| panic!("{refused}")) {
         std::fs::write(&path, &screen).expect("the snapshot directory is committed");
         return;
     }
@@ -132,6 +145,98 @@ fn every_theme_paints_the_shell_at_both_sizes() {
             assert_snapshot(
                 &format!("{name}-{width}x{height}"),
                 &paint(&mut running_session().with_theme(theme), width, height),
+            );
+        }
+    }
+}
+
+/// The pictures the README shows, one per theme at 120x30, each drawn as a
+/// terminal draws it: the designed themes in 24-bit colour, `classic` in the
+/// sixteen names. Written by the harness rather than captured, so the front
+/// page cannot show a shell the code no longer draws; regenerated with the
+/// other pictures by `UPDATE_SNAPSHOTS=1`.
+#[test]
+fn every_theme_has_the_picture_the_readme_shows() {
+    for theme in THEMES {
+        let name = theme.name.to_lowercase();
+        let depth = match theme.name {
+            "CLASSIC" => Depth::Sixteen,
+            _ => Depth::TrueColour,
+        };
+        let picture = svg(
+            &mut running_session().with_depth(depth).with_theme(theme),
+            120,
+            30,
+        );
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/snapshots")
+            .join(format!("{name}-120x30.svg"));
+        if niobe_tui::snapshots::updating().unwrap_or_else(|refused| panic!("{refused}")) {
+            std::fs::write(&path, &picture).expect("the snapshot directory is committed");
+            continue;
+        }
+        let expected = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+            panic!(
+                "no picture at {}: {e}\nrun `UPDATE_SNAPSHOTS=1 cargo test` to write one",
+                path.display()
+            )
+        });
+        assert!(
+            picture == expected,
+            "the README's picture {} no longer shows what the shell draws; look at it and, \
+             if it is right, run `UPDATE_SNAPSHOTS=1 cargo test`",
+            path.display()
+        );
+    }
+}
+
+/// What the agent says reads brighter than what it ran: in every theme and
+/// at every depth, what a call does is drawn in the dim colour, the reply in
+/// the body text's, and the operator's prompt in their own colour, so the
+/// three are told apart at a glance.
+#[test]
+fn every_theme_draws_the_calls_dimmer_than_the_reply_and_the_prompt_apart() {
+    for theme in THEMES {
+        for depth in [Depth::Sixteen, Depth::TrueColour] {
+            let palette = theme.at(depth);
+            let mut app = running_session().with_depth(depth).with_theme(theme);
+            let fg = |style: Option<ratatui::style::Style>| style.and_then(|style| style.fg);
+            let name = palette.name;
+            assert_eq!(
+                fg(style_at(&mut app, 200, 60, "Reading catalog/fetch.ts")),
+                Some(palette.fg),
+                "{name} at {depth:?}: the reply"
+            );
+            assert_eq!(
+                fg(style_at(
+                    &mut app,
+                    200,
+                    60,
+                    "catalog/fetch.ts, catalog/cache.ts"
+                )),
+                Some(palette.dim),
+                "{name} at {depth:?}: what a group of calls does"
+            );
+            assert_eq!(
+                fg(style_at(&mut app, 200, 60, "catalog/fetch.ts    ")),
+                Some(palette.dim),
+                "{name} at {depth:?}: what one call of the group does"
+            );
+            assert_eq!(
+                fg(style_at(&mut app, 200, 60, "npm test  ")),
+                Some(palette.dim),
+                "{name} at {depth:?}: the program a failed call ran"
+            );
+            assert_eq!(
+                fg(style_at(&mut app, 200, 60, "✗ Bash")),
+                Some(palette.del),
+                "{name} at {depth:?}: a failed call keeps its failure colour"
+            );
+            let prompt = styles_at(&mut app, 200, 60, "add etag support");
+            assert_eq!(
+                fg(prompt.last().copied()),
+                Some(palette.user),
+                "{name} at {depth:?}: the prompt, under the pane's title that repeats it"
             );
         }
     }
@@ -220,13 +325,13 @@ impl niobe_tui::Prices for ATenthOfACentPerThousand {
 /// reads `unpriced`; with one it reads the estimate, marked as one.
 #[test]
 fn a_price_sheet_puts_a_running_figure_in_the_cost_pane() {
-    let without = screen(&mut running_session(), 120, 40);
+    let without = screen(&mut metered_session(), 120, 40);
     assert!(
         without.contains("≥$0.04"),
         "with nothing to value the rest, the figure is a floor:\n{without}"
     );
 
-    let mut priced = running_session().with_prices(Box::new(ATenthOfACentPerThousand));
+    let mut priced = metered_session().with_prices(Box::new(ATenthOfACentPerThousand));
     let totals = priced.session().totals().clone();
     let owed: u64 = totals
         .unsettled
@@ -236,9 +341,9 @@ fn a_price_sheet_puts_a_running_figure_in_the_cost_pane() {
     let expected = totals.reported_cost_usd + owed as f64 / 1_000.0 * 0.001;
 
     let frame = screen(&mut priced, 120, 40);
-    // 27,220 tokens owed for, at a tenth of a cent per thousand, is $0.02722
-    // on top of the $0.04 the recording reported: $0.06722, to the cent.
-    assert_eq!(owed, 27_220);
+    // 30,420 tokens owed for, at a tenth of a cent per thousand, is $0.03042
+    // on top of the $0.04 the recording reported: $0.07042, to the cent.
+    assert_eq!(owed, 30_420);
     assert_eq!(
         format!("~${expected:.2}"),
         "~$0.07",
@@ -277,25 +382,166 @@ fn a_finished_turn_is_ruled_off_with_what_it_spent() {
     assert_snapshot("turns-80x24", &frame);
 }
 
-/// Two sub-agents at work at once: each of their calls is named for the
-/// agent that made it, two agents' calls to one tool stay two rows, and what
-/// an agent says is drawn under its own name rather than as the session's.
+/// A conversation started over is a new session: the frame after the clear
+/// holds nothing of what came before it — the transcript, the turn numbers,
+/// the title, the error count, the model rows — and the plan's windows stay.
+#[test]
+fn a_cleared_conversation_is_drawn_as_a_new_session() {
+    let usage = |model: &str| {
+        Event::Usage(Usage {
+            input: 500,
+            output: 100,
+            cache_read: 0,
+            cache_write: 0,
+            cache_write_1h: Some(0),
+            reasoning: 0,
+            model: model.to_owned(),
+            cost_usd: None,
+            settles_model: Some(false),
+            fast: false,
+        })
+    };
+    let mut app = session_with_finished_turns();
+    for event in [
+        Event::Titled {
+            title: "Cached manifests".to_owned(),
+        },
+        Event::Error {
+            message: "rate limited".to_owned(),
+            fatal: false,
+        },
+        usage("haiku-4-5"),
+    ] {
+        app.apply(&event);
+    }
+    let before = screen(&mut app, 120, 30);
+    assert!(before.contains("Cached manifests"), "{before}");
+    assert!(before.contains("haiku-4-5"), "{before}");
+    assert!(before.contains("1 error"), "{before}");
+
+    app.apply(&Event::UserMessage {
+        text: "/clear".to_owned(),
+    });
+    app.apply(&Event::Cleared);
+    app.apply(&Event::TurnEnded);
+    let between = screen(&mut app, 120, 30);
+    assert!(between.contains("no tokens reported yet"), "{between}");
+    assert!(!between.contains("haiku-4-5"), "{between}");
+    assert_snapshot("cleared-before-a-request-120x30", &between);
+
+    for event in [
+        Event::UserMessage {
+            text: "where was I?".to_owned(),
+        },
+        Event::AssistantMessage {
+            text: "A new conversation.".to_owned(),
+            agent: None,
+        },
+        usage("sonnet-5"),
+        Event::TurnEnded,
+    ] {
+        app.apply(&event);
+    }
+    let after = screen(&mut app, 120, 30);
+    assert!(after.contains("turn 1"), "{after}");
+    assert!(!after.contains("turn 2"), "{after}");
+    assert!(!after.contains("Cached manifests"), "{after}");
+    assert!(!after.contains("keep the cached copy"), "{after}");
+    assert!(!after.contains("haiku-4-5"), "{after}");
+    assert!(!after.contains("error"), "{after}");
+    assert!(after.contains("sonnet-5"), "{after}");
+    assert!(after.contains("5h"), "{after}");
+    assert_snapshot("cleared-then-a-turn-120x30", &after);
+}
+
+/// A turn whose CLI total came to more than its messages reported says so
+/// in words in the transcript, with the turn, the time, the CLI's session and
+/// the reply that never said what it finished at under it; and the Usage pane
+/// carries the difference on a row that says where it came from.
+#[test]
+fn a_turn_total_beyond_its_messages_is_a_notice_with_its_detail_and_a_labelled_row() {
+    let frame = screen(&mut session_whose_turn_total_differs(), 200, 60);
+    for shown in [
+        "The CLI counted 120891 tokens for this turn beyond what its messages reported.",
+        "turn 1 · 13:49 · CLI session 506fa4fd-8719-4564-8c62-5c6ae4b1a471",
+        "no final count: msg_011Cfh9DZarQmXXnvywwTKDD (request",
+        "+121k reported by the CLI, not per message",
+    ] {
+        assert!(frame.contains(shown), "{shown} is not on screen:\n{frame}");
+    }
+    assert!(!frame.contains("! error"), "{frame}");
+    assert_snapshot("turn-total-differs-200x60", &frame);
+}
+
+/// Two sub-agents of one kind at work at once: each of their calls is named
+/// by the agent's tag, numbered because the two are of one kind, two agents'
+/// calls to one tool stay two rows, and what an agent says is drawn under its
+/// own tag rather than as the session's.
 #[test]
 fn whose_each_row_is_shows_where_two_agents_calls_interleave() {
     let frame = screen(&mut session_with_two_agents_at_work(), 120, 30);
     for row in [
-        "…fetch.py › catalog/fetch.py",
-        "…cache.py › catalog/cache.py",
-        "…fetch.py › catalog/etag.py",
-        "↳ deep-reasoner: Review cache.py  sub-agent",
+        "deep1 catalog/fetch.py",
+        "deep2 catalog/cache.py",
+        "deep1 catalog/etag.py",
+        "↳ deep2",
     ] {
         assert!(frame.contains(row), "{row} is not on screen:\n{frame}");
     }
     assert_snapshot("agents-120x30", &frame);
 }
 
+/// Grouped by agent from the Activity pane, each agent's rows read top to
+/// bottom under a heading with its tag and task, and the bar says the key
+/// that ungroups them.
+#[test]
+fn grouped_by_agent_each_agents_rows_stand_under_its_heading() {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let mut app = session_with_two_agents_at_work();
+    screen(&mut app, 120, 30);
+    let press = |app: &mut App, code| app.on_key(KeyEvent::new(code, KeyModifiers::NONE));
+    press(&mut app, KeyCode::Tab);
+    press(&mut app, KeyCode::Tab);
+    // The bar has room for the pane's keys at full width.
+    let focused = screen(&mut app, 200, 60);
+    assert!(focused.contains("a groups by agent"), "{focused}");
+
+    press(&mut app, KeyCode::Char('a'));
+    assert!(screen(&mut app, 200, 60).contains("a ungroups"));
+    let frame = screen(&mut app, 120, 30);
+    for row in ["▾ deep1", "▾ deep2"] {
+        assert!(frame.contains(row), "{row} is not on screen:\n{frame}");
+    }
+    let heading = frame
+        .lines()
+        .position(|line| line.contains("▾ deep1"))
+        .expect("the heading is drawn");
+    // Everything the first agent did and said stands under its heading, in
+    // the order it happened, and nothing of the second's does.
+    let under: Vec<&str> = frame
+        .lines()
+        .skip(heading + 1)
+        .take_while(|line| !line.contains("▾ deep2"))
+        .collect();
+    let at = |needle: &str| under.iter().position(|line| line.contains(needle));
+    let (fetch, said, etag) = (
+        at("catalog/fetch.py"),
+        at("never compared on the 304 path"),
+        at("catalog/etag.py"),
+    );
+    assert!(
+        fetch.is_some() && fetch < said && said < etag,
+        "the first agent's rows are not together under it:\n{frame}"
+    );
+    assert!(
+        at("catalog/cache.py").is_none() && at("eviction").is_none(),
+        "the second agent's rows are under the first's heading:\n{frame}"
+    );
+    assert_snapshot("agents-grouped-120x30", &frame);
+}
+
 /// A reviewer's call refused and the other reviewer's waiting: the refusal
-/// and the question each say which agent asked, by the name its calls' rows
+/// and the question each say which agent asked, by the tag its calls' rows
 /// give it, rather than reading as the session's own.
 #[test]
 fn a_sub_agents_question_and_its_refusal_say_which_agent_asked() {
@@ -305,6 +551,8 @@ fn a_sub_agents_question_and_its_refusal_say_which_agent_asked() {
         tool: "Bash".to_owned(),
         input: format!(r#"{{"command":"{command}"}}"#),
         target: Some(command.to_owned()),
+        proposal: ran(command),
+        reason: None,
         agent: Some(AgentId::new(agent)),
     };
     app.apply(&asked("f3", "curl -sI localhost:8080", "toolu_fetch"));
@@ -317,13 +565,127 @@ fn a_sub_agents_question_and_its_refusal_say_which_agent_asked() {
 
     let frame = screen(&mut app, 120, 30);
     for row in [
-        "! denied  …fetch.py › Bash · curl -sI localhost:8080",
-        "? …cache.py asks",
+        "! denied  deep1 › Bash · curl -sI localhost:8080",
+        "? deep2 asks",
     ] {
         assert!(frame.contains(row), "{row} is not on screen:\n{frame}");
     }
     assert!(!frame.contains("? claude asks"), "{frame}");
     assert_snapshot("agents-asking-120x30", &frame);
+}
+
+/// The CLI stops on a command it could not check, and says so: the question
+/// carries that under the tool's name, where without it the command would
+/// read as any other.
+#[test]
+fn a_question_says_why_the_backend_asked() {
+    let mut app = running_session();
+    let command = "grep -rn \"cache\" . ; python3 -c '\n# x\nprint(1)'";
+    app.apply(&Event::PermissionRequest {
+        id: "why".into(),
+        tool: "Bash".to_owned(),
+        input: format!(r#"{{"command":{}}}"#, serde_json::json!(command)),
+        target: Some(command.to_owned()),
+        proposal: ran(command),
+        reason: Some(
+            "Newline followed by # inside a quoted argument can hide arguments from path \
+             validation"
+                .to_owned(),
+        ),
+        agent: None,
+    });
+
+    let frame = screen(&mut app, 100, 30);
+    assert!(
+        frame.contains("asked because: Newline followed by #"),
+        "{frame}"
+    );
+    assert_snapshot("asking-with-a-reason-100x30", &frame);
+}
+
+/// What is approved is the text as written: a path with two spaces in it is
+/// another file than one with one, and a pattern's runs of spaces are part of
+/// the pattern. The target is drawn once, and the arguments by key beside it
+/// keep what they hold.
+#[test]
+fn a_targeted_question_draws_its_target_once_and_every_space_of_its_arguments() {
+    let mut app = running_session();
+    app.apply(&Event::PermissionRequest {
+        id: "spaced".into(),
+        tool: "Grep".to_owned(),
+        input: serde_json::json!({
+            "path": "/repo/a  b.txt",
+            "pattern": "fn  main\\(\\)    \\{",
+            "glob": "*.rs",
+        })
+        .to_string(),
+        target: Some("/repo/a  b.txt".to_owned()),
+        proposal: None,
+        reason: None,
+        agent: None,
+    });
+
+    let frame = screen(&mut app, 120, 40);
+    let rows = question_rows(&frame);
+
+    let target = rows
+        .iter()
+        .filter(|row| row.contains("/repo/a  b.txt") && !row.contains("niobe saves"))
+        .count();
+    assert_eq!(target, 1, "the target once, spaces kept:\n{frame}");
+    assert!(
+        rows.iter()
+            .any(|row| row == "pattern: fn  main\\(\\)    \\{"),
+        "the pattern's runs of spaces are kept:\n{frame}"
+    );
+    assert!(
+        rows.iter().all(|row| !row.starts_with("path:")),
+        "the key that holds the target is not said again:\n{frame}"
+    );
+}
+
+/// A refused command of several lines, drawn on its one row, keeps its
+/// lines apart: `set -e` and `cd /tmp` joined would read as another command.
+#[test]
+fn a_denied_command_of_several_lines_keeps_its_lines_apart_on_its_row() {
+    let mut app = running_session();
+    let command = "set -e\ncd /tmp\necho step 0";
+    app.apply(&Event::PermissionRequest {
+        id: "multi".into(),
+        tool: "Bash".to_owned(),
+        input: r#"{"command":"set -e\ncd /tmp\necho step 0"}"#.to_owned(),
+        target: Some(command.to_owned()),
+        proposal: ran(command),
+        reason: None,
+        agent: None,
+    });
+    app.apply(&Event::PermissionResponse {
+        id: "multi".into(),
+        decision: PermissionDecision::Deny,
+        message: None,
+    });
+
+    let frame = screen(&mut app, 120, 30);
+    assert!(
+        frame.contains("! denied  Bash · set -e ↵ cd /tmp ↵ echo step 0"),
+        "{frame}"
+    );
+    assert_snapshot("denied-multiline-120x30", &frame);
+}
+
+/// A shell call's row names the programs it ran, and Ctrl+T draws the whole
+/// command under it, where the operator who wants the exact text finds it.
+#[test]
+fn a_shell_calls_row_names_its_programs_and_ctrl_t_draws_its_whole_command() {
+    let mut app = running_session();
+    let closed = screen(&mut app, 120, 30);
+    assert!(closed.contains("✗ Bash           npm test "), "{closed}");
+    assert!(!closed.contains("npm test -- fetch"), "{closed}");
+
+    app.open_diffs();
+    let open = screen(&mut app, 120, 30);
+    assert!(open.contains("$ npm test -- fetch"), "{open}");
+    assert_snapshot("command-open-120x30", &open);
 }
 
 #[test]
@@ -361,7 +723,7 @@ fn first_row_with(frame: &str, marker: &str) -> Option<(usize, String)> {
 }
 
 /// The screen row the transcript's first line is drawn on at 120×40.
-const TRANSCRIPT_TOP: usize = 3;
+const TRANSCRIPT_TOP: usize = 2;
 
 /// The long write, opened, with a reply under it long enough to scroll back
 /// through without the diff coming into view.
@@ -545,6 +907,31 @@ fn a_theme_moves_no_character_on_screen_but_the_focus_line() {
     }
 }
 
+/// A reset the backend timed past what the clock can hold is a window with
+/// no reset to name, not a shell that panics drawing it.
+#[test]
+fn a_window_resetting_past_what_the_clock_holds_is_drawn_without_its_reset() {
+    let mut app = running_session();
+    app.apply(&Event::UsageWindows(UsageWindows {
+        five_hour: Some(UsageWindow {
+            utilization: 0.5,
+            resets_at: Some(u64::MAX),
+        }),
+        seven_day: None,
+        using_overage: false,
+        overage: niobe_core::event::Overage::Unreported,
+    }));
+
+    let frame = screen(&mut app, 200, 60);
+
+    let row = frame
+        .lines()
+        .find(|row| row.contains("5h "))
+        .expect("the five-hour window is drawn");
+    assert!(row.contains("50%"), "{row}");
+    assert!(!row.contains("resets"), "{row}");
+}
+
 #[test]
 fn the_shell_renders_at_eighty_by_twentyfour() {
     assert_snapshot("running-80x24", &screen(&mut running_session(), 80, 24));
@@ -561,6 +948,20 @@ fn an_empty_session_renders_at_both_sizes() {
     assert_snapshot("empty-120x30", &screen(&mut empty_session(), 120, 30));
 }
 
+/// A session with a backend attached and nothing asked yet: every side pane
+/// says what will appear in it, and the plan's windows are drawn waiting for
+/// the first reply rather than left out.
+#[test]
+fn a_fresh_attached_session_draws_every_side_pane_with_what_will_appear_there() {
+    let mut app = empty_session().attached();
+    let frame = screen(&mut app, 120, 30);
+
+    assert!(frame.contains("reported with the first reply"), "{frame}");
+    assert!(frame.contains("none spawned"), "{frame}");
+    assert!(frame.contains("none called"), "{frame}");
+    assert_snapshot("fresh-120x30", &frame);
+}
+
 #[test]
 fn a_recorded_prompt_puts_the_question_in_the_transcript_at_both_sizes() {
     assert_snapshot(
@@ -573,12 +974,207 @@ fn a_recorded_prompt_puts_the_question_in_the_transcript_at_both_sizes() {
     );
 }
 
+/// The question stands off the transcript the way a dialog stands off the
+/// panes: the two columns right of its frame, from its second row down, and
+/// the row under it, from its third column on, are its shadow, in every
+/// theme, drawn as a dialog's is: in the shadow's colours, over the
+/// transcript's own characters, with no shading glyph laid over a blank.
+#[test]
+fn the_question_casts_a_shadow_on_the_transcript() {
+    for theme in THEMES {
+        let mut app = session_waiting_on_a_prompt()
+            .with_depth(Depth::Sixteen)
+            .with_theme(theme);
+        let (width, height) = (80, 24);
+        let frame = screen(&mut app, width, height);
+        let cells = styles(&mut app, width, height);
+        let rows: Vec<Vec<char>> = frame.lines().map(|row| row.chars().collect()).collect();
+        let find = |corner: char| {
+            rows.iter()
+                .enumerate()
+                .find_map(|(y, row)| row.iter().position(|&c| c == corner).map(|x| (x, y)))
+        };
+        let (left, top) = find('┌').expect("the question's top-left corner is on screen");
+        let (right, bottom) = find('┘').expect("the question's bottom-right corner is on screen");
+
+        let mut shadow = Vec::new();
+        for y in top + 1..=bottom + 1 {
+            shadow.extend([(right + 1, y), (right + 2, y)]);
+        }
+        shadow.extend((left + 2..=right).map(|x| (x, bottom + 1)));
+        for (x, y) in shadow {
+            let style = cells[y * usize::from(width) + x];
+            assert_eq!(
+                (style.bg, style.fg),
+                (Some(theme.shadow), Some(theme.shadow_fg)),
+                "{}: no shadow at column {x}, row {y}:\n{frame}",
+                theme.name
+            );
+            assert_ne!(
+                rows[y].get(x),
+                Some(&'░'),
+                "{}: the shadow hides what is under it at column {x}, row {y}:\n{frame}",
+                theme.name
+            );
+        }
+    }
+}
+
+/// A session waiting on a `Bash` call whose command is sixty-two lines long,
+/// more than any pane these tests draw has rows for.
+fn session_waiting_on_a_long_command() -> App {
+    let mut app = running_session();
+    let mut command = String::from("set -e\ncd /tmp\n");
+    for step in 1..=59 {
+        command.push_str(&format!("echo step {step} && \\\n"));
+    }
+    command.push_str("rm -rf ~/important");
+    app.apply(&Event::PermissionRequest {
+        id: "toolu_long_command".into(),
+        tool: "Bash".to_owned(),
+        input: format!(
+            r#"{{"command":"{}"}}"#,
+            command.replace('\\', "\\\\").replace('\n', "\\n")
+        ),
+        proposal: ran(&command),
+        target: Some(command),
+        reason: None,
+        agent: None,
+    });
+    app
+}
+
+/// What is asked, where the call starts and every answer are on screen for a
+/// prompt taller than the pane, and the rows cut from it say so.
+fn assert_a_tall_question_fits(frame: &str) {
+    let rows = question_rows(frame);
+    assert!(frame.contains("? claude asks"), "{frame}");
+    assert!(rows.iter().any(|row| row == "to run Bash"), "{frame}");
+    assert!(rows.iter().any(|row| row == "set -e"), "{frame}");
+    for option in [
+        "▶ 1. Allow once",
+        "2. Always allow Bash",
+        "3. Always allow this target",
+        "4. Deny",
+    ] {
+        assert!(
+            rows.iter().any(|row| row.starts_with(option)),
+            "`{option}` is not on screen:\n{frame}"
+        );
+    }
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("more lines") && row.contains("Ctrl+T")),
+        "nothing says the call was cut, or how to read it whole:\n{frame}"
+    );
+}
+
+#[test]
+fn a_question_taller_than_the_pane_keeps_what_is_asked_and_its_answers_on_screen() {
+    let small = screen(&mut session_waiting_on_a_long_command(), 80, 24);
+    assert_a_tall_question_fits(&small);
+    assert_snapshot("asking-long-80x24", &small);
+
+    let large = screen(&mut session_waiting_on_a_long_command(), 120, 40);
+    assert_a_tall_question_fits(&large);
+    assert_snapshot("asking-long-120x40", &large);
+}
+
+#[test]
+fn enter_answers_nothing_while_the_top_of_the_question_is_not_drawn() {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = session_waiting_on_a_long_command();
+    app.on_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
+    let frame = screen(&mut app, 80, 24);
+    assert!(
+        !frame.contains("to run Bash"),
+        "the whole call fits:\n{frame}"
+    );
+
+    app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert!(
+        !app.take_produced()
+            .iter()
+            .any(|event| matches!(event, Event::PermissionResponse { .. })),
+        "a call was answered with the question it asks off screen"
+    );
+    assert!(app.asking().is_some());
+}
+
+/// A key read on its own, at `at`.
+fn alone(at: std::time::Instant) -> niobe_tui::app::Arrival {
+    niobe_tui::app::Arrival { at, alone: true }
+}
+
+fn answered(app: &mut App) -> bool {
+    app.take_produced()
+        .iter()
+        .any(|event| matches!(event, Event::PermissionResponse { .. }))
+}
+
+#[test]
+fn a_question_on_a_window_too_small_to_draw_it_takes_no_answer_until_the_window_grows() {
+    use niobe_tui::app::ASK_QUIET;
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use std::time::{Duration, Instant};
+
+    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+    let shown = Instant::now();
+    let mut app = session_waiting_on_a_prompt();
+    app.tick(shown, None);
+    let frame = screen(&mut app, 60, 20);
+    assert!(!frame.contains("claude asks"), "{frame}");
+
+    app.on_key_read(key(KeyCode::Down), alone(shown + ASK_QUIET * 2));
+    app.on_key_read(key(KeyCode::Enter), alone(shown + ASK_QUIET * 4));
+    app.on_key_read(key(KeyCode::Char('2')), alone(shown + ASK_QUIET * 6));
+
+    assert!(!answered(&mut app), "a call was answered off screen");
+    assert!(app.take_rules().is_empty());
+    assert!(app.asking().is_some());
+    let frame = screen(&mut app, 60, 20);
+    assert!(
+        frame.contains("Not taken as an answer: the window is too small"),
+        "{frame}"
+    );
+
+    let grown = shown + Duration::from_secs(10);
+    app.tick(grown, None);
+    let frame = screen(&mut app, 80, 24);
+    assert!(frame.contains("claude asks"), "{frame}");
+    app.on_key_read(key(KeyCode::Enter), alone(grown + ASK_QUIET / 5));
+    assert!(
+        !answered(&mut app),
+        "a key pressed as the question came into view answered it"
+    );
+
+    app.on_key_read(key(KeyCode::Enter), alone(grown + ASK_QUIET * 3));
+    assert!(answered(&mut app), "the question on screen took no answer");
+    assert!(app.asking().is_none());
+}
+
 /// The rows of the question box, with its borders and the pane's taken off.
 fn question_rows(frame: &str) -> Vec<String> {
     frame
         .lines()
         .filter_map(|row| row.split('│').nth(1))
         .map(|row| row.trim().to_owned())
+        .collect()
+}
+
+/// The rows of the question box with its borders and their one-cell margins
+/// taken off, and nothing else: each is the frame's inner width, and its
+/// spaces, leading or trailing, are its own.
+fn question_cells(frame: &str) -> Vec<String> {
+    frame
+        .lines()
+        .filter_map(|row| row.split('│').nth(1))
+        .map(|row| {
+            let row = row.strip_prefix(' ').unwrap_or(row);
+            row.strip_suffix(' ').unwrap_or(row).to_owned()
+        })
         .collect()
 }
 
@@ -593,11 +1189,12 @@ fn the_question_shows_what_would_run_and_every_way_to_answer_it() {
     assert!(frame.contains("blocks turn 1"), "{frame}");
     let rows = question_rows(&frame);
     assert!(rows.iter().any(|row| row == "to run Read"), "{frame}");
-    assert!(rows.iter().any(|row| row == "/repo/notes.txt"), "{frame}");
-    // The whole of the arguments, not a summary of them.
-    assert!(
+    // The target once: the key that holds it is not said again by key.
+    assert_eq!(
         rows.iter()
-            .any(|row| row == r#"{"file_path":"/repo/notes.txt"}"#),
+            .filter(|row| row.contains("/repo/notes.txt") && !row.contains("niobe saves"))
+            .count(),
+        1,
         "{frame}"
     );
     // Numbered, the first selected, each with what choosing it does.
@@ -633,6 +1230,166 @@ fn the_question_shows_what_would_run_and_every_way_to_answer_it() {
     );
 }
 
+/// A session waiting on a call the bridge read as what it would do: its
+/// arguments as the CLI sends them, and the proposal read out of them.
+fn session_asked(tool: &str, input: serde_json::Value, proposal: Proposal) -> App {
+    let mut app = running_session();
+    let target = ["command", "file_path"]
+        .iter()
+        .find_map(|key| input.get(key)?.as_str())
+        .map(str::to_owned);
+    app.apply(&Event::PermissionRequest {
+        id: "toolu_proposed".into(),
+        tool: tool.to_owned(),
+        input: input.to_string(),
+        target,
+        proposal: Some(proposal),
+        reason: None,
+        agent: None,
+    });
+    app
+}
+
+const EDIT_OLD: &str = "    if cached:\n        return cached.body\n    response = get(url)";
+const EDIT_NEW: &str = "    if cached and cached.etag:\n        headers[\"If-None-Match\"] = cached.etag\n    response = get(url, headers=headers)";
+
+fn session_waiting_on_an_edit() -> App {
+    session_asked(
+        "Edit",
+        serde_json::json!({
+            "file_path": "/repo/catalog/fetch.py",
+            "old_string": EDIT_OLD,
+            "new_string": EDIT_NEW,
+            "replace_all": false,
+        }),
+        Proposal::new(
+            Action::Replace {
+                path: "/repo/catalog/fetch.py".to_owned(),
+                old: EDIT_OLD.to_owned(),
+                new: EDIT_NEW.to_owned(),
+                every: false,
+            },
+            ["file_path", "old_string", "new_string", "replace_all"],
+        ),
+    )
+}
+
+#[test]
+fn an_edit_question_shows_the_lines_it_removes_and_adds_and_ctrl_t_what_is_sent() {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    for (width, height) in [(80, 24), (120, 30)] {
+        let mut app = session_waiting_on_an_edit();
+        let frame = screen(&mut app, width, height);
+        let rows = question_rows(&frame);
+        // A pane too short for the whole question cuts the change, as it
+        // cuts any arguments, and keeps what is asked and every answer.
+        let whole = height >= 30;
+        for (row, shown) in [
+            ("/repo/catalog/fetch.py", true),
+            ("-     if cached:", true),
+            ("-         return cached.body", true),
+            ("+     if cached and cached.etag:", true),
+            ("+         headers[\"If-None-Match\"] = cached.etag", whole),
+        ] {
+            assert_eq!(
+                rows.iter().any(|drawn| drawn == row),
+                shown,
+                "{row}:\n{frame}"
+            );
+        }
+        // The count of what is not drawn is the change's lines less the ones
+        // that are, read off the fixture and the frame and not off the code.
+        let changed = EDIT_OLD.lines().count() + EDIT_NEW.lines().count();
+        let drawn = rows
+            .iter()
+            .filter(|row| row.starts_with("- ") || row.starts_with("+ "))
+            .count();
+        let said = format!(
+            "… {} more lines · Ctrl+T shows the whole call",
+            changed - drawn
+        );
+        assert_eq!(rows.contains(&said), !whole, "{said}:\n{frame}");
+        assert!(
+            !rows.iter().any(|row| row.starts_with('{')),
+            "no JSON until Ctrl+T:\n{frame}"
+        );
+        assert_snapshot(&format!("asking-edit-{width}x{height}"), &frame);
+
+        app.on_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
+        let sent = screen(&mut app, width, height);
+        assert!(
+            question_rows(&sent)
+                .iter()
+                .any(|row| row.starts_with(r#"{"file_path":"/repo/catalog/fetch.py""#)),
+            "Ctrl+T shows the arguments as sent:\n{sent}"
+        );
+    }
+}
+
+#[test]
+fn a_write_question_shows_the_lines_written_and_that_what_the_file_held_is_not_in_the_call() {
+    let content = "# Caching\n\nResponses are kept with their etag.\n";
+    for (width, height) in [(80, 24), (120, 30)] {
+        let mut app = session_asked(
+            "Write",
+            serde_json::json!({"file_path": "/repo/docs/caching.md", "content": content}),
+            Proposal::new(
+                Action::Write {
+                    path: "/repo/docs/caching.md".to_owned(),
+                    content: content.to_owned(),
+                    existed: Some(true),
+                },
+                ["file_path", "content"],
+            ),
+        );
+        let frame = screen(&mut app, width, height);
+        let rows = question_rows(&frame);
+        for row in [
+            "/repo/docs/caching.md",
+            "+ # Caching",
+            "+ Responses are kept with their etag.",
+        ] {
+            assert!(rows.iter().any(|drawn| drawn == row), "{row}:\n{frame}");
+        }
+        assert!(frame.contains("what it held is not in the call"), "{frame}");
+        assert!(!rows.iter().any(|row| row.starts_with('-')), "{frame}");
+        assert_snapshot(&format!("asking-write-{width}x{height}"), &frame);
+    }
+}
+
+#[test]
+fn a_bash_question_shows_the_command_once_and_its_description() {
+    for (width, height) in [(80, 24), (120, 30)] {
+        let mut app = session_asked(
+            "Bash",
+            serde_json::json!({"command": "cargo test -p catalog", "description": "Run the catalog tests"}),
+            Proposal::new(
+                Action::Command {
+                    command: "cargo test -p catalog".to_owned(),
+                },
+                ["command"],
+            ),
+        );
+        let frame = screen(&mut app, width, height);
+        let rows = question_rows(&frame);
+        assert_eq!(
+            rows.iter()
+                .filter(|row| row.contains("cargo test -p catalog"))
+                .count(),
+            // The command, and the standing answer that names it.
+            1 + usize::from(frame.contains("Bash(cargo test -p catalog)")),
+            "{frame}"
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row == "description: Run the catalog tests"),
+            "{frame}"
+        );
+        assert_snapshot(&format!("asking-bash-{width}x{height}"), &frame);
+    }
+}
+
 #[test]
 fn the_selected_answer_is_a_solid_bar_as_well_as_a_mark() {
     let mut app = session_waiting_on_a_prompt().with_theme(CLASSIC);
@@ -664,6 +1421,8 @@ fn a_standing_answer_too_long_for_its_column_is_repeated_whole() {
         tool: "mcp__claude_ai_Notion__notion-search".to_owned(),
         input: format!(r#"{{"command":"{command}"}}"#),
         target: Some(command.to_owned()),
+        proposal: None,
+        reason: None,
         agent: None,
     });
     let frame = screen(&mut app, 120, 30);
@@ -674,18 +1433,323 @@ fn a_standing_answer_too_long_for_its_column_is_repeated_whole() {
             .any(|row| row.starts_with("2. Always allow Notion·search")),
         "the tool's option does not name it the way the timeline does:\n{frame}"
     );
-    let rule: String = rows
-        .iter()
+    let rule: String = question_cells(&frame)
+        .into_iter()
         .skip_while(|row| !row.starts_with("3. niobe saves"))
-        .take_while(|row| !row.is_empty())
-        .cloned()
-        .collect::<Vec<_>>()
-        .join(" ");
+        .take_while(|row| !row.trim().is_empty())
+        .collect();
     assert_eq!(
-        rule,
+        rule.trim_end(),
         format!("3. niobe saves mcp__claude_ai_Notion__notion-search({command})"),
         "the rule the operator would save is not shown whole:\n{frame}"
     );
+}
+
+/// A session whose agent edited its own notes twice in a row, after a
+/// reply: what the backend marks as the agent's memory rather than the
+/// project's.
+fn session_that_updated_its_memory() -> App {
+    use niobe_core::event::ChangeScope;
+
+    let mut app = empty_session();
+    app.apply(&Event::AssistantMessage {
+        text: "Noting the sweep's numbering for next time.".to_owned(),
+        agent: None,
+    });
+    let notes = "/home/me/notes/-w-app/memory";
+    for (id, file, line) in [("m1", "sweeps.md", 7), ("m2", "MEMORY.md", 3)] {
+        let path = format!("{notes}/{file}");
+        app.apply(&Event::ToolCallStart {
+            id: id.into(),
+            name: "Edit".to_owned(),
+            input: path.clone(),
+            summary: Some(path.clone()),
+            agent: None,
+        });
+        app.apply(&Event::ToolCallEnd {
+            id: id.into(),
+            name: "Edit".to_owned(),
+            input: path.clone(),
+            output: String::new(),
+            bytes: 120,
+            outcome: niobe_core::event::ToolOutcome::Ok,
+            summary: Some(path.clone()),
+            command: None,
+            untrimmed: None,
+            exit_code: None,
+            error: None,
+        });
+        app.apply(&Event::FileChange {
+            path,
+            added: Some(1),
+            removed: Some(1),
+            hunks: vec![common::hunk(
+                line,
+                line,
+                &["-modified: 2026-10-03", "+modified: 2026-10-04"],
+            )],
+            scope: ChangeScope::AgentMemory,
+        });
+    }
+    app
+}
+
+#[test]
+fn edits_to_the_agents_own_notes_are_one_row_naming_them_and_ctrl_t_shows_the_diff() {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = session_that_updated_its_memory();
+    let frame = screen(&mut app, 120, 30);
+    let rows: Vec<&str> = frame.lines().filter(|row| row.contains("memory")).collect();
+    assert_eq!(rows.len(), 1, "{frame}");
+    assert!(
+        rows[0].contains("updated memory · sweeps.md, MEMORY.md"),
+        "{frame}"
+    );
+    assert!(
+        !frame.contains("modified: 2026"),
+        "a diff is drawn:\n{frame}"
+    );
+    assert!(!frame.contains("/home/me"), "a path is drawn:\n{frame}");
+    assert_snapshot("memory-120x30", &frame);
+
+    app.on_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
+    let open = screen(&mut app, 120, 30);
+    assert_eq!(
+        open.matches("+ modified: 2026-10-04").count(),
+        2,
+        "Ctrl+T does not show the edits:\n{open}"
+    );
+}
+
+/// What an MCP tool that creates a page sends: a parent named by its id, and
+/// one page whose body is markdown with line breaks and a table in it —
+/// arguments the backend names no target in, so the question has only the
+/// arguments to show.
+const PAGE_ARGUMENTS: &str = concat!(
+    r#"{"parent":{"data_source_id":"615238cb-8caf-4c56-a853-7769d8ab7051"},"#,
+    r#""pages":[{"properties":{"Name":"Etag support","Status":"Not started","#,
+    r#""Priority":"High","date:Due:start":"2026-10-04","date:Due:is_datetime":0},"#,
+    r#""content":"**Severity:** High\n## Report\nThe fetcher downloads every manifest again.\n"#,
+    r#"| before | after |\n|---|---|\n| 200 | 304 |\n## Where\n- catalog/fetch.ts"}]}"#
+);
+
+fn session_asked_to_create_a_page() -> App {
+    let mut app = running_session();
+    app.apply(&Event::PermissionRequest {
+        id: "toolu_page".into(),
+        tool: "mcp__claude_ai_Notion__notion-create-pages".to_owned(),
+        input: PAGE_ARGUMENTS.to_owned(),
+        target: None,
+        proposal: None,
+        reason: None,
+        agent: None,
+    });
+    app
+}
+
+/// The rows of a question between what it asks and its answers: the call.
+fn call_rows(frame: &str) -> Vec<String> {
+    question_cells(frame)
+        .into_iter()
+        .skip_while(|row| !row.starts_with("to run "))
+        .skip(1)
+        .take_while(|row| !row.contains("1. Allow once"))
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .skip_while(|row| row.trim().is_empty())
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect()
+}
+
+#[test]
+fn a_tool_with_no_target_is_asked_about_by_its_arguments_laid_out_by_key() {
+    let frame = screen(&mut session_asked_to_create_a_page(), 100, 60);
+    let rows = question_rows(&frame);
+    let call = call_rows(&frame);
+
+    for raw in ["{", "\\\"", "\\n", "\""] {
+        assert!(
+            !call.iter().any(|row| row.contains(raw)),
+            "`{raw}` is drawn: the arguments are shown as their JSON:\n{frame}"
+        );
+    }
+    assert!(
+        rows.iter().any(|row| row == "to run Notion·create-pages"),
+        "{frame}"
+    );
+    let indent = |text: &str| {
+        call.iter()
+            .find(|row| row.trim_start().starts_with(text))
+            .map(|row| row.len() - row.trim_start().len())
+            .unwrap_or_else(|| panic!("`{text}` is not drawn:\n{frame}"))
+    };
+    assert_eq!(indent("pages: 1 item"), 0, "{frame}");
+    // The page's body as the lines it is, under its key.
+    assert!(indent("content:") > indent("pages: 1 item"), "{frame}");
+    assert!(indent("**Severity:** High") > indent("content:"), "{frame}");
+    assert!(indent("## Report") > indent("content:"), "{frame}");
+    // And its properties under the page, one to a row.
+    assert!(indent("properties:") > indent("pages: 1 item"), "{frame}");
+    assert!(
+        indent("Status: Not started") > indent("properties:"),
+        "{frame}"
+    );
+    assert!(
+        indent("Name: Etag support") > indent("properties:"),
+        "{frame}"
+    );
+}
+
+#[test]
+fn a_tool_with_no_target_is_asked_about_in_a_few_rows_and_ctrl_t_shows_what_is_sent() {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = session_asked_to_create_a_page();
+    let frame = screen(&mut app, 100, 60);
+    let call = call_rows(&frame);
+    assert!(call.len() <= 14, "{} rows:\n{frame}", call.len());
+    assert!(
+        call.last()
+            .is_some_and(|row| row.contains("more lines") && row.contains("Ctrl+T")),
+        "nothing says the arguments were cut, or how to read them whole:\n{frame}"
+    );
+
+    app.on_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
+    let open = screen(&mut app, 100, 60);
+    assert_eq!(
+        call_rows(&open).concat().trim_end(),
+        PAGE_ARGUMENTS,
+        "Ctrl+T does not show the arguments as they are sent:\n{open}"
+    );
+}
+
+#[test]
+fn a_standing_answer_for_a_tool_with_no_target_says_what_it_keeps_in_words() {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = session_asked_to_create_a_page();
+    let frame = screen(&mut app, 120, 60);
+    let rows = question_rows(&frame);
+    let always = rows
+        .iter()
+        .find(|row| row.starts_with("2. Always allow Notion·create-pages"))
+        .unwrap_or_else(|| panic!("no standing answer for the tool:\n{frame}"));
+    assert!(
+        always.ends_with("saved in this repo's config"),
+        "`{always}` does not say what is kept and where:\n{frame}"
+    );
+    assert!(
+        !rows.iter().any(|row| row.contains("mcp__")),
+        "the rule's own spelling is said without being asked for:\n{frame}"
+    );
+    assert!(
+        !rows.iter().any(|row| row.starts_with("2. saved")),
+        "a consequence that fits on its row is said again under the answers:\n{frame}"
+    );
+
+    app.on_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
+    let open = screen(&mut app, 120, 60);
+    assert!(
+        question_cells(&open).iter().any(
+            |row| row.trim_end() == "2. niobe saves mcp__claude_ai_Notion__notion-create-pages"
+        ),
+        "Ctrl+T does not show the rule as it is kept:\n{open}"
+    );
+}
+
+#[test]
+fn a_question_about_a_tool_with_no_target_is_drawn_as_its_picture() {
+    assert_snapshot(
+        "asking-mcp-100x40",
+        &screen(&mut session_asked_to_create_a_page(), 100, 40),
+    );
+}
+
+/// Every row of the question box between its top and bottom borders has its
+/// right border in the column the top border's `┐` is in.
+fn assert_the_question_box_holds(frame: &str) {
+    let rows: Vec<Vec<char>> = frame.lines().map(|row| row.chars().collect()).collect();
+    let top = rows
+        .iter()
+        .position(|row| row.iter().collect::<String>().contains("? claude asks"))
+        .unwrap_or_else(|| panic!("no question is drawn:\n{frame}"));
+    let column = rows[top]
+        .iter()
+        .position(|&cell| cell == '┐')
+        .unwrap_or_else(|| panic!("the question's top border has no corner:\n{frame}"));
+    let bottom = (top..rows.len())
+        .find(|&at| rows[at].get(column) == Some(&'┘'))
+        .unwrap_or_else(|| panic!("the question's bottom border is not under its top:\n{frame}"));
+    for (at, row) in rows.iter().enumerate().take(bottom).skip(top + 1) {
+        assert_eq!(
+            row.get(column),
+            Some(&'│'),
+            "row {at} breaks the question's right border:\n{frame}"
+        );
+    }
+}
+
+#[test]
+fn a_long_mcp_tool_name_keeps_the_questions_border_and_reads_whole() {
+    let name = "create_pull_request_review_comment_reply_with_a_suggested_change";
+    let label = format!("github·{name}");
+    assert!(label.chars().count() >= 64);
+    for (width, height) in [(80, 24), (100, 40)] {
+        let mut app = running_session();
+        app.apply(&Event::PermissionRequest {
+            id: "toolu_long_name".into(),
+            tool: format!("mcp__github__{name}"),
+            input: r#"{"body":"looks good"}"#.to_owned(),
+            target: None,
+            proposal: None,
+            reason: None,
+            agent: None,
+        });
+        let frame = screen(&mut app, width, height);
+        assert_the_question_box_holds(&frame);
+        let head: String = question_cells(&frame)
+            .into_iter()
+            .skip_while(|row| !row.starts_with("to run "))
+            .take_while(|row| !row.trim().is_empty() && !row.contains("body"))
+            .map(|row| row.trim_end().to_owned())
+            .collect();
+        assert_eq!(
+            head,
+            format!("to run {label}"),
+            "{width}x{height}:\n{frame}"
+        );
+    }
+}
+
+#[test]
+fn a_control_character_in_a_question_does_not_move_its_border() {
+    for (target, input) in [
+        (None, "{\"cmd\":\"\u{1b}[31mred\u{1b}[0m\"}".to_owned()),
+        (
+            Some("printf 'a\rb'".to_owned()),
+            "{\"command\":\"printf 'a\rb'\"}".to_owned(),
+        ),
+        (
+            Some("echo \u{0}nul\u{7}bell".to_owned()),
+            "{\"command\":\"echo \u{0}nul\u{7}bell\"}".to_owned(),
+        ),
+    ] {
+        let mut app = running_session();
+        app.apply(&Event::PermissionRequest {
+            id: "toolu_control".into(),
+            tool: "Bash".to_owned(),
+            input,
+            proposal: target.as_deref().and_then(ran),
+            target,
+            reason: None,
+            agent: None,
+        });
+        assert_the_question_box_holds(&screen(&mut app, 100, 40));
+    }
 }
 
 #[test]
@@ -697,19 +1761,125 @@ fn a_long_request_wraps_inside_the_question() {
         tool: "Bash".to_owned(),
         input: format!(r#"{{"command":"{}"}}"#, command.trim()),
         target: Some(command.trim().to_owned()),
+        proposal: ran(command.trim()),
+        reason: None,
         agent: None,
     });
     let frame = screen(&mut app, 200, 60);
 
-    let rows = question_rows(&frame);
-    let words = rows
-        .iter()
+    let call: String = question_cells(&frame)
+        .into_iter()
         .take_while(|row| !row.starts_with("▶ 1."))
-        .map(|row| row.matches("word").count())
-        .sum::<usize>();
-    // Forty in the command and forty again in the arguments, none cut off.
-    assert_eq!(words, 80, "{frame}");
+        .collect();
+    let words = call.matches("word").count();
+    // Forty in the command, none cut off, and not again in the arguments.
+    assert_eq!(words, 40, "{frame}");
     assert!(frame.lines().all(|row| text_width(row) <= 200));
+}
+
+/// A session waiting on a `Bash` call whose command means what its spacing
+/// says: an indented Python body, a tab, and a quoted string and a comment
+/// with runs of spaces in them.
+fn session_waiting_on_a_spaced_command() -> App {
+    let mut app = running_session();
+    let command = "python3 -c '\nclass H:\n    def log(self, a): pass\n\tprint(\"a    b\")\n' # three   spaces";
+    app.apply(&Event::PermissionRequest {
+        id: "toolu_spaced".into(),
+        tool: "Bash".to_owned(),
+        input: format!(
+            r#"{{"command":"{}"}}"#,
+            command
+                .replace('"', "\\\"")
+                .replace('\n', "\\n")
+                .replace('\t', "\\t")
+        ),
+        target: Some(command.to_owned()),
+        proposal: ran(command),
+        reason: None,
+        agent: None,
+    });
+    app
+}
+
+#[test]
+fn the_question_draws_a_command_with_every_space_and_tab_it_has() {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = session_waiting_on_a_spaced_command();
+    let frame = screen(&mut app, 120, 40);
+    let rows = question_cells(&frame);
+    app.on_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
+    let sent = screen(&mut app, 120, 40);
+    let sent_rows = question_cells(&sent);
+    let from = |first: &str, count: usize| -> Vec<String> {
+        rows.iter()
+            .map(|row| row.trim_end().to_owned())
+            .skip_while(|row| row != first)
+            .take(count)
+            .collect()
+    };
+    // The command once, and the arguments as they are sent only on Ctrl+T.
+    assert!(
+        !rows.iter().any(|row| row.starts_with(r#"{"command""#)),
+        "{frame}"
+    );
+    let arguments: String = sent_rows
+        .iter()
+        .skip_while(|row| !row.starts_with(r#"{"command""#))
+        .take_while(|row| !row.trim().is_empty())
+        .cloned()
+        .collect();
+
+    assert_eq!(
+        from("python3 -c '", 5),
+        [
+            "python3 -c '",
+            "class H:",
+            "    def log(self, a): pass",
+            "    print(\"a    b\")",
+            "' # three   spaces",
+        ],
+        "{frame}"
+    );
+    assert_eq!(
+        arguments.trim_end(),
+        r#"{"command":"python3 -c '\nclass H:\n    def log(self, a): pass\n\tprint(\"a    b\")\n' # three   spaces"}"#,
+        "the arguments are not drawn as they arrived:\n{sent}"
+    );
+    assert_eq!(
+        from("3. niobe saves Bash(python3 -c '", 5),
+        [
+            "3. niobe saves Bash(python3 -c '",
+            "class H:",
+            "    def log(self, a): pass",
+            "    print(\"a    b\")",
+            "' # three   spaces)",
+        ],
+        "the rule the operator would save is not drawn as it is kept:\n{frame}"
+    );
+    assert_snapshot("asking-spaced-120x40", &frame);
+}
+
+#[test]
+fn a_short_standing_answer_with_a_tab_in_it_is_repeated_as_it_is_kept() {
+    let mut app = running_session();
+    app.apply(&Event::PermissionRequest {
+        id: "toolu_tab".into(),
+        tool: "Bash".to_owned(),
+        input: r#"{"command":"ls\t-l"}"#.to_owned(),
+        target: Some("ls\t-l".to_owned()),
+        proposal: ran("ls\t-l"),
+        reason: None,
+        agent: None,
+    });
+    let frame = screen(&mut app, 120, 30);
+    let rows = question_cells(&frame);
+
+    assert!(
+        rows.iter()
+            .any(|row| row.trim_end() == "3. niobe saves Bash(ls  -l)"),
+        "the rule is drawn only on its row, its tab a single space:\n{frame}"
+    );
 }
 
 fn text_width(row: &str) -> usize {
@@ -776,6 +1946,8 @@ fn a_question_arriving_while_scrolled_back_does_not_move_the_view() {
         tool: "Read".to_owned(),
         input: r#"{"file_path":"/repo/notes.txt"}"#.to_owned(),
         target: Some("/repo/notes.txt".to_owned()),
+        proposal: None,
+        reason: None,
         agent: None,
     });
     let after = screen(&mut app, 120, 30);
@@ -815,6 +1987,87 @@ fn session_at_work() -> App {
     app
 }
 
+/// A terminal cell cannot hold a tab, and a row drawn on one line has no
+/// column for one to line up: a literal tab in what a call does is a space,
+/// in the call's row and in the activity row under the transcript.
+#[test]
+fn a_tab_in_what_a_call_does_is_drawn_as_a_space() {
+    let mut app = at_work(running_session(), std::time::Duration::from_secs(5));
+    app.apply(&Event::ToolCallStart {
+        id: "t1".into(),
+        name: "Bash".to_owned(),
+        input: r#"{"command":"printf 'a\tb'"}"#.to_owned(),
+        summary: Some("printf 'a\tb'".to_owned()),
+        agent: None,
+    });
+    let frame = screen(&mut app, 120, 40);
+    assert!(!frame.contains("printf 'ab'"), "{frame}");
+    assert!(frame.contains("running Bash  printf 'a b'"), "{frame}");
+}
+
+/// A question no standing rule answers puts the turn's working line on the
+/// operator, and its call is an entry that needs them.
+#[test]
+fn a_question_mid_turn_says_the_turn_is_waiting_on_the_operator() {
+    let mut app = session_at_work();
+    app.apply(&Event::PermissionRequest {
+        id: "t1".into(),
+        tool: "Bash".to_owned(),
+        input: r#"{"command":"npm test -- fetch"}"#.to_owned(),
+        target: Some("npm test -- fetch".to_owned()),
+        proposal: None,
+        reason: None,
+        agent: None,
+    });
+    assert_eq!(
+        app.entries().last().map(|entry| entry.attention),
+        Some(niobe_core::Attention::NeedsYou)
+    );
+    let frame = screen(&mut app, 80, 24);
+    assert!(frame.contains("waiting on you"), "{frame}");
+    assert_snapshot("waiting-on-you-80x24", &frame);
+}
+
+/// Notable only, the transcript keeps what was said, written and asked, and
+/// each run of reads and searches between is one row that counts them.
+#[test]
+fn notable_only_counts_the_routine_entries_it_leaves_out_at_both_sizes() {
+    let mut app = running_session();
+    let whole = screen(&mut app, 200, 60);
+    app.show_notable_only();
+    for (name, width, height) in [
+        ("notable-only-80x24", 80, 24),
+        ("notable-only-200x60", 200, 60),
+    ] {
+        let frame = screen(&mut app, width, height);
+        assert!(frame.contains("routine entr"), "{frame}");
+        assert_ne!(frame, whole);
+        assert_snapshot(name, &frame);
+    }
+    app.show_notable_only();
+    assert_eq!(screen(&mut app, 200, 60), whole, "the key shows them again");
+}
+
+/// What happened since the operator last caught up is a sheet over the
+/// session, each row a figure of the fold, with what the session is doing now
+/// as its last.
+#[test]
+fn what_happened_is_a_sheet_of_the_session_s_own_figures_at_both_sizes() {
+    let mut app = running_session().with_theme(NEO);
+    app.show_catch_up();
+    for (name, width, height) in [
+        ("catch-up-neo-80x24", 80, 24),
+        ("catch-up-neo-200x60", 200, 60),
+    ] {
+        let frame = screen(&mut app, width, height);
+        assert!(frame.contains("Since you last looked"), "{frame}");
+        assert!(frame.contains("files changed:"), "{frame}");
+        assert!(frame.contains("now: "), "{frame}");
+        assert_snapshot(name, &frame);
+    }
+    assert_snapshot("catch-up-neo-painted-80x24", &paint(&mut app, 80, 24));
+}
+
 #[test]
 fn a_turn_at_work_says_so_under_the_transcript_until_it_ends() {
     let mut app = session_at_work();
@@ -830,12 +2083,93 @@ fn a_turn_at_work_says_so_under_the_transcript_until_it_ends() {
     assert!(!frame.contains("running Bash"), "{frame}");
 }
 
+/// While the backend compacts the conversation the line under the
+/// transcript says so, with a spinner of its own, rather than reading as a
+/// turn thinking; once it is done, a row says what it shrank the context from
+/// and to — the floor the backend reported until the next request measures
+/// the second, as the Usage pane's context row does — and the rule under the
+/// turn names it as a compaction.
+#[test]
+fn a_compaction_is_shown_as_one_while_it_runs_and_after() {
+    use std::time::{Duration, Instant};
+
+    let mut app = App::new(Repo {
+        name: "example-app".to_owned(),
+        branch: Some("main".to_owned()),
+        ..Repo::default()
+    })
+    .attached();
+    app.apply(&Event::Commands {
+        commands: vec![niobe_core::event::SlashCommand {
+            name: "compact".to_owned(),
+            description: "Clear history but keep a summary".to_owned(),
+            argument_hint: None,
+            mid_prompt: false,
+        }],
+    });
+    app.apply(&Event::Context(niobe_core::event::Context {
+        tokens: 192_000,
+        model: "opus-5".to_owned(),
+        window: Some(1_000_000),
+    }));
+    for c in "/compact".chars() {
+        app.type_into_composer(ratatui_textarea::Input {
+            key: ratatui_textarea::Key::Char(c),
+            ..Default::default()
+        });
+    }
+    app.submit();
+    let t0 = Instant::now();
+    app.tick(t0, None);
+    app.apply(&Event::CompactionStarted);
+    app.tick(t0 + Duration::from_secs(38), None);
+    let frame = screen(&mut app, 80, 24);
+    assert!(frame.contains("compacting context · 38s"), "{frame}");
+    assert!(!frame.contains("thinking"), "{frame}");
+    assert_snapshot("compacting-80x24", &frame);
+
+    app.apply(&Event::CompactionEnded);
+    app.apply(&Event::Compacted {
+        trigger: CompactTrigger::Manual,
+        before: Some(192_000),
+        after: Some(4_282),
+    });
+    app.apply(&Event::TurnEnded);
+    let frame = screen(&mut app, 80, 24);
+    assert!(
+        frame.contains("⇣ context compacted · 192k → ≥4282 tokens"),
+        "{frame}"
+    );
+    assert!(frame.contains("── compact"), "{frame}");
+    assert!(!frame.contains("compacting context"), "{frame}");
+    let wide = screen(&mut app, 120, 30);
+    assert!(wide.contains("≥4282 / 1.0M"), "{wide}");
+    assert!(!wide.contains("192k / 1.0M"), "{wide}");
+    assert_snapshot("compacted-floor-120x30", &wide);
+
+    app.apply(&Event::Context(niobe_core::event::Context {
+        tokens: 18_000,
+        model: "opus-5".to_owned(),
+        window: Some(1_000_000),
+    }));
+    let frame = screen(&mut app, 80, 24);
+    assert!(
+        frame.contains("⇣ context compacted · 192k → 18k tokens"),
+        "{frame}"
+    );
+    let wide = screen(&mut app, 120, 30);
+    assert!(wide.contains(" 18k / 1.0M"), "{wide}");
+    assert!(!wide.contains('≥'), "{wide}");
+    assert_snapshot("compacted-80x24", &frame);
+}
+
 #[test]
 fn a_selected_profile_is_named_in_the_menu_row_with_nothing_yet_listening() {
     let mut app = empty_session().with_profile(SelectedProfile {
         name: "work".to_owned(),
         backend: Backend::Claude,
         models: Vec::new(),
+        billing: None,
     });
 
     // At the narrowest the shell draws in there is room for what it runs
@@ -878,13 +2212,14 @@ fn a_model_the_operator_moved_to_is_what_the_menu_row_names() {
 
 #[test]
 fn the_model_list_shows_what_the_profile_offers_and_when_a_choice_lands() {
-    let mut app = running_session().with_profile(SelectedProfile {
+    let mut app = running_session().attached().with_profile(SelectedProfile {
         name: "max".to_owned(),
         backend: Backend::Claude,
         models: vec!["opus-5".to_owned(), "sonnet-5".to_owned()],
+        billing: None,
     });
     app.on_key(ratatui::crossterm::event::KeyEvent::new(
-        ratatui::crossterm::event::KeyCode::F(8),
+        ratatui::crossterm::event::KeyCode::F(4),
         ratatui::crossterm::event::KeyModifiers::NONE,
     ));
 
@@ -899,39 +2234,579 @@ fn the_model_list_shows_what_the_profile_offers_and_when_a_choice_lands() {
         frame.contains("applied from the next turn"),
         "the list did not say when a choice takes effect:\n{frame}"
     );
+    // Its keys whole, though the box is sized for the model names.
+    for (width, height) in [(80, 24), (120, 30)] {
+        let frame = screen(&mut app, width, height);
+        assert!(
+            frame.contains("Esc keep") && frame.contains("this one"),
+            "{frame}"
+        );
+        assert_snapshot(&format!("model-list-{width}x{height}"), &frame);
+    }
+}
+
+/// The twelve models the `claude` CLI listed in its answer to `initialize` on
+/// a Max login, as Claude Code 2.1.288 listed them: id, name, what it is for
+/// and the release it runs on.
+const OFFERED: &[(&str, &str, &str, &str)] = &[
+    (
+        "default",
+        "Default (recommended)",
+        "Sonnet 5.5 · Efficient for routine tasks",
+        "claude-sonnet-5-5",
+    ),
+    (
+        "opus",
+        "Opus 5.5",
+        "For complex work and everyday tasks",
+        "claude-opus-5-5",
+    ),
+    (
+        "fable",
+        "Fable 5.1",
+        "For your toughest challenges",
+        "claude-fable-5-1",
+    ),
+    (
+        "sonnet",
+        "Sonnet 5.5",
+        "Most efficient for simpler tasks",
+        "claude-sonnet-5-5",
+    ),
+    (
+        "haiku",
+        "Haiku 4.5",
+        "Fastest for quick answers",
+        "claude-haiku-4-5-20251001",
+    ),
+    (
+        "claude-sonnet-5",
+        "Sonnet 5",
+        "Efficient for routine tasks",
+        "claude-sonnet-5",
+    ),
+    (
+        "claude-opus-5",
+        "Opus 5",
+        "Best for everyday, complex tasks",
+        "claude-opus-5",
+    ),
+    (
+        "claude-fable-5",
+        "Fable 5",
+        "Most capable for your hardest and longest-running tasks",
+        "claude-fable-5",
+    ),
+    (
+        "claude-opus-4-8",
+        "Opus 4.8",
+        "Best for everyday, complex tasks",
+        "claude-opus-4-8",
+    ),
+    (
+        "claude-opus-4-7",
+        "Opus 4.7",
+        "Best for everyday, complex tasks",
+        "claude-opus-4-7",
+    ),
+    (
+        "claude-opus-4-6",
+        "Opus 4.6",
+        "Best for everyday, complex tasks",
+        "claude-opus-4-6",
+    ),
+    (
+        "claude-sonnet-4-6",
+        "Sonnet 4.6",
+        "Efficient for routine tasks",
+        "claude-sonnet-4-6",
+    ),
+];
+
+fn offered() -> Event {
+    Event::Models {
+        models: OFFERED
+            .iter()
+            .map(
+                |(id, name, description, resolves_to)| niobe_core::event::ModelOption {
+                    id: (*id).to_owned(),
+                    name: Some((*name).to_owned()),
+                    description: Some((*description).to_owned()),
+                    resolves_to: Some((*resolves_to).to_owned()),
+                    auto_mode: None,
+                },
+            )
+            .collect(),
+    }
+}
+
+fn f4() -> ratatui::crossterm::event::KeyEvent {
+    ratatui::crossterm::event::KeyEvent::new(
+        ratatui::crossterm::event::KeyCode::F(4),
+        ratatui::crossterm::event::KeyModifiers::NONE,
+    )
+}
+
+/// The list is every model the backend offers: each one's name, the id
+/// choosing it sends, and what it is for.
+#[test]
+fn the_model_list_shows_every_model_the_backend_offers_by_name_and_id() {
+    let mut app = running_session().attached().with_profile(SelectedProfile {
+        name: "max".to_owned(),
+        backend: Backend::Claude,
+        models: Vec::new(),
+        billing: None,
+    });
+    app.apply(&offered());
+    app.on_key(f4());
+
+    let frame = screen(&mut app, 120, 30);
+    for (id, name, _, _) in OFFERED {
+        assert!(frame.contains(id) && frame.contains(name), "{id}:\n{frame}");
+    }
+    assert!(frame.contains("For your toughest"), "{frame}");
+    for (width, height) in [(80, 24), (120, 30)] {
+        assert_snapshot(
+            &format!("model-list-offered-{width}x{height}"),
+            &screen(&mut app, width, height),
+        );
+    }
+}
+
+/// A list longer than the screen is tall scrolls with the cursor: the row it
+/// is on and the keys under the list are drawn wherever it goes, so Enter
+/// never picks a model nobody can see.
+#[test]
+fn a_model_list_taller_than_the_screen_keeps_the_cursor_and_the_keys_in_view() {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = running_session().attached().with_profile(SelectedProfile {
+        name: "max".to_owned(),
+        backend: Backend::Claude,
+        models: Vec::new(),
+        billing: None,
+    });
+    app.apply(&Event::Models {
+        models: (0..40)
+            .map(|n| niobe_core::event::ModelOption {
+                id: format!("model-{n:02}"),
+                name: Some(format!("Model {n:02}")),
+                description: Some("A model".to_owned()),
+                resolves_to: None,
+                auto_mode: None,
+            })
+            .collect(),
+    });
+    app.on_key(f4());
+    let down = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
+    let up = KeyEvent::new(KeyCode::Up, KeyModifiers::NONE);
+    let steps = std::iter::repeat_n(down, 39).chain(std::iter::repeat_n(up, 39));
+    let mut at = 0_usize;
+    for (step, key) in std::iter::once(None).chain(steps.map(Some)).enumerate() {
+        if let Some(key) = key {
+            app.on_key(key);
+            at = match key.code {
+                KeyCode::Down => at + 1,
+                _ => at - 1,
+            };
+        }
+        let frame = screen(&mut app, 80, 24);
+        assert!(
+            frame
+                .lines()
+                .any(|row| row.contains(&format!("› Model {at:02}"))),
+            "step {step}: the cursor on Model {at:02} is not drawn:\n{frame}"
+        );
+        assert!(
+            frame.contains("Esc keep this one"),
+            "step {step}: the keys are not drawn:\n{frame}"
+        );
+    }
+}
+
+/// A profile that names models shows those, in its order, and says how many
+/// of the backend's it leaves out.
+#[test]
+fn a_profile_naming_models_shows_those_and_how_many_more_the_backend_offers() {
+    let mut app = running_session().attached().with_profile(SelectedProfile {
+        name: "max".to_owned(),
+        backend: Backend::Claude,
+        models: vec!["fable".to_owned(), "claude-opus-4-8".to_owned()],
+        billing: None,
+    });
+    app.apply(&offered());
+    app.on_key(f4());
+
+    let frame = screen(&mut app, 120, 30);
+    let fable = frame.find("Fable 5.1").expect("the profile's first model");
+    let opus = frame.find("Opus 4.8").expect("the profile's second model");
+    assert!(fable < opus, "{frame}");
+    assert!(!frame.contains("Haiku 4.5"), "{frame}");
+    assert!(frame.contains("10 more the backend offers"), "{frame}");
+}
+
+/// What the binary reads for a repository laid out as this one is: a
+/// `CLAUDE.md` that only imports `AGENTS.md`, a `CLAUDE.md` in the home
+/// directory above it, the user's own importing a second file, and the
+/// backend's notes — an index and two entries.
+fn remembered() -> Vec<niobe_tui::MemoryFile> {
+    use niobe_tui::memory::Scope;
+    let file = |scope, path: &str, named: &str, depth, text: &str, note: Option<&str>| {
+        niobe_tui::MemoryFile {
+            scope,
+            path: path.to_owned(),
+            named: named.to_owned(),
+            depth,
+            text: Some(text.to_owned()),
+            bytes: Some(text.len() as u64),
+            note: note.map(str::to_owned),
+            editable: Some(format!("/home/me/{named}")),
+        }
+    };
+    let notes = "~/.claude/projects/-home-me-src-niobe/memory";
+    vec![
+        file(
+            Scope::User,
+            "~/.claude/CLAUDE.md",
+            "/home/me/.claude/CLAUDE.md",
+            0,
+            "@RTK.md\n",
+            None,
+        ),
+        file(
+            Scope::Imported,
+            "~/.claude/RTK.md",
+            "/home/me/.claude/RTK.md",
+            1,
+            "# RTK\n\nrtk gain\n",
+            None,
+        ),
+        file(
+            Scope::Parent,
+            "~/CLAUDE.md",
+            "/home/me/CLAUDE.md",
+            0,
+            "Use the graph first.\n",
+            None,
+        ),
+        file(
+            Scope::Project,
+            "CLAUDE.md",
+            "CLAUDE.md",
+            0,
+            "@AGENTS.md\n",
+            None,
+        ),
+        file(
+            Scope::Imported,
+            "AGENTS.md",
+            "AGENTS.md",
+            1,
+            "# AI Agent Guidelines\n\nWhen working on this project, adopt the persona of a\nPrincipal Rust Engineer.\n\n## 0. The project\n\nNiobe is a terminal coding agent.\n",
+            None,
+        ),
+        file(
+            Scope::AutoMemory,
+            &format!("{notes}/MEMORY.md"),
+            "/home/me/MEMORY.md",
+            0,
+            "- [Priorities](priorities.md) — what matters first\n- [Facts](facts.md) — verified CLI facts\n",
+            None,
+        ),
+        file(
+            Scope::AutoEntry,
+            "priorities.md",
+            "/home/me/priorities.md",
+            1,
+            "awareness first\n",
+            Some("what matters first"),
+        ),
+        file(
+            Scope::AutoEntry,
+            "facts.md",
+            "/home/me/facts.md",
+            1,
+            "init repeats\n",
+            Some("verified CLI facts"),
+        ),
+    ]
+}
+
+/// F8 lists every file the agent is given, in the order it is given them,
+/// each import under the file importing it, with its size and whether the
+/// session changed it; Enter shows one's text in the shell.
+#[test]
+fn f8_shows_what_the_agent_is_told_and_remembers_in_the_shell() {
+    use ratatui::crossterm::event::KeyCode;
+    let mut app = running_session();
+    app.apply(&Event::FileChange {
+        path: "AGENTS.md".to_owned(),
+        added: Some(1),
+        removed: Some(0),
+        hunks: Vec::new(),
+        scope: niobe_core::ChangeScope::Project,
+    });
+    press(&mut app, KeyCode::F(8));
+    assert!(app.take_memory_request());
+    app.set_memory(remembered());
+
+    let frame = screen(&mut app, 120, 30);
+    assert!(frame.contains(" Memory "), "{frame}");
+    for said in [
+        "user",
+        "imported",
+        "parent",
+        "project",
+        "auto-memory",
+        "note",
+    ] {
+        assert!(frame.contains(said), "{said}:\n{frame}");
+    }
+    assert!(frame.contains("what matters first"), "{frame}");
+    assert!(frame.contains("changed"), "AGENTS.md was changed:\n{frame}");
+    assert_snapshot("memory-view-120x30", &frame);
+
+    for _ in 0..4 {
+        press(&mut app, KeyCode::Down);
+    }
+    press(&mut app, KeyCode::Enter);
+    let frame = screen(&mut app, 120, 30);
+    assert!(frame.contains("Memory · AGENTS.md"), "{frame}");
+    assert!(frame.contains("Principal Rust Engineer"), "{frame}");
+    assert_snapshot("memory-reading-120x30", &frame);
+}
+
+/// A file read in the Memory view scrolls no further than its end, so the
+/// first Up after any number of Downs moves it back a line.
+#[test]
+fn f8_reading_a_file_scrolled_past_its_end_moves_back_on_the_first_up() {
+    use ratatui::crossterm::event::KeyCode;
+    let mut app = running_session();
+    press(&mut app, KeyCode::F(8));
+    assert!(app.take_memory_request());
+    let text: String = (1..=40).map(|n| format!("line {n}\n")).collect();
+    app.set_memory(vec![niobe_tui::MemoryFile {
+        scope: niobe_tui::memory::Scope::Project,
+        path: "CLAUDE.md".to_owned(),
+        named: "CLAUDE.md".to_owned(),
+        depth: 0,
+        bytes: Some(text.len() as u64),
+        text: Some(text),
+        note: None,
+        editable: Some("/home/me/CLAUDE.md".to_owned()),
+    }]);
+    press(&mut app, KeyCode::Enter);
+    for _ in 0..60 {
+        press(&mut app, KeyCode::Down);
+        screen(&mut app, 120, 30);
+    }
+    let at_the_end = screen(&mut app, 120, 30);
+    assert!(at_the_end.contains("line 40"), "{at_the_end}");
+
+    press(&mut app, KeyCode::Up);
+    let one_up = screen(&mut app, 120, 30);
+    assert_ne!(one_up, at_the_end, "the first Up did not move the file");
+    assert!(!one_up.contains("line 40"), "{one_up}");
+}
+
+/// A file the agent is given that is too large to read is listed with its
+/// size, and says its text is not shown, rather than being left out.
+#[test]
+fn f8_lists_a_file_too_large_to_read_with_its_size() {
+    use ratatui::crossterm::event::KeyCode;
+    let mut app = running_session();
+    press(&mut app, KeyCode::F(8));
+    assert!(app.take_memory_request());
+    app.set_memory(vec![niobe_tui::MemoryFile {
+        scope: niobe_tui::memory::Scope::Imported,
+        path: "docs/big.md".to_owned(),
+        named: "docs/big.md".to_owned(),
+        depth: 1,
+        text: None,
+        bytes: Some(5 * 1024 * 1024),
+        note: None,
+        editable: Some("/home/me/docs/big.md".to_owned()),
+    }]);
+
+    let frame = screen(&mut app, 120, 30);
+    assert!(frame.contains("docs/big.md"), "{frame}");
+    assert!(frame.contains("5.0 MB · text not shown"), "{frame}");
+}
+
+/// With no memory at all the view says so, and where the backend offers
+/// `/init`, that it writes one.
+#[test]
+fn f8_with_no_memory_says_so_and_how_to_get_one() {
+    use ratatui::crossterm::event::KeyCode;
+    let mut app = empty_session().attached();
+    app.apply(&Event::Commands {
+        commands: vec![niobe_core::event::SlashCommand {
+            name: "init".to_owned(),
+            description: "Initialize a new CLAUDE.md file with codebase documentation".to_owned(),
+            argument_hint: None,
+            mid_prompt: false,
+        }],
+    });
+    press(&mut app, KeyCode::F(8));
+    app.set_memory(Vec::new());
+
+    let frame = screen(&mut app, 120, 30);
+    assert!(frame.contains("given no memory here"), "{frame}");
+    assert!(frame.contains("/init"), "{frame}");
+}
+
+/// A shell asking whether to trust a repository's config that sets
+/// `grants` rows of what only a trusted file may.
+fn asking_trust(grants: Vec<(String, String)>) -> App {
+    empty_session().asking_trust(niobe_tui::trust::Question {
+        path: "/home/me/src/niobe/.niobe/config.toml".to_owned(),
+        grants,
+    })
+}
+
+fn row(what: &str, value: &str) -> (String, String) {
+    (what.to_owned(), value.to_owned())
+}
+
+#[test]
+fn the_trust_question_names_the_file_what_trusting_it_puts_in_force_and_the_answers() {
+    let mut app = asking_trust(vec![
+        row(
+            "permissions",
+            "allow Edit, Bash, mcp__claude_ai_Notion__notion-search, Bash(cargo test)",
+        ),
+        row(
+            "work",
+            "env AWS_PROFILE=work-sso, CLAUDE_CODE_USE_BEDROCK=1",
+        ),
+        row("work", "auth_refresh aws sso login --profile work-sso"),
+        row("default_profile", "work"),
+    ]);
+
+    for (width, height) in [(80, 24), (120, 30)] {
+        let frame = screen(&mut app, width, height);
+        assert!(frame.contains("Trust this repository's config?"), "{frame}");
+        assert!(
+            frame.contains("/home/me/src/niobe/.niobe/config.toml"),
+            "{frame}"
+        );
+        assert!(frame.contains("AWS_PROFILE=work-sso"), "{frame}");
+        assert!(frame.contains("1. Yes, trust this config"), "{frame}");
+        assert!(frame.contains("2. No, open without it"), "{frame}");
+        assert_snapshot(&format!("trust-{width}x{height}"), &frame);
+    }
+}
+
+#[test]
+fn a_config_that_sets_more_than_fits_keeps_the_answers_on_screen() {
+    let grants = (1..=40)
+        .map(|n| row("permissions", &format!("allow Bash(script-{n}.sh)")))
+        .collect();
+    let mut app = asking_trust(grants);
+
+    let frame = screen(&mut app, 80, 24);
+
+    assert!(frame.contains("1. Yes, trust this config"), "{frame}");
+    assert!(frame.contains("2. No, open without it"), "{frame}");
+    assert!(
+        frame.contains("more"),
+        "the rows left out were not counted:\n{frame}"
+    );
+    assert_snapshot("trust-long-80x24", &frame);
+}
+
+#[test]
+fn a_trust_value_is_drawn_with_its_control_characters_shown_and_its_spacing_kept() {
+    let mut app = asking_trust(vec![
+        row("titles", "Repo\u{1b}[31m title"),
+        row("work", "args --x \"a    b\""),
+    ]);
+
+    let frame = screen(&mut app, 120, 30);
+
+    assert!(frame.contains("Repo\u{241b}[31m title"), "{frame}");
+    assert!(frame.contains("--x \"a    b\""), "{frame}");
+}
+
+#[test]
+fn the_trust_question_on_a_window_too_small_to_draw_it_takes_no_answer_until_the_window_grows() {
+    use niobe_tui::app::ASK_QUIET;
+    use niobe_tui::trust::Answer;
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use std::time::{Duration, Instant};
+
+    let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+    let shown = Instant::now();
+    let mut app = asking_trust(vec![row("work", "env AWS_PROFILE=work-sso")]);
+    app.tick(shown, None);
+    let frame = screen(&mut app, 60, 20);
+    assert!(
+        !frame.contains("Trust this repository's config?"),
+        "{frame}"
+    );
+
+    app.on_key_read(enter, alone(shown + ASK_QUIET * 2));
+    app.on_key_read(
+        KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE),
+        alone(shown + ASK_QUIET * 4),
+    );
+
+    assert_eq!(app.trust_answer(), None);
+    assert!(app.trusting().is_some());
+    let frame = screen(&mut app, 60, 20);
+    assert!(
+        frame.contains("Not taken as an answer: the window is too small"),
+        "{frame}"
+    );
+
+    let grown = shown + Duration::from_secs(10);
+    app.tick(grown, None);
+    let frame = screen(&mut app, 80, 24);
+    assert!(frame.contains("Trust this repository's config?"), "{frame}");
+    app.on_key_read(enter, alone(grown + ASK_QUIET / 5));
+    assert_eq!(app.trust_answer(), None);
+
+    app.on_key_read(enter, alone(grown + ASK_QUIET * 3));
+    assert_eq!(app.trust_answer(), Some(Answer::NotNow));
 }
 
 #[test]
 fn a_budget_is_in_the_usage_pane_with_what_has_been_spent_against_it() {
-    let mut app = running_session().with_budget(0.50);
+    let mut app = metered_session().with_budget(0.50);
 
     let frame = screen(&mut app, 120, 30);
 
     // The fixture reports $0.04 of cost and one record without any, so the
-    // figure beside the budget is what was actually reported and no more.
-    assert!(frame.contains("budget $0.04/$0.50"), "{frame}");
+    // figure beside the budget is the floor of what was spent.
+    assert!(frame.contains("budget ≥$0.04/$0.50"), "{frame}");
     assert!(
         !screen(&mut running_session(), 120, 30).contains("budget"),
         "a session with no budget was given one"
     );
 }
 
+/// What the operator produced, without the looks the shell records for the
+/// catch-up, which no test of what they said is about.
+fn said(app: &mut App) -> Vec<Event> {
+    app.take_produced()
+        .into_iter()
+        .filter(|event| *event != Event::Looked)
+        .collect()
+}
+
 #[test]
 fn a_cycled_mode_is_produced_for_the_backend_and_a_denied_key_is_not() {
-    let mut app = running_session();
+    let mut app = running_session().attached();
     app.on_key(ratatui::crossterm::event::KeyEvent::new(
         ratatui::crossterm::event::KeyCode::BackTab,
         ratatui::crossterm::event::KeyModifiers::SHIFT,
     ));
 
-    assert_eq!(
-        app.take_produced(),
-        [Event::ModeSelected { mode: Mode::Auto }]
-    );
+    assert_eq!(said(&mut app), [Event::ModeSelected { mode: Mode::Auto }]);
 }
 
 #[test]
-fn the_plans_usage_windows_are_the_headline_and_f5_says_when_they_come_back() {
+fn the_plans_usage_windows_are_the_headline_and_cost_and_usage_says_when_they_come_back() {
     let mut app = running_session();
     let frame = screen(&mut app, 120, 30);
 
@@ -944,12 +2819,9 @@ fn the_plans_usage_windows_are_the_headline_and_f5_says_when_they_come_back() {
     // time on the clock rather than as a weekday.
     assert!(frame.contains("resets 16:40"), "{frame}");
 
-    app.on_key(ratatui::crossterm::event::KeyEvent::new(
-        ratatui::crossterm::event::KeyCode::F(5),
-        ratatui::crossterm::event::KeyModifiers::NONE,
-    ));
+    app.perform(niobe_tui::menu::Action::Usage);
     let pressed = screen(&mut app, 200, 60);
-    // The key reads the windows out against the same moment the pane draws
+    // The item reads the windows out against the same moment the pane draws
     // them at: one clock, or the shell says two things about one window.
     assert!(
         pressed.contains("5h window 62%, resets in 2h 59m"),
@@ -1048,13 +2920,17 @@ fn a_metered_session_that_worked_a_measured_time_shows_its_spend_rate() {
 
 /// A metered session and the moments it ran at.
 fn metered_turn(worked_seconds: u64, cost_usd: Option<f64>) -> App {
+    billed_turn(niobe_core::Billing::Metered, worked_seconds, cost_usd)
+}
+
+/// One turn of `worked_seconds` that cost `cost_usd`, on a session billed as
+/// `billing` from its start.
+fn billed_turn(billing: niobe_core::Billing, worked_seconds: u64, cost_usd: Option<f64>) -> App {
     let clock = niobe_tui::clock::Clock::fixed(0).expect("UTC is an offset");
     let at = |seconds| clock.at(std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds));
     let mut app = App::new(Repo::default()).with_clock(clock.clone());
     app.tick(std::time::Instant::now(), Some(at(0)));
-    let billing = Event::Billing {
-        billing: niobe_core::Billing::Metered,
-    };
+    let billing = Event::Billing { billing };
     let prompt = Event::UserMessage {
         text: "go".to_owned(),
     };
@@ -1064,12 +2940,12 @@ fn metered_turn(worked_seconds: u64, cost_usd: Option<f64>) -> App {
         output: 500_000,
         cache_read: 0,
         cache_write: 0,
-        cache_write_1h: 0,
+        cache_write_1h: Some(0),
         reasoning: 0,
         model: "opus-5".to_owned(),
         cost_usd,
-        cost_basis: cost_usd.map(|_| niobe_core::event::CostBasis::Measured),
-        settles_model: false,
+        settles_model: Some(false),
+        fast: false,
     });
     for event in [&billing, &prompt, &usage] {
         app.apply_at(event, at(0));
@@ -1127,12 +3003,8 @@ fn a_session_with_no_measured_time_shows_no_rate() {
 /// On a plan no money moves with the work, so there is no rate of spending it.
 #[test]
 fn a_plan_shows_no_spend_rate() {
-    let mut app = metered_turn(1_800, Some(0.50));
-    app.apply(&Event::Billing {
-        billing: niobe_core::Billing::Plan,
-    });
+    let mut app = billed_turn(niobe_core::Billing::Plan, 1_800, Some(0.50));
     let frame = screen(&mut app, 120, 30);
-    assert!(frame.contains("API-equivalent $0.50"), "{frame}");
     assert!(!frame.contains("/h"), "{frame}");
 }
 
@@ -1142,25 +3014,22 @@ fn a_plan_shows_no_spend_rate() {
 fn a_metered_profiles_budget_stands_under_its_cost() {
     let frame = screen(&mut metered_session().with_budget(0.50), 120, 30);
     let session = frame.find("session ").expect("the cost is drawn");
-    let budget = frame.find("budget $").expect("the budget is drawn");
+    let budget = frame.find("budget ").expect("the budget is drawn");
     let model = frame.find("opus-5    ").expect("the model rows are drawn");
     assert!(session < budget && budget < model, "{frame}");
 }
 
-/// On a plan no money moves with the work, so what the CLI prices it at is
-/// what the same work would have cost on the API: shown, labelled so, dimmed,
-/// and never as the session's cost.
+/// On a plan no money moves with the work, and what limits it is the
+/// plan's windows: the figure the CLI prices it at is what the same work
+/// would have cost on the API, which nobody pays, so no dollar figure is
+/// drawn at all — in the pane, the transcript or a turn's rule.
 #[test]
-fn a_plan_shows_what_the_work_would_have_cost_as_api_equivalent_and_dim() {
+fn a_plan_shows_no_dollar_figure() {
     let mut app = running_session();
     let frame = screen(&mut app, 120, 30);
-    assert!(frame.contains("API-equivalent ≥$0.04"), "{frame}");
+    assert!(!frame.contains('$'), "{frame}");
+    assert!(!frame.contains("API-eq"), "{frame}");
     assert!(!frame.contains("session "), "{frame}");
-    let dim = app.theme().dim;
-    assert_eq!(
-        style_at(&mut app, 120, 30, "≥$0.04").and_then(|style| style.fg),
-        Some(dim)
-    );
 }
 
 /// A session whose billing nothing has said and the profile does not set
@@ -1183,12 +3052,9 @@ fn a_session_no_backend_reported_a_window_for_shows_no_window_at_all() {
     assert!(!frame.contains("/5h"), "{frame}");
     assert!(!frame.contains("/7d"), "{frame}");
 
-    // And F5 says what the key does not do yet rather than reading out a
-    // window nobody reported.
-    app.on_key(ratatui::crossterm::event::KeyEvent::new(
-        ratatui::crossterm::event::KeyCode::F(5),
-        ratatui::crossterm::event::KeyModifiers::NONE,
-    ));
+    // And Cost & usage says what it does not do yet rather than reading out
+    // a window nobody reported.
+    app.perform(niobe_tui::menu::Action::Usage);
     let pressed = screen(&mut app, 120, 30);
     assert!(pressed.contains("not implemented yet"), "{pressed}");
     assert!(!pressed.contains("window 0%"), "{pressed}");
@@ -1207,13 +3073,14 @@ fn a_plan_spending_beyond_its_flat_fee_is_marked_in_the_usage_pane() {
             resets_at: Some(1_790_118_000),
         }),
         using_overage: true,
+        overage: niobe_core::event::Overage::Unreported,
     }));
 
     let frame = screen(&mut app, 120, 30);
     assert!(frame.contains("100%"), "{frame}");
     assert!(frame.contains(" 91%"), "{frame}");
     assert!(
-        frame.contains("extra — · on"),
+        frame.contains("extra     — · on"),
         "the plan is spending real money and the pane did not say so:\n{frame}"
     );
     assert!(
@@ -1236,12 +3103,12 @@ fn session_on_three_models() -> App {
             output,
             cache_read,
             cache_write: 0,
-            cache_write_1h: 0,
+            cache_write_1h: Some(0),
             reasoning: 0,
             model: model.to_owned(),
             cost_usd: Some(0.01),
-            cost_basis: None,
-            settles_model: false,
+            settles_model: Some(false),
+            fast: false,
         }));
     }
     app
@@ -1489,8 +3356,13 @@ fn a_window_under_the_minimum_says_so_instead_of_drawing_a_broken_shell() {
     assert!(!small.contains("Session ─"), "{small}");
 }
 
+/// Every row of every size is drawn, and nothing panics. The buffer clips
+/// every write to its own width, so text running past a pane cannot show
+/// here: that ratatui draws every laid-out line inside its pane is what
+/// `ui`'s own `every_line_laid_out_fits_the_width_ratatui_draws_it_in`
+/// checks, on the lines themselves.
 #[test]
-fn every_size_between_the_two_renders_without_a_panic_or_an_overrun() {
+fn every_size_between_the_two_renders_without_a_panic() {
     let mut app = running_session();
 
     for width in (80..=200).step_by(3) {
@@ -1529,16 +3401,71 @@ fn scrolling_back_moves_the_transcript_and_says_that_it_did() {
     assert_eq!(screen(&mut app, 80, 24), tail, "paging back did not return");
 }
 
+/// The rows inside the Usage pane's border, read off a drawn frame: the
+/// figures a test about the bill is about, and none of the transcript's text,
+/// which can hold a dash or a zero of its own.
+fn usage_pane(frame: &str) -> Vec<String> {
+    let lines: Vec<Vec<char>> = frame.lines().map(|line| line.chars().collect()).collect();
+    let (top, left) = lines
+        .iter()
+        .enumerate()
+        .find_map(|(row, line)| {
+            let text: String = line.iter().collect();
+            let title = text.find(" Usage ")?;
+            let before = text[..title].chars().count();
+            let corner = line[..before]
+                .iter()
+                .rposition(|c| *c == '┌' || *c == FOCUS_TOP_LEFT)?;
+            Some((row, corner))
+        })
+        .expect("the frame has a Usage pane");
+    lines[top + 1..]
+        .iter()
+        .take_while(|line| {
+            line.get(left)
+                .is_some_and(|c| *c != '└' && *c != FOCUS_BOTTOM_LEFT)
+        })
+        .map(|line| line[left + 1..].iter().collect())
+        .collect()
+}
+
 #[test]
 fn nothing_the_backends_did_not_report_appears_as_a_number() {
     // Two usage records, one of them without a cost: the pane must show the sum
     // as a floor rather than as the session's bill.
-    let wide = screen(&mut running_session(), 120, 30);
-    assert!(wide.contains("≥$0.04"), "{wide}");
+    let floor = usage_pane(&screen(&mut metered_session(), 120, 30)).join("\n");
+    assert!(floor.contains("≥$0.04"), "{floor}");
 
-    // An empty session has no cost at all, and says so.
-    let empty = screen(&mut empty_session(), 120, 30);
-    assert!(empty.contains("No backend attached"), "{empty}");
+    // A metered session with a budget, whose only record carries no cost:
+    // nothing in the pane may read as money that was measured.
+    let mut unreported = empty_session().with_budget(5.0);
+    unreported.apply(&Event::Billing {
+        billing: niobe_core::Billing::Metered,
+    });
+    unreported.apply(&Event::Usage(niobe_core::Usage {
+        input: 1_000,
+        output: 100,
+        cache_read: 0,
+        cache_write: 0,
+        cache_write_1h: Some(0),
+        reasoning: 0,
+        model: "opus-5".to_owned(),
+        cost_usd: None,
+        settles_model: Some(false),
+        fast: false,
+    }));
+    // Its tokens were measured, so a cache hit of none is a figure; money
+    // nobody reported is not.
+    let pane = usage_pane(&screen(&mut unreported, 120, 30)).join("\n");
+    assert!(
+        !pane.contains("$0.00"),
+        "a zero bill in the Usage pane:\n{pane}"
+    );
+    assert!(pane.contains("session unpriced"), "{pane}");
+    assert!(pane.contains("budget —/$5.00"), "{pane}");
+
+    // An empty session has no cost at all, and the pane says so itself.
+    let empty = usage_pane(&screen(&mut empty_session(), 120, 30)).join("\n");
     assert!(empty.contains('—'), "{empty}");
 }
 
@@ -1568,172 +3495,22 @@ fn gutter(frame: &str) -> String {
         .collect()
 }
 
-/// Nothing fills the gutter until a turn is running, and what fills it then
-/// moves. A shell that looked the same whether or not it was working is the
-/// complaint this answers.
+/// The gutter between the panes stays empty while a turn runs, in every
+/// theme: the spinner under the transcript is what says a turn is going.
 #[test]
-fn the_desktop_moves_between_the_panes_while_a_turn_runs() {
-    use std::time::Duration;
-
-    let idle = gutter(&screen(&mut running_session(), 120, 30));
-    assert!(
-        idle.chars().all(char::is_whitespace),
-        "an idle session animated the desktop: {idle:?}"
-    );
-
-    let mut app = session_at_work();
-    let first = gutter(&screen(&mut app, 120, 30));
-    assert!(
-        !first.chars().all(char::is_whitespace),
-        "a running turn left the desktop blank"
-    );
-
-    // Two tenths of a second later the strip has moved on.
-    app.tick(std::time::Instant::now() + Duration::from_secs(200), None);
-    let later = gutter(&screen(&mut app, 120, 30));
-    assert_ne!(first, later, "the desktop drew the same frame twice");
-
-    // And it stops with the turn, rather than running on over a finished one.
-    app.apply(&Event::TurnEnded);
-    let stopped = gutter(&screen(&mut app, 120, 30));
-    assert!(
-        stopped.chars().all(char::is_whitespace),
-        "the desktop kept moving after the turn ended: {stopped:?}"
-    );
-}
-
-/// The cells of the body that are desktop in a `width`-column `frame`: in a
-/// column no pane draws anything in, from the first row of the body to the
-/// last. A pane always draws its border at its top, so no column a pane is in
-/// qualifies. A frame's rows are trimmed of trailing blanks, so a cell past
-/// the end of its row is blank.
-fn desktop_columns(frame: &str, width: u16) -> Vec<usize> {
-    let rows: Vec<Vec<char>> = frame.lines().map(|row| row.chars().collect()).collect();
-    let body = &rows[1..rows.len() - 1];
-    (0..usize::from(width))
-        .filter(|&x| body.iter().all(|row| row.get(x).is_none_or(|&c| c == ' ')))
-        .collect()
-}
-
-/// The motion is drawn behind the panes, so a pane's cell is never touched
-/// by it: in every theme, at both depths, at every size and on many frames,
-/// the only cells that differ from the same moment with effects off are in
-/// columns of desktop no pane is in.
-#[test]
-fn the_motion_never_touches_a_cell_a_pane_owns() {
-    use std::time::Duration;
-
-    let mut moved = std::collections::BTreeSet::new();
-    for theme in THEMES {
-        for depth in [Depth::Sixteen, Depth::TrueColour] {
-            for (width, height) in [(80, 24), (120, 30), (200, 60)] {
-                for tenths in [0, 7, 33, 120, 751] {
-                    let elapsed = Duration::from_millis(tenths * 100);
-                    let dressed = |on: bool| {
-                        at_work(
-                            running_session()
-                                .with_depth(depth)
-                                .with_theme(theme)
-                                .with_effects(on),
-                            elapsed,
-                        )
-                    };
-                    let (mut on, mut off) = (dressed(true), dressed(false));
-                    let still = screen(&mut off, width, height);
-                    let desktop = desktop_columns(&still, width);
-                    // Wide, a column at each edge of the screen and one
-                    // between the session pane and the right stack; narrow,
-                    // the session pane takes the whole body.
-                    let wide = width >= ui::WIDE_COLUMNS;
-                    assert_eq!(desktop.len(), 3 * usize::from(wide), "{width}x{height}");
-                    if wide {
-                        let edges = (desktop.first(), desktop.last());
-                        let last = usize::from(width) - 1;
-                        assert_eq!(edges, (Some(&0), Some(&last)), "{width}x{height}");
-                    }
-                    let (moving, moving_styles) = (
-                        screen(&mut on, width, height),
-                        styles(&mut on, width, height),
-                    );
-                    let still_styles = styles(&mut off, width, height);
-
-                    let columns = usize::from(width);
-                    let mut touched = 0;
-                    let texts = moving.lines().zip(still.lines()).enumerate();
-                    for (y, (a, b)) in texts {
-                        for (x, (a, b)) in a.chars().zip(b.chars()).enumerate() {
-                            let cell = y * columns + x;
-                            let differs = a != b || moving_styles[cell] != still_styles[cell];
-                            touched += usize::from(differs);
-                            assert!(
-                                !differs || desktop.contains(&x),
-                                "{} {width}x{height} at {elapsed:?}: the motion drew {a:?} \
-                                 over a pane's {b:?} at column {x}, row {y}",
-                                theme.name
-                            );
-                        }
-                    }
-                    // A test that only ever compared two blank desktops would
-                    // pass whatever the motion drew.
-                    if touched > 0 {
-                        moved.insert(theme.name);
-                    }
-                }
-            }
-        }
-    }
-    // Each of the three themes that move drew on the desktop at some moment,
-    // and the one that stays still never did.
-    assert_eq!(moved.len(), 3, "{moved:?}");
-    assert!(!moved.contains(CLASSIC.name), "{moved:?}");
-}
-
-/// Turned off, the desktop stays empty while a turn runs, in every theme,
-/// and the turn still says it is running under the transcript.
-#[test]
-fn with_effects_off_the_desktop_is_empty_while_a_turn_runs() {
+fn the_desktop_stays_empty_while_a_turn_runs() {
     use std::time::Duration;
 
     for theme in THEMES {
-        let mut app = at_work(
-            running_session().with_theme(theme).with_effects(false),
-            Duration::from_secs(3),
-        );
+        let mut app = at_work(running_session().with_theme(theme), Duration::from_secs(5));
         let frame = screen(&mut app, 120, 30);
         let desk = gutter(&frame);
-        assert_eq!(
-            desktop_columns(&frame, 120).len(),
-            3,
-            "{}: {frame}",
-            theme.name
-        );
         assert!(
             desk.chars().all(char::is_whitespace),
             "{}: {desk:?}",
             theme.name
         );
         assert!(frame.contains("working"), "{frame}");
-    }
-}
-
-/// A frame of each motion, where the operator sees it: the desktop between
-/// the panes, five seconds into a turn.
-#[test]
-fn a_frame_of_each_motion_is_drawn_on_the_desktop_between_the_panes() {
-    use std::time::Duration;
-
-    for theme in [NEO, CYBER, MODERN] {
-        let mut app = at_work(running_session().with_theme(theme), Duration::from_secs(5));
-        let frame = screen(&mut app, 120, 30);
-        assert!(
-            !gutter(&frame).chars().all(char::is_whitespace),
-            "{}: the motion drew nothing between the panes",
-            theme.name
-        );
-        assert_snapshot(
-            &format!("motion-{}-120x30", theme.name.to_lowercase()),
-            &frame,
-        );
     }
 }
 
@@ -1749,8 +3526,9 @@ fn borders(row: &str) -> Vec<usize> {
 }
 
 /// No pane puts its text against its border. A column either side of the
-/// content and a blank row under the title is what the panes are drawn to,
-/// and text touching a double border is what they are drawn that way to avoid.
+/// content is what the panes are drawn to, and text touching a double border
+/// is what they are drawn that way to avoid. What a pane holds starts on the
+/// row under its title: the title stands apart on the border already.
 #[test]
 fn no_pane_draws_its_text_against_its_border() {
     for (width, height) in [(80, 24), (120, 30), (200, 60)] {
@@ -1759,8 +3537,7 @@ fn no_pane_draws_its_text_against_its_border() {
 
         for (at, row) in frame.lines().enumerate() {
             let cells = &rows[at];
-            for pair in borders(row).chunks_exact(2) {
-                let (left, right) = (pair[0], pair[1]);
+            for &[left, right] in borders(row).as_chunks::<2>().0 {
                 assert_eq!(
                     cells.get(left + 1).copied(),
                     Some(' '),
@@ -1773,21 +3550,10 @@ fn no_pane_draws_its_text_against_its_border() {
                 );
             }
         }
-
-        // The row under the body's top border belongs to the Session pane and
-        // to the Usage pane at once, and both keep it blank.
-        let under = frame.lines().nth(2).unwrap_or_default();
-        assert!(
-            under
-                .chars()
-                .all(|c| c == FOCUS_SIDE || matches!(c, '│' | ' ')),
-            "the row under the pane titles at {width}x{height} is not blank: {under:?}"
-        );
     }
 }
 
-/// A folded section is its header and nothing else, and what was under it
-/// gives its rows back to the sections below.
+/// A folded section is its header and nothing else.
 ///
 /// The marker is what says so: `▸` closed against `▾` open, which reads
 /// without colour and on a terminal that draws neither in bold.
@@ -1806,16 +3572,12 @@ fn the_changes_pane_folds_a_section_away() {
         !frame.contains("cache/lru.ts"),
         "the files are folded away, not merely scrolled past"
     );
-    assert!(
-        frame.contains("▾ Commits"),
-        "the sections below take the rows the folded one gave back"
-    );
 }
 
-/// The pane scrolls rather than truncating: the commits and what the session
-/// itself reported are below twenty-three files, and they are reachable.
+/// The pane scrolls rather than truncating: the last of twenty-three files
+/// is below the pane's foot, and it is reachable.
 #[test]
-fn the_changes_pane_scrolls_to_what_is_below_the_files() {
+fn the_changes_pane_scrolls_to_the_last_of_the_files() {
     let mut app = running_session();
     // Draw once so the pane knows how tall it is and how much it holds; the
     // event loop has always drawn before a wheel notch can arrive.
@@ -1825,272 +3587,53 @@ fn the_changes_pane_scrolls_to_what_is_below_the_files() {
 
     assert_snapshot("changes-scrolled-200x60", &frame);
     assert!(
-        frame.contains("▾ Commits"),
-        "the commits section is what the pane was scrolled to"
-    );
-    assert!(
-        frame.contains("9f2c1ab"),
-        "a commit the session made is drawn with its short hash"
+        frame.contains("verify.ts"),
+        "the last file is what the pane was scrolled to"
     );
 }
 
-const GREEN: TestCounts = TestCounts {
-    passed: 637,
-    failed: 0,
-    ignored: 0,
-    suites: 30,
-};
-
-/// The Changes pane's rows, scrolled to the bottom, where the Tests section
-/// is drawn.
-fn changes_scrolled_down(app: &mut App, width: u16, height: u16) -> String {
-    let _ = screen(app, width, height);
-    app.scroll_pane(Pane::Changes, isize::MAX / 2);
-    screen(app, width, height)
-}
-
-/// The Tests section's header row, from its name to the pane's edge: the
-/// transcript beside it draws each run's own figures under its call, and
-/// those are not what the section says.
-fn tests_header(frame: &str) -> &str {
-    frame
-        .lines()
-        .find_map(|line| line.split_once("▾ Tests").map(|(_, header)| header))
-        .and_then(|header| header.split('│').next())
-        .expect("the frame draws the Tests section")
-}
-
-/// The test run the agent made, as its own summary reported it, at the foot
-/// of the Changes pane and dated by when its call finished.
+/// A test run is the transcript's to show, under the call that ran it: its
+/// counts beside a bar of them, and no section of the Changes pane repeating
+/// the last of them.
 #[test]
-fn the_agents_own_test_run_is_drawn_with_its_counts_and_its_age() {
-    let mut app = session_with_test_runs(&[(Some(GREEN), Some(0), false)]);
-    let frame = changes_scrolled_down(&mut app, 200, 60);
-
-    assert_snapshot("tests-200x60", &frame);
-    assert!(
-        frame.contains("▾ Tests  637 passed · 0 failed · 30 suites · 1m ago"),
-        "{frame}"
-    );
-    assert_eq!(
-        style_at(&mut app, 200, 60, "637 passed").and_then(|style| style.fg),
-        Some(CLASSIC.add),
-        "a run that passed says so in the colour of an addition"
-    );
-}
-
-#[test]
-fn a_session_that_ran_no_tests_draws_no_tests_section() {
-    // The session does run `npm test`, which is not a format this shell
-    // reads, so it is not a test run as far as the pane is concerned.
-    let mut app = running_session();
-    let frame = changes_scrolled_down(&mut app, 200, 60);
-
-    assert!(!frame.contains("Tests"), "{frame}");
-    assert!(!frame.contains("0 passed"), "{frame}");
-}
-
-#[test]
-fn a_failing_run_is_drawn_as_failing_with_its_own_count() {
-    let failing = TestCounts {
+fn a_test_run_is_drawn_under_its_call_with_a_bar_of_its_counts() {
+    let counts = TestCounts {
         passed: 612,
         failed: 3,
-        ignored: 2,
+        ignored: 0,
         suites: 30,
-    };
-    let mut app = session_with_test_runs(&[(Some(failing), Some(101), true)]);
-    let frame = changes_scrolled_down(&mut app, 200, 60);
-
-    assert!(
-        frame.contains("612 passed · 3 failed · 2 ignored · 30 suites · 1m ago"),
-        "{frame}"
-    );
-    assert_eq!(
-        style_at(&mut app, 200, 60, "3 failed").and_then(|style| style.fg),
-        Some(CLASSIC.del)
-    );
-    assert_ne!(
-        style_at(&mut app, 200, 60, "612 passed").and_then(|style| style.fg),
-        Some(CLASSIC.add),
-        "a failing run does not colour its passes as if all were well"
-    );
-}
-
-#[test]
-fn a_run_whose_result_was_not_read_says_so_and_gives_no_count() {
-    let mut app =
-        session_with_test_runs(&[(Some(GREEN), Some(0), false), (None, Some(101), false)]);
-    let frame = changes_scrolled_down(&mut app, 200, 60);
-
-    assert!(
-        frame.contains("▾ Tests  exit 101 · result not read · 1m ago"),
-        "{frame}"
-    );
-    assert!(
-        !tests_header(&frame).contains("passed"),
-        "the earlier run's counts are not the latest run's"
-    );
-}
-
-/// A failing run whose output the backend could not read whole — the Claude
-/// CLI cuts a long failure and keeps none of it — says it failed, apart from
-/// a run whose result was simply not read, and still gives no count.
-#[test]
-fn a_run_known_to_have_failed_without_counts_says_it_failed_and_gives_no_count() {
-    let mut app = session_with_test_runs(&[(Some(GREEN), Some(0), false), (None, Some(101), true)]);
-    let frame = changes_scrolled_down(&mut app, 200, 60);
-
-    assert!(
-        frame.contains("▾ Tests  failed · exit 101 · counts not read · 1m ago"),
-        "{frame}"
-    );
-    let header = tests_header(&frame);
-    assert!(!header.contains("passed"), "{header}");
-    assert!(!header.contains("result not read"), "{header}");
-    assert_eq!(
-        style_at(&mut app, 200, 60, "failed · exit").and_then(|style| style.fg),
-        Some(CLASSIC.del),
-        "a failure is drawn in the failure colour"
-    );
-}
-
-/// A failed run whose output still held a failing binary's list of what
-/// failed names those tests under the section's header, as that binary's: an
-/// earlier binary's failures may be in the part that was cut.
-#[test]
-fn the_tests_a_failed_run_named_are_listed_as_the_failures_of_their_binary() {
-    let run = TestRunRecord::new(
-        None,
-        Some(101),
-        true,
-        vec![FailedTests {
-            binary: "--test statement".to_owned(),
-            tests: vec![
-                "a_statement_line_037_rounds_like_the_ledger".to_owned(),
-                "a_statement_line_088_rounds_like_the_ledger".to_owned(),
-            ],
-        }],
-    );
-    let mut app = session_with_test_records(&[run]);
-    let frame = changes_scrolled_down(&mut app, 200, 60);
-
-    let row = |text: &str| {
-        frame
-            .lines()
-            .position(|line| line.contains(text))
-            .unwrap_or_else(|| panic!("{text:?} is drawn:\n{frame}"))
-    };
-    let header = row("▾ Tests  failed · exit 101 · counts not read · 1m ago");
-    assert_eq!(
-        [
-            row("│   failing in --test statement "),
-            row("│   ✗ a_statement_line_037_rounds_like_the_ledger "),
-            row("│   ✗ a_statement_line_088_rounds_like_the_ledger "),
-        ],
-        [header + 1, header + 2, header + 3],
-        "{frame}"
-    );
-    assert_eq!(
-        style_at(&mut app, 200, 60, "✗ a_statement_line_037").and_then(|style| style.fg),
-        Some(CLASSIC.del)
-    );
-
-    app.fold(Section::Tests);
-    let folded = changes_scrolled_down(&mut app, 200, 60);
-    assert!(folded.contains("▸ Tests  failed"), "{folded}");
-    assert!(!folded.contains("failing in --test statement"), "{folded}");
-    assert!(!folded.contains("✗ a_statement_line_037"), "{folded}");
-}
-
-/// A run that went on past a failing binary lists each binary's failures
-/// under its own label, in the order the binaries ran.
-#[test]
-fn a_run_that_failed_in_two_binaries_lists_each_binarys_failures_under_its_own_label() {
-    let counts = TestCounts {
-        passed: 5,
-        failed: 2,
-        ignored: 1,
-        suites: 3,
     };
     let run = TestRunRecord::new(
         Some(counts),
         Some(101),
         true,
-        vec![
-            FailedTests {
-                binary: "--lib".to_owned(),
-                tests: vec!["tests::wrong".to_owned()],
-            },
-            FailedTests {
-                binary: "--test api".to_owned(),
-                tests: vec!["from_outside".to_owned()],
-            },
-        ],
-    );
-    let mut app = session_with_test_records(&[run]);
-    let frame = changes_scrolled_down(&mut app, 200, 60);
-
-    let row = |text: &str| {
-        frame
-            .lines()
-            .position(|line| line.contains(text))
-            .unwrap_or_else(|| panic!("{text:?} is drawn:\n{frame}"))
-    };
-    let header = row("▾ Tests  5 passed · 2 failed");
-    assert_eq!(
-        [
-            row("│   failing in --lib "),
-            row("│   ✗ tests::wrong "),
-            row("│   failing in --test api "),
-            row("│   ✗ from_outside "),
-        ],
-        [header + 1, header + 2, header + 3, header + 4],
-        "{frame}"
-    );
-}
-
-/// `cargo test 2>&1 | tail -30` of a failing run exits with tail's status,
-/// and the list its tail kept proves the failure by itself: the section says
-/// the run failed, with no count and no `exit 0` beside it.
-#[test]
-fn a_tailed_run_that_listed_a_failure_reads_as_failed_with_no_count() {
-    let run = TestRunRecord::new(
-        None,
-        Some(0),
-        false,
         vec![FailedTests {
-            binary: "--lib".to_owned(),
-            tests: vec!["tests::wrong".to_owned()],
+            binary: "--test statement".to_owned(),
+            tests: vec!["a_statement_line_037_rounds_like_the_ledger".to_owned()],
         }],
     );
     let mut app = session_with_test_records(&[run]);
-    let frame = changes_scrolled_down(&mut app, 200, 60);
+    let frame = screen(&mut app, 200, 60);
 
+    assert_snapshot("tests-200x60", &frame);
     assert!(
-        frame.contains("▾ Tests  failed · counts not read · 1m ago"),
+        frame.contains("━━  612 passed · 3 failed · a_statement_line_037"),
         "{frame}"
     );
-    assert!(frame.contains("│   failing in --lib "), "{frame}");
-    assert!(frame.contains("│   ✗ tests::wrong "), "{frame}");
-    let header = tests_header(&frame);
-    assert!(!header.contains("exit"), "{header}");
+    assert!(!frame.contains("▾ Tests"), "{frame}");
+    assert_eq!(
+        style_at(&mut app, 200, 60, "━━━  612 passed").and_then(|style| style.fg),
+        Some(CLASSIC.add),
+        "the passes are the bar's colour of an addition"
+    );
 }
 
+/// A directory that is not a repository has no branch and no working tree,
+/// and the pane says that rather than drawing either empty: a `Working tree`
+/// section reading `no files` would be a claim about a repository that is not
+/// there, and an empty box says nothing at all.
 #[test]
-fn a_narrow_pane_keeps_the_counts_and_sheds_the_rest() {
-    let mut app = session_with_test_runs(&[(Some(GREEN), Some(0), false)]);
-    let frame = changes_scrolled_down(&mut app, 120, 30);
-
-    assert!(frame.contains("▾ Tests  637 passed · 0 failed"), "{frame}");
-    assert!(!frame.contains("30 suites"), "{frame}");
-}
-
-/// A directory that is not a repository has no branch and no commits, and the
-/// pane says nothing about either rather than drawing them empty: a `Commits`
-/// section reading `none this session` would be a claim about a repository
-/// that is not there.
-#[test]
-fn a_session_outside_a_repository_draws_no_branch_and_no_commits() {
+fn a_session_outside_a_repository_draws_no_branch_and_no_working_tree() {
     let mut app = App::new(Repo {
         name: "scratch".to_owned(),
         branch: None,
@@ -2099,12 +3642,8 @@ fn a_session_outside_a_repository_draws_no_branch_and_no_commits() {
     let frame = screen(&mut app, 120, 30);
 
     assert!(!frame.contains('⎇'), "there is no branch to name");
-    assert!(!frame.contains("Commits"), "{frame}");
     assert!(!frame.contains("Working tree"), "{frame}");
-    assert!(
-        frame.contains("This session"),
-        "what the session itself changed is not the repository's to report"
-    );
+    assert!(frame.contains("not a git repository"), "{frame}");
 }
 
 /// The wheel goes to whatever the pointer is over. Two panes scroll, and a
@@ -2140,14 +3679,14 @@ fn wheel_at(column: u16, row: u16) -> ratatui::crossterm::event::MouseEvent {
     }
 }
 
-/// The three sections the pane holds, each with the summary line the operator
+/// The two sections the pane holds, each with the summary line the operator
 /// reads it by.
 #[test]
-fn the_activity_pane_holds_the_sub_agents_the_decisions_and_the_tools() {
+fn the_activity_pane_holds_the_sub_agents_and_the_tools() {
     let frame = screen(&mut running_session(), 200, 60);
 
     assert!(frame.contains("─ Activity "), "{frame}");
-    for section in ["▾ Sub-agents", "▾ Decisions", "▾ Tools"] {
+    for section in ["▾ Sub-agents", "▾ Tools"] {
         assert!(frame.contains(section), "{section} is missing:\n{frame}");
     }
     // The recorded session spawned three: one still running, one done, one
@@ -2158,21 +3697,15 @@ fn the_activity_pane_holds_the_sub_agents_the_decisions_and_the_tools() {
     );
 }
 
-/// A sixteen-colour terminal in a palette the operator chose is not somewhere
-/// a colour can be the only difference between an agent that finished and one
-/// that failed, so the glyph carries the state on its own.
-#[test]
-fn a_sub_agents_state_is_legible_without_its_colour() {
-    let frame = screen(&mut running_session(), 200, 60);
+/// What the running session's three agents were spawned to do, which is
+/// what their rows in the Activity pane are found by.
+const TESTS_TASK: &str = "Cover tests/fetch.test.ts";
+const REVIEW_TASK: &str = "Review catalog/cache.ts";
+const DOCS_TASK: &str = "Write docs/etags.md";
 
-    assert!(frame.contains("◆ test-writer"), "running:\n{frame}");
-    assert!(frame.contains("◇ reviewer"), "done:\n{frame}");
-    assert!(frame.contains("✗ doc-writer"), "failed:\n{frame}");
-}
-
-/// A session whose backend died runs nothing: the agent it was running and
-/// the call it was making are drawn as cut short, not as still running, and
-/// neither is counted as a failure.
+/// A session whose backend died runs nothing: the agent it was running leaves
+/// the list, counted as cut short rather than failed, and the call it was
+/// making is drawn as cut short, not as still running.
 #[test]
 fn a_session_that_ended_draws_nothing_as_still_running() {
     let mut app = running_session();
@@ -2183,7 +3716,7 @@ fn a_session_that_ended_draws_nothing_as_still_running() {
         summary: Some("cargo build".to_owned()),
         agent: None,
     });
-    assert!(screen(&mut app, 200, 60).contains("◆ test-writer"));
+    assert!(screen(&mut app, 200, 60).contains("◆ test "));
 
     app.apply(&Event::Error {
         message: "the `claude` session ended: exit status 1".to_owned(),
@@ -2191,14 +3724,9 @@ fn a_session_that_ended_draws_nothing_as_still_running() {
     });
     let frame = screen(&mut app, 200, 60);
 
-    let agent = frame
-        .lines()
-        .find(|line| line.contains("test-writer"))
-        .unwrap_or_default();
-    assert!(agent.contains("⊘ test-writer"), "{agent:?}");
     assert!(
-        agent.trim_end_matches(['│', ' ']).ends_with("cut short"),
-        "{agent:?}"
+        !frame.lines().any(|line| line.contains(TESTS_TASK)),
+        "{frame}"
     );
     let call = frame
         .lines()
@@ -2207,6 +3735,7 @@ fn a_session_that_ended_draws_nothing_as_still_running() {
     assert!(call.contains("cut short"), "{call:?}");
     assert!(frame.contains("0 running"), "{frame}");
     assert!(frame.contains("1 cut short"), "{frame}");
+    assert!(frame.contains("1 failed"), "{frame}");
     assert!(
         !frame
             .lines()
@@ -2215,63 +3744,66 @@ fn a_session_that_ended_draws_nothing_as_still_running() {
     );
 }
 
-/// A list of only what is running now would erase the failure at the moment
-/// it matters most.
+/// The pane lists what is running now. An agent that finished, failed or was
+/// cancelled leaves the list, and the header's counts are where it went: a
+/// list of every agent a long session spawned buries the one at work under
+/// the ones that stopped.
 #[test]
-fn an_agent_that_finished_stays_in_the_list_with_its_outcome() {
+fn only_a_running_agent_is_listed_and_a_finished_one_is_counted() {
     let frame = screen(&mut running_session(), 200, 60);
 
-    let row = frame
-        .lines()
-        .find(|line| line.contains("doc-writer"))
-        .unwrap_or_default();
-    assert!(row.contains("failed"), "{row:?}");
-
-    let done = frame
-        .lines()
-        .find(|line| line.contains("reviewer"))
-        .unwrap_or_default();
-    assert!(done.contains("done"), "{done:?}");
+    assert!(frame.contains("◆ test "), "running:\n{frame}");
+    for finished in [REVIEW_TASK, DOCS_TASK] {
+        assert!(
+            !frame.lines().any(|line| line.contains(finished)),
+            "{finished} has stopped and is still listed:\n{frame}"
+        );
+    }
+    assert!(
+        frame.contains("1 running · 3 spawned · 1 failed"),
+        "{frame}"
+    );
 }
 
 /// A running agent's status column is an elapsed time, measured from the
-/// moment it was spawned against the moment the shell is drawing at. A
-/// finished one carries the size its conversation reached where its backend
-/// reported one, and a failed one carries its state alone.
+/// moment it was spawned against the moment the shell is drawing at.
 #[test]
-fn a_running_agent_is_timed_and_a_finished_one_shows_its_context() {
+fn a_running_agent_is_timed() {
     let frame = screen(&mut running_session(), 200, 60);
 
     let running = frame
         .lines()
-        .find(|line| line.contains("test-writer"))
+        .find(|line| line.contains(TESTS_TASK))
         .unwrap_or_default();
     assert!(
-        running.contains("running 1m 42s"),
+        running.trim_end_matches(['│', ' ']).ends_with(" 1m 42s"),
         "the session ran for 102 seconds before it was read:\n{running:?}"
     );
-
     assert!(!running.contains("ctx"), "{running:?}");
-
-    for (finished, word) in [("reviewer", "done 4100 ctx"), ("doc-writer", "failed")] {
-        let row = frame
-            .lines()
-            .find(|line| line.contains(finished))
-            .unwrap_or_default();
-        // Nothing follows the status column but the pane's own border.
-        assert!(
-            row.trim_end_matches(['│', ' ']).ends_with(word),
-            "{finished} reads other than {word:?}: {row:?}"
-        );
-    }
 }
+
+/// The running session with a second agent running, one its backend has
+/// reported nothing about yet: no model, no step.
+fn session_with_a_silent_agent() -> App {
+    let mut app = running_session();
+    app.apply(&Event::AgentSpawn {
+        id: "a4".into(),
+        parent: None,
+        kind: Some("planner".to_owned()),
+        label: format!("planner: {PLAN_TASK}"),
+    });
+    app
+}
+
+/// What the agent the backend has said nothing about was spawned to do.
+const PLAN_TASK: &str = "Plan the etag rollout";
 
 /// The model a sub-agent's own messages named is drawn beside what it was
 /// spawned to do, shortened the way the Usage pane shortens it; an agent whose
 /// backend named none is drawn with none.
 #[test]
 fn a_sub_agents_model_is_drawn_beside_what_it_was_spawned_to_do() {
-    let frame = screen(&mut running_session(), 200, 60);
+    let frame = screen(&mut session_with_a_silent_agent(), 200, 60);
     let row = |label: &str| {
         frame
             .lines()
@@ -2280,24 +3812,18 @@ fn a_sub_agents_model_is_drawn_beside_what_it_was_spawned_to_do() {
             .to_owned()
     };
 
-    assert!(
-        row("test-writer").contains("tests/fetch.test.ts sonnet-5"),
-        "{frame}"
-    );
-    assert!(
-        row("reviewer").contains("catalog/cache.ts haiku-4-5"),
-        "{frame}"
-    );
+    assert!(row(TESTS_TASK).contains(" sonnet "), "{frame}");
+    assert!(row(PLAN_TASK).contains("◆ plan"), "{frame}");
     for model in ["sonnet", "haiku", "opus"] {
-        assert!(!row("doc-writer").contains(model), "{frame}");
+        assert!(!row(PLAN_TASK).contains(model), "{frame}");
     }
 }
 
-/// Under an agent is the last thing it was observed doing, and under an agent
-/// that reported nothing there is nothing — not an empty `└`.
+/// Under an agent is what it is doing now, and under an agent that reported
+/// nothing there is nothing — not an empty `└`.
 #[test]
 fn under_each_agent_is_the_last_thing_it_was_seen_doing() {
-    let frame = screen(&mut running_session(), 200, 60);
+    let frame = screen(&mut session_with_a_silent_agent(), 200, 60);
     let lines: Vec<&str> = frame.lines().collect();
     let under = |label: &str| {
         let at = lines
@@ -2308,14 +3834,9 @@ fn under_each_agent_is_the_last_thing_it_was_seen_doing() {
     };
 
     assert!(
-        under("test-writer").contains("└ Reading tests/stream.rs"),
+        under(TESTS_TASK).contains("└ Reading tests/stream.rs"),
         "{frame}"
     );
-    assert!(
-        under("doc-writer").contains("└ Notion 404, gave up after 2 retries"),
-        "{frame}"
-    );
-    assert!(under("reviewer").contains("✗ doc-writer"), "{frame}");
     // The transcript hangs rows of its own from a `└`; in the column to its
     // right, every one is under an agent.
     let under_agents: usize = frame
@@ -2326,57 +3847,7 @@ fn under_each_agent_is_the_last_thing_it_was_seen_doing() {
         })
         .map(|right| right.matches('└').count())
         .sum();
-    assert_eq!(under_agents, 2, "{frame}");
-}
-
-/// A decision carries the time it was recorded, in a column of its own, and
-/// what wraps out of the summary hangs under the summary rather than under
-/// the time.
-#[test]
-fn a_decision_is_drawn_under_the_time_it_was_recorded_at() {
-    let frame = screen(&mut running_session(), 200, 60);
-    let rows: Vec<&str> = frame.lines().collect();
-    let at = rows
-        .iter()
-        .position(|line| line.contains("Key the cache on the request URL"))
-        .expect("the newest decision is the first one under the header");
-
-    // The recorded session is folded at 13:39 and read at 13:41: the column
-    // carries the moment the decision was recorded, not the moment it is
-    // drawn at.
-    assert!(rows[at].contains("13:39"), "{:?}", rows[at]);
-    assert!(
-        rows[at + 1].contains("manifests can share an id"),
-        "the summary wraps under itself, not under the time: {:?}",
-        rows[at + 1]
-    );
-    // Columns, not bytes: the transcript beside the pane draws characters
-    // wider than a byte, and the two rows carry different ones.
-    let column = |row: &str, text: &str| row.find(text).map(|at| row[..at].chars().count());
-    let hang = column(rows[at + 1], "two manifests").zip(column(rows[at], "Key the cache"));
-    assert!(
-        hang.map(|(a, b)| a == b).unwrap_or(false),
-        "the hanging indent is the summary's own column: {hang:?}"
-    );
-}
-
-/// Newest first: the pane does not follow its own tail, so a decision
-/// appended below the fold would never be seen. Under the header it is always
-/// one row from a heading the eye already has.
-#[test]
-fn the_newest_decision_is_the_one_under_the_header() {
-    let frame = screen(&mut running_session(), 200, 60);
-    let rows: Vec<&str> = frame.lines().collect();
-    let header = rows
-        .iter()
-        .position(|line| line.contains("▾ Decisions"))
-        .expect("the section is drawn");
-
-    assert!(
-        rows[header + 1].contains("Key the cache on the request URL"),
-        "the second decision recorded is the first one drawn: {:?}",
-        rows[header + 1]
-    );
+    assert_eq!(under_agents, 1, "{frame}");
 }
 
 /// A session reaches for one MCP server a dozen ways, and a row each says
@@ -2384,7 +3855,9 @@ fn the_newest_decision_is_the_one_under_the_header() {
 /// server. A backend's own tools are already the family they belong to.
 #[test]
 fn the_tools_of_one_mcp_server_are_counted_as_one_family() {
-    let frame = screen(&mut running_session(), 200, 60);
+    let mut app = running_session();
+    app.count_tools_by_name();
+    let frame = screen(&mut app, 200, 60);
 
     let row = frame
         .lines()
@@ -2411,6 +3884,48 @@ fn the_tools_of_one_mcp_server_are_counted_as_one_family() {
     assert!(!read.contains('✗'), "{read:?}");
 }
 
+/// The Tools section counts calls by the kind of work they did, with what did
+/// it on a dim line under each kind, and `t` in the Activity pane turns it to
+/// the tools' own names and back.
+#[test]
+fn the_tools_are_counted_by_kind_of_work_and_t_turns_them_to_tool_names() {
+    let mut app = running_session();
+    let wide = screen(&mut app, 200, 60);
+    assert!(!wide.contains("Notion·*"), "{wide}");
+    let notion = wide
+        .lines()
+        .position(|line| line.contains("Notion ") && line.contains("✗ 1"))
+        .expect("the server is a kind of its own, with its failure beside it");
+    let under = wide.lines().nth(notion + 1).unwrap_or_default();
+    assert!(under.contains("search"), "{under:?}");
+    assert_snapshot("tools-by-work-200x60", &wide);
+    // Drawn once so the pane knows how tall it is, then scrolled to its end,
+    // where the tools are.
+    let _ = screen(&mut app, 120, 30);
+    app.scroll_pane(Pane::Activity, 40);
+    let narrow = screen(&mut app, 120, 30);
+    assert_snapshot("tools-by-work-120x30", &narrow);
+
+    for _ in 0..2 {
+        app.on_key(ratatui::crossterm::event::KeyEvent::from(
+            ratatui::crossterm::event::KeyCode::Tab,
+        ));
+    }
+    app.on_key(ratatui::crossterm::event::KeyEvent::from(
+        ratatui::crossterm::event::KeyCode::Char('t'),
+    ));
+    assert!(app.tools_by_name());
+    let raw = screen(&mut app, 200, 60);
+    assert!(raw.contains("Notion·*"), "{raw}");
+    assert!(raw.contains("t kinds of work"), "{raw}");
+
+    app.on_key(ratatui::crossterm::event::KeyEvent::from(
+        ratatui::crossterm::event::KeyCode::Char('t'),
+    ));
+    assert!(!app.tools_by_name());
+    assert!(!screen(&mut app, 200, 60).contains("Notion·*"));
+}
+
 /// Nothing having happened reads as nothing having happened — not as a figure
 /// of zero, and not as a bar drawn for a tool that never ran.
 #[test]
@@ -2418,7 +3933,6 @@ fn an_untouched_activity_pane_draws_no_zeroed_bar() {
     let frame = screen(&mut empty_session(), 120, 30);
 
     assert!(frame.contains("none spawned"), "{frame}");
-    assert!(frame.contains("none recorded"), "{frame}");
     assert!(frame.contains("none called"), "{frame}");
     // A bar is drawn in the same heavy line the focused pane's edges are, so
     // the rows those edges are on are not where a bar is looked for.
@@ -2433,14 +3947,14 @@ fn an_untouched_activity_pane_draws_no_zeroed_bar() {
     );
 }
 
-/// The pane scrolls rather than truncating: with three sections in it, the
-/// tools are below the sub-agents and the decisions, and they are reachable.
+/// The pane scrolls rather than truncating: the tools are below the
+/// sub-agents, and they are reachable.
 #[test]
 fn the_activity_pane_scrolls_to_what_is_below_the_agents() {
     let mut app = running_session();
     // Draw once so the pane knows how tall it is and how much it holds. At
-    // 200x60 it holds everything it has; a terminal half that tall is where a
-    // pane with three sections in it has to scroll.
+    // 200x60 it holds everything it has; a terminal half that tall is where the
+    // pane has to scroll.
     let _ = screen(&mut app, 120, 30);
     app.scroll_pane(Pane::Activity, 40);
     let frame = screen(&mut app, 120, 30);
@@ -2450,11 +3964,11 @@ fn the_activity_pane_scrolls_to_what_is_below_the_agents() {
     // pane shows the last rows it holds, and how many of them fit above the
     // tools depends on how tall the panes over it are.
     assert!(
-        frame.contains("Notion·*"),
+        frame.contains("Notion"),
         "the tools section is what the pane was scrolled to:\n{frame}"
     );
     assert!(
-        !frame.contains("◆ test-writer"),
+        !frame.contains("◆ test "),
         "and the agents above it are what it scrolled past:\n{frame}"
     );
 }
@@ -2472,10 +3986,10 @@ fn the_activity_pane_folds_a_section_away() {
         "a folded section still has to say that it is folded:\n{frame}"
     );
     assert!(
-        !frame.contains("test-writer"),
+        !frame.contains(TESTS_TASK),
         "the agents are folded away, not merely scrolled past:\n{frame}"
     );
-    assert!(frame.contains("▾ Decisions"), "{frame}");
+    assert!(frame.contains("▾ Tools"), "{frame}");
     assert!(
         frame.contains("▾ Working tree"),
         "folding a section of one pane left the other alone:\n{frame}"
@@ -2503,41 +4017,6 @@ fn a_wheel_notch_over_the_activity_pane_moves_only_that_pane() {
     );
 }
 
-/// A log that kept no times gives a decision no time. The column stays, so the
-/// summaries keep their edge, but it is left blank: a time of zero would be a
-/// moment nobody recorded, and the pane would be inventing one.
-#[test]
-fn a_decision_from_a_log_with_no_times_is_drawn_without_one() {
-    let mut app = empty_session();
-    app.apply(&Event::Decision {
-        summary: "Read the etag off the response, not the cache entry.".to_owned(),
-        rationale: None,
-        rejected: vec![],
-    });
-    let frame = screen(&mut app, 120, 30);
-    let row = frame
-        .lines()
-        .find(|line| line.contains("Read the etag off the response"))
-        .unwrap_or_default();
-
-    assert!(
-        !row.contains(':'),
-        "a shell with no clock drew a time anyway: {row:?}"
-    );
-    // The summary still starts where a decision with a time would: the column
-    // is what keeps the section's left edge straight.
-    let dated = screen(&mut running_session(), 120, 30);
-    let with_time = dated
-        .lines()
-        .find(|line| line.contains("13:39"))
-        .unwrap_or_default();
-    assert_eq!(
-        row.find("Read the etag"),
-        with_time.find("Reuse the existing LRU"),
-        "the summaries do not share a column:\n{row:?}\n{with_time:?}"
-    );
-}
-
 /// The row the ask bar is drawn on: the one where a badge meets the prompt's
 /// marker, whichever mode the badge names.
 fn bar_row(frame: &str) -> String {
@@ -2552,6 +4031,13 @@ fn press(app: &mut App, code: ratatui::crossterm::event::KeyCode) {
     app.on_key(ratatui::crossterm::event::KeyEvent::new(
         code,
         ratatui::crossterm::event::KeyModifiers::NONE,
+    ));
+}
+
+fn ctrl_f(app: &mut App) {
+    app.on_key(ratatui::crossterm::event::KeyEvent::new(
+        ratatui::crossterm::event::KeyCode::Char('f'),
+        ratatui::crossterm::event::KeyModifiers::CONTROL,
     ));
 }
 
@@ -2578,8 +4064,12 @@ fn the_placeholder_names_only_what_the_composer_does_today() {
     let mut app = running_session();
     let row = bar_row(&screen(&mut app, 200, 60));
     assert!(row.contains("Ask for a change"), "{row}");
-    assert!(row.contains("/ search transcript"), "{row}");
     assert!(row.contains("@ file"), "{row}");
+    assert!(row.contains("Ctrl+F find"), "{row}");
+    assert!(
+        !row.contains("/ command"),
+        "the bar promises commands the backend has not listed:\n{row}"
+    );
     assert!(
         !row.contains("! shell"),
         "the bar promises `! shell`, which the composer does not do:\n{row}"
@@ -2631,9 +4121,9 @@ fn the_badge_keeps_the_mode_while_the_right_end_is_taken() {
     let mut app = running_session();
     app.apply(&Event::ModeSelected { mode: Mode::Auto });
 
-    press(&mut app, ratatui::crossterm::event::KeyCode::F(3));
+    app.perform(niobe_tui::menu::Action::Stop);
     let row = bar_row(&screen(&mut app, 80, 24));
-    assert!(row.contains("F3 Diff"), "{row}");
+    assert!(row.contains("Nothing is running"), "{row}");
     assert!(
         row.contains(" auto  > "),
         "the shell's reply hid the mode:\n{row}"
@@ -2664,7 +4154,7 @@ fn a_command_and_a_search_keep_their_own_badges() {
     assert!(!frame.contains(" auto  > "), "{frame}");
 
     press(&mut app, ratatui::crossterm::event::KeyCode::Esc);
-    press(&mut app, ratatui::crossterm::event::KeyCode::Char('/'));
+    ctrl_f(&mut app);
     let frame = screen(&mut app, 120, 30);
     assert!(frame.contains(" find  / "), "{frame}");
     assert!(!frame.contains(" auto  > "), "{frame}");
@@ -2743,7 +4233,7 @@ fn the_bar_keeps_the_key_that_opens_a_line_at_eighty_columns() {
         assert!(row.contains(&format!(" {mode}  > ")), "{row}");
         assert!(row.contains("Ctrl+J newline"), "{row}");
         assert!(
-            row.contains("Ask for a change · / search transcript · @ file"),
+            row.contains("Ask for a change · @ file · Ctrl+F find"),
             "with the mode in the badge, the placeholder has its room back:\n{row}"
         );
     }
@@ -2754,7 +4244,7 @@ fn a_terminal_that_reports_shift_enter_holds_no_newline_key_at_eighty_columns() 
     let mut app = running_session().reports_shift_enter();
     let row = bar_row(&screen(&mut app, 80, 24));
     assert!(
-        row.contains("Ask for a change · / search transcript · @ file"),
+        row.contains("Ask for a change · @ file · Ctrl+F find"),
         "Shift+Enter cannot be mistaken for Enter here, so the placeholder keeps its room:\n{row}"
     );
     assert!(row.contains(" ask  > "), "{row}");
@@ -2784,10 +4274,10 @@ fn the_shells_reply_is_said_in_the_bar_without_taking_a_row() {
     let mut app = running_session();
     let before = screen(&mut app, 120, 30);
 
-    press(&mut app, ratatui::crossterm::event::KeyCode::F(3));
+    app.perform(niobe_tui::menu::Action::Stop);
     let after = screen(&mut app, 120, 30);
     let row = bar_row(&after);
-    assert!(row.contains("F3 Diff"), "{row}");
+    assert!(row.contains("Nothing is running"), "{row}");
     assert_eq!(
         before.lines().position(|row| row.contains(" ask ")),
         after.lines().position(|row| row.contains(" ask ")),
@@ -2860,10 +4350,219 @@ fn a_line_opened_after_the_last_one_grows_the_composer_rather_than_hiding_it() {
     assert_eq!(bar(&after) + 1, bar(&before), "{after}");
 }
 
+/// The composer's rows on a frame, from the bar's first down to the pane's
+/// bottom border.
+fn composer_box(frame: &str) -> Vec<String> {
+    let rows: Vec<&str> = frame.lines().collect();
+    let bar = rows
+        .iter()
+        .position(|row| row.contains("  > "))
+        .unwrap_or_else(|| panic!("no ask bar on the frame:\n{frame}"));
+    rows[bar..]
+        .iter()
+        .take_while(|row| !row.starts_with(FOCUS_BOTTOM_LEFT))
+        .map(|row| (*row).to_owned())
+        .collect()
+}
+
+/// Numbered words, `w0 w1 w2 …`, to exactly `length` characters, so a test
+/// can tell from any row which part of the prompt it holds.
+fn numbered_words(length: usize) -> String {
+    let mut text = String::new();
+    for n in 0.. {
+        let word = format!("w{n} ");
+        if text.len() + word.len() > length {
+            break;
+        }
+        text.push_str(&word);
+    }
+    while text.len() < length {
+        text.push('z');
+    }
+    text
+}
+
+#[test]
+fn a_long_line_without_a_break_is_drawn_whole_from_its_first_row() {
+    let mut app = running_session();
+    let prompt = numbered_words(300);
+    type_keys(&mut app, &prompt);
+    let frame = screen(&mut app, 80, 40);
+    let rows = composer_box(&frame);
+
+    assert!(
+        rows[0].contains("> w0 w1 w2"),
+        "the prompt's first row scrolled out of the composer:\n{frame}"
+    );
+    let shown: String = rows
+        .iter()
+        .map(|row| {
+            row.split_once("> ")
+                .map_or(row.as_str(), |(_, typed)| typed)
+        })
+        .map(|row| row.trim_matches(|c| c == FOCUS_SIDE || c == ' '))
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert_eq!(
+        shown.split_whitespace().collect::<Vec<_>>(),
+        prompt.split_whitespace().collect::<Vec<_>>(),
+        "every wrapped row of the prompt is on screen:\n{frame}"
+    );
+}
+
+#[test]
+fn paragraphs_that_each_wrap_to_two_rows_get_a_row_for_every_row_they_wrap_to() {
+    let mut app = running_session();
+    for paragraph in ["one", "two", "three"] {
+        if paragraph != "one" {
+            app.on_key(ratatui::crossterm::event::KeyEvent::new(
+                ratatui::crossterm::event::KeyCode::Char('j'),
+                ratatui::crossterm::event::KeyModifiers::CONTROL,
+            ));
+        }
+        type_keys(&mut app, &format!("{paragraph} {}", "word ".repeat(18)));
+    }
+    let frame = screen(&mut app, 80, 40);
+    let rows = composer_box(&frame);
+
+    assert_eq!(rows.len(), 6, "{frame}");
+    assert!(rows[0].contains("> one word"), "{frame}");
+    assert!(rows[2].contains("two word"), "{frame}");
+    assert!(rows[4].contains("three word"), "{frame}");
+}
+
+#[test]
+fn a_prompt_past_a_third_of_the_pane_stops_the_composer_and_keeps_the_cursor_row() {
+    let mut app = running_session();
+    let prompt = numbered_words(2000);
+    type_keys(&mut app, &prompt);
+    let frame = screen(&mut app, 80, 24);
+    let rows = composer_box(&frame);
+
+    let pane_bottom = frame
+        .lines()
+        .collect::<Vec<_>>()
+        .iter()
+        .rposition(|row| row.starts_with(FOCUS_BOTTOM_LEFT))
+        .expect("the pane is closed");
+    assert_eq!(rows.len(), (pane_bottom - 2) / 3, "{frame}");
+    let last_word = prompt
+        .split_whitespace()
+        .last()
+        .expect("the prompt has words");
+    assert!(
+        rows.last().is_some_and(|row| row.contains(last_word)),
+        "the row the cursor is on is out of sight:\n{frame}"
+    );
+}
+
+#[test]
+fn a_line_of_wide_characters_grows_the_composer_by_the_rows_it_is_drawn_in() {
+    let mut app = running_session();
+    let prompt = "漢字かな交じり文、".repeat(10);
+    type_keys(&mut app, &prompt);
+    let frame = screen(&mut app, 80, 40);
+    let rows = composer_box(&frame);
+
+    // The frame holds a wide character's second cell as a space.
+    let shown: String = rows
+        .iter()
+        .map(|row| {
+            row.split_once("> ")
+                .map_or(row.as_str(), |(_, typed)| typed)
+        })
+        .flat_map(|row| row.chars().filter(|c| *c != FOCUS_SIDE && *c != ' '))
+        .collect();
+    assert!(shown.starts_with("漢字かな"), "{frame}");
+    assert_eq!(shown, prompt, "{frame}");
+}
+
+#[test]
+fn the_composer_grows_as_the_character_that_wraps_is_typed_and_shrinks_back() {
+    use ratatui::crossterm::event::KeyCode;
+
+    let mut app = running_session();
+    let mut typed = 0;
+    let rows = loop {
+        press(&mut app, KeyCode::Char('x'));
+        typed += 1;
+        let rows = composer_box(&screen(&mut app, 80, 40));
+        if rows.len() > 1 || typed > 200 {
+            break rows;
+        }
+    };
+    assert_eq!(rows.len(), 2, "{rows:#?}");
+    assert!(
+        rows[0].contains(&format!("> {}", "x".repeat(typed - 1))),
+        "the first row is the line up to the wrap:\n{rows:#?}"
+    );
+    assert_eq!(rows[1].matches('x').count(), 1, "{rows:#?}");
+
+    press(&mut app, KeyCode::Backspace);
+    assert_eq!(composer_box(&screen(&mut app, 80, 40)).len(), 1);
+}
+
+#[test]
+fn opening_a_line_after_a_wrapped_one_keeps_both_of_its_rows_in_sight() {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let line = numbered_words(110);
+    for (key, terminal) in [
+        (
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT),
+            running_session().reports_shift_enter(),
+        ),
+        (
+            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL),
+            running_session(),
+        ),
+        (
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT),
+            running_session(),
+        ),
+    ] {
+        let mut app = terminal;
+        type_keys(&mut app, &line);
+        assert_eq!(composer_box(&screen(&mut app, 80, 40)).len(), 2);
+        app.on_key(key);
+        let frame = screen(&mut app, 80, 40);
+        let rows = composer_box(&frame);
+        assert_eq!(rows.len(), 3, "{key:?}:\n{frame}");
+        assert!(rows[0].contains("> w0 w1"), "{key:?}:\n{frame}");
+        assert!(
+            rows[1].contains(
+                line.split_whitespace()
+                    .last()
+                    .expect("the row holds a last word")
+            ),
+            "{key:?}:\n{frame}"
+        );
+    }
+}
+
+#[test]
+fn a_prompt_cut_back_under_the_cap_is_drawn_from_its_first_row() {
+    use ratatui::crossterm::event::KeyCode;
+
+    let mut app = running_session();
+    type_keys(&mut app, &numbered_words(1500));
+    let capped = composer_box(&screen(&mut app, 80, 24));
+    for _ in 0..1300 {
+        press(&mut app, KeyCode::Backspace);
+    }
+    let frame = screen(&mut app, 80, 24);
+    let rows = composer_box(&frame);
+    assert!(rows.len() < capped.len(), "{frame}");
+    assert!(
+        rows[0].contains("> w0 w1"),
+        "the box has room for the whole prompt but its first rows stayed scrolled away:\n{frame}"
+    );
+}
+
 #[test]
 fn a_reply_too_long_for_the_bar_wraps_in_it_rather_than_being_cut() {
     let mut app = running_session();
-    press(&mut app, ratatui::crossterm::event::KeyCode::F(1));
+    app.perform(niobe_tui::menu::Action::SignIn);
     let frame = screen(&mut app, 80, 24);
     let rows: Vec<&str> = frame.lines().collect();
     let bar = rows
@@ -2877,7 +4576,7 @@ fn a_reply_too_long_for_the_bar_wraps_in_it_rather_than_being_cut() {
         .collect::<Vec<_>>()
         .join(" ");
     assert!(
-        said.ends_with("Shift- or Option-drag selects text"),
+        said.ends_with("use /login there"),
         "the reply was cut:\n{frame}"
     );
     assert!(!said.contains("Ask for a change"), "{frame}");
@@ -2987,22 +4686,42 @@ fn the_focused_border_is_in_the_colour_the_theme_keeps_for_it() {
 /// The arrows walk the focused pane's section headers and Enter folds the one
 /// under the cursor, leaving the transcript and the composer alone.
 #[test]
+fn work_the_agent_says_it_left_out_of_scope_is_a_decision_in_the_activity_pane() {
+    let mut app = running_session();
+    app.apply(&Event::AssistantMessage {
+        text: "The etag path is done.\n\
+               DECISION: left the CSV exporter alone; it was not part of the request."
+            .to_owned(),
+        agent: None,
+    });
+
+    let frame = screen(&mut app, 200, 60);
+
+    assert!(
+        frame.contains("▾ Decisions, as the agent says  1"),
+        "{frame}"
+    );
+    assert!(frame.contains("left the CSV exporter alone"), "{frame}");
+}
+
+#[test]
 fn a_focused_pane_folds_the_section_under_its_cursor() {
     use ratatui::crossterm::event::KeyCode;
 
     let mut app = running_session();
     let _ = screen(&mut app, 200, 60);
     press(&mut app, KeyCode::Tab);
+    press(&mut app, KeyCode::Tab);
     let _ = screen(&mut app, 200, 60);
+    press(&mut app, KeyCode::Down);
     press(&mut app, KeyCode::Down);
     press(&mut app, KeyCode::Enter);
     let frame = screen(&mut app, 200, 60);
 
-    // The cursor scrolled the pane down to the commits, below the files, and
-    // folding them keeps their header in view.
-    assert!(frame.contains("▸ Commits"), "{frame}");
+    assert!(frame.contains("▸ Tools"), "{frame}");
+    assert!(frame.contains("▾ Decisions"), "{frame}");
     assert!(
-        !app.folded(Section::WorkingTree),
+        !app.folded(Section::SubAgents),
         "one section, the one under the cursor"
     );
     assert_eq!(app.composed(), "", "Enter folded rather than typed");
@@ -3120,7 +4839,7 @@ fn type_keys(app: &mut App, typed: &str) {
 }
 
 #[test]
-fn slash_searches_the_transcript_steps_between_matches_and_esc_puts_the_view_back() {
+fn ctrl_f_searches_the_transcript_steps_between_matches_and_esc_puts_the_view_back() {
     use ratatui::crossterm::event::KeyCode;
 
     let mut app = session_with_a_needle();
@@ -3130,10 +4849,10 @@ fn slash_searches_the_transcript_steps_between_matches_and_esc_puts_the_view_bac
         "the test needs it off screen"
     );
 
-    press(&mut app, KeyCode::Char('/'));
+    ctrl_f(&mut app);
     let row = find_row(&screen(&mut app, 120, 30));
     assert!(row.contains("Find in the transcript"), "{row}");
-    assert!(app.composed().is_empty(), "the slash went into the prompt");
+    assert!(app.composed().is_empty(), "the key went into the prompt");
 
     type_keys(&mut app, "needle");
     let frame = screen(&mut app, 120, 30);
@@ -3173,10 +4892,8 @@ fn slash_searches_the_transcript_steps_between_matches_and_esc_puts_the_view_bac
 
 #[test]
 fn every_match_on_screen_is_marked_and_only_the_current_one_as_a_chip() {
-    use ratatui::crossterm::event::KeyCode;
-
     let mut app = session_with_a_needle();
-    press(&mut app, KeyCode::Char('/'));
+    ctrl_f(&mut app);
     type_keys(&mut app, "worth");
     let frame = screen(&mut app, 120, 30);
     let theme = app.theme().to_owned();
@@ -3202,12 +4919,72 @@ fn a_query_found_nowhere_says_so() {
 
     let mut app = session_with_a_needle();
     let tail = screen(&mut app, 120, 30);
-    press(&mut app, KeyCode::Char('/'));
+    ctrl_f(&mut app);
     type_keys(&mut app, "haystack");
     let frame = screen(&mut app, 120, 30);
     assert!(find_row(&frame).contains("no match"), "{frame}");
     press(&mut app, KeyCode::Esc);
     assert_eq!(screen(&mut app, 120, 30), tail);
+}
+
+/// Folding the runs of calls takes the matches inside them off the
+/// transcript, above the one stepped to; the one stepped to is the same text
+/// after it, not whichever match now has its number.
+#[test]
+fn folding_the_calls_above_the_current_match_keeps_the_same_match_current() {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = running_session();
+    for text in ["look in fetch.ts first", "look in fetch.ts second"] {
+        app.apply(&Event::AssistantMessage {
+            text: text.to_owned(),
+            agent: None,
+        });
+    }
+    let open = screen(&mut app, 200, 60);
+    assert!(open.contains("├ catalog/fetch.ts"), "{open}");
+    ctrl_f(&mut app);
+    type_keys(&mut app, "fetch.ts");
+    let _ = screen(&mut app, 200, 60);
+    press(&mut app, KeyCode::Up);
+    let frame = screen(&mut app, 200, 60);
+    let theme = app.theme().to_owned();
+    let chip = Some((Some(theme.pane_bg), Some(theme.hot)));
+    let current =
+        |app: &mut App, text: &str| style_at(app, 200, 60, text).map(|style| (style.fg, style.bg));
+    assert_eq!(current(&mut app, "fetch.ts first"), chip, "{frame}");
+    let before = find_row(&frame);
+
+    app.on_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
+    let folded = screen(&mut app, 200, 60);
+
+    assert!(!folded.contains("├ catalog/fetch.ts"), "{folded}");
+    assert_ne!(
+        find_row(&folded),
+        before,
+        "the fold took no match away:\n{folded}"
+    );
+    assert_eq!(current(&mut app, "fetch.ts first"), chip, "{folded}");
+    assert_ne!(current(&mut app, "fetch.ts second"), chip, "{folded}");
+}
+
+/// A reply that arrives while the search is open is searched too, and the
+/// match stepped to stays where it was.
+#[test]
+fn a_reply_arriving_while_the_search_is_open_is_counted() {
+    let mut app = session_with_a_needle();
+    let _ = screen(&mut app, 120, 30);
+    ctrl_f(&mut app);
+    type_keys(&mut app, "needle");
+    assert!(find_row(&screen(&mut app, 120, 30)).contains("2 of 2"));
+
+    app.apply(&Event::AssistantMessage {
+        text: "a needle at the end".to_owned(),
+        agent: None,
+    });
+    let frame = screen(&mut app, 120, 30);
+
+    assert!(find_row(&frame).contains("2 of 3"), "{frame}");
 }
 
 #[test]
@@ -3220,12 +4997,15 @@ fn a_slash_anywhere_but_the_start_of_a_prompt_is_a_slash() {
     assert_eq!(app.composed(), "a/b");
 
     let mut app = session_with_a_needle();
-    type_keys(&mut app, "//etc");
-    assert!(app.finding().is_none(), "a second slash leaves the search");
-    assert_eq!(app.composed(), "/etc", "and starts the prompt with one");
+    type_keys(&mut app, "/etc");
+    assert!(
+        app.finding().is_none(),
+        "a slash opening the prompt searched"
+    );
+    assert_eq!(app.composed(), "/etc", "and the prompt starts with it");
 
     let mut app = session_with_a_needle();
-    press(&mut app, KeyCode::Char('/'));
+    ctrl_f(&mut app);
     press(&mut app, KeyCode::Backspace);
     assert!(
         app.finding().is_none(),
@@ -3364,6 +5144,7 @@ fn listed_commands(names: &[(&str, &str, Option<&str>)]) -> Event {
                     name: (*name).to_owned(),
                     description: (*description).to_owned(),
                     argument_hint: hint.map(str::to_owned),
+                    mid_prompt: false,
                 },
             )
             .collect(),
@@ -3408,11 +5189,11 @@ fn command_list(frame: &str) -> Vec<String> {
 }
 
 #[test]
-fn two_slashes_offer_the_backends_commands_and_enter_picks_one_to_send() {
+fn a_slash_offers_the_backends_commands_and_enter_picks_one_to_send() {
     use ratatui::crossterm::event::KeyCode;
 
-    let mut app = session_with_commands();
-    type_keys(&mut app, "//");
+    let mut app = session_with_commands().attached();
+    type_keys(&mut app, "/");
     assert!(app.finding().is_none());
     let frame = screen(&mut app, 120, 30);
     let offered = command_list(&frame);
@@ -3457,6 +5238,265 @@ fn two_slashes_offer_the_backends_commands_and_enter_picks_one_to_send() {
 }
 
 #[test]
+fn enter_on_a_command_typed_in_full_sends_it_rather_than_a_longer_one() {
+    use ratatui::crossterm::event::KeyCode;
+
+    let mut app = empty_session().attached();
+    app.apply(&listed_commands(&[
+        ("review-pr", "Review a pull request", None),
+        ("review", "Review the changes", None),
+    ]));
+    type_keys(&mut app, "/review");
+    let offered = command_list(&screen(&mut app, 120, 30));
+    assert!(offered[0].starts_with("/review "), "{offered:?}");
+
+    press(&mut app, KeyCode::Enter);
+    let sent = app.take_produced();
+    assert!(
+        sent.iter().any(|event| matches!(
+            event,
+            Event::UserMessage { text } if text == "/review"
+        )),
+        "the command typed in full is sent on the first Enter: {sent:?}"
+    );
+    assert_eq!(app.composed(), "");
+}
+
+#[test]
+fn enter_on_another_command_than_the_one_typed_in_full_puts_that_one_in_the_prompt() {
+    use ratatui::crossterm::event::KeyCode;
+
+    let mut app = empty_session();
+    app.apply(&listed_commands(&[
+        ("review-pr", "Review a pull request", None),
+        ("review", "Review the changes", None),
+    ]));
+    type_keys(&mut app, "/review");
+    press(&mut app, KeyCode::Down);
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(app.composed(), "/review-pr ");
+    assert!(app.take_produced().is_empty());
+
+    let mut app = empty_session();
+    app.apply(&listed_commands(&[("review", "Review the changes", None)]));
+    type_keys(&mut app, "/REVIEW");
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(
+        app.composed(),
+        "/review ",
+        "a name typed in another case is written as the backend lists it"
+    );
+    assert!(app.take_produced().is_empty());
+}
+
+/// A session whose backend lists `/compact`, which it runs only where a
+/// prompt opens with it, and the skills `review` and `reveal`, which it takes
+/// named anywhere in a prompt.
+fn session_with_skills() -> App {
+    let mut app = empty_session();
+    let command = |name: &str, mid_prompt: bool| niobe_core::event::SlashCommand {
+        name: name.to_owned(),
+        description: format!("what /{name} does"),
+        argument_hint: None,
+        mid_prompt,
+    };
+    app.apply(&Event::Commands {
+        commands: vec![
+            command("compact", false),
+            command("review", true),
+            command("reveal", true),
+        ],
+    });
+    app
+}
+
+fn new_line(app: &mut App) {
+    app.on_key(ratatui::crossterm::event::KeyEvent::new(
+        ratatui::crossterm::event::KeyCode::Char('j'),
+        ratatui::crossterm::event::KeyModifiers::CONTROL,
+    ));
+}
+
+#[test]
+fn a_slash_mid_prompt_offers_the_skills_and_not_the_commands_that_only_open_one() {
+    let mut app = session_with_skills();
+    type_keys(&mut app, "fix it with /rev");
+    let offered = command_list(&screen(&mut app, 120, 30));
+    assert_eq!(offered.len(), 2, "{offered:?}");
+    assert!(offered[0].starts_with("/review "), "{offered:?}");
+    assert!(offered[1].starts_with("/reveal "), "{offered:?}");
+
+    let mut app = session_with_skills();
+    type_keys(&mut app, "first");
+    new_line(&mut app);
+    type_keys(&mut app, "fix it with /");
+    let offered = command_list(&screen(&mut app, 120, 30));
+    assert_eq!(offered.len(), 2, "on any row: {offered:?}");
+    assert!(
+        offered.iter().all(|row| !row.starts_with("/compact")),
+        "a command run only from the start of the prompt is not offered mid-prompt: \
+         {offered:?}"
+    );
+
+    let mut app = session_with_skills();
+    type_keys(&mut app, "/");
+    let offered = command_list(&screen(&mut app, 120, 30));
+    assert_eq!(
+        offered.len(),
+        3,
+        "the start of the prompt offers them all: {offered:?}"
+    );
+}
+
+#[test]
+fn a_slash_inside_a_word_opens_no_list() {
+    let mut app = session_with_skills();
+    type_keys(&mut app, "look at src/re");
+    assert!(command_list(&screen(&mut app, 120, 30)).is_empty());
+
+    let mut app = session_with_skills();
+    type_keys(&mut app, "see /rev/");
+    assert!(
+        command_list(&screen(&mut app, 120, 30)).is_empty(),
+        "a path that starts a word is no skill's name"
+    );
+}
+
+#[test]
+fn enter_on_a_skill_offered_mid_prompt_replaces_only_that_word() {
+    use ratatui::crossterm::event::KeyCode;
+
+    let mut app = session_with_skills();
+    type_keys(&mut app, "fix it with /rev");
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(app.composed(), "fix it with /review ");
+    assert!(app.take_produced().is_empty());
+
+    type_keys(&mut app, "and /reve");
+    press(&mut app, KeyCode::Esc);
+    assert!(
+        command_list(&screen(&mut app, 120, 30)).is_empty(),
+        "Esc closes the list under the word it was open for"
+    );
+    type_keys(&mut app, "a");
+    assert!(command_list(&screen(&mut app, 120, 30)).is_empty());
+}
+
+#[test]
+fn a_command_typed_in_the_composer_is_drawn_in_the_command_colour() {
+    let mut app = session_with_skills();
+    type_keys(&mut app, "/compact zebra /review quokka /usr/bin /tidy");
+    assert_snapshot("composer-command-120x30", &paint(&mut app, 120, 30));
+
+    let theme = app.theme().to_owned();
+    let mut fg = |text: &str| {
+        style_at(&mut app, 120, 30, text)
+            .unwrap_or_else(|| panic!("{text} is drawn"))
+            .fg
+    };
+    assert_eq!(fg("/compact"), Some(theme.command));
+    assert_eq!(fg("t zebra"), Some(theme.command), "the whole name");
+    assert_eq!(fg("zebra"), Some(theme.fg));
+    assert_eq!(fg("/review"), Some(theme.command), "a skill mid-prompt");
+    assert_eq!(fg("/usr/bin"), Some(theme.fg), "a path");
+    assert_eq!(
+        fg("/tidy"),
+        Some(theme.fg),
+        "a name the backend did not list"
+    );
+}
+
+#[test]
+fn a_command_after_an_emoji_drawn_as_one_glyph_is_coloured_on_its_own_cells() {
+    for emoji in [
+        "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}",
+        "\u{1f1fa}\u{1f1e6}",
+        "\u{2764}\u{fe0f}",
+    ] {
+        let mut app = session_with_skills();
+        type_keys(&mut app, &format!("{emoji} /review quokka"));
+        let theme = app.theme().to_owned();
+        let mut fg = |text: &str| style_at(&mut app, 120, 30, text).and_then(|style| style.fg);
+
+        assert_eq!(fg("/review"), Some(theme.command), "after {emoji}");
+        assert_eq!(fg("w quokka"), Some(theme.command), "after {emoji}");
+        assert_eq!(fg(" quokka"), Some(theme.fg), "after {emoji}");
+        assert_eq!(fg("quokka"), Some(theme.fg), "after {emoji}");
+    }
+}
+
+#[test]
+fn a_command_mid_prompt_is_coloured_only_where_the_backend_reads_it_there() {
+    let mut app = session_with_skills();
+    type_keys(&mut app, "then /compact and /review it");
+    let theme = app.theme().to_owned();
+    assert_eq!(
+        style_at(&mut app, 120, 30, "/compact").and_then(|style| style.fg),
+        Some(theme.fg),
+        "a command the backend runs only where the prompt opens with it"
+    );
+    assert_eq!(
+        style_at(&mut app, 120, 30, "/review").and_then(|style| style.fg),
+        Some(theme.command)
+    );
+}
+
+#[test]
+fn a_command_that_wraps_in_the_composer_is_coloured_on_both_rows() {
+    let mut app = session_with_skills();
+    type_keys(&mut app, &format!("{} /review it", "word ".repeat(22)));
+    let frame = screen(&mut app, 120, 30);
+    let row = frame
+        .lines()
+        .position(|line| line.contains("/review it"))
+        .unwrap_or_else(|| panic!("the skill is on its own row:\n{frame}"));
+    assert!(
+        frame
+            .lines()
+            .nth(row - 1)
+            .is_some_and(|line| line.contains("word")),
+        "the prompt wrapped before it:\n{frame}"
+    );
+    let theme = app.theme().to_owned();
+    assert_eq!(
+        style_at(&mut app, 120, 30, "/review").and_then(|style| style.fg),
+        Some(theme.command)
+    );
+}
+
+#[test]
+fn a_sent_prompt_that_opens_with_a_command_is_coloured_in_the_transcript() {
+    use ratatui::crossterm::event::KeyCode;
+
+    let mut app = session_with_skills().attached();
+    type_keys(&mut app, "/review zebra /compact quokka");
+    press(&mut app, KeyCode::Enter);
+    assert!(app.composed().is_empty());
+    let theme = app.theme().to_owned();
+    assert_eq!(theme, Theme::default());
+    assert_ne!(
+        theme.command, theme.user,
+        "the default theme draws the command apart from the prompt around it"
+    );
+    assert_snapshot("transcript-command-120x30", &paint(&mut app, 120, 30));
+    // The pane's title names the session by the same prompt; the two blanks
+    // after it are what only the transcript's row has.
+    let mut fg = |text: &str| {
+        style_at(&mut app, 120, 30, text)
+            .unwrap_or_else(|| panic!("{text} is drawn"))
+            .fg
+    };
+    assert_eq!(fg("/review zebra /compact quokka  "), Some(theme.command));
+    assert_eq!(fg("w zebra /compact quokka  "), Some(theme.command));
+    assert_eq!(fg("zebra /compact quokka  "), Some(theme.user));
+    assert_eq!(
+        fg("/compact quokka  "),
+        Some(theme.user),
+        "mid-prompt, a command is text"
+    );
+}
+
+#[test]
 fn a_list_the_backend_sends_again_replaces_what_is_offered() {
     let mut app = session_with_commands();
     app.apply(&listed_commands(&[(
@@ -3464,7 +5504,7 @@ fn a_list_the_backend_sends_again_replaces_what_is_offered() {
         "Pre-commit review workflow",
         None,
     )]));
-    type_keys(&mut app, "//");
+    type_keys(&mut app, "/");
     let offered = command_list(&screen(&mut app, 120, 30));
     assert_eq!(offered.len(), 1, "{offered:?}");
     assert!(
@@ -3478,11 +5518,11 @@ fn a_command_is_offered_only_where_it_opens_the_prompt_and_esc_leaves_it_as_type
     use ratatui::crossterm::event::KeyCode;
 
     let mut app = session_with_commands();
-    type_keys(&mut app, "see //comp");
+    type_keys(&mut app, "see /comp");
     assert!(command_list(&screen(&mut app, 120, 30)).is_empty());
 
     let mut app = session_with_commands();
-    type_keys(&mut app, "//co");
+    type_keys(&mut app, "/co");
     assert!(!command_list(&screen(&mut app, 120, 30)).is_empty());
     press(&mut app, KeyCode::Esc);
     type_keys(&mut app, "n");
@@ -3492,11 +5532,16 @@ fn a_command_is_offered_only_where_it_opens_the_prompt_and_esc_leaves_it_as_type
     );
     press(&mut app, KeyCode::Enter);
     assert!(
+        app.take_produced().is_empty(),
+        "a command the backend did not list is held once"
+    );
+    press(&mut app, KeyCode::Enter);
+    assert!(
         !app.take_produced().is_empty(),
         "with the list closed, Enter sends"
     );
 
-    type_keys(&mut app, "//co");
+    type_keys(&mut app, "/co");
     assert!(
         !command_list(&screen(&mut app, 120, 30)).is_empty(),
         "a list closed on one prompt stayed closed for the next"
@@ -3523,15 +5568,15 @@ fn a_list_of_files_closed_on_a_word_opens_again_for_the_next_word_in_its_place()
 #[test]
 fn a_session_whose_backend_listed_no_commands_does_not_offer_one() {
     let mut app = empty_session();
-    assert!(!bar_row(&screen(&mut app, 200, 60)).contains("// command"));
-    type_keys(&mut app, "//");
+    assert!(!bar_row(&screen(&mut app, 200, 60)).contains("/ command"));
+    type_keys(&mut app, "/");
     assert_eq!(app.composed(), "/");
     assert!(command_list(&screen(&mut app, 120, 30)).is_empty());
 
     let mut app = session_with_commands();
     let row = bar_row(&screen(&mut app, 200, 60));
     assert!(
-        row.contains("// command"),
+        row.contains("/ command or skill"),
         "a session with commands to run says how to reach them: {row}"
     );
 }
@@ -3662,21 +5707,10 @@ fn a_command_after_a_blank_one_still_runs_here_rather_than_reaching_the_agent() 
 }
 
 #[test]
-fn bang_and_slash_on_a_composer_of_spaces_open_what_they_open_on_nothing() {
-    use ratatui::crossterm::event::KeyCode;
-
+fn bang_on_a_composer_of_spaces_opens_what_it_opens_on_nothing() {
     let mut app = session_that_runs_commands();
     type_keys(&mut app, "  ");
     run_command(&mut app, "echo spaced");
-
-    type_keys(&mut app, "  ");
-    press(&mut app, KeyCode::Char('/'));
-    assert!(
-        app.finding().is_some(),
-        "`/` was typed rather than opening search: {:?}",
-        app.composed()
-    );
-    assert!(app.composed().is_empty(), "the spaces were left behind");
 }
 
 #[test]
@@ -3932,17 +5966,23 @@ fn a_command_the_operator_stopped_ends_as_stopped_with_what_it_printed_up_to_the
     assert!(
         matches!(
             produced.as_slice(),
-            [Event::ToolCallEnd { id: ended, outcome: ToolOutcome::Failed, exit_code: None, error: Some(error), output, .. }]
+            [Event::ToolCallEnd { id: ended, outcome: ToolOutcome::Interrupted, exit_code: None, error: Some(error), output, .. }]
                 if *ended == id && error == "stopped by the operator" && output == "y\ny\ny\n"
         ),
         "the end does not say the operator stopped it: {produced:?}"
     );
+    assert!(
+        app.session().tools().failed_by_name.is_empty(),
+        "a command the operator stopped was counted as one that failed"
+    );
     let frame = screen(&mut app, 120, 30);
     assert!(frame.contains("stopped by the operator"), "{frame}");
+    assert!(frame.contains("stopped"), "{frame}");
+    assert!(!frame.contains("failed"), "{frame}");
 }
 
 #[test]
-fn a_stopped_command_whose_sh_exited_0_is_still_stopped_and_keeps_the_status() {
+fn a_stopped_command_whose_sh_exited_0_reads_as_stopped_and_not_as_exit_0() {
     use niobe_core::event::ToolOutcome;
 
     let mut app = session_that_runs_commands();
@@ -3964,11 +6004,14 @@ fn a_stopped_command_whose_sh_exited_0_is_still_stopped_and_keeps_the_status() {
     assert!(
         matches!(
             produced.as_slice(),
-            [Event::ToolCallEnd { outcome: ToolOutcome::Failed, exit_code: Some(0), error: Some(error), .. }]
+            [Event::ToolCallEnd { outcome: ToolOutcome::Interrupted, exit_code: None, error: Some(error), .. }]
                 if error == "stopped by the operator"
         ),
         "a stopped command read as one that succeeded: {produced:?}"
     );
+    let frame = screen(&mut app, 120, 30);
+    assert!(!frame.contains("exit 0"), "{frame}");
+    assert!(frame.contains("stopped by the operator"), "{frame}");
 }
 
 #[test]
@@ -3980,4 +6023,697 @@ fn ctrl_g_with_no_command_running_says_so() {
     assert!(app.take_stops().is_empty());
     assert_eq!(app.hint(), Some("No ! command is running"));
     assert!(!app.should_quit());
+}
+
+/// A `❤️` is two cells as ratatui draws it and one apiece by character, so a
+/// reply of them wrapped by characters overran its line and lost its end.
+#[test]
+fn a_reply_of_emoji_is_wrapped_as_wide_as_it_is_drawn() {
+    let mut app = App::new(Repo::default());
+    app.apply(&Event::AssistantMessage {
+        text: format!("{} END", "\u{2764}\u{fe0f}".repeat(40)),
+        agent: None,
+    });
+
+    let frame = screen(&mut app, 120, 30);
+
+    assert!(
+        frame.contains("END"),
+        "the end of the reply was cut off:\n{frame}"
+    );
+}
+
+/// A file the repository does not track yet is in the working tree, marked
+/// new: counted where its lines were read, an em dash where they were not,
+/// and in the header either way.
+#[test]
+fn new_files_are_in_the_working_tree_marked_new_and_counted_where_read() {
+    let working = |path: &str, added: Option<u64>, new: bool| niobe_tui::app::WorkingFile {
+        path: path.to_owned(),
+        added,
+        removed: Some(0),
+        new,
+    };
+    let mut app = App::new(Repo {
+        name: "niobe".to_owned(),
+        branch: Some("main".to_owned()),
+        read: true,
+        working: vec![
+            working("kept.txt", Some(1), false),
+            working("large.txt", None, true),
+            working("sub/dir/inner.txt", Some(3), true),
+        ],
+        ..Repo::default()
+    });
+
+    let frame = screen(&mut app, 120, 30);
+
+    assert_snapshot("working-new-120x30", &frame);
+    let header = frame
+        .lines()
+        .find(|line| line.contains("Working tree"))
+        .expect("the working tree is drawn");
+    assert!(header.contains("3 files  +≥4 −0"), "{header}");
+}
+
+/// Git counts no lines in a binary file, so a working tree whose only change
+/// is one has no figure to add up: its header says so rather than `+0 −0`.
+#[test]
+fn a_working_tree_of_nothing_but_a_binary_file_has_no_line_counts() {
+    let mut app = App::new(Repo {
+        name: "niobe".to_owned(),
+        branch: Some("main".to_owned()),
+        read: true,
+        working: vec![niobe_tui::app::WorkingFile {
+            path: "docs/diagram.png".to_owned(),
+            added: None,
+            removed: None,
+            new: false,
+        }],
+        ..Repo::default()
+    });
+
+    let frame = screen(&mut app, 120, 30);
+    let header = frame
+        .lines()
+        .find(|line| line.contains("Working tree"))
+        .expect("the working tree is drawn");
+
+    // The same dash a file's own row draws where git gave it no count.
+    assert!(header.contains("1 file  — —"), "{header}");
+    assert!(!header.contains("+0"), "{header}");
+}
+
+fn alt(letter: char) -> ratatui::crossterm::event::KeyEvent {
+    ratatui::crossterm::event::KeyEvent::new(
+        ratatui::crossterm::event::KeyCode::Char(letter),
+        ratatui::crossterm::event::KeyModifiers::ALT,
+    )
+}
+
+#[test]
+fn an_open_menu_hangs_from_its_name_with_the_keys_that_do_each_item() {
+    let mut app = running_session();
+    app.on_key(alt('v'));
+    for (width, height) in [(80, 24), (120, 30)] {
+        let frame = screen(&mut app, width, height);
+        assert!(frame.contains("Group by agent"), "{frame}");
+        assert!(frame.contains("F5  Ctrl+T"), "{frame}");
+        assert!(
+            frame.contains("shown"),
+            "a pane says whether it is: {frame}"
+        );
+        assert_snapshot(&format!("menu-view-{width}x{height}"), &frame);
+    }
+}
+
+/// An open menu in `classic`, colours and all, over the transcript: Far's
+/// white-on-cyan menu with its item under the cursor white on black, and the
+/// menu's shadow redrawing what it falls on in dark grey on black.
+/// The menu row's styles, cell by cell, beside its text: the identity on the
+/// right of the row is drawn after the menus and must leave theirs alone.
+fn menu_row(app: &mut App) -> (Vec<char>, Vec<ratatui::style::Style>) {
+    let text = screen(app, 160, 30);
+    let row: Vec<char> = text.lines().next().unwrap_or_default().chars().collect();
+    let cells = styles(app, 160, 30).into_iter().take(160).collect();
+    (row, cells)
+}
+
+fn title_at(row: &[char], name: &str) -> usize {
+    let name: Vec<char> = name.chars().collect();
+    row.windows(name.len())
+        .position(|window| window == name.as_slice())
+        .unwrap_or_else(|| panic!("{} is not on the menu row", String::from_iter(&name)))
+}
+
+#[test]
+fn every_menu_title_keeps_its_hot_letter_and_the_open_one_is_inverted_in_every_theme() {
+    for theme in THEMES {
+        let mut app = running_session().with_theme(theme);
+        let (row, cells) = menu_row(&mut app);
+        assert!(
+            String::from_iter(&row).trim_end().len() > 60,
+            "the identity is on the row, so it is drawn over it"
+        );
+        for menu in niobe_tui::menu::MENUS {
+            let at = title_at(&row, menu.name);
+            assert_eq!(
+                cells[at].fg,
+                Some(theme.hot),
+                "{} {}",
+                theme.name,
+                menu.name
+            );
+        }
+
+        app.on_key(alt('v'));
+        let (row, cells) = menu_row(&mut app);
+        let at = title_at(&row, "View");
+        assert_eq!(cells[at].fg, Some(theme.hot), "{}", theme.name);
+        assert_eq!(
+            (cells[at + 1].fg, cells[at + 1].bg),
+            (Some(theme.menu_bg), Some(theme.menu_fg)),
+            "{}: the open menu's title is inverted",
+            theme.name
+        );
+    }
+}
+
+#[test]
+fn an_open_menu_in_classic_is_painted_in_far_managers_colours() {
+    let mut app = running_session()
+        .with_depth(Depth::Sixteen)
+        .with_theme(CLASSIC);
+    app.on_key(alt('v'));
+    assert_snapshot("menu-view-classic-120x30", &paint(&mut app, 120, 30));
+}
+
+#[test]
+fn the_settings_name_the_files_the_session_was_read_from() {
+    let mut app = running_session().with_places(niobe_tui::Places {
+        config_files: vec![
+            niobe_tui::ConfigFile {
+                path: "/home/me/.config/niobe/config.toml".to_owned(),
+                exists: true,
+                openable: true,
+            },
+            niobe_tui::ConfigFile {
+                path: "/home/me/src/niobe/.niobe/config.toml".to_owned(),
+                exists: false,
+                openable: false,
+            },
+        ],
+    });
+    app.on_key(ratatui::crossterm::event::KeyEvent::new(
+        ratatui::crossterm::event::KeyCode::F(9),
+        ratatui::crossterm::event::KeyModifiers::NONE,
+    ));
+    let frame = screen(&mut app, 120, 30);
+    assert!(frame.contains(" Settings "), "{frame}");
+    assert!(
+        frame.contains("/home/me/.config/niobe/config.toml"),
+        "{frame}"
+    );
+    assert!(frame.contains("o open"), "{frame}");
+    assert_snapshot("settings-120x30", &frame);
+}
+
+/// F7 lists the MCP servers the backend reported as the session started,
+/// each with how it stands, where its configuration came from and how many
+/// tools it gave the model, while a turn runs and without sending one; Enter
+/// shows the one under the cursor whole, with why it failed.
+#[test]
+fn f7_lists_the_mcp_servers_while_a_turn_runs() {
+    use niobe_core::event::{McpServer, McpStatus};
+    use ratatui::crossterm::event::KeyCode;
+
+    let mut app = running_session();
+    let server = |name: &str, status: McpStatus, scope: &str, tools: &[&str]| McpServer {
+        name: name.to_owned(),
+        status,
+        source: None,
+        tools: tools.iter().map(|tool| (*tool).to_owned()).collect(),
+        scope: Some(scope.to_owned()),
+        error: None,
+        endpoint: None,
+        reports_as: None,
+    };
+    app.apply(&Event::McpServers {
+        servers: vec![
+            McpServer {
+                endpoint: Some("http · https://api.githubcopilot.com/mcp".to_owned()),
+                reports_as: Some("github-mcp-server 0.9.1".to_owned()),
+                ..server(
+                    "github",
+                    McpStatus::Connected,
+                    "user",
+                    &["create_issue", "search_code"],
+                )
+            },
+            server("notes", McpStatus::Connected, "project", &["search"]),
+            server("linear", McpStatus::NeedsAuth, "user", &[]),
+            McpServer {
+                error: Some(
+                    "ECONNREFUSED: Unable to connect. Is the computer able to access the url?"
+                        .to_owned(),
+                ),
+                endpoint: Some("http · http://127.0.0.1:9/mcp".to_owned()),
+                ..server("remote docs", McpStatus::Failed, "local", &[])
+            },
+        ],
+    });
+    app.take_produced();
+    press(&mut app, KeyCode::F(7));
+    assert_eq!(said(&mut app), [], "F7 sent a turn");
+
+    let frame = screen(&mut app, 120, 30);
+    assert!(frame.contains(" MCP servers "), "{frame}");
+    for said in [
+        "github",
+        "needs sign-in",
+        "remote docs",
+        "failed",
+        "2 tools",
+    ] {
+        assert!(frame.contains(said), "{said}:\n{frame}");
+    }
+    assert_snapshot("mcp-view-120x30", &frame);
+
+    for _ in 0..3 {
+        press(&mut app, KeyCode::Down);
+    }
+    press(&mut app, KeyCode::Enter);
+    let frame = screen(&mut app, 120, 30);
+    for said in [
+        " MCP servers · remote docs ",
+        "ECONNREFUSED: Unable to connect.",
+        "http · http://127.0.0.1:9/mcp",
+        "local",
+    ] {
+        assert!(frame.contains(said), "{said}:\n{frame}");
+    }
+    assert_snapshot("mcp-server-120x30", &frame);
+}
+
+#[test]
+fn a_pane_hidden_from_the_view_menu_gives_its_rows_to_the_others() {
+    let mut app = running_session();
+    app.perform(niobe_tui::menu::Action::Pane(
+        niobe_tui::menu::SidePane::Changes,
+    ));
+    let frame = screen(&mut app, 120, 30);
+    assert!(!frame.contains(" Changes "), "{frame}");
+    assert!(frame.contains(" Activity "), "{frame}");
+    assert_snapshot("changes-hidden-120x30", &frame);
+
+    for pane in [
+        niobe_tui::menu::SidePane::Usage,
+        niobe_tui::menu::SidePane::Activity,
+    ] {
+        app.perform(niobe_tui::menu::Action::Pane(pane));
+    }
+    let frame = screen(&mut app, 120, 30);
+    assert!(
+        !frame.contains(" Usage ") && !frame.contains(" Activity "),
+        "with every pane hidden the session takes the width: {frame}"
+    );
+}
+
+/// The session above with a store behind it holding two earlier sessions of
+/// Niobe's and one the `claude` CLI recorded, each dated back from the moment
+/// the session is read at.
+fn with_history() -> App {
+    use niobe_tui::history::{Past, PastPrompt, PastSession, Target};
+
+    let mut app = running_session().remembers();
+    let now = app
+        .stamp()
+        .expect("the session is read at a fixed moment")
+        .at();
+    let clock = niobe_tui::clock::Clock::fixed(0).expect("UTC is an offset");
+    let ago = |secs: u64| Some(clock.at(now - std::time::Duration::from_secs(secs)));
+    let prompt = |text: &str, session: &str, secs| PastPrompt {
+        text: text.to_owned(),
+        at: ago(secs),
+        session: Target::Recorded(session.to_owned()),
+    };
+    app.set_past(Past {
+        prompts: vec![
+            prompt("and a test for the 304 path", "12", 3_600),
+            prompt(
+                "add etag support to the static handler\nkeep the weak form for gzip",
+                "12",
+                4_000,
+            ),
+            prompt("why does the resume test hang?", "11", 3 * 86_400),
+        ],
+        sessions: vec![
+            PastSession {
+                target: Target::Recorded("12".to_owned()),
+                last: ago(3_500),
+                first_prompt: None,
+                title: None,
+                open_elsewhere: false,
+            },
+            PastSession {
+                target: Target::Claude("2f6c1e10-8f4b-4d2a-9c3e-7a5b0d1e6f42".to_owned()),
+                last: ago(2 * 86_400),
+                first_prompt: Some("rename the crate".to_owned()),
+                title: None,
+                open_elsewhere: false,
+            },
+            PastSession {
+                target: Target::Recorded("11".to_owned()),
+                last: ago(3 * 86_400),
+                first_prompt: None,
+                title: None,
+                open_elsewhere: true,
+            },
+        ],
+        unread: None,
+    });
+    app
+}
+
+#[test]
+fn a_recalled_prompt_is_labelled_on_the_rule_above_the_composer() {
+    use ratatui::crossterm::event::KeyCode;
+
+    let mut app = with_history();
+    for c in "my draft".chars() {
+        press(&mut app, KeyCode::Char(c));
+    }
+    press(&mut app, KeyCode::Up);
+    press(&mut app, KeyCode::Up);
+
+    for (width, height) in [(80, 24), (120, 30)] {
+        let frame = screen(&mut app, width, height);
+        assert!(
+            frame.contains("─ history 2/4 · Esc gives your draft back ─"),
+            "{frame}"
+        );
+        assert_snapshot(&format!("history-recalled-{width}x{height}"), &frame);
+    }
+
+    press(&mut app, KeyCode::Esc);
+    let frame = screen(&mut app, 80, 24);
+    assert!(!frame.contains("history 2/4"), "{frame}");
+    assert!(frame.contains("my draft"), "{frame}");
+}
+
+#[test]
+fn ctrl_r_lists_every_prompt_and_shows_the_chosen_one_whole() {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = with_history();
+    app.on_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+    press(&mut app, KeyCode::Down);
+    press(&mut app, KeyCode::Down);
+
+    for (width, height) in [(80, 24), (120, 30)] {
+        let frame = screen(&mut app, width, height);
+        assert!(frame.contains("this session"), "{frame}");
+        assert!(frame.contains("#12"), "{frame}");
+        assert!(
+            frame.contains("keep the weak form for gzip"),
+            "the prompt under the cursor is shown whole:\n{frame}"
+        );
+        assert!(frame.contains("Enter put in the prompt"), "{frame}");
+        assert_snapshot(&format!("history-prompts-{width}x{height}"), &frame);
+    }
+}
+
+#[test]
+fn the_history_turned_to_its_sessions_lists_each_with_its_prompts() {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = with_history();
+    app.on_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+    press(&mut app, KeyCode::Tab);
+    press(&mut app, KeyCode::Down);
+
+    for (width, height) in [(80, 24), (120, 30)] {
+        let frame = screen(&mut app, width, height);
+        assert!(frame.contains("claude 2f6c1e10"), "{frame}");
+        assert!(frame.contains("2 prompts"), "{frame}");
+        assert!(frame.contains("and a test for the 304 path"), "{frame}");
+        assert!(frame.contains("Enter open"), "{frame}");
+        assert_snapshot(&format!("history-sessions-{width}x{height}"), &frame);
+    }
+}
+
+#[test]
+fn a_session_of_ten_prompts_lists_its_first_prompt_in_the_same_column_as_the_rest() {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = with_history();
+    for n in 2..=10 {
+        app.apply(&Event::UserMessage {
+            text: format!("step {n}"),
+        });
+    }
+    app.on_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+    press(&mut app, KeyCode::Tab);
+
+    let frame = screen(&mut app, 120, 30);
+    // The column the first prompt starts at in the row of the session `row`
+    // names.
+    let column = |row: &str, said: &str| {
+        frame
+            .lines()
+            .filter(|line| line.contains(row))
+            .find_map(|line| line.find(said).map(|at| line[..at].chars().count()))
+            .unwrap_or_else(|| panic!("{said:?} is listed for {row:?}:\n{frame}"))
+    };
+    let rename = column("claude 2f6c1e10", "rename the crate");
+    assert!(frame.contains("10 prompts"), "{frame}");
+    assert_eq!(
+        column("this session", "add etag support"),
+        rename,
+        "{frame}"
+    );
+    assert_eq!(column("#12", "add etag support"), rename, "{frame}");
+}
+
+#[test]
+fn a_session_another_niobe_has_open_is_marked_and_enter_on_it_says_why_it_stays_shut() {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = with_history();
+    app.on_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+    press(&mut app, KeyCode::Tab);
+    for _ in 0..3 {
+        press(&mut app, KeyCode::Down);
+    }
+    press(&mut app, KeyCode::Enter);
+
+    assert!(!app.should_quit());
+    let frame = screen(&mut app, 80, 24);
+    assert!(frame.contains("#11 in use"), "{frame}");
+    assert!(
+        frame.contains("#11 is open in another niobe: quit it there to open it here"),
+        "{frame}"
+    );
+    assert_snapshot("history-session-in-use-80x24", &frame);
+}
+
+#[test]
+fn the_history_opened_before_its_load_lands_says_it_is_reading() {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = running_session().remembers();
+    app.on_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+    press(&mut app, KeyCode::Tab);
+
+    let frame = screen(&mut app, 120, 30);
+    assert!(frame.contains("reading the earlier sessions"), "{frame}");
+    assert!(!frame.contains("no other session"), "{frame}");
+}
+
+#[test]
+fn a_new_file_leaves_its_removed_column_blank_and_a_tracked_one_keeps_it() {
+    let working = |path: &str, new: bool| niobe_tui::app::WorkingFile {
+        path: path.to_owned(),
+        added: Some(4),
+        removed: Some(0),
+        new,
+    };
+    let mut app = App::new(Repo {
+        name: "niobe".to_owned(),
+        branch: Some("main".to_owned()),
+        read: true,
+        working: vec![working("kept.txt", false), working("fresh.txt", true)],
+        ..Repo::default()
+    });
+
+    let frame = screen(&mut app, 120, 30);
+    let row = |name: &str| {
+        frame
+            .lines()
+            .find(|line| line.contains(name))
+            .unwrap_or_else(|| panic!("no row for {name}:\n{frame}"))
+            .to_owned()
+    };
+
+    assert!(row("fresh.txt").contains("new +4"), "{}", row("fresh.txt"));
+    assert!(!row("fresh.txt").contains('−'), "{}", row("fresh.txt"));
+    assert!(row("kept.txt").contains("+4 −0"), "{}", row("kept.txt"));
+}
+
+#[test]
+fn a_branch_level_with_its_upstream_says_so_and_one_without_an_upstream_says_nothing() {
+    let branch_row = |ahead: Option<u32>, behind: Option<u32>| {
+        let mut app = App::new(Repo {
+            name: "niobe".to_owned(),
+            branch: Some("main".to_owned()),
+            ahead,
+            behind,
+            read: true,
+            ..Repo::default()
+        });
+        let frame = screen(&mut app, 120, 30);
+        frame
+            .lines()
+            .find(|line| line.contains("⎇ main"))
+            .unwrap_or_else(|| panic!("no branch row:\n{frame}"))
+            .to_owned()
+    };
+
+    assert!(branch_row(Some(0), Some(0)).contains("⎇ main · in sync with upstream"));
+    assert!(!branch_row(Some(3), Some(0)).contains("in sync"));
+    assert!(branch_row(Some(3), Some(0)).contains("↑3"));
+    assert!(!branch_row(None, None).contains("in sync"));
+}
+
+#[test]
+fn the_session_caption_is_the_prompt_at_the_left_of_the_top_edge() {
+    let mut app = empty_session();
+    app.apply(&Event::UserMessage {
+        text: "Price the replayed sessions".to_owned(),
+    });
+
+    let frame = screen(&mut app, 120, 24);
+    let top = frame.lines().nth(1).unwrap_or_default();
+    let corner = top.find(FOCUS_TOP_LEFT).expect("the session pane's corner");
+
+    assert!(
+        top[corner..].starts_with(&format!(
+            "{FOCUS_TOP_LEFT}{FOCUS_EDGE} > Price the replayed sessions "
+        )),
+        "{top}"
+    );
+}
+
+/// A title the backend made is not what the operator typed: it is drawn as a
+/// title is, without the prompt marker, and the first prompt still is one.
+#[test]
+fn a_backends_title_is_not_drawn_as_the_prompt_the_operator_typed() {
+    // The session already holds the prompt that began it.
+    let mut app = running_session();
+    let typed = screen(&mut app, 100, 30);
+    let typed_top = typed.lines().nth(1).unwrap_or_default();
+    assert!(typed_top.contains("> add etag support"), "{typed_top}");
+
+    app.apply(&Event::Titled {
+        title: "Cached manifests".to_owned(),
+    });
+    let titled = screen(&mut app, 100, 30);
+    let top = titled.lines().nth(1).unwrap_or_default();
+
+    assert!(top.contains("Cached manifests"), "{top}");
+    assert!(!top.contains("> Cached manifests"), "{top}");
+}
+
+/// Every call of the recorded session opens from the list of calls, and what
+/// the view holds is the arguments the call started with and the output its
+/// end carried, byte for byte: nothing is cut on the way in.
+#[test]
+fn every_call_of_a_recorded_session_opens_whole_byte_for_byte() {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let events: Vec<Event> = include_str!("../../niobe-core/tests/fixtures/claude-session.jsonl")
+        .lines()
+        .enumerate()
+        .map(|(n, line)| {
+            serde_json::from_str(line)
+                .unwrap_or_else(|e| panic!("line {} of the fixture: {e}", n + 1))
+        })
+        .collect();
+    let mut expected: Vec<(niobe_core::event::ToolCallId, String)> = Vec::new();
+    for event in &events {
+        match event {
+            Event::ToolCallStart { id, input, .. } => {
+                expected.push((id.clone(), input.clone()));
+            }
+            Event::ToolCallEnd { id, output, .. } => {
+                let started = expected
+                    .iter_mut()
+                    .find(|(started, _)| started == id)
+                    .expect("every end in the fixture has its start");
+                started.1.push_str(output);
+            }
+            _ => {}
+        }
+    }
+    let mut app = App::new(Repo::default());
+    app.extend(&events);
+    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+
+    assert_eq!(expected.len(), 26, "the fixture's calls");
+    for (at, (_, whole)) in expected.iter().enumerate() {
+        app.perform(niobe_tui::menu::Action::Calls);
+        for _ in at..expected.len() - 1 {
+            app.on_key(key(KeyCode::Up));
+        }
+        app.on_key(key(KeyCode::Enter));
+        let detail = app.detail().expect("Enter opens the call");
+        assert_eq!(detail.text(), whole, "call {at}");
+        app.on_key(key(KeyCode::Esc));
+        assert!(app.detail().is_none());
+    }
+}
+
+/// The list of calls and one call read whole, as the operator sees them.
+#[test]
+fn a_tool_call_read_whole_shows_its_arguments_and_its_output_at_both_sizes() {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = running_session().with_theme(NEO);
+    app.perform(niobe_tui::menu::Action::Calls);
+    assert_snapshot("calls-neo-80x24", &screen(&mut app, 80, 24));
+    app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    for (name, width, height) in [("call-neo-80x24", 80, 24), ("call-neo-200x60", 200, 60)] {
+        let frame = screen(&mut app, width, height);
+        assert!(frame.contains("input · "), "{frame}");
+        assert!(frame.contains("output · "), "{frame}");
+        assert_snapshot(name, &frame);
+    }
+}
+
+/// The project overview, while the binary writes it and once it has.
+#[test]
+fn the_project_overview_reads_whole_once_the_binary_has_written_it() {
+    let mut app = running_session().with_theme(NEO);
+    app.perform(niobe_tui::menu::Action::Overview);
+    assert!(app.take_overview_request(), "opening it asks for the page");
+    let reading = screen(&mut app, 80, 24);
+    assert!(
+        reading.contains("reading every session recorded here"),
+        "{reading}"
+    );
+    assert_snapshot("overview-reading-neo-80x24", &reading);
+
+    app.set_overview(OVERVIEW);
+    for (name, width, height) in [
+        ("overview-neo-80x24", 80, 24),
+        ("overview-neo-200x60", 200, 60),
+    ] {
+        let frame = screen(&mut app, width, height);
+        assert!(frame.contains("## Highlights"), "{frame}");
+        assert_snapshot(name, &frame);
+    }
+}
+
+/// A page as `niobe overview` writes one, cut short.
+const OVERVIEW: &str = "# What has been built in catalog\n\n2 sessions recorded, the first started 2026-09-18 12:00 UTC and the last 2026-09-18 12:00 UTC.\n\n## Highlights\n\n- 0 turns ended.\n- 6 prompts sent, 15 replies from the agent.\n- 24 of 27 tool calls finished without failing.\n\n## Lowlights\n\n- 3 tool calls failed, 1 denied.\n- Session 1: 3 failed calls, 1 denied call — `niobe --resume 1`\n\n## Most used tools\n\n| Tool | Calls | Failed |\n| --- | ---: | ---: |\n| Bash | 12 | 3 |\n| Read | 9 | 0 |";
+
+/// Narrowed to one sub-agent, the transcript draws that agent's entries
+/// alone and its title says so.
+#[test]
+fn a_transcript_narrowed_to_one_agent_draws_its_entries_and_says_whose() {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = session_with_two_agents_at_work().with_theme(NEO);
+    app.perform(niobe_tui::menu::Action::OneAgent);
+    assert_snapshot("agents-neo-80x24", &screen(&mut app, 80, 24));
+    app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    let tag = app.only_agent_tag().expect("Enter narrows the transcript");
+    for (name, width, height) in [
+        ("one-agent-neo-80x24", 80, 24),
+        ("one-agent-neo-200x60", 200, 60),
+    ] {
+        let frame = screen(&mut app, width, height);
+        assert!(frame.contains(&format!("only {tag}'s entries")), "{frame}");
+        assert_snapshot(name, &frame);
+    }
 }

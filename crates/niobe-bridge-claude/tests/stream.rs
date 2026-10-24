@@ -8,9 +8,10 @@
 //! numbers this crate produced, so a bug in the translation cannot agree with
 //! itself.
 
-use niobe_bridge_claude::Translator;
+use niobe_bridge_claude::{Translator, transcript};
 use niobe_core::event::{
-    AgentOutcome, Backend, Billing, CostBasis, Event, PermissionDecision, ToolOutcome, UsageWindow,
+    AgentOutcome, Backend, Billing, CompactTrigger, Event, PermissionDecision, ToolOutcome,
+    UsageWindow,
 };
 use niobe_core::session::SessionState;
 
@@ -185,7 +186,7 @@ fn a_turn_in_flight_says_which_tokens_no_cost_covers() {
 #[test]
 fn each_message_says_which_lifetime_its_cache_writes_were_bought_for() {
     let events = translated();
-    let split: Vec<(u64, u64)> = usage_records(&events)
+    let split: Vec<(u64, Option<u64>)> = usage_records(&events)
         .into_iter()
         .filter(|usage| usage.cost_usd.is_none())
         .map(|usage| (usage.cache_write, usage.cache_write_1h))
@@ -196,7 +197,14 @@ fn each_message_says_which_lifetime_its_cache_writes_were_bought_for() {
     // the table in `tests/fixtures/README.md` is where they are written down.
     assert_eq!(
         split,
-        [(100, 100), (50, 0), (10, 10), (10, 10), (10, 10), (5, 5)]
+        [
+            (100, Some(100)),
+            (50, Some(0)),
+            (10, Some(10)),
+            (10, Some(10)),
+            (10, Some(10)),
+            (5, Some(5))
+        ]
     );
 
     let state = SessionState::replay(&events);
@@ -211,14 +219,14 @@ fn each_message_says_which_lifetime_its_cache_writes_were_bought_for() {
 #[test]
 fn the_per_message_tokens_add_up_to_what_the_cli_reported_for_the_turn() {
     // The bridge checks this itself on every `result` and says so when it
-    // fails, so the absence of that warning is the assertion.
+    // fails, so the absence of that report is the assertion.
     let events = translated();
-    let complaints: Vec<&str> = warnings(&events)
-        .into_iter()
-        .filter(|w| w.contains("do not add up"))
+    let differs: Vec<&Event> = events
+        .iter()
+        .filter(|event| matches!(event, Event::TurnTotalDiffers { .. }))
         .collect();
 
-    assert!(complaints.is_empty(), "{complaints:?}");
+    assert!(differs.is_empty(), "{differs:?}");
 }
 
 #[test]
@@ -238,40 +246,22 @@ fn usage_is_folded_from_the_stream_events_not_from_the_assistant_snapshot() {
     assert_eq!(first.cache_read, 1_000);
     assert_eq!(first.cache_write, 100);
     assert_eq!(
-        first.cache_write_1h, 100,
+        first.cache_write_1h,
+        Some(100),
         "the CLI bought the hour, not the five minutes"
     );
     assert_eq!(first.model, "claude-sonnet-5");
 }
 
 #[test]
-fn a_plan_backends_cost_is_api_equivalent_and_never_measured() {
+fn a_cost_is_reported_once_per_model_per_turn_that_cost_something_new() {
     let events = translated();
-    let priced: Vec<_> = usage_records(&events)
+    let priced = usage_records(&events)
         .into_iter()
         .filter(|usage| usage.cost_usd.is_some())
-        .collect();
+        .count();
 
-    assert_eq!(
-        priced.len(),
-        3,
-        "one per model per turn that cost something new"
-    );
-    for usage in &priced {
-        assert_eq!(
-            usage.cost_basis,
-            Some(CostBasis::ApiEquivalent),
-            "{} was priced as {:?}",
-            usage.model,
-            usage.cost_basis
-        );
-    }
-    assert!(
-        usage_records(&events)
-            .iter()
-            .all(|usage| usage.cost_basis != Some(CostBasis::Measured)),
-        "a figure the CLI computed from list prices was stored as money that moved"
-    );
+    assert_eq!(priced, 3);
 }
 
 #[test]
@@ -410,6 +400,62 @@ fn a_change_pushed_mid_session_replaces_the_list_the_cli_answered_with() {
     );
 }
 
+const SKILL_MID_PROMPT: &str = include_str!("fixtures/skill-mid-prompt.jsonl");
+
+/// Recorded: a skill and a command of the repository's own, each named in
+/// the middle of a prompt, were run by the model through its `Skill` tool.
+/// What the CLI marks as its own — its built-in commands and the skills it
+/// bundles alike — is offered only where a prompt opens with it.
+#[test]
+fn what_the_cli_does_not_mark_as_its_own_is_honoured_anywhere_in_a_prompt() {
+    let events = translate(SKILL_MID_PROMPT);
+    let state = SessionState::replay(&events);
+    let anywhere: Vec<(&str, bool)> = state
+        .commands()
+        .iter()
+        .map(|command| (command.name.as_str(), command.mid_prompt))
+        .collect();
+    assert_eq!(
+        anywhere,
+        [
+            ("shout", true),
+            ("whisper", true),
+            ("simplify", false),
+            ("compact", false)
+        ]
+    );
+
+    let skills: Vec<String> = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::ToolCallStart { name, input, .. } if name == "Skill" => {
+                serde_json::from_str::<serde_json::Value>(input)
+                    .ok()?
+                    .get("skill")?
+                    .as_str()
+                    .map(str::to_owned)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(skills, ["shout", "whisper"], "{events:?}");
+    assert!(warnings(&events).is_empty(), "{events:?}");
+    assert!(notices(&events).is_empty(), "{events:?}");
+}
+
+/// An MCP server's prompt is not marked as the CLI's own, and runs only
+/// where a prompt opens with it.
+#[test]
+fn a_servers_prompt_is_offered_only_where_a_prompt_opens_with_it() {
+    let state = SessionState::replay(&translate(SLASH_COMMAND));
+    let prompt = state
+        .commands()
+        .iter()
+        .find(|command| command.name.ends_with(" (MCP)"))
+        .expect("the recording lists one MCP prompt");
+    assert!(!prompt.mid_prompt);
+}
+
 #[test]
 fn what_the_session_ran_comes_from_the_cli_not_from_the_profile() {
     let events = translated();
@@ -519,6 +565,7 @@ fn a_prompt_the_cli_is_waiting_on_is_asked_and_kept_to_be_answered() {
         input,
         target,
         agent,
+        ..
     }) = asked.first().copied()
     else {
         panic!("the CLI asked before it read the file: {asked:?}");
@@ -551,33 +598,56 @@ fn a_prompt_the_cli_is_waiting_on_is_asked_and_kept_to_be_answered() {
 }
 
 #[test]
-fn a_prompt_with_no_answer_in_the_recording_stays_pending() {
+fn a_prompt_with_no_answer_in_the_recording_waits_until_its_turn_ends() {
     // The fixture is what the CLI printed; Niobe's answer goes the other way,
-    // on standard input, so folding the recording alone leaves the prompt up.
-    let state = SessionState::replay(&translated());
+    // on standard input, so folding the recording alone leaves the prompt up
+    // for as long as its turn runs — and no longer, because nothing waits on
+    // an answer once the turn has ended.
+    let events = translated();
+    let asked = events
+        .iter()
+        .position(|event| {
+            matches!(event, Event::PermissionRequest { id, .. } if id.as_str() == "toolu_read")
+        })
+        .expect("the recording asks about the read");
+    let turn_end = asked
+        + events[asked..]
+            .iter()
+            .position(|event| matches!(event, Event::TurnEnded))
+            .expect("the turn ends after the prompt");
 
-    assert_eq!(state.permission_requests(), 2);
-    assert_eq!(state.permissions_denied(), 1);
+    let running = SessionState::replay(&events[..turn_end]);
     assert_eq!(
-        state
+        running
             .pending_permissions()
             .iter()
             .map(|id| id.as_str())
             .collect::<Vec<_>>(),
         ["toolu_read"]
     );
+
+    let state = SessionState::replay(&events);
+    assert_eq!(state.permission_requests(), 2);
+    assert_eq!(state.permissions_denied(), 1);
+    assert!(state.pending_permissions().is_empty());
 }
 
 #[test]
-fn a_compaction_is_a_notice_rather_than_a_failure() {
+fn a_compaction_the_cli_started_itself_is_reported_as_automatic() {
     let events = translated();
-    let compacted: Vec<&str> = notices(&events)
-        .into_iter()
-        .filter(|notice| notice.contains("compacted"))
+    let compacted: Vec<&Event> = events
+        .iter()
+        .filter(|event| matches!(event, Event::Compacted { .. }))
         .collect();
 
-    assert_eq!(compacted.len(), 1, "{compacted:?}");
-    assert!(compacted[0].contains("41000"), "{compacted:?}");
+    assert_eq!(
+        compacted,
+        [&Event::Compacted {
+            trigger: CompactTrigger::Auto,
+            before: Some(41_000),
+            after: None,
+        }]
+    );
 }
 
 #[test]
@@ -663,14 +733,13 @@ mod edits {
         let state = folded();
 
         // `1  4  notes.md`: the overwrite says what the file becomes and never
-        // what it was, so the four lines it dropped are nowhere in the stream.
+        // what it was, so the four lines it dropped are nowhere in the stream,
+        // and the lines it wrote are not the lines it changed.
         let notes = &state.files()[2];
-        assert_eq!(notes.added, 1);
-        assert!(notes.added_stated());
-        assert_eq!(notes.removed, 0);
+        assert_eq!((notes.added, notes.removed), (0, 0));
         assert!(
-            !notes.removed_stated(),
-            "a removal the stream never carried was shown as the whole figure"
+            !notes.added_stated() && !notes.removed_stated(),
+            "a count the stream never carried was shown as the whole figure"
         );
 
         // `2  2  catalog/cache.ts`: the CLI replaced both occurrences and the
@@ -754,7 +823,82 @@ mod reported_hunks {
                     )
                     .expect("the recorded header counts two lines on each side"),
                 ],
+                scope: niobe_core::event::ChangeScope::Project,
             }]
+        );
+    }
+}
+
+/// An `Edit` with `replace_all` that matched three times, recorded from Claude
+/// Code 2.1.309: the call names one occurrence, and the patch the CLI reported
+/// beside its result is what says there were three. `git diff --numstat` read
+/// `3 3` for the file afterwards.
+#[test]
+fn a_replace_all_is_counted_from_the_patch_the_cli_reported_as_git_counts_it() {
+    let mut translator = Translator::new("max").in_dir("/repo");
+    let counts: Vec<(String, Option<u64>, Option<u64>)> =
+        include_str!("fixtures/replace-all.jsonl")
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .flat_map(|line| translator.line(line))
+            .filter_map(|event| match event {
+                Event::FileChange {
+                    path,
+                    added,
+                    removed,
+                    ..
+                } => Some((path, added, removed)),
+                _ => None,
+            })
+            .collect();
+
+    assert_eq!(counts, [("palette.txt".to_owned(), Some(3), Some(3))]);
+}
+
+/// Calls the CLI did not run, recorded from Claude Code 2.1.309: one refused
+/// over the control channel, one by a rule the CLI was started with, and one
+/// a `PreToolUse` hook blocked. Nothing tells the translator about any of
+/// them but the lines themselves.
+mod refusals {
+    use super::*;
+
+    const REFUSALS: &str = include_str!("fixtures/refusals.jsonl");
+    const ANSWERS: &str = include_str!("fixtures/stdio-answers.jsonl");
+
+    fn endings(recording: &str) -> Vec<(String, ToolOutcome)> {
+        let mut translator = Translator::new("max").in_dir("/repo");
+        recording
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .flat_map(|line| translator.line(line))
+            .filter_map(|event| match event {
+                Event::ToolCallEnd { name, outcome, .. } => Some((name, outcome)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_call_the_cli_marks_as_not_run_by_a_permission_reads_as_refused() {
+        assert_eq!(
+            endings(REFUSALS),
+            [
+                ("Bash".to_owned(), ToolOutcome::Denied),
+                ("Bash".to_owned(), ToolOutcome::Denied),
+                ("Bash".to_owned(), ToolOutcome::Denied),
+                ("Read".to_owned(), ToolOutcome::Failed),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_call_refused_over_the_control_channel_reads_as_refused_without_the_driver_saying_so() {
+        assert_eq!(
+            endings(ANSWERS),
+            [
+                ("Edit".to_owned(), ToolOutcome::Ok),
+                ("Write".to_owned(), ToolOutcome::Denied),
+            ]
         );
     }
 }
@@ -838,7 +982,6 @@ mod long_context {
         assert_eq!(billed.len(), 2, "one cost record a turn: {billed:?}");
         for usage in billed {
             assert_eq!(usage.model, "claude-opus-5[1m]");
-            assert_eq!(usage.cost_basis, Some(CostBasis::ApiEquivalent));
             assert_eq!(
                 (
                     usage.input,
@@ -892,6 +1035,126 @@ mod long_context {
                 (21_068, "claude-opus-5[1m]", Some(1_000_000)),
                 (26_741, "claude-opus-5[1m]", Some(1_000_000)),
             ]
+        );
+    }
+}
+
+/// A session that asked for fast mode on an account with no usage credits
+/// left, which the CLI served at the standard speed while its `init` and its
+/// `result` both said fast mode was on. The numbers are the recording's own,
+/// as `tests/fixtures/README.md` sets out.
+mod fast_mode_refused {
+    use super::*;
+
+    const FAST_MODE_REFUSED: &str = include_str!("fixtures/fast-mode-refused.jsonl");
+
+    fn translated() -> Vec<Event> {
+        let mut translator = Translator::new("max").in_dir("/repo");
+        FAST_MODE_REFUSED
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .flat_map(|line| translator.line(line))
+            .collect()
+    }
+
+    /// The message's own `speed` is `standard`, and that, not the session's
+    /// `fast_mode_state`, is what it is billed by: valued as fast, the
+    /// running estimate would be twice the $0.1001588 the CLI reported.
+    #[test]
+    fn a_message_served_at_the_standard_speed_is_not_valued_as_fast() {
+        let events = translated();
+        let records = usage_records(&events);
+
+        assert_eq!(records.len(), 2, "the message and the bill: {records:?}");
+        assert!(records.iter().all(|usage| !usage.fast), "{records:?}");
+        let message = records[0];
+        assert_eq!(message.model, "claude-opus-5-5");
+        assert_eq!(
+            (
+                message.input,
+                message.output,
+                message.cache_read,
+                message.cache_write
+            ),
+            (2, 4, 10_234, 12_253)
+        );
+        assert_eq!(message.cache_write_1h, Some(12_253));
+    }
+
+    /// The only place the stream says fast mode was turned off is the CLI's
+    /// notification, which reaches the operator in its own words.
+    #[test]
+    fn the_cli_saying_fast_mode_was_turned_off_reaches_the_operator() {
+        let events = translated();
+
+        assert!(warnings(&events).is_empty(), "{:?}", warnings(&events));
+        assert!(
+            notices(&events).contains(&"Fast mode disabled · usage credits exhausted"),
+            "{:?}",
+            notices(&events)
+        );
+    }
+
+    #[test]
+    fn the_reported_cost_settles_the_message() {
+        let totals = SessionState::replay(&translated()).totals().clone();
+
+        assert_eq!(totals.records_unsettled, 0, "{:?}", totals.unsettled);
+        assert!(
+            (totals.reported_cost_usd - 0.100_158_8).abs() < 1e-9,
+            "{}",
+            totals.reported_cost_usd
+        );
+    }
+}
+
+/// A turn whose one `Bash` call ran for 65 seconds, during which Claude Code
+/// 2.1.287 sent a `tool_progress` heartbeat at 30 and at 60 seconds. The
+/// numbers are the recording's own, as `tests/fixtures/README.md` sets out.
+mod tool_progress {
+    use super::*;
+
+    const TOOL_PROGRESS: &str = include_str!("fixtures/tool-progress.jsonl");
+
+    #[test]
+    fn a_heartbeat_while_a_call_runs_reaches_the_operator_as_nothing() {
+        let events = translate(TOOL_PROGRESS);
+
+        assert!(notices(&events).is_empty(), "{:?}", notices(&events));
+        assert!(warnings(&events).is_empty(), "{:?}", warnings(&events));
+    }
+
+    /// The heartbeat names the running call as its parent, which is where a
+    /// sub-agent's own messages name the call that spawned them: read as one,
+    /// a shell command would become a sub-agent.
+    #[test]
+    fn a_heartbeat_neither_ends_its_call_nor_makes_it_a_sub_agent() {
+        let events = translate(TOOL_PROGRESS);
+        let state = SessionState::replay(&events);
+        let tools = state.tools();
+
+        assert_eq!((tools.started, tools.finished), (1, 1));
+        assert_eq!(tools.by_name.get("Bash"), Some(&1));
+        assert_eq!(tools.unmatched_ends, 0);
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Event::AgentSpawn { .. })),
+            "{events:?}"
+        );
+    }
+
+    #[test]
+    fn the_reported_cost_settles_the_turn() {
+        let totals = SessionState::replay(&translate(TOOL_PROGRESS))
+            .totals()
+            .clone();
+
+        assert_eq!(totals.records_unsettled, 0, "{:?}", totals.unsettled);
+        assert!(
+            (totals.reported_cost_usd - 0.053_226_8).abs() < 1e-9,
+            "{}",
+            totals.reported_cost_usd
         );
     }
 }
@@ -1087,7 +1350,8 @@ fn a_message_delta_says_its_cache_writes_were_bought_for_an_hour_inside_its_iter
     assert!(!per_message.is_empty());
     for usage in per_message {
         assert_eq!(
-            usage.cache_write_1h, usage.cache_write,
+            usage.cache_write_1h,
+            Some(usage.cache_write),
             "every write this session made was an hour's: {usage:?}"
         );
     }
@@ -1234,11 +1498,11 @@ mod shell {
             endings(SHELL),
             vec![
                 (ToolOutcome::Ok, Some(0), None),
-                // Refused over the control channel, which the recording
-                // cannot say on its own: the driver tells the translator, and
-                // `tests/answers.rs` is where that is checked.
+                // Refused over the control channel, which the CLI marks
+                // beside the result as `permission-rule`: the recording says
+                // it on its own, as the driver's word does live.
                 (
-                    ToolOutcome::Failed,
+                    ToolOutcome::Denied,
                     None,
                     Some(
                         "The operator denied this call in Niobe and answered instead: Do not \
@@ -1307,8 +1571,17 @@ fn a_cleared_conversation_is_billed_from_zero_again() {
     );
     assert!((costs[0] - 0.025_885).abs() < 1e-9, "{costs:?}");
     assert!((costs[1] - 0.042_380_4).abs() < 1e-9, "{costs:?}");
-    assert!((state.totals().reported_cost_usd - 0.068_265_4).abs() < 1e-9);
-    assert_eq!(state.totals().tokens(), 17_567 + 23_333);
+    // The conversation after the clear is a session of its own: the fold
+    // holds what it spent, and the part before the clear holds the rest.
+    assert!((state.totals().reported_cost_usd - 0.042_380_4).abs() < 1e-9);
+    assert_eq!(state.totals().tokens(), 23_333);
+    let cleared = events
+        .iter()
+        .position(|event| matches!(event, Event::Cleared))
+        .expect("the reset is reported");
+    let before = SessionState::replay(&events[..cleared]);
+    assert!((before.totals().reported_cost_usd - 0.025_885).abs() < 1e-9);
+    assert_eq!(before.totals().tokens(), 17_567);
     assert!(warnings(&events).is_empty(), "{events:?}");
     assert!(notices(&events).is_empty(), "{events:?}");
 }
@@ -1386,17 +1659,20 @@ fn a_model_moved_by_command_is_named_from_the_next_turn_and_billed_apart() {
 /// with no message of its own to count, in a `result` of no turns.
 #[test]
 fn a_compaction_asked_for_by_command_is_billed_and_explained() {
-    const COMPACT_COMMAND: &str = include_str!("fixtures/compact-command.jsonl");
     let events = translate(COMPACT_COMMAND);
     let state = SessionState::replay(&events);
 
     assert!((state.totals().reported_cost_usd - 0.115_232_2).abs() < 1e-9);
     assert_eq!(
-        notices(&events)
+        events
             .iter()
-            .filter(|notice| notice.contains("compacted (manual)") && notice.contains("23193"))
-            .count(),
-        1,
+            .filter(|event| matches!(event, Event::Compacted { .. }))
+            .collect::<Vec<_>>(),
+        [&Event::Compacted {
+            trigger: CompactTrigger::Manual,
+            before: Some(23_193),
+            after: Some(4_282),
+        }],
         "{events:?}"
     );
     assert!(warnings(&events).is_empty(), "{events:?}");
@@ -1405,4 +1681,827 @@ fn a_compaction_asked_for_by_command_is_billed_and_explained() {
         0,
         "the summary it hands the model is not a prompt"
     );
+    let compacted: Vec<_> = state.turns().iter().map(|turn| turn.compacted).collect();
+    assert_eq!(compacted, [None, Some(CompactTrigger::Manual), None]);
+}
+
+/// The CLI says when it starts compacting and when it stops, and between the
+/// two the session is compacting rather than answering. Lines 13 and 14 of
+/// the recording are the two.
+#[test]
+fn a_compaction_asked_for_by_command_is_a_phase_between_its_two_statuses() {
+    let mut translator = Translator::new("max");
+    let mut state = SessionState::new();
+    let mut compacting = Vec::new();
+    for line in COMPACT_COMMAND
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+    {
+        for event in translator.line(line) {
+            state.apply(&event);
+        }
+        compacting.push(state.compacting());
+    }
+
+    let lines: Vec<usize> = compacting
+        .iter()
+        .enumerate()
+        .filter(|(_, compacting)| **compacting)
+        .map(|(at, _)| at + 1)
+        .collect();
+    assert_eq!(lines, [13]);
+}
+
+/// Once the boundary on line 16 is folded the context is what the CLI says
+/// the compaction left, a floor — through the `result` that ends the turn on
+/// line 19, where the session sits until the operator sends something — until
+/// the next request measures 2 + 8269 + 13412.
+#[test]
+fn a_compacted_context_is_the_clis_floor_until_the_next_request_measures_it() {
+    let mut translator = Translator::new("max");
+    let mut state = SessionState::new();
+    let mut contexts = Vec::new();
+    for line in COMPACT_COMMAND
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+    {
+        for event in translator.line(line) {
+            state.apply(&event);
+        }
+        contexts.push((
+            state.context().map(|context| context.tokens),
+            state.context_is_a_floor(),
+        ));
+    }
+
+    assert_eq!(contexts[14], (Some(23_189), false), "before the boundary");
+    assert_eq!(contexts[15..19], [(Some(4_282), true); 4], "lines 16 to 19");
+    let mut after: Vec<_> = contexts[15..].to_vec();
+    after.dedup();
+    assert_eq!(after, [(Some(4_282), true), (Some(21_683), false)]);
+}
+
+const COMPACT_COMMAND: &str = include_str!("fixtures/compact-command.jsonl");
+
+/// A turn of a session resumed with `--resume`, and the transcript that
+/// session had left behind when it was resumed.
+const RESUMED: &str = include_str!("fixtures/resumed.jsonl");
+
+fn resumed_transcript() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/resumed-transcript.jsonl")
+}
+
+/// The CLI restores its running totals on `--resume`, so the first `result`
+/// carries the whole earlier session. The resumed turn costs the difference
+/// from the transcript's last `cost-state`: 0.064619 − 0.0560548 = 0.0085642,
+/// and its tokens are the message's own, 2 + 3 + 30,291 + 618.
+#[test]
+fn a_resumed_sessions_first_turn_costs_what_it_added_to_the_restored_totals() {
+    let spent = transcript::spent(&resumed_transcript()).expect("the transcript reads");
+    assert_eq!(spent.cost_usd("claude-sonnet-5"), Some(0.0560548));
+
+    let mut translator = Translator::new("max").resuming(&spent);
+    let events: Vec<Event> = RESUMED
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .flat_map(|line| translator.line(line))
+        .collect();
+    let totals = SessionState::replay(&events).totals().clone();
+
+    assert!(
+        (totals.reported_cost_usd - 0.0085642).abs() < 1e-9,
+        "the resumed turn cost {} rather than the 0.0085642 it added",
+        totals.reported_cost_usd
+    );
+    assert_eq!(
+        (
+            totals.input,
+            totals.output,
+            totals.cache_read,
+            totals.cache_write
+        ),
+        (2, 3, 30_291, 618)
+    );
+    assert!(warnings(&events).is_empty(), "{events:?}");
+}
+
+/// What the same turn would read as with nothing restored: the whole earlier
+/// session again, which is the figure the fix exists to keep off the screen.
+#[test]
+fn a_resumed_turn_read_from_nothing_would_bill_the_earlier_session_again() {
+    let totals = SessionState::replay(&translate(RESUMED)).totals().clone();
+
+    assert!((totals.reported_cost_usd - 0.064619).abs() < 1e-9);
+}
+
+#[test]
+fn a_transcript_with_no_cost_state_restores_nothing() {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let path = dir.path().join("open.jsonl");
+    let text = std::fs::read_to_string(resumed_transcript()).expect("the fixture reads");
+    let open: String = text
+        .lines()
+        .filter(|line| !line.contains("cost-state"))
+        .map(|line| format!("{line}\n"))
+        .collect();
+    std::fs::write(&path, open).expect("the temporary directory is writable");
+
+    assert!(
+        transcript::spent(&path)
+            .expect("the transcript reads")
+            .is_empty()
+    );
+}
+
+/// The CLI restores its last running total whatever this side can read, so an
+/// older record's figure is not what the first turn reports on top of: using
+/// it would count the turns in between again as measured.
+#[test]
+fn a_last_cost_state_that_cannot_be_read_leaves_the_earlier_spend_unknown() {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let path = dir.path().join("left.jsonl");
+    let older = r#"{"type":"cost-state","sessionId":"s","totalCostUSD":1.0,"modelUsage":{"claude-sonnet-5":{"inputTokens":1,"outputTokens":1,"cacheReadInputTokens":0,"cacheCreationInputTokens":0,"costUSD":1.0}}}"#;
+    let wrong_type = r#"{"type":"cost-state","sessionId":"s","totalCostUSD":3.0,"modelUsage":7}"#;
+    let cut_off = r#"{"type":"cost-state","sessionId":"s","totalCostUSD":3.0,"modelUsa"#;
+    let mentions = r#"{"type":"assistant","message":{"role":"assistant","content":"the cost-state is written on exit"}}"#;
+
+    for last in [wrong_type, cut_off] {
+        std::fs::write(&path, format!("{older}\n{last}\n"))
+            .expect("the temporary directory is writable");
+        let spent = transcript::spent(&path).expect("the transcript reads");
+        assert!(!spent.is_known(), "{last}");
+        assert_eq!(spent.cost_usd("claude-sonnet-5"), None, "{last}");
+    }
+
+    // A readable last record reads as before, and another record that merely
+    // names the type does not stand in for it.
+    std::fs::write(&path, format!("{older}\n{mentions}\n"))
+        .expect("the temporary directory is writable");
+    let spent = transcript::spent(&path).expect("the transcript reads");
+    assert!(spent.is_known());
+    assert_eq!(spent.cost_usd("claude-sonnet-5"), Some(1.0));
+}
+
+/// The CLI says why it is asking, and a question that left that out would
+/// read as routine: three of the recorded prompts were stopped on a command
+/// that could hide arguments from the CLI's own checks.
+#[test]
+fn a_prompt_carries_the_reason_the_cli_gave_for_asking() {
+    let events = translate(SUB_AGENTS);
+
+    let reasons: Vec<&str> = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::PermissionRequest { reason, .. } => reason.as_deref(),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        reasons,
+        [
+            "Newline followed by # inside a quoted argument can hide arguments from path \
+             validation",
+            "Contains brace with quote character (expansion obfuscation)",
+            "Parser skipped input between top-level statements",
+        ]
+    );
+}
+
+/// A refusal the CLI announces says why, and the call's row says it: the
+/// result that carries the refusal back to the model does not.
+#[test]
+fn a_refusal_the_cli_announced_says_why_on_the_calls_end() {
+    let events = translated();
+
+    let denied = events
+        .iter()
+        .find_map(|event| match event {
+            Event::ToolCallEnd {
+                id,
+                outcome: ToolOutcome::Denied,
+                error,
+                ..
+            } if id.as_str() == "toolu_bash" => Some(error.clone()),
+            _ => None,
+        })
+        .expect("the recording refuses toolu_bash");
+    assert_eq!(denied.as_deref(), Some("This command requires approval"));
+}
+
+/// The hand-written shapes: a prompt the CLI withdrew, and a turn the budget
+/// ended. See `tests/fixtures/README.md`.
+const HAND_WRITTEN: &str = include_str!("fixtures/hand-written.jsonl");
+
+#[test]
+fn a_withdrawn_prompt_and_a_budgets_end_fold_as_the_fixtures_readme_says() {
+    let events = translate(HAND_WRITTEN);
+
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::PermissionWithdrawn { id } if id.as_str() == "toolu_touch"
+        )),
+        "{events:#?}"
+    );
+    let state = SessionState::replay(&events);
+    assert!(state.pending_permissions().is_empty());
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Error { message, .. } if message.contains("budget")
+        )),
+        "the budget's end did not say what stopped the turn: {events:#?}"
+    );
+}
+
+/// The two messages the CLI sends around ordinary work: where the operator's
+/// message stands, and that the permission classifier is checking a call.
+/// See `tests/fixtures/README.md`.
+const LIFECYCLE: &str = include_str!("fixtures/lifecycle.jsonl");
+
+#[test]
+fn a_message_lifecycle_and_a_permission_check_are_read_without_a_notice_or_an_error() {
+    let events = translate(LIFECYCLE);
+
+    assert!(
+        notices(&events).is_empty() && warnings(&events).is_empty(),
+        "{events:#?}"
+    );
+    let calls = events
+        .iter()
+        .filter(|event| matches!(event, Event::ToolCallStart { .. }))
+        .count();
+    assert_eq!(
+        calls, 1,
+        "the call between them is still folded: {events:#?}"
+    );
+}
+
+fn interrupted() -> Vec<Event> {
+    translate(include_str!("fixtures/interrupted.jsonl"))
+}
+
+/// Two turns the operator stopped — one while a command ran, one while the
+/// reply was being written — and a third that ran to its end, as the README
+/// beside the recording lays out.
+#[test]
+fn a_recorded_turn_the_operator_stopped_ends_and_reads_as_stopped_rather_than_failed() {
+    use niobe_core::event::ToolOutcome;
+
+    let events = interrupted();
+
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, Event::TurnEnded))
+            .count(),
+        3
+    );
+    let outcomes: Vec<(&str, ToolOutcome)> = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::ToolCallEnd { id, outcome, .. } => Some((id.as_str(), *outcome)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        outcomes,
+        [("toolu_013GGPoispcXD3cJuo1J8vgh", ToolOutcome::Interrupted)]
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::Error { .. })),
+        "a stop the operator asked for read as a failure: {events:?}"
+    );
+    let stopped = notices(&events)
+        .into_iter()
+        .filter(|notice| notice.contains("stopped"))
+        .count();
+    assert_eq!(stopped, 2, "{events:?}");
+}
+
+/// The tokens are what the CLI reported in the end: its running totals after
+/// the third turn. The turn stopped while the reply was written reports none
+/// — its `result` carries zeros and `modelUsage` does not move.
+#[test]
+fn a_recorded_session_with_stopped_turns_counts_the_tokens_the_cli_reported() {
+    let state = SessionState::replay(&interrupted());
+    let totals = state.totals();
+
+    assert_eq!(totals.input, 4);
+    assert_eq!(totals.output, 129);
+    assert_eq!(totals.cache_read, 31_168);
+    assert_eq!(totals.cache_write, 11_349);
+    assert!(
+        (totals.reported_cost_usd - 0.052_927_6).abs() < 1e-9,
+        "{}",
+        totals.reported_cost_usd
+    );
+    assert_eq!(state.turns().len(), 3);
+}
+
+/// A reply the operator stopped as soon as it started, on a release whose
+/// stream still sends the reply's `message_delta` after the interrupt, as the
+/// README beside the recording lays out.
+mod interrupted_at_start {
+    use super::{notices, translate};
+    use niobe_core::event::Event;
+    use niobe_core::session::SessionState;
+
+    fn events() -> Vec<Event> {
+        translate(include_str!("fixtures/interrupted-at-start.jsonl"))
+    }
+
+    /// The CLI's `result` carries zeros, its `modelUsage` is empty and its
+    /// `total_cost_usd` is 0: it counted nothing for the stopped reply, so
+    /// neither does the fold, and nothing is left waiting for a cost.
+    #[test]
+    fn a_reply_stopped_as_it_started_counts_nothing_though_its_message_delta_arrived() {
+        let events = events();
+        let state = SessionState::replay(&events);
+        let totals = state.totals();
+
+        assert_eq!(totals.tokens(), 0, "{events:#?}");
+        assert_eq!(totals.records_unsettled, 0, "{events:#?}");
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Event::TurnTotalDiffers { .. })),
+            "the fold and the CLI agree on nothing: {events:#?}"
+        );
+        assert_eq!(state.turns().len(), 1);
+    }
+
+    #[test]
+    fn a_reply_stopped_as_it_started_reads_as_stopped_and_not_as_cut_off() {
+        let events = events();
+        let notices = notices(&events);
+
+        assert!(
+            !notices.iter().any(|notice| notice.contains("cut off")),
+            "{notices:?}"
+        );
+        assert_eq!(
+            notices
+                .iter()
+                .filter(|notice| notice.contains("stopped"))
+                .count(),
+            1,
+            "{notices:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Event::Error { .. })),
+            "{events:#?}"
+        );
+    }
+}
+
+/// A turn one of whose replies was cut off mid-stream, before its
+/// `message_delta`, after which the CLI carried the turn on by itself, as the
+/// README beside the fixture lays out.
+mod cut_off {
+    use super::{notices, translate};
+    use niobe_core::event::{Event, TokenCounts};
+    use niobe_core::session::SessionState;
+
+    const CUT_OFF: &str = include_str!("fixtures/cut-off.jsonl");
+
+    /// What the turn's `result.usage` reports, and what the three messages'
+    /// counts sum to: see the README's table.
+    const REPORTED: TokenCounts = TokenCounts {
+        input: 8,
+        output: 9_175,
+        cache_read: 352_445,
+        cache_write: 7_496,
+        cache_write_1h: None,
+    };
+
+    fn translated() -> Vec<Event> {
+        translate(CUT_OFF)
+    }
+
+    fn per_message(events: &[Event]) -> TokenCounts {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Usage(usage) if usage.settles_model != Some(true) => Some(TokenCounts {
+                    input: usage.input,
+                    output: usage.output,
+                    cache_read: usage.cache_read,
+                    cache_write: usage.cache_write,
+                    cache_write_1h: None,
+                }),
+                _ => None,
+            })
+            .fold(TokenCounts::default(), |sum, counts| sum.plus(&counts))
+    }
+
+    #[test]
+    fn the_messages_add_up_to_what_the_cli_reported_for_the_turn() {
+        let events = translated();
+
+        assert_eq!(per_message(&events), REPORTED);
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Event::TurnTotalDiffers { .. } | Event::Error { .. })),
+            "{events:#?}"
+        );
+    }
+
+    #[test]
+    fn the_cut_off_message_is_counted_from_what_the_cli_recorded_for_it() {
+        let events = translated();
+        let cut = events
+            .iter()
+            .find_map(|event| match event {
+                Event::Usage(usage) if usage.cache_read == 118_070 => Some(usage),
+                _ => None,
+            })
+            .expect("the cut-off message was counted");
+
+        assert_eq!(
+            (cut.input, cut.output, cut.cache_write, cut.cache_write_1h),
+            (2, 8, 2_811, Some(2_811))
+        );
+        assert_eq!(cut.model, "claude-opus-5-5");
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                Event::Context(context) if context.tokens == 2 + 118_070 + 2_811
+            )),
+            "the cut-off request's prompt never reached the context meter"
+        );
+        let state = SessionState::replay(&events);
+        assert_eq!(state.totals().tokens(), REPORTED.total());
+    }
+
+    #[test]
+    fn the_cut_is_a_notice_where_it_happened_and_the_clis_own_prompt_is_not_the_operators() {
+        let events = translated();
+        let said = notices(&events);
+        let cut: Vec<&&str> = said
+            .iter()
+            .filter(|line| line.contains("cut off"))
+            .collect();
+        assert_eq!(cut.len(), 1, "{said:?}");
+        assert!(
+            cut[0].contains("msg_011Cfh9DZarQmXXnvywwTKDD")
+                && cut[0].contains("req_011Cfh9DZCJ19ME3Je89LBSJ"),
+            "the notice does not name the message: {cut:?}"
+        );
+
+        let at = |wanted: &dyn Fn(&Event) -> bool| {
+            events
+                .iter()
+                .position(wanted)
+                .expect("the event is in the stream")
+        };
+        let cut_reply = at(
+            &|event| matches!(event, Event::AssistantMessage { text, .. } if text == "Writing the six tasks now."),
+        );
+        let notice =
+            at(&|event| matches!(event, Event::Notice { message } if message.contains("cut off")));
+        let next_reply = at(
+            &|event| matches!(event, Event::AssistantMessage { text, .. } if text == "The six pages are written."),
+        );
+        assert!(cut_reply < notice && notice < next_reply, "{events:#?}");
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Event::UserMessage { .. })),
+            "the CLI's prompt to carry on read as the operator's"
+        );
+    }
+}
+
+/// Every call of a recorded session is counted under one kind of work: the
+/// kinds' calls add up to the calls that finished, and their failures and
+/// refusals to the session's.
+#[test]
+fn a_recorded_sessions_kinds_of_work_add_up_to_its_calls() {
+    for recording in [FIXTURE, SUB_AGENTS, include_str!("fixtures/shell.jsonl")] {
+        let state = SessionState::replay(&translate(recording));
+        let tools = state.tools();
+        let sum = |count: fn(&niobe_core::WorkTotals) -> u64| -> u64 {
+            tools.by_work.values().map(count).sum()
+        };
+        assert!(tools.finished > 0);
+        assert_eq!(
+            sum(|kind| kind.calls),
+            tools.finished,
+            "{:?}",
+            tools.by_work
+        );
+        assert_eq!(sum(|kind| kind.failed), tools.failed, "{:?}", tools.by_work);
+        assert_eq!(sum(|kind| kind.denied), tools.denied, "{:?}", tools.by_work);
+    }
+}
+
+/// A turn on a Max login whose answer to `initialize` keeps the models the CLI
+/// offers, recorded from Claude Code 2.1.288.
+const MODELS_LISTED: &str = include_str!("fixtures/models-listed.jsonl");
+
+/// The CLI says which models the signed-in account can run, Fable and dated
+/// releases among them, in the answer to the `initialize` every session opens
+/// with; the session holds every one, in the CLI's order, by the id the CLI
+/// takes it by.
+#[test]
+fn the_models_the_cli_offers_come_from_the_answer_to_initialize() {
+    let events = translate(MODELS_LISTED);
+    let state = SessionState::replay(&events);
+
+    let ids: Vec<&str> = state
+        .models()
+        .iter()
+        .map(|model| model.id.as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        [
+            "default",
+            "opus",
+            "fable",
+            "sonnet",
+            "haiku",
+            "claude-sonnet-5",
+            "claude-opus-5",
+            "claude-fable-5",
+            "claude-opus-4-8",
+            "claude-opus-4-7",
+            "claude-opus-4-6",
+            "claude-sonnet-4-6",
+        ]
+    );
+    let fable = &state.models()[2];
+    assert_eq!(fable.name.as_deref(), Some("Fable 5.1"));
+    assert_eq!(
+        fable.description.as_deref(),
+        Some("For your toughest challenges")
+    );
+    assert_eq!(fable.resolves_to.as_deref(), Some("claude-fable-5-1"));
+    assert!(warnings(&events).is_empty(), "{events:?}");
+    assert!(notices(&events).is_empty(), "{events:?}");
+}
+
+const MCP_SERVERS: &str = include_str!("fixtures/mcp-servers.jsonl");
+const MCP_STATUS: &str = include_str!("fixtures/mcp-status.jsonl");
+
+/// The recording's lines in the order given, by their place in it.
+fn lines_of(recording: &str, order: &[usize]) -> String {
+    let lines: Vec<&str> = recording.lines().collect();
+    order
+        .iter()
+        .map(|at| lines[*at])
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The servers of the recorded `mcp_status` answer: why the two that failed
+/// did, the scope each came from, how each is reached and what the one that
+/// connected calls itself.
+fn recorded_status() -> Vec<niobe_core::event::McpServer> {
+    use niobe_core::event::{McpServer, McpStatus};
+
+    let server = |name: &str, status: McpStatus, endpoint: &str| McpServer {
+        name: name.to_owned(),
+        status,
+        source: Some("dynamic".to_owned()),
+        tools: Vec::new(),
+        scope: Some("dynamic".to_owned()),
+        error: None,
+        endpoint: Some(endpoint.to_owned()),
+        reports_as: None,
+    };
+    vec![
+        McpServer {
+            tools: vec!["search".to_owned(), "fetch".to_owned()],
+            reports_as: Some("notes 1.0.0".to_owned()),
+            ..server("notes", McpStatus::Connected, "stdio · python3")
+        },
+        McpServer {
+            error: Some("ENOENT: no such file or directory, posix_spawn 'stdio'".to_owned()),
+            ..server("broken", McpStatus::Failed, "stdio · /nonexistent/server")
+        },
+        McpServer {
+            error: Some(
+                "ECONNREFUSED: Unable to connect. Is the computer able to access the url?"
+                    .to_owned(),
+            ),
+            ..server(
+                "remote docs",
+                McpStatus::Failed,
+                "http · http://127.0.0.1:9/…",
+            )
+        },
+    ]
+}
+
+/// The CLI answers `mcp_status` on its control channel with each server's
+/// error, scope, configuration and tools, which `init` leaves out. The
+/// session holds them; a reconnect the CLI refused is said with the server's
+/// name and the CLI's reason, and one it took says nothing.
+#[test]
+fn the_clis_mcp_status_says_why_each_server_failed_and_where_it_is_configured() {
+    let mut translator = Translator::new("max");
+    translator.asked_to_reconnect("niobe-3", "notes");
+    translator.asked_to_reconnect("niobe-4", "broken");
+    let events: Vec<Event> = MCP_STATUS
+        .lines()
+        .flat_map(|line| translator.line(line))
+        .collect();
+    let state = SessionState::replay(&events);
+
+    assert_eq!(state.mcp_servers(), recorded_status());
+    assert_eq!(
+        warnings(&events),
+        [
+            "the MCP server `broken` could not be reconnected: ENOENT: no such file or directory, posix_spawn 'stdio'"
+        ]
+    );
+    assert!(notices(&events).is_empty(), "{events:?}");
+}
+
+/// Every turn's `init` lists the servers again without what `mcp_status`
+/// said of them, so what was said is kept for a server that stands as it
+/// did: the error of one that failed and failed again is not lost to the
+/// next turn.
+#[test]
+fn a_later_init_keeps_what_mcp_status_said_of_a_server_that_stands_as_it_did() {
+    let events = translate(&lines_of(MCP_STATUS, &[1, 0]));
+    let state = SessionState::replay(&events);
+
+    // The tools are the ones `init` says the model was given, in its order.
+    let mut expected = recorded_status();
+    expected[0].tools = vec!["fetch".to_owned(), "search".to_owned()];
+    assert_eq!(state.mcp_servers(), expected);
+}
+
+/// Every `init` the CLI sends lists the MCP servers it configured, each with
+/// how it stands, and the tools the connected ones gave the model are among
+/// the session's tools as `mcp__<server>__<tool>`. The session holds them all,
+/// each server with its own tools, without a turn being sent to ask.
+#[test]
+fn the_mcp_servers_the_cli_configured_come_from_its_init() {
+    use niobe_core::event::{McpServer, McpStatus};
+
+    let events = translate(MCP_SERVERS);
+    let state = SessionState::replay(&events);
+
+    let server = |name: &str, status: McpStatus, tools: &[&str]| McpServer {
+        name: name.to_owned(),
+        status,
+        source: Some("dynamic".to_owned()),
+        tools: tools.iter().map(|tool| (*tool).to_owned()).collect(),
+        scope: None,
+        error: None,
+        endpoint: None,
+        reports_as: None,
+    };
+    assert_eq!(
+        state.mcp_servers(),
+        [
+            server("notes", McpStatus::Connected, &["fetch", "search"]),
+            server("broken", McpStatus::Failed, &[]),
+            server("remote docs", McpStatus::Failed, &[]),
+        ]
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::UserMessage { .. })),
+        "{events:?}"
+    );
+    assert!(warnings(&events).is_empty(), "{events:?}");
+}
+
+/// A session run against a stand-in for the API that fails on cue; see
+/// `tests/fixtures/README.md`.
+const API_ERRORS: &str = include_str!("fixtures/api-errors.jsonl");
+
+#[test]
+fn a_recorded_retry_refusal_and_banner_are_each_read_rather_than_reported_as_unknown() {
+    let events = translate(API_ERRORS);
+
+    let unknown: Vec<&str> = notices(&events)
+        .into_iter()
+        .filter(|notice| notice.contains("does not know how to read"))
+        .collect();
+    assert!(unknown.is_empty(), "{unknown:?}");
+}
+
+#[test]
+fn every_retry_of_a_recorded_failed_request_is_an_error_saying_what_failed_and_which_attempt() {
+    let events = translate(API_ERRORS);
+
+    let retries: Vec<&str> = warnings(&events)
+        .into_iter()
+        .filter(|warning| warning.contains("retrying"))
+        .collect();
+    assert_eq!(
+        retries,
+        [
+            "a request failed (529 overloaded), and the CLI is retrying it: attempt 1 of 2, in 0.5 s",
+            "a request failed (529 overloaded), and the CLI is retrying it: attempt 2 of 2, in 1.2 s",
+            "a request failed (529 overloaded), and the CLI is retrying it: attempt 1 of 2, in 0.6 s",
+            "a request failed (529 overloaded), and the CLI is retrying it: attempt 2 of 2, in 1.1 s",
+        ]
+    );
+}
+
+#[test]
+fn a_recorded_refusal_with_no_model_to_fall_back_on_is_a_warning_naming_the_model() {
+    let events = translate(API_ERRORS);
+
+    let refusals: Vec<&str> = warnings(&events)
+        .into_iter()
+        .filter(|warning| warning.contains("declined"))
+        .collect();
+    assert_eq!(
+        refusals,
+        [
+            "`claude-sonnet-5` declined to answer, and the CLI has no other model to give the \
+             request to"
+        ]
+    );
+}
+
+#[test]
+fn a_recorded_banner_at_the_notice_level_is_a_notice_in_the_clis_words() {
+    let events = translate(API_ERRORS);
+
+    assert!(
+        notices(&events).contains(
+            &"Sonnet 5's safeguards stopped the response above · continuing once with that noted"
+        ),
+        "{events:#?}"
+    );
+}
+
+/// `background-commands.jsonl`: two shell commands the model put in the
+/// background, one that exited 0 and one that exited 3, each ending in a
+/// `task_notification` after the turn that started them.
+mod background {
+    use super::*;
+
+    const BACKGROUND: &str = include_str!("fixtures/background-commands.jsonl");
+
+    fn events() -> Vec<Event> {
+        let mut translator = Translator::new("max").in_dir("/repo");
+        BACKGROUND
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .flat_map(|line| translator.line(line))
+            .collect()
+    }
+
+    #[test]
+    fn each_background_commands_end_is_a_notice_naming_the_command_and_its_status() {
+        let notices: Vec<String> = events()
+            .into_iter()
+            .filter_map(|event| match event {
+                Event::Notice { message } => Some(message),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            notices,
+            [
+                "the background command `sleep 2; echo finished-in-background` finished with \
+                 exit code 0",
+                "the background command `sleep 3; echo about-to-fail; exit 3` failed with exit \
+                 code 3",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_background_commands_end_is_neither_an_agent_nor_an_error() {
+        let events = events();
+
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                Event::AgentSpawn { .. } | Event::AgentExit { .. } | Event::Error { .. }
+            )),
+            "{events:#?}"
+        );
+    }
+
+    #[test]
+    fn a_command_put_in_the_background_names_no_status_on_its_call() {
+        let statuses: Vec<Option<i32>> = events()
+            .into_iter()
+            .filter_map(|event| match event {
+                Event::ToolCallEnd { exit_code, .. } => Some(exit_code),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(statuses, [None, None]);
+    }
 }

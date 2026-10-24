@@ -17,6 +17,10 @@
 //! proves the last two — the hook writes to the process's own standard output,
 //! and the signal disposition belongs to the process.
 //!
+//! A clean quit is also driven on terminals with no room to draw on — one
+//! cell, and no size at all — and on one whose `TERM` says `dumb`: each still
+//! ends with status 0 and gives the terminal back.
+//!
 //! A stop is not a way out, but it hands the terminal over all the same: a
 //! SIGTSTP, or Ctrl+Z read as a key, hands it back before the process stops,
 //! and a SIGCONT takes it again and draws the whole frame.
@@ -59,7 +63,8 @@ use std::net::Shutdown;
 use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::UnixStream;
-use std::path::Path;
+use std::os::unix::process::CommandExt;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -72,14 +77,37 @@ use rustix::process::{Pid, Signal};
 use rustix::pty::OpenptFlags;
 use rustix::termios::Winsize;
 
-/// How long the shell may take to act on its terminal going away, or on a
-/// SIGTERM. Both are noticed once per tick of the event loop.
-const DEADLINE: Duration = Duration::from_secs(1);
+/// How long the shell may take to end once its terminal has gone, a signal
+/// has asked it to or the operator has quit, and how long what it started may
+/// take to be gone after.
+///
+/// Each is noticed within a tick of the event loop, and a quit gives a `!`
+/// command half a second and the CLI half a second more to leave, so on an
+/// idle machine the shell is gone in well under a second. What these tests
+/// tell apart from that is a shell that waits on something that does not end
+/// — the stand-ins and `!` commands here sleep for most of a day — or that
+/// never notices at all, so the ceiling is set by the machine, not by the
+/// tick: it is wall-clock time for processes to be scheduled and to exit.
+/// With a `yes` on every core of a 12-core Mac, a SIGTERM with a `!` command
+/// running took 4.7 to 5.5 s, and with two whole-workspace runs sharing it a
+/// shell took 9.27 s to end; one second failed there.
+const DEADLINE: Duration = Duration::from_secs(20);
+
+/// How long a test waits, once the shell has drawn what a line typed into it
+/// did, before pressing Enter, so that the shell reads the two apart as it
+/// would a person's keys. Far longer than a debug build takes to read a key.
+const KEY_GAP: Duration = Duration::from_millis(100);
 
 /// How long a test waits for the shell to draw, to record or to end before
-/// calling it hung. Long enough that a loaded machine does not fail it, short
-/// enough that a hung test is not mistaken for a slow one.
-const PATIENCE: Duration = Duration::from_secs(10);
+/// calling it hung.
+///
+/// Every wait returns as soon as what it waits for happens, so a passing test
+/// waits no longer for this being long; a hung one never gets there either
+/// way. With two whole-workspace test runs sharing a 12-core Mac (load
+/// average 17), the opening frame came after 0.12 s at the median and 11.06 s
+/// at worst — the binary starting, not the harness — and a shell ended within
+/// 9.27 s of being asked; ten seconds failed there.
+const PATIENCE: Duration = Duration::from_secs(60);
 
 /// How long a wait on the pty blocks before looking at the stop flag again.
 const POLL: Timespec = Timespec {
@@ -109,12 +137,12 @@ const LEAVE_ALTERNATE_SCREEN: &str = "\x1b[?1049l";
 ///
 /// The terminals these tests open answer as one that reports keys does, so
 /// this is what every way out has to leave behind.
-const RESTORED: &str = "\x1b[?1006l\x1b[?1000l\x1b[?2004l\x1b[<1u\x1b[?1049l\x1b[?25h";
+const RESTORED: &str = "\x1b[?1006l\x1b[?1002l\x1b[?2004l\x1b[<1u\x1b[?1049l\x1b[?25h";
 
 /// The same, on a terminal that cannot report keys: it was never pushed the
 /// enhancement, so it is never asked to pop it, and the modifyOtherKeys it was
 /// asked for instead goes back to what the terminal had.
-const RESTORED_LEGACY: &str = "\x1b[?1006l\x1b[?1000l\x1b[?2004l\x1b[>4m\x1b[?1049l\x1b[?25h";
+const RESTORED_LEGACY: &str = "\x1b[?1006l\x1b[?1002l\x1b[?2004l\x1b[>4m\x1b[?1049l\x1b[?25h";
 
 /// What the shell asks a terminal on the way in: which keyboard enhancements
 /// it has on, then its primary device attributes.
@@ -173,10 +201,19 @@ impl Keys {
 /// Ctrl+Q, one of the two keys that quit the shell.
 const CTRL_Q: &[u8] = b"\x11";
 
-/// F9, the key that moves the shell to the next theme. A terminal sends it as
-/// this sequence, which is what proves the key reaches the shell as F9 rather
-/// than as the characters it is spelt with.
+/// F9, the key that opens the settings. A terminal sends it as this
+/// sequence, which is what proves the key reaches the shell as F9 rather than
+/// as the characters it is spelt with.
 const F9: &[u8] = b"\x1b[20~";
+
+/// Alt+V, which opens the View menu: Esc and the letter, as a terminal that
+/// sends Option as Meta writes it.
+const ALT_V: &[u8] = b"\x1bv";
+
+/// The arrow keys and Enter, as a terminal sends them.
+const UP: &[u8] = b"\x1b[A";
+const DOWN: &[u8] = b"\x1b[B";
+const ENTER: &[u8] = b"\r";
 
 /// The variable the binary reads to panic inside the event loop, which is the
 /// only way in to the one exit path nothing else can reach. The binary compiles
@@ -322,7 +359,38 @@ impl Terminal {
     }
 
     /// Types into the shell.
+    ///
+    /// A line ending in Enter is typed, and then the Enter pressed on its own
+    /// once the shell has had time to read the line: sent in one write, the
+    /// two arrive in one read, which is what a paste from a terminal that
+    /// does not bracket pastes looks like, and a pasted Enter is a line break.
     fn typed(&self, keys: &[u8]) {
+        match keys.split_last() {
+            Some((b'\r', line)) if !line.is_empty() => {
+                let before = self.mark();
+                self.write(line);
+                self.drew_since(before);
+                std::thread::sleep(KEY_GAP);
+                self.write(b"\r");
+            }
+            _ => self.write(keys),
+        }
+    }
+
+    /// Waits until the shell has drawn anything after `from`, a
+    /// [`Self::mark`], which it does once it has read what was typed.
+    fn drew_since(&self, from: usize) {
+        let deadline = Instant::now() + PATIENCE;
+        while self.mark() <= from {
+            assert!(
+                Instant::now() < deadline,
+                "the shell drew nothing {PATIENCE:?} after keys were typed"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    fn write(&self, keys: &[u8]) {
         rustix::io::write(&*self.master, keys).expect("the pty takes what is typed");
     }
 
@@ -359,11 +427,12 @@ impl Terminal {
 }
 
 /// Reads everything the shell draws until the test stops, or until the shell
-/// closes its end, answering the keyboard query the first time it is asked, as
-/// a terminal emulator would.
+/// closes its end, answering the keyboard query each time it is asked, as a
+/// terminal emulator would: a session opened after the trust question takes
+/// the terminal, and asks, a second time.
 fn read_until_stopped(master: &OwnedFd, drawn: &Mutex<String>, stop: &AtomicBool, keys: Keys) {
     let mut buffer = [0u8; 4096];
-    let mut answered = false;
+    let mut answered = 0;
     while !stop.load(Ordering::SeqCst) {
         let mut fds = [PollFd::new(master, PollFlags::IN)];
         let ready = rustix::event::poll(&mut fds, Some(&POLL)).unwrap_or(0);
@@ -381,8 +450,9 @@ fn read_until_stopped(master: &OwnedFd, drawn: &Mutex<String>, stop: &AtomicBool
             Ok(0) | Err(_) => return,
             Ok(read) => {
                 drawn.push_str(&String::from_utf8_lossy(&buffer[..read]));
-                if !answered && drawn.contains(KEYBOARD_QUERY) {
-                    answered = true;
+                let asked = drawn.matches(KEYBOARD_QUERY).count();
+                if asked > answered {
+                    answered = asked;
                     // A terminal that has gone takes no answer, and a test
                     // that closes it is not failed by that.
                     let _ = rustix::io::write(master, keys.answer());
@@ -399,8 +469,22 @@ fn repo() -> tempfile::TempDir {
     dir
 }
 
-/// The shell, ready to run on `slave` and record into `cwd`, with no user
-/// config and no `COLORTERM`: the operator's own config, and the depth their
+/// A user config directory under `cwd` whose file defines no profile, so that
+/// a shell run under it is attached to nothing.
+///
+/// Not a missing file: with none anywhere a session runs the `claude` it
+/// finds, which these tests are not about.
+fn defines_no_profile(cwd: &Path) -> PathBuf {
+    let home = cwd.join("no-profile-here");
+    let dir = home.join("niobe");
+    std::fs::create_dir_all(&dir).expect("a config directory can be made");
+    std::fs::write(dir.join("config.toml"), "# no profile is defined\n")
+        .expect("the user config is written");
+    home
+}
+
+/// The shell, ready to run on `slave` and record into `cwd`, with a user
+/// config that defines no profile and no `COLORTERM`: the operator's own config, and the depth their
 /// terminal announces, would otherwise change what these tests see.
 ///
 /// Standard error goes to the terminal too, the way it does for an operator:
@@ -413,19 +497,112 @@ fn shell_command(slave: &File, cwd: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_niobe"));
     command
         .current_dir(cwd)
-        .env("XDG_CONFIG_HOME", cwd.join("no-user-config-here"))
+        .env("XDG_CONFIG_HOME", defines_no_profile(cwd))
+        // A test that wants a `claude` puts one first on this, and one that
+        // does not must not start whatever this machine has installed.
+        .env("PATH", "/usr/bin:/bin")
         .env_remove("COLORTERM")
+        // Which notification the shell sends is read off it, and the
+        // terminal running the tests is not the one under test.
+        .env_remove("TERM_PROGRAM")
         .stdin(Stdio::from(stdin))
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr));
     command
 }
 
-/// Opens the shell on `slave`.
-fn shell_on(slave: &File, cwd: &Path) -> Child {
-    shell_command(slave, cwd)
+/// Opens the shell on `slave`, held so that a test that fails with it still
+/// running — or stopped — does not leave it behind.
+fn shell_on(slave: &File, cwd: &Path) -> Reaped {
+    Reaped(
+        shell_command(slave, cwd)
+            .spawn()
+            .expect("the niobe binary runs"),
+    )
+}
+
+/// Opens the shell on `slave` as its controlling terminal, the way a login
+/// gives an operator's shell one: in a session of its own, where `/dev/tty`
+/// names `slave`. [`shell_on`] leaves the shell whatever controlling terminal
+/// the test runner has, which under CI is none.
+fn shell_owning(slave: &File, cwd: &Path) -> Reaped {
+    let mut command = shell_command(slave, cwd);
+    in_a_session_of_its_own(&mut command);
+    Reaped(command.spawn().expect("the niobe binary runs"))
+}
+
+/// Makes `command` lead a session of its own, with its standard input as the
+/// session's controlling terminal. A signal it sends to its process group
+/// then reaches nothing of the test runner's.
+///
+/// `unsafe` is allowed here for the reason the binary's own `!` commands
+/// allow it: `pre_exec` is the only hook between fork and exec,
+/// and nothing safe gives a child a session and a terminal.
+#[allow(unsafe_code)]
+fn in_a_session_of_its_own(command: &mut Command) {
+    // SAFETY: between fork and exec the child may make only async-signal-safe
+    // calls. `setsid` and the `TIOCSCTTY` ioctl are single system calls that
+    // allocate nothing and take no lock, and fd 0 is `slave` by then: the
+    // standard streams are set before the closure runs.
+    unsafe {
+        std::os::unix::process::CommandExt::pre_exec(command, || {
+            rustix::process::setsid()?;
+            rustix::process::ioctl_tiocsctty(rustix::stdio::stdin())?;
+            Ok(())
+        });
+    }
+}
+
+/// A child process that is killed and reaped when it is dropped, whatever
+/// state it is in.
+///
+/// `Child` does neither on drop, and a stopped process does not end when its
+/// parent does: a stop test that fails between the stop and the continue
+/// would otherwise leave a stopped niobe on the machine for good. SIGKILL
+/// ends a stopped process as it does a running one.
+struct Reaped(Child);
+
+impl std::ops::Deref for Reaped {
+    type Target = Child;
+
+    fn deref(&self) -> &Child {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for Reaped {
+    fn deref_mut(&mut self) -> &mut Child {
+        &mut self.0
+    }
+}
+
+impl Drop for Reaped {
+    fn drop(&mut self) {
+        if matches!(self.0.try_wait(), Ok(None)) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+}
+
+#[test]
+fn a_stopped_child_is_gone_once_what_holds_it_is_dropped() {
+    let child = Command::new("sleep")
+        .arg("600")
         .spawn()
-        .expect("the niobe binary runs")
+        .expect("sleep runs");
+    let pid = rustix::process::Pid::from_child(&child);
+    let held = Reaped(child);
+    signal(&held, Signal::STOP);
+    stopped(&held);
+
+    drop(held);
+
+    assert_eq!(
+        rustix::process::test_kill_process(pid),
+        Err(rustix::io::Errno::SRCH),
+        "the stopped child outlived what held it"
+    );
 }
 
 /// Opens the shell reading from one terminal and drawing on another.
@@ -440,7 +617,8 @@ fn shell_reading_from(input: &File, screen: &File, cwd: &Path) -> Child {
     let stderr = screen.try_clone().expect("the slave can be duplicated");
     Command::new(env!("CARGO_BIN_EXE_niobe"))
         .current_dir(cwd)
-        .env("XDG_CONFIG_HOME", cwd.join("no-user-config-here"))
+        .env("XDG_CONFIG_HOME", defines_no_profile(cwd))
+        .env("PATH", "/usr/bin:/bin")
         .env_remove("COLORTERM")
         .stdin(Stdio::from(stdin))
         .stdout(Stdio::from(stdout))
@@ -458,21 +636,42 @@ fn signal(shell: &Child, signal: Signal) {
 
 /// Asserts that the shell handed the terminal back exactly once on `path`, the
 /// way out of the shell it was driven down.
-fn assert_handed_back(drawn: &str, path: &str) {
-    assert_handed_back_as(drawn, path, Keys::Reported);
+fn assert_handed_back(drawn: &str, cooked: bool, path: &str) {
+    assert_handed_back_as(drawn, cooked, path, Keys::Reported);
+}
+
+/// Everything the shell drew, once the test lets go of its end of the pty,
+/// and whether the pty's line discipline was cooked again when it did: the
+/// escape sequences say the screen was handed back, and only the modes say
+/// raw mode was turned off.
+fn released(terminal: Terminal, slave: File) -> (String, bool) {
+    let cooked = cooked(&slave);
+    drop(slave);
+    (terminal.drained(), cooked)
 }
 
 /// Asserts that the shell handed back exactly once, on `path`, a terminal that
 /// answered the keyboard query as `keys` says.
-fn assert_handed_back_as(drawn: &str, path: &str, keys: Keys) {
+fn assert_handed_back_as(drawn: &str, cooked: bool, path: &str, keys: Keys) {
+    assert_handed_back_times(drawn, cooked, path, keys, 1);
+}
+
+/// Asserts that the shell handed back a terminal that answered the keyboard
+/// query as `keys` says exactly `times` times on `path`: once for each time it
+/// took it, which is twice where it asked whether to trust a config first.
+fn assert_handed_back_times(drawn: &str, cooked: bool, path: &str, keys: Keys, times: usize) {
+    assert!(
+        cooked,
+        "on {path} the shell left the terminal in raw mode: no line editing, no echo, no Ctrl+C"
+    );
     assert!(
         drawn.contains(ENTER_ALTERNATE_SCREEN),
         "on {path} the shell never entered the alternate screen, so leaving it would prove nothing"
     );
     let left = drawn.matches(LEAVE_ALTERNATE_SCREEN).count();
     assert_eq!(
-        left, 1,
-        "on {path} the shell left the alternate screen {left} time(s), not once"
+        left, times,
+        "on {path} the shell left the alternate screen {left} time(s), not {times}"
     );
     assert!(
         drawn.contains(keys.restored()),
@@ -481,8 +680,9 @@ fn assert_handed_back_as(drawn: &str, path: &str, keys: Keys) {
     );
     assert_eq!(
         drawn.matches(keys.taken_back()).count(),
-        1,
-        "on {path} what the keyboard was asked for was not taken back exactly once: {drawn:?}"
+        times,
+        "on {path} what the keyboard was asked for was not taken back exactly {times} \
+         time(s): {drawn:?}"
     );
 }
 
@@ -608,6 +808,121 @@ fn a_claude_session_read_in_is_a_niobe_session_from_then_on() {
     assert!(out.contains("1 changed — +3 −1"), "{out}");
 }
 
+/// The CLI's id run twice is one conversation: the second run opens the Niobe
+/// session the first made rather than reading the same history in again.
+#[test]
+fn a_claude_session_read_in_twice_opens_the_niobe_session_the_first_made() {
+    let repo = repo();
+    let claude = claude_config_with_the_transcript(repo.path());
+    for _ in 0..2 {
+        let (terminal, slave) = Terminal::open();
+        let mut shell = shell_command(&slave, repo.path())
+            .env("CLAUDE_CONFIG_DIR", claude.path())
+            .args(["--resume", TRANSCRIPT_SESSION])
+            .spawn()
+            .expect("the niobe binary runs");
+        terminal.shows("Done: the catalog response carries an etag.");
+        terminal.typed(CTRL_Q);
+        let (_, status) = ended(&mut shell);
+        drop(slave);
+        assert!(status.success(), "ended with {status}");
+    }
+
+    let listed = niobe(repo.path(), &["sessions"]);
+    let out = String::from_utf8(listed.stdout).expect("stdout is UTF-8");
+    let niobe_sessions: Vec<&str> = out
+        .lines()
+        .skip(1)
+        .take_while(|line| !line.trim().is_empty() && !line.contains("claude sessions"))
+        .collect();
+    assert_eq!(
+        niobe_sessions.len(),
+        1,
+        "the same conversation was recorded twice:\n{out}"
+    );
+}
+
+/// A session read in from the CLI's transcript is stored at the times the
+/// CLI recorded, so that resuming it shows when it happened rather than when
+/// it was read in.
+#[test]
+fn a_claude_session_read_in_is_stored_at_the_times_its_transcript_records() {
+    let repo = repo();
+    let claude = claude_config_with_the_transcript(repo.path());
+    let (terminal, slave) = Terminal::open();
+    let mut shell = shell_command(&slave, repo.path())
+        .env("CLAUDE_CONFIG_DIR", claude.path())
+        .args(["--resume", TRANSCRIPT_SESSION])
+        .spawn()
+        .expect("the niobe binary runs");
+    terminal.shows("Done: the catalog response carries an etag.");
+    recorded(repo.path(), 13);
+    terminal.typed(CTRL_Q);
+    let (_, status) = ended(&mut shell);
+    drop(slave);
+    assert!(status.success(), "the imported session ended with {status}");
+
+    let store =
+        Store::open(&repo.path().join(".niobe").join("sessions.db")).expect("the store opens");
+    let session: SessionId = "1".parse().expect("1 is a session id");
+    let stored = store.events(session).expect("the session reads");
+    let at = |text: &str| {
+        stored
+            .iter()
+            .find(|s| matches!(&s.event, niobe_core::event::Event::UserMessage { text: said } if said == text))
+            .map(|s| s.at)
+            .expect("the prompt was stored")
+    };
+    // The record holding the prompt is stamped `2026-09-18T09:00:02.000Z`,
+    // which `date -u -d 2026-09-18T09:00:02Z +%s` gives as 1789722002.
+    assert_eq!(
+        at("add an etag to the catalog response"),
+        std::time::UNIX_EPOCH + Duration::from_secs(1_789_722_002)
+    );
+    // Nothing of the transcript is dated by the import: its records span
+    // 09:00:00 to 09:00:13 that morning.
+    let first = std::time::UNIX_EPOCH + Duration::from_secs(1_789_722_000);
+    let last = std::time::UNIX_EPOCH + Duration::from_secs(1_789_722_013);
+    for s in stored.iter().take(13) {
+        assert!(
+            (first..=last).contains(&s.at),
+            "{:?} stored at {:?}",
+            s.event,
+            s.at
+        );
+    }
+}
+
+/// A resume whose backend will not start is a session nobody carried on, and
+/// is not left in the list: every retry would add another copy.
+#[test]
+fn a_claude_session_whose_backend_will_not_start_is_not_recorded() {
+    let repo = repo();
+    let claude = claude_config_with_the_transcript(repo.path());
+    let home = user_config("default_profile = \"max\"\n\n[profiles.max]\nbackend = \"claude\"\n");
+    let (terminal, slave) = Terminal::open();
+    let mut shell = shell_command(&slave, repo.path())
+        .env("XDG_CONFIG_HOME", home.path())
+        .env("CLAUDE_CONFIG_DIR", claude.path())
+        .env("PATH", "/usr/bin:/bin")
+        .args(["--resume", TRANSCRIPT_SESSION])
+        .spawn()
+        .expect("the niobe binary runs");
+
+    let (_, status) = ended(&mut shell);
+    drop(slave);
+    let drawn = terminal.drained();
+
+    assert_eq!(status.code(), Some(1), "{drawn}");
+    assert!(drawn.contains("not on PATH"), "{drawn}");
+    let listed = niobe(repo.path(), &["sessions"]);
+    let out = String::from_utf8(listed.stdout).expect("stdout is UTF-8");
+    assert!(
+        !out.contains("EVENTS"),
+        "the failed resume left a session behind:\n{out}"
+    );
+}
+
 /// A user config directory holding `config`, to run the shell under.
 fn user_config(config: &str) -> tempfile::TempDir {
     let home = tempfile::tempdir().expect("a temporary directory can be created");
@@ -662,12 +977,12 @@ fn a_settings_file_a_profile_names_and_this_machine_has_not_stops_the_session() 
 /// names the palette in force, so this is what a choice of one is read off.
 const NEO_MENU: &str = "\u{1b}[38;5;2;48;5;0m";
 const MODERN_MENU: &str = "\u{1b}[38;5;15;48;5;8m";
-const CLASSIC_MENU: &str = "\u{1b}[38;5;0;48;5;7m";
+const CLASSIC_MENU: &str = "\u{1b}[38;5;0;48;5;6m";
 
 /// The three ways a palette is chosen, on the one screen that can show it: the
-/// flag, a config key, and F9 while the session runs.
+/// flag, a config key, and the View menu's list while the session runs.
 #[test]
-fn a_theme_is_selected_by_the_flag_by_the_config_and_by_f9() {
+fn a_theme_is_selected_by_the_flag_by_the_config_and_from_the_view_menu() {
     let repo = repo();
     let home = user_config("theme = \"neo\"\n");
     let (terminal, slave) = Terminal::open();
@@ -678,9 +993,14 @@ fn a_theme_is_selected_by_the_flag_by_the_config_and_by_f9() {
         .spawn()
         .expect("the niobe binary runs");
     terminal.shows(NEO_MENU);
-    terminal.typed(F9);
-    // F9 cycles the table in order, and `neo` is not the last of it.
+    // The list opens on the theme in force, and the table has `modern`
+    // after `neo`.
+    choose_theme(&terminal, DOWN);
     terminal.shows(MODERN_MENU);
+    // F9 reaches the shell as itself, and opens the settings.
+    let mark = terminal.mark();
+    terminal.typed(F9);
+    terminal.shows_since(mark, "Settings");
     terminal.typed(CTRL_Q);
     let (_, status) = ended(&mut shell);
     assert!(status.success(), "the shell ended with {status}");
@@ -704,6 +1024,21 @@ fn a_theme_is_selected_by_the_flag_by_the_config_and_by_f9() {
     flagged.drained();
 }
 
+/// Opens the View menu's theme list, moves its cursor by `step` and takes
+/// the theme under it.
+fn choose_theme(terminal: &Terminal, step: &[u8]) {
+    let mark = terminal.mark();
+    terminal.typed(ALT_V);
+    // An item's hot letter is drawn in a colour of its own, so a label is
+    // never one run of text on the wire; the keys beside one are.
+    terminal.shows_since(mark, "Ctrl+T");
+    terminal.typed(b"t");
+    terminal.typed(ENTER);
+    terminal.shows_since(mark, "Esc keep");
+    terminal.typed(step);
+    terminal.typed(ENTER);
+}
+
 /// `neo`'s menu row as its design draws it, in 24-bit colour.
 const NEO_MENU_TRUECOLOR: &str = "\u{1b}[38;2;0;255;65;48;2;0;26;8m";
 
@@ -721,10 +1056,8 @@ fn a_terminal_announcing_truecolor_gets_the_designed_colours_and_classic_stays_n
         .spawn()
         .expect("the niobe binary runs");
     terminal.shows(NEO_MENU_TRUECOLOR);
-    // neo → modern → cyber → classic.
-    terminal.typed(F9);
-    terminal.typed(F9);
-    terminal.typed(F9);
+    // `classic` is the theme before `neo` in the list.
+    choose_theme(&terminal, UP);
     terminal.shows(CLASSIC_MENU);
     terminal.typed(CTRL_Q);
     let (_, status) = ended(&mut shell);
@@ -760,6 +1093,58 @@ fn a_config_naming_a_theme_that_does_not_exist_stops_the_session_at_its_line() {
     assert!(!repo.path().join(".niobe").exists(), "{drawn}");
 }
 
+/// Starts the shell in `repo` with `planted` a link at `.niobe/<name>`, and
+/// returns what it drew and how it ended.
+#[cfg(unix)]
+fn started_with_a_link(repo: &Path, name: &str, planted: &Path) -> (ExitStatus, String) {
+    std::fs::create_dir_all(repo.join(".niobe")).expect("the directory can be made");
+    std::os::unix::fs::symlink(planted, repo.join(".niobe").join(name))
+        .expect("the link is planted");
+    let (terminal, slave) = Terminal::open();
+
+    let mut shell = shell_command(&slave, repo)
+        .spawn()
+        .expect("the niobe binary runs");
+
+    let (_, status) = ended(&mut shell);
+    drop(slave);
+    (status, terminal.drained())
+}
+
+#[cfg(unix)]
+#[test]
+fn a_session_store_linked_out_of_the_repository_stops_the_session_and_writes_nothing_there() {
+    for (name, exists) in [
+        ("sessions.db", false),
+        ("sessions.db", true),
+        (".gitignore", false),
+        ("sessions.db-wal", false),
+        ("sessions.db-shm", false),
+        ("sessions.db-journal", false),
+    ] {
+        let repo = repo();
+        let outside = tempfile::tempdir().expect("a temporary directory can be created");
+        let planted = outside.path().join("leak");
+        if exists {
+            std::fs::write(&planted, "").expect("the file outside is written");
+        }
+
+        let (status, drawn) = started_with_a_link(repo.path(), name, &planted);
+
+        assert_eq!(status.code(), Some(1), "{name}: {drawn}");
+        assert!(drawn.contains(name), "the failure names the link: {drawn}");
+        let written = std::fs::read(&planted).unwrap_or_default();
+        assert!(written.is_empty(), "{name}: niobe wrote through the link");
+        assert_eq!(
+            std::fs::read_dir(outside.path())
+                .expect("the directory exists and is readable")
+                .count(),
+            usize::from(exists),
+            "{name}: niobe created a file outside the repository"
+        );
+    }
+}
+
 #[test]
 fn a_clean_quit_hands_the_terminal_back() {
     let repo = repo();
@@ -770,11 +1155,92 @@ fn a_clean_quit_hands_the_terminal_back() {
     terminal.typed(CTRL_Q);
 
     let (_, status) = ended(&mut shell);
-    drop(slave);
-    let drawn = terminal.drained();
+    let (drawn, cooked) = released(terminal, slave);
 
     assert!(status.success(), "a clean quit ended with {status}");
-    assert_handed_back(&drawn, "a clean quit");
+    assert_handed_back(&drawn, cooked, "a clean quit");
+}
+
+/// Quits a shell started on a terminal of `size` rows and columns, and
+/// asserts that it ended cleanly and handed the terminal back.
+///
+/// Such a terminal has no room for the opening frame, so what the test waits
+/// for is the alternate screen: raw mode is on before it is entered, so the
+/// quit that follows is read as a key rather than eaten by the line
+/// discipline.
+fn quits_cleanly_at(rows: u16, cols: u16) {
+    let repo = repo();
+    let (terminal, slave) = Terminal::open();
+    let size = Winsize {
+        ws_row: rows,
+        ws_col: cols,
+        ..SIZE
+    };
+    rustix::termios::tcsetwinsize(&slave, size).expect("the pty can be resized");
+    let mut shell = shell_on(&slave, repo.path());
+    terminal.shows(ENTER_ALTERNATE_SCREEN);
+
+    terminal.typed(CTRL_Q);
+
+    let (_, status) = ended(&mut shell);
+    let (drawn, cooked) = released(terminal, slave);
+
+    let path = format!("a quit on a {rows}×{cols} terminal");
+    assert!(status.success(), "{path} ended with {status}");
+    assert_handed_back(&drawn, cooked, &path);
+}
+
+/// A key typed the moment the screen is taken — while the shell is still
+/// waiting on the terminal's answer about its keyboard — is read, not lost:
+/// the `!` it types here is what puts the composer into a command.
+#[test]
+fn a_key_typed_as_the_shell_opens_is_read_and_not_lost() {
+    let repo = repo();
+    let (terminal, slave) = Terminal::open();
+    let mut shell = shell_on(&slave, repo.path());
+    terminal.shows(ENTER_ALTERNATE_SCREEN);
+    terminal.typed(b"!");
+    terminal.shows("what it prints");
+    terminal.typed(b"echo typed-ahead-$((6*7))\r");
+    terminal.shows("typed-ahead-42");
+    terminal.typed(CTRL_Q);
+
+    let (_, status) = ended(&mut shell);
+    let (drawn, cooked) = released(terminal, slave);
+    assert!(status.success(), "{drawn}");
+    assert_handed_back(&drawn, cooked, "a quit after a key typed ahead");
+}
+
+#[test]
+fn a_one_by_one_terminal_quits_cleanly_and_is_handed_back() {
+    quits_cleanly_at(1, 1);
+}
+
+#[test]
+fn a_terminal_with_no_size_quits_cleanly_and_is_handed_back() {
+    quits_cleanly_at(0, 0);
+}
+
+#[test]
+fn a_dumb_terminal_quits_cleanly_and_is_handed_back() {
+    let repo = repo();
+    let (terminal, slave) = Terminal::open();
+    let mut shell = shell_command(&slave, repo.path())
+        .env("TERM", "dumb")
+        .spawn()
+        .expect("the niobe binary runs");
+    terminal.shows(OPENING_FRAME);
+
+    terminal.typed(CTRL_Q);
+
+    let (_, status) = ended(&mut shell);
+    let (drawn, cooked) = released(terminal, slave);
+
+    assert!(
+        status.success(),
+        "a quit with TERM=dumb ended with {status}"
+    );
+    assert_handed_back(&drawn, cooked, "a quit with TERM=dumb");
 }
 
 #[test]
@@ -787,8 +1253,7 @@ fn a_sigterm_hands_the_terminal_back() {
     signal(&shell, Signal::TERM);
 
     let (took, status) = ended(&mut shell);
-    drop(slave);
-    let drawn = terminal.drained();
+    let (drawn, cooked) = released(terminal, slave);
 
     assert!(
         took < DEADLINE,
@@ -797,7 +1262,7 @@ fn a_sigterm_hands_the_terminal_back() {
     // The default disposition kills the process outright, on the alternate
     // screen in raw mode; catching the signal is what turns it into a quit.
     assert!(status.success(), "a SIGTERM ended the shell with {status}");
-    assert_handed_back(&drawn, "a SIGTERM");
+    assert_handed_back(&drawn, cooked, "a SIGTERM");
 }
 
 #[test]
@@ -810,11 +1275,10 @@ fn a_sigterm_takes_back_the_modify_other_keys_a_legacy_terminal_was_asked_for() 
     signal(&shell, Signal::TERM);
 
     let (_, status) = ended(&mut shell);
-    drop(slave);
-    let drawn = terminal.drained();
+    let (drawn, cooked) = released(terminal, slave);
 
     assert!(status.success(), "a SIGTERM ended the shell with {status}");
-    assert_handed_back_as(&drawn, "a SIGTERM", Keys::Legacy);
+    assert_handed_back_as(&drawn, cooked, "a SIGTERM", Keys::Legacy);
 }
 
 #[test]
@@ -909,10 +1373,9 @@ fn shift_enter_in_modify_other_keys_opens_a_line_and_the_bar_names_it_from_then_
     terminal.typed(CTRL_Q);
 
     let (_, status) = ended(&mut shell);
-    drop(slave);
-    let drawn = terminal.drained();
+    let (drawn, cooked) = released(terminal, slave);
     assert!(status.success(), "the shell ended with {status}");
-    assert_handed_back_as(&drawn, "a clean quit", Keys::Legacy);
+    assert_handed_back_as(&drawn, cooked, "a clean quit", Keys::Legacy);
 }
 
 /// Only with debug assertions on: the panic the binary is asked for is
@@ -950,15 +1413,14 @@ fn panics_and_hands_back(keys: Keys) {
     terminal.typed(b"anything\r");
 
     let (_, status) = ended(&mut shell);
-    drop(slave);
-    let drawn = terminal.drained();
+    let (drawn, cooked) = released(terminal, slave);
 
     assert_eq!(
         status.code(),
         Some(PANICKED),
         "the shell was asked to panic and ended with {status}"
     );
-    assert_handed_back_as(&drawn, "a panic", keys);
+    assert_handed_back_as(&drawn, cooked, "a panic", keys);
 
     // The guard would restore on its own as the stack unwinds, so restoring is
     // not what the hook is for: it restores *first*, so that the message is
@@ -1013,13 +1475,21 @@ fn a_session_whose_terminal_went_away_is_still_there_to_resume() {
     let resumed = niobe(repo.path(), &["--resume", "1"]);
     let out = String::from_utf8(resumed.stdout).expect("stdout is UTF-8");
     assert!(resumed.status.success(), "{out}");
+    // The prompt, kept as one that reached no backend: no backend is
+    // configured here, so nothing was asked.
     assert!(out.starts_with("session 1 · 1 events"), "{out}");
-    assert!(out.contains("1 from you"), "{out}");
+    assert!(out.contains("0 from you"), "{out}");
 
-    // The prompt itself, which the list shows a session by.
+    // The session is listed, but not by a prompt that asked nothing.
     let listed = niobe(repo.path(), &["sessions"]);
     let listed = String::from_utf8(listed.stdout).expect("stdout is UTF-8");
-    assert!(listed.contains("etags please"), "{listed}");
+    assert!(
+        listed
+            .lines()
+            .any(|line| line.trim_start().starts_with("1 ")),
+        "{listed}"
+    );
+    assert!(!listed.contains("etags please"), "{listed}");
 }
 
 #[test]
@@ -1190,15 +1660,14 @@ fn a_hangup_ends_the_session_as_a_terminal_that_went_away_rather_than_as_a_quit(
     signal(&shell, Signal::HUP);
 
     let (took, status) = ended(&mut shell);
-    drop(slave);
-    let drawn = terminal.drained();
+    let (drawn, cooked) = released(terminal, slave);
 
     assert!(
         took < DEADLINE,
         "the shell took {took:?} to act on a hangup, over the {DEADLINE:?} it has"
     );
     assert!(status.success(), "a hangup ended the shell with {status}");
-    assert_handed_back(&drawn, "a hangup");
+    assert_handed_back(&drawn, cooked, "a hangup");
     assert!(
         !drawn.contains("niobe --resume"),
         "a hangup printed the line a quit prints, onto the terminal the hangup says has gone: \
@@ -1276,6 +1745,465 @@ fn a_command_typed_after_a_bang_runs_here_and_is_kept_as_a_call() {
     );
 }
 
+/// A command typed after `!` has no terminal of its own to write on: the
+/// shell is drawing on the one the session holds, and whatever a program
+/// wrote there by opening `/dev/tty` would stay drawn over the frame.
+#[test]
+fn a_bang_command_cannot_write_on_the_terminal_the_shell_draws_on() {
+    let repo = repo();
+    let (terminal, slave) = Terminal::open();
+    let mut shell = shell_owning(&slave, repo.path());
+    terminal.shows(OPENING_FRAME);
+
+    terminal.typed(b"!");
+    terminal.shows("what it prints");
+    // The shell redraws only the cells that changed, so a marker made of
+    // letters can come out in pieces where the welcome text it covers
+    // already held some of them; nothing on screen before holds a `#`.
+    terminal.typed(b"printf 'GARBAGE-ON-%s' TTY > /dev/tty; echo \"#$((6*7))#\"\r");
+    terminal.shows("#42#");
+    terminal.typed(CTRL_Q);
+
+    let (_, status) = ended(&mut shell);
+    drop(slave);
+    let drawn = terminal.drained();
+    assert!(status.success(), "the shell ended with {status}");
+    assert!(
+        !drawn.contains("GARBAGE-ON-TTY"),
+        "a command wrote on the shell's terminal"
+    );
+}
+
+/// A `claude` that writes down the arguments it was started with, names its
+/// conversation `conv-1`, says it is gating calls in plan mode, and answers
+/// every turn.
+const WRITES_DOWN_ITS_ARGUMENTS_CLAUDE: &str = "#!/bin/sh\n\
+    printf '%s\\n' \"$*\" >> args.log\n\
+    read -r first\n\
+    printf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"conv-1\",\"model\":\"claude-opus-5\",\"permissionMode\":\"plan\"}'\n\
+    while read -r turn; do\n\
+    printf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"model\":\"claude-opus-5\",\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"answered-the-turn\"}]}}'\n\
+    printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"done\"}'\n\
+    done\n";
+
+/// Sends a turn in a terminal that says it is iTerm2 under the user config
+/// `config`, and gives back everything that reached the terminal.
+fn a_turn_ended_in_iterm(config: &str) -> String {
+    let repo = repo();
+    put_stand_in(repo.path(), WRITES_DOWN_ITS_ARGUMENTS_CLAUDE);
+    let home = user_config(config);
+    let (terminal, slave) = Terminal::open();
+    let mut shell = shell_driving_the_stand_in(&slave, repo.path(), home.path())
+        .env("TERM_PROGRAM", "iTerm.app")
+        .env("TERM", "xterm-256color")
+        .spawn()
+        .expect("the niobe binary runs");
+
+    terminal.shows(OPENING_FRAME);
+    terminal.typed(b"go\r");
+    terminal.shows("answered-the-turn");
+    // The second turn's answer follows the first turn's end on the CLI's
+    // output, so once it is drawn the pass that folded that end, and called
+    // the operator back for it, has written all it would.
+    let mark = terminal.mark();
+    terminal.typed(b"again\r");
+    terminal.shows_since(mark, "answered-the-turn");
+    terminal.typed(CTRL_Q);
+    let (_, status) = ended(&mut shell);
+    let (drawn, cooked) = released(terminal, slave);
+    assert!(status.success(), "ended with {status}: {drawn}");
+    assert_handed_back(&drawn, cooked, "a quit after a turn ended");
+    drawn
+}
+
+/// A turn that ends calls the operator back: iTerm2 is sent its
+/// notification and the bell rings after it.
+#[test]
+fn a_turn_that_ends_rings_the_bell_and_sends_the_terminal_s_notification() {
+    let drawn = a_turn_ended_in_iterm(
+        "default_profile = \"max\"\n\n[profiles.max]\nbackend = \"claude\"\n",
+    );
+    assert!(
+        drawn.contains(": turn ended\x07\x07") && drawn.contains("\x1b]9;niobe · "),
+        "{drawn:?}"
+    );
+}
+
+/// With both switches off nothing calls the operator back: not one bell
+/// reaches the terminal.
+#[test]
+fn a_config_that_turns_the_bell_and_the_notification_off_sends_neither() {
+    let drawn = a_turn_ended_in_iterm(
+        "default_profile = \"max\"\n\n[notify]\nbell = false\nnotification = false\n\n\
+         [profiles.max]\nbackend = \"claude\"\n",
+    );
+    assert!(!drawn.contains('\x07'), "{drawn:?}");
+}
+
+/// A `claude` that answers a turn by asking whether it may run `cargo test`,
+/// as the CLI does, and then waits on the answer.
+const ASKS_TO_RUN_CLAUDE: &str = "#!/bin/sh\n\
+    read -r first\n\
+    read -r turn\n\
+    printf '%s\\n' '{\"type\":\"control_request\",\"request_id\":\"req_1\",\"request\":{\"subtype\":\"can_use_tool\",\"tool_name\":\"Bash\",\"input\":{\"command\":\"cargo test\"},\"description\":\"cargo test\",\"tool_use_id\":\"toolu_1\"}}'\n\
+    while read -r line; do :; done\n";
+
+/// A question only the operator can answer calls them back, with the
+/// notification that says so and the bell.
+#[test]
+fn a_permission_question_rings_the_bell_and_says_it_is_waiting_on_you() {
+    let repo = repo();
+    let home = stand_in(repo.path(), ASKS_TO_RUN_CLAUDE);
+    let (terminal, slave) = Terminal::open();
+    let mut shell = shell_driving_the_stand_in(&slave, repo.path(), home.path())
+        .env("TERM_PROGRAM", "iTerm.app")
+        .spawn()
+        .expect("the niobe binary runs");
+
+    terminal.shows(OPENING_FRAME);
+    terminal.typed(b"go\r");
+    terminal.shows(": waiting on you\x07\x07");
+    terminal.typed(CTRL_Q);
+    let (_, status) = ended(&mut shell);
+    let (drawn, cooked) = released(terminal, slave);
+    assert!(status.success(), "ended with {status}: {drawn}");
+    assert_handed_back(&drawn, cooked, "a quit with a question waiting");
+}
+
+/// Continuing a session hands the CLI the conversation it recorded and the
+/// mode it was left in: without either, the operator reads the old session
+/// and talks to a new one, asked about everything they had stopped it asking.
+#[test]
+fn a_resumed_session_starts_its_cli_on_the_same_conversation_and_in_the_same_mode() {
+    let repo = repo();
+    let home = stand_in(repo.path(), WRITES_DOWN_ITS_ARGUMENTS_CLAUDE);
+    for (started, args) in [(1, &[][..]), (2, &["--resume", "1"][..])] {
+        let (terminal, slave) = Terminal::open();
+        let mut shell = shell_driving_the_stand_in(&slave, repo.path(), home.path())
+            .args(args)
+            .spawn()
+            .expect("the niobe binary runs");
+        if args.is_empty() {
+            terminal.shows(OPENING_FRAME);
+            terminal.typed(b"go\r");
+        }
+        terminal.shows("answered-the-turn");
+        // A resumed session draws the recorded answer before its CLI has
+        // started, and the quit ends the CLI's group at once: what it was
+        // started with is waited for first.
+        lines_written(&repo.path().join("args.log"), started);
+        terminal.typed(CTRL_Q);
+        let (_, status) = ended(&mut shell);
+        let (drawn, _) = released(terminal, slave);
+        assert!(status.success(), "{args:?} ended with {status}: {drawn}");
+    }
+
+    let started = std::fs::read_to_string(repo.path().join("args.log"))
+        .expect("the stand-in wrote down how it was started");
+    let started: Vec<&str> = started.lines().collect();
+    assert_eq!(started.len(), 2, "{started:?}");
+    assert!(!started[0].contains("--resume"), "{started:?}");
+    assert!(started[1].contains("--resume conv-1"), "{started:?}");
+    assert!(started[1].contains("--permission-mode plan"), "{started:?}");
+}
+
+/// A `claude` that writes down how it was started, reports the plan's windows
+/// with every turn it answers, and answers it.
+const REPORTS_THE_WINDOWS_CLAUDE: &str = "#!/bin/sh\n\
+    printf '%s\\n' \"$*\" >> args.log\n\
+    read -r first\n\
+    printf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"conv-1\",\"model\":\"claude-opus-5\",\"permissionMode\":\"default\"}'\n\
+    while read -r turn; do\n\
+    printf '%s\\n' '{\"type\":\"rate_limit_event\",\"rate_limit_info\":{\"status\":\"allowed\",\"resetsAt\":4000000000,\"rateLimitType\":\"five_hour\",\"isUsingOverage\":false,\"unifiedWindows\":{\"five_hour\":{\"utilization\":0.83,\"resetsAt\":4000000000},\"seven_day\":{\"utilization\":0.4,\"resetsAt\":4000000000}}}}'\n\
+    printf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"model\":\"claude-opus-5\",\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"answered-the-turn\"}]}}'\n\
+    printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"done\"}'\n\
+    done\n";
+
+/// The windows a resumed session's record holds were read when it was
+/// recorded, so they are drawn dated, as the levels an earlier session saw
+/// are, rather than as a reading the backend has just taken.
+#[test]
+fn a_resumed_session_draws_the_windows_it_recorded_as_of_when_they_were_recorded() {
+    let repo = repo();
+    let home = stand_in(repo.path(), REPORTS_THE_WINDOWS_CLAUDE);
+    for (started, args) in [(1, &[][..]), (2, &["--resume", "1"][..])] {
+        let (terminal, slave) = Terminal::open();
+        rustix::termios::tcsetwinsize(&slave, WIDE).expect("the pty can be resized");
+        let mut shell = shell_driving_the_stand_in(&slave, repo.path(), home.path())
+            .args(args)
+            .spawn()
+            .expect("the niobe binary runs");
+        if args.is_empty() {
+            terminal.shows("Shift+Enter newline");
+            terminal.typed(b"go\r");
+        }
+        terminal.shows("answered-the-turn");
+        terminal.shows("83%");
+        lines_written(&repo.path().join("args.log"), started);
+        if !args.is_empty() {
+            terminal.shows("before this session");
+        }
+        terminal.typed(CTRL_Q);
+        let (_, status) = ended(&mut shell);
+        let (drawn, _) = released(terminal, slave);
+        assert!(status.success(), "{args:?} ended with {status}: {drawn}");
+        if args.is_empty() {
+            assert!(
+                !drawn.contains("before this session"),
+                "the session's own report was dated: {drawn}"
+            );
+        }
+    }
+}
+
+/// Choosing an earlier session in the history dialog ends the one open and
+/// opens the chosen one in the same terminal, its CLI carrying on the
+/// conversation that session recorded, as `niobe --resume` would.
+#[test]
+fn a_session_chosen_in_the_history_reopens_the_shell_on_it() {
+    let repo = repo();
+    let home = stand_in(repo.path(), WRITES_DOWN_ITS_ARGUMENTS_CLAUDE);
+    {
+        let (terminal, slave) = Terminal::open();
+        let mut shell = shell_driving_the_stand_in(&slave, repo.path(), home.path())
+            .spawn()
+            .expect("the niobe binary runs");
+        terminal.shows(OPENING_FRAME);
+        terminal.typed(b"recorded-before\r");
+        terminal.shows("answered-the-turn");
+        lines_written(&repo.path().join("args.log"), 1);
+        terminal.typed(CTRL_Q);
+        let (_, status) = ended(&mut shell);
+        let (drawn, _) = released(terminal, slave);
+        assert!(
+            status.success(),
+            "the first session ended with {status}: {drawn}"
+        );
+    }
+
+    let (terminal, slave) = Terminal::open();
+    let mut shell = shell_driving_the_stand_in(&slave, repo.path(), home.path())
+        .spawn()
+        .expect("the niobe binary runs");
+    terminal.shows(OPENING_FRAME);
+    lines_written(&repo.path().join("args.log"), 2);
+    // Ctrl+R, waiting for the earlier session's prompt to be listed, which
+    // says the load has landed, then Tab to the sessions.
+    terminal.typed(b"\x12");
+    terminal.shows("recorded-before");
+    // Waiting on what the turned dialog draws would wait on cells a frame
+    // may leave as they were; the keys are taken in order whatever is drawn.
+    terminal.typed(b"\t");
+    terminal.typed(b"\x1b[B");
+    terminal.typed(b"\r");
+    let started = lines_written(&repo.path().join("args.log"), 3);
+    terminal.shows("answered-the-turn");
+    terminal.typed(CTRL_Q);
+    let (_, status) = ended(&mut shell);
+    let (drawn, _) = released(terminal, slave);
+    assert!(status.success(), "{drawn}");
+
+    let started: Vec<&str> = started.lines().collect();
+    assert!(!started[1].contains("--resume"), "{started:?}");
+    assert!(started[2].contains("--resume conv-1"), "{started:?}");
+}
+
+/// A session another niobe has open is marked in the history dialog, and
+/// choosing it leaves the operator in their own shell, with what they were
+/// writing, told why: ending this one first would leave them with neither.
+#[test]
+fn a_session_another_niobe_holds_is_not_opened_from_the_history() {
+    let repo = repo();
+    let home = stand_in(repo.path(), WRITES_DOWN_ITS_ARGUMENTS_CLAUDE);
+    let (holding, holding_slave) = Terminal::open();
+    let mut holder = shell_driving_the_stand_in(&holding_slave, repo.path(), home.path())
+        .spawn()
+        .expect("the niobe binary runs");
+    holding.shows(OPENING_FRAME);
+    holding.typed(b"recorded-before\r");
+    holding.shows("answered-the-turn");
+    lines_written(&repo.path().join("args.log"), 1);
+
+    let (terminal, slave) = Terminal::open();
+    let mut shell = shell_driving_the_stand_in(&slave, repo.path(), home.path())
+        .spawn()
+        .expect("the niobe binary runs");
+    terminal.shows(OPENING_FRAME);
+    lines_written(&repo.path().join("args.log"), 2);
+    terminal.typed(b"draft-kept");
+    terminal.shows("draft-kept");
+    terminal.typed(b"\x12");
+    terminal.shows("recorded-before");
+    // The list's rows are not waited on: a frame redraws only the cells that
+    // changed, so a row can arrive in pieces. The keys are taken in order.
+    terminal.typed(b"\t");
+    terminal.typed(b"\x1b[B");
+    let chosen = terminal.mark();
+    terminal.typed(b"\r");
+    terminal.shows_since(chosen, "#1 is open in another niobe");
+    // Esc closes the dialog, and the draft is sent: only the shell that kept
+    // it can send it. The Enter waits for the welcome the dialog covered to
+    // be drawn again, since the two read together are Alt+Enter.
+    let closing = terminal.mark();
+    terminal.typed(b"\x1b");
+    terminal.shows_since(closing, "visible");
+    terminal.typed(b"\r");
+    let started = lines_written(&repo.path().join("args.log"), 2);
+    terminal.shows("answered-the-turn");
+    terminal.typed(CTRL_Q);
+    let (_, status) = ended(&mut shell);
+    let (drawn, _) = released(terminal, slave);
+    assert!(status.success(), "{drawn}");
+
+    holding.typed(CTRL_Q);
+    let (_, held) = ended(&mut holder);
+    let (drawn, _) = released(holding, holding_slave);
+    assert!(held.success(), "{drawn}");
+
+    let started: Vec<&str> = started.lines().collect();
+    assert_eq!(started.len(), 2, "no third CLI was started: {started:?}");
+    let listed = niobe(repo.path(), &["sessions"]);
+    let listed = String::from_utf8(listed.stdout).expect("stdout is UTF-8");
+    assert!(listed.contains("draft-kept"), "{listed}");
+}
+
+/// A session read in from the CLI's own transcript carries on in the CLI
+/// under the transcript's own id, and in the mode the transcript left it in.
+#[test]
+fn an_imported_session_starts_its_cli_on_its_transcript_and_in_its_mode() {
+    let repo = repo();
+    let home = stand_in(repo.path(), WRITES_DOWN_ITS_ARGUMENTS_CLAUDE);
+    let claude = claude_config_with_the_transcript(repo.path());
+    let transcript = std::fs::read_dir(claude.path().join("projects"))
+        .expect("the projects directory lists")
+        .next()
+        .expect("one project")
+        .expect("it reads")
+        .path()
+        .join(format!("{TRANSCRIPT_SESSION}.jsonl"));
+    let mut text = std::fs::read_to_string(&transcript).expect("the transcript reads");
+    if !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push_str("{\"type\":\"permission-mode\",\"permissionMode\":\"plan\"}\n");
+    std::fs::write(&transcript, text).expect("the transcript is written");
+    let (terminal, slave) = Terminal::open();
+    let mut shell = shell_driving_the_stand_in(&slave, repo.path(), home.path())
+        .env("CLAUDE_CONFIG_DIR", claude.path())
+        .args(["--resume", TRANSCRIPT_SESSION])
+        .spawn()
+        .expect("the niobe binary runs");
+
+    terminal.shows("Done: the catalog response carries an etag.");
+    // Waited for before the quit, which ends the CLI's group at once.
+    let started = written(&repo.path().join("args.log"));
+    terminal.typed(CTRL_Q);
+    let (_, status) = ended(&mut shell);
+    let (drawn, _) = released(terminal, slave);
+    assert!(status.success(), "{drawn}");
+
+    assert!(
+        started.contains(&format!("--resume {TRANSCRIPT_SESSION}")),
+        "{started}"
+    );
+    assert!(started.contains("--permission-mode plan"), "{started}");
+}
+
+/// A `claude` that writes down the directory it was started in, then every
+/// turn it is sent, and answers each with the same reply.
+const WRITES_DOWN_WHERE_IT_RUNS_CLAUDE: &str = "#!/bin/sh\n\
+    pwd -P > claude.cwd\n\
+    read -r first\n\
+    while read -r turn; do\n\
+    printf '%s\\n' \"$turn\" >> turns.jsonl\n\
+    printf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"model\":\"claude-opus-5\",\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"answered-the-turn\"}]}}'\n\
+    printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"done\"}'\n\
+    done\n";
+
+/// What is written at `path` once it holds `lines` lines, waited for as
+/// [`written`] waits.
+fn lines_written(path: &Path, lines: usize) -> String {
+    let deadline = Instant::now() + PATIENCE;
+    while Instant::now() < deadline {
+        if let Ok(text) = std::fs::read_to_string(path)
+            && text.lines().count() >= lines
+        {
+            return text;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    panic!("{} never held {lines} lines", path.display());
+}
+
+/// Waits until `path` holds something, and gives back what.
+fn written(path: &Path) -> String {
+    let deadline = Instant::now() + PATIENCE;
+    while Instant::now() < deadline {
+        if let Ok(text) = std::fs::read_to_string(path)
+            && !text.is_empty()
+        {
+            return text;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    panic!("nothing was written to {}", path.display());
+}
+
+/// Opened in a subdirectory, the session has one directory: the agent runs
+/// at the repository's root, a `!` command runs there too, and a path an `@`
+/// completion puts in the prompt is one the agent can open from there.
+#[test]
+fn a_session_opened_in_a_subdirectory_runs_everything_at_the_repositorys_root() {
+    let dir = tempfile::tempdir().expect("a temporary directory can be created");
+    let root = std::fs::canonicalize(dir.path()).expect("the directory resolves");
+    let git = |args: &[&str]| {
+        let ran = Command::new("git")
+            .args(args)
+            .current_dir(&root)
+            .output()
+            .expect("git runs");
+        assert!(ran.status.success(), "git {args:?}: {ran:?}");
+    };
+    git(&["init", "-q"]);
+    let below = root.join("sub").join("dir");
+    std::fs::create_dir_all(&below).expect("the subdirectory can be made");
+    std::fs::write(below.join("inner.txt"), "in here\n").expect("the file is written");
+    let home = stand_in(&root, WRITES_DOWN_WHERE_IT_RUNS_CLAUDE);
+    let (terminal, slave) = Terminal::open();
+    let mut shell = shell_command(&slave, &below)
+        .env("XDG_CONFIG_HOME", home.path())
+        .env(
+            "PATH",
+            format!("{}:/bin:/usr/bin", root.join("bin").display()),
+        )
+        .spawn()
+        .expect("the niobe binary runs");
+    terminal.shows(OPENING_FRAME);
+
+    terminal.typed(b"!");
+    terminal.shows("what it prints");
+    terminal.typed(b"pwd -P > bang.cwd\r");
+    let bang = written(&root.join("bang.cwd"));
+    terminal.typed(b"look at @inn");
+    terminal.shows("inner.txt");
+    terminal.typed(b"\t\r");
+    terminal.shows("answered-the-turn");
+    terminal.typed(CTRL_Q);
+
+    let (_, status) = ended(&mut shell);
+    let (drawn, cooked) = released(terminal, slave);
+    assert!(status.success(), "the shell ended with {status}: {drawn}");
+    let at_root = format!("{}\n", root.display());
+    assert_eq!(written(&root.join("claude.cwd")), at_root, "the agent");
+    assert_eq!(bang, at_root, "the operator's command");
+    let turns = written(&root.join("turns.jsonl"));
+    assert!(
+        turns.contains("look at @sub/dir/inner.txt"),
+        "the completed path is not the one the agent names the file by: {turns}"
+    );
+    assert_handed_back(&drawn, cooked, "a quit from a subdirectory");
+}
+
 /// A `claude` that reads the request a session opens with and one turn,
 /// replies around a line that is not UTF-8, ends the turn, and then reads
 /// whatever it is sent until its standard input closes — so a session that
@@ -1308,25 +2236,110 @@ fn a_line_from_the_cli_that_is_not_utf8_costs_neither_the_reply_nor_the_shell() 
     terminal.typed(CTRL_Q);
 
     let (_, status) = ended(&mut shell);
-    drop(slave);
-    let drawn = terminal.drained();
+    let (drawn, cooked) = released(terminal, slave);
     assert!(status.success(), "the shell ended with {status}: {drawn}");
     assert!(
         !drawn.contains("standard input is closed"),
         "the session closed the CLI's input under it: {drawn}"
     );
-    assert_handed_back(&drawn, "a quit after a line that was not UTF-8");
+    assert_handed_back(&drawn, cooked, "a quit after a line that was not UTF-8");
 }
 
 /// A `claude` that writes down every turn it is sent, one line each, and
-/// answers each with the same reply.
+/// answers each with the same reply. A control request, such as the one
+/// asking for the session's title, is not a turn and is passed over.
 const WRITES_DOWN_TURNS_CLAUDE: &str = "#!/bin/sh\n\
     read -r first\n\
     while read -r turn; do\n\
+    case \"$turn\" in *'\"type\":\"control_request\"'*) continue ;; esac\n\
     printf '%s\\n' \"$turn\" >> turns.jsonl\n\
     printf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"model\":\"claude-opus-5\",\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"answered-the-turn\"}]}}'\n\
     printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"done\"}'\n\
     done\n";
+
+/// A `claude` that writes down every line it is sent after `initialize`,
+/// answers a turn with a reply, and answers a request for the session's
+/// title with one, from the request's own id.
+const TITLES_CLAUDE: &str = "#!/bin/sh\n\
+    read -r first\n\
+    while read -r line; do\n\
+    printf '%s\\n' \"$line\" >> sent.jsonl\n\
+    case \"$line\" in\n\
+    *generate_session_title*)\n\
+    id=$(printf '%s' \"$line\" | sed 's/.*\"request_id\":\"\\([^\"]*\\)\".*/\\1/')\n\
+    printf '{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"%s\",\"response\":{\"title\":\"Etag support by the model\"}}}\\n' \"$id\" ;;\n\
+    *)\n\
+    printf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"model\":\"claude-opus-5\",\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"answered-the-turn\"}]}}'\n\
+    printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"done\"}' ;;\n\
+    esac\n\
+    done\n";
+
+/// Types one prompt into a shell on the [`TITLES_CLAUDE`] stand-in under
+/// `config` and quits once it has the reply and, where `titled`, once the
+/// store holds a title for the session. Hands back what the stand-in was
+/// sent and the title the store lists the session by, which is what the
+/// history dialog names it by after a restart.
+fn titled_under(config: &str, titled: bool) -> (String, Option<String>) {
+    let repo = repo();
+    let home = stand_in(repo.path(), TITLES_CLAUDE);
+    std::fs::write(home.path().join("niobe").join("config.toml"), config)
+        .expect("the user config is written");
+    let (terminal, slave) = Terminal::open();
+    let mut shell = shell_driving_the_stand_in(&slave, repo.path(), home.path())
+        .spawn()
+        .expect("the niobe binary runs");
+    terminal.shows(OPENING_FRAME);
+
+    terminal.typed(b"add etag support to the static handler\r");
+    terminal.shows("answered-the-turn");
+    let title = || {
+        Store::open(&repo.path().join(".niobe").join("sessions.db"))
+            .ok()?
+            .sessions()
+            .ok()?
+            .into_iter()
+            .find_map(|session| session.title)
+    };
+    let deadline = Instant::now() + PATIENCE;
+    while titled && title().is_none() {
+        assert!(Instant::now() < deadline, "the session was never titled");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    terminal.typed(CTRL_Q);
+
+    let (_, status) = ended(&mut shell);
+    let (drawn, _) = released(terminal, slave);
+    assert!(status.success(), "the shell ended with {status}: {drawn}");
+    let sent = std::fs::read_to_string(repo.path().join("sent.jsonl"))
+        .expect("the stand-in wrote down what it was sent");
+    (sent, title())
+}
+
+/// A new session asks the CLI it runs for a title, once, from its first
+/// prompt, and keeps the answer; nothing else is started to make it.
+#[test]
+fn a_new_session_keeps_the_title_the_cli_made() {
+    let (sent, title) = titled_under(
+        "default_profile = \"max\"\n\n[profiles.max]\nbackend = \"claude\"\n",
+        true,
+    );
+
+    assert_eq!(title.as_deref(), Some("Etag support by the model"));
+    assert_eq!(sent.matches("generate_session_title").count(), 1, "{sent}");
+}
+
+/// With titles turned off the CLI is asked for none, and nothing titles the
+/// session but its first prompt.
+#[test]
+fn with_titles_off_the_cli_is_not_asked_for_a_title() {
+    let (sent, title) = titled_under(
+        "default_profile = \"max\"\ntitles = \"first-prompt\"\n\n[profiles.max]\nbackend = \"claude\"\n",
+        false,
+    );
+
+    assert!(!sent.contains("generate_session_title"), "{sent}");
+    assert_eq!(title, None);
+}
 
 /// A paste the terminal bracketed is one prompt with its lines in it, sent
 /// by the Enter after it: the carriage returns a terminal separates the
@@ -1347,8 +2360,7 @@ fn a_bracketed_paste_of_three_lines_is_sent_as_one_turn() {
     terminal.typed(CTRL_Q);
 
     let (_, status) = ended(&mut shell);
-    drop(slave);
-    let drawn = terminal.drained();
+    let (drawn, cooked) = released(terminal, slave);
     assert!(status.success(), "the shell ended with {status}: {drawn}");
     let turns = std::fs::read_to_string(repo.path().join("turns.jsonl"))
         .expect("the stand-in wrote down the turn it was sent");
@@ -1358,12 +2370,621 @@ fn a_bracketed_paste_of_three_lines_is_sent_as_one_turn() {
         turns[0].contains(r"here is the log:\nerror: boom\nat foo.rs:3"),
         "the turn sent was not the paste with its lines: {turns:?}"
     );
-    assert_handed_back(&drawn, "a quit after a paste");
+    assert_handed_back(&drawn, cooked, "a quit after a paste");
+}
+
+/// `e` in the Memory view on a file a repository's `CLAUDE.md` imports opens
+/// it in the text editor the environment names, on the terminal the shell
+/// lends it, and never hands it to the system's opener: an executable
+/// `.command` file the repository planted is shown, not run.
+#[test]
+fn e_in_the_memory_view_opens_an_imported_command_file_in_the_editor_and_runs_nothing() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo = repo();
+    let home = stand_in(repo.path(), WRITES_DOWN_TURNS_CLAUDE);
+    let elsewhere = tempfile::tempdir().expect("a temporary directory can be created");
+    let ran = repo.path().join("the-command-ran");
+    let edited = repo.path().join("edited");
+    std::fs::write(repo.path().join("CLAUDE.md"), "@tools/setup.command\n")
+        .expect("the memory file is written");
+    let setup = repo.path().join("tools").join("setup.command");
+    std::fs::create_dir(repo.path().join("tools")).expect("a directory for the tool");
+    std::fs::write(&setup, format!("#!/bin/sh\ntouch '{}'\n", ran.display()))
+        .expect("the planted command is written");
+    std::fs::set_permissions(&setup, std::fs::Permissions::from_mode(0o755))
+        .expect("the planted command is made executable");
+    let editor = elsewhere.path().join("editor");
+    std::fs::write(
+        &editor,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
+            edited.display()
+        ),
+    )
+    .expect("the stand-in editor is written");
+    std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o755))
+        .expect("the stand-in editor is made executable");
+
+    let (terminal, slave) = Terminal::open();
+    let mut shell = shell_driving_the_stand_in(&slave, repo.path(), home.path())
+        .env("HOME", elsewhere.path())
+        .env("CLAUDE_CONFIG_DIR", elsewhere.path().join("claude"))
+        .env_remove("VISUAL")
+        .env("EDITOR", &editor)
+        .spawn()
+        .expect("the niobe binary runs");
+    terminal.shows(OPENING_FRAME);
+
+    terminal.typed(b"\x1b[19~");
+    terminal.shows("setup.command");
+    terminal.typed(b"\x1b[F");
+    terminal.typed(b"e");
+    terminal.shows("Edited");
+    // Esc read together with what follows it is Alt with that key.
+    let closing = terminal.mark();
+    terminal.typed(b"\x1b");
+    terminal.drew_since(closing);
+    terminal.typed(CTRL_Q);
+
+    let (_, status) = ended(&mut shell);
+    let (drawn, cooked) = released(terminal, slave);
+    assert!(status.success(), "the shell ended with {status}: {drawn}");
+    let canonical = std::fs::canonicalize(&setup).expect("the planted command is there");
+    let handed = std::fs::read_to_string(&edited).expect("the editor was started");
+    let handed = std::fs::canonicalize(handed.trim_end()).expect("the editor was handed a file");
+    assert_eq!(handed, canonical, "the editor was handed another file");
+    assert!(!ran.exists(), "the repository's command file was run");
+    // Once for the editor, once for the quit.
+    assert_handed_back_times(&drawn, cooked, "a quit after an edit", Keys::Reported, 2);
+}
+
+/// An editor that suspends itself, as vim does on Ctrl+Z: it signals its
+/// whole process group, which the shell is in, so the shell is told to stop
+/// while the terminal is lent. The operator's shell then continues the
+/// editor, which ends. The shell must not stop once it has the terminal back:
+/// nothing would be left to continue it, and under a wrapper that waits on it
+/// the session hangs.
+#[test]
+fn an_editor_that_suspends_itself_does_not_stop_the_shell_after_it_ends() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo = repo();
+    let home = stand_in(repo.path(), WRITES_DOWN_TURNS_CLAUDE);
+    let elsewhere = tempfile::tempdir().expect("a temporary directory can be created");
+    std::fs::write(repo.path().join("CLAUDE.md"), "@tools/notes.md\n")
+        .expect("the memory file is written");
+    std::fs::create_dir(repo.path().join("tools")).expect("a directory for the notes");
+    std::fs::write(repo.path().join("tools").join("notes.md"), "notes\n")
+        .expect("the imported file is written");
+    let editor = elsewhere.path().join("editor");
+    // The pty's group is orphaned, so the editor itself is not stopped by
+    // this; the shell, which catches the signal, is the one that is told.
+    std::fs::write(&editor, "#!/bin/sh\nkill -TSTP 0\nexit 0\n")
+        .expect("the stand-in editor is written");
+    std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o755))
+        .expect("the stand-in editor is made executable");
+
+    let (terminal, slave) = Terminal::open();
+    // In a session of its own: the editor signals its process group, which
+    // is the runner's, and every test beside this one, otherwise.
+    let mut command = shell_driving_the_stand_in(&slave, repo.path(), home.path());
+    command
+        .env("HOME", elsewhere.path())
+        .env("CLAUDE_CONFIG_DIR", elsewhere.path().join("claude"))
+        .env_remove("VISUAL")
+        .env("EDITOR", &editor);
+    in_a_session_of_its_own(&mut command);
+    let mut shell = Reaped(command.spawn().expect("the niobe binary runs"));
+    terminal.shows(OPENING_FRAME);
+
+    terminal.typed(b"\x1b[19~");
+    terminal.shows("notes.md");
+    terminal.typed(b"\x1b[F");
+    terminal.typed(b"e");
+    terminal.shows("Edited");
+    let closing = terminal.mark();
+    terminal.typed(b"\x1b");
+    terminal.drew_since(closing);
+    terminal.typed(CTRL_Q);
+
+    let (_, status) = ended(&mut shell);
+    drop(slave);
+    let drawn = terminal.drained();
+    assert!(
+        status.success(),
+        "the shell ended with {status}, or was stopped again after the editor: {drawn}"
+    );
+}
+
+/// An image file dropped on the terminal — which types its path as a paste —
+/// is attached rather than typed, and goes to the CLI as an image block after
+/// the prompt's text, which keeps the placeholder standing where it went.
+#[test]
+fn a_dropped_image_file_goes_to_the_cli_with_the_prompt() {
+    let repo = repo();
+    let home = stand_in(repo.path(), WRITES_DOWN_TURNS_CLAUDE);
+    std::fs::write(repo.path().join("shot one.png"), b"\x89PNG\r\n\x1a\nfoo")
+        .expect("the image is written");
+    let (terminal, slave) = Terminal::open();
+    let mut shell = shell_driving_the_stand_in(&slave, repo.path(), home.path())
+        .spawn()
+        .expect("the niobe binary runs");
+    terminal.shows(OPENING_FRAME);
+
+    terminal.typed(b"\x1b[200~'shot one.png'\x1b[201~");
+    terminal.shows("[Image #1]");
+    terminal.typed(b"look\r");
+    terminal.shows("answered-the-turn");
+    terminal.typed(CTRL_Q);
+
+    let (_, status) = ended(&mut shell);
+    let (drawn, _) = released(terminal, slave);
+    assert!(status.success(), "the shell ended with {status}: {drawn}");
+    let turns = std::fs::read_to_string(repo.path().join("turns.jsonl"))
+        .expect("the stand-in wrote down the turn it was sent");
+    let turns: Vec<&str> = turns.lines().collect();
+    let [turn] = turns.as_slice() else {
+        panic!("one turn was not sent: {turns:?}");
+    };
+    let turn: serde_json::Value = serde_json::from_str(turn).expect("the turn is JSON");
+    assert_eq!(
+        turn["message"]["content"],
+        serde_json::json!([
+            { "type": "text", "text": "[Image #1] look" },
+            { "type": "image", "source": {
+                "type": "base64",
+                "media_type": "image/png",
+                "data": "iVBORw0KGgpmb28=",
+            } },
+        ]),
+        "{turn}"
+    );
+}
+
+/// A `claude` that starts writing a reply to its first turn and does not
+/// finish it until it is asked to stop, writing down every request to stop it
+/// gets; then closes that turn as the CLI closes one an interrupt cut off,
+/// and answers the next turn whole.
+const STOPPABLE_CLAUDE: &str = "#!/bin/sh\n\
+    read -r first\n\
+    read -r turn\n\
+    printf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"model\":\"claude-opus-5\",\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"started-a-long-turn\"}]}}'\n\
+    while read -r line; do\n\
+    case \"$line\" in *'\"interrupt\"'*) printf '%s\\n' \"$line\" >> interrupts.jsonl; break;; esac\n\
+    done\n\
+    printf '%s\\n' '{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"[Request interrupted by user]\"}]}}'\n\
+    printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"is_error\":true,\"terminal_reason\":\"aborted_streaming\",\"errors\":[\"[ede_diagnostic] result_type=user\"]}'\n\
+    read -r turn\n\
+    printf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"model\":\"claude-opus-5\",\"id\":\"msg_2\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"answered-after-the-stop\"}]}}'\n\
+    printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"done\"}'\n\
+    while read -r line; do :; done\n";
+
+/// Stops a running turn with `key` and asserts it reached the CLI as one
+/// `interrupt` request, and that the session was still there for the next
+/// prompt.
+fn stops_a_running_turn_with(key: &[u8], path: &str) {
+    let repo = repo();
+    let home = stand_in(repo.path(), STOPPABLE_CLAUDE);
+    let (terminal, slave) = Terminal::open();
+    let mut shell = shell_driving_the_stand_in(&slave, repo.path(), home.path())
+        .spawn()
+        .expect("the niobe binary runs");
+    terminal.shows(OPENING_FRAME);
+
+    terminal.typed(b"go\r");
+    terminal.shows("started-a-long-turn");
+    terminal.typed(key);
+    // The notice's words are drawn one cursor move apart, as a redraw sends
+    // only the cells that changed, so its last word is what is waited on.
+    terminal.shows("operator.");
+    terminal.typed(b"again\r");
+    terminal.shows("answered-after-the-stop");
+    terminal.typed(CTRL_Q);
+
+    let (_, status) = ended(&mut shell);
+    let (drawn, cooked) = released(terminal, slave);
+    assert!(status.success(), "the shell ended with {status}: {drawn}");
+    let asked = std::fs::read_to_string(repo.path().join("interrupts.jsonl"))
+        .expect("the stand-in was asked to stop the turn");
+    let asked: Vec<&str> = asked.lines().collect();
+    assert_eq!(asked.len(), 1, "{asked:?}");
+    assert!(
+        asked[0].contains(r#""type":"control_request""#),
+        "{asked:?}"
+    );
+    assert_handed_back(&drawn, cooked, path);
+}
+
+#[test]
+fn esc_during_a_running_turn_stops_it_and_the_session_takes_the_next_prompt() {
+    stops_a_running_turn_with(b"\x1b", "a quit after Esc stopped a turn");
+}
+
+#[test]
+fn ctrl_c_during_a_running_turn_stops_it_and_leaves_the_session_open() {
+    stops_a_running_turn_with(b"\x03", "a quit after Ctrl+C stopped a turn");
+}
+
+/// With nothing to read keys from — standard input from `/dev/null` and no
+/// controlling terminal to fall back on — the shell says so before it starts
+/// the backend or takes the screen.
+#[test]
+fn a_shell_with_no_keys_to_read_stops_before_it_starts_anything() {
+    let repo = repo();
+    let home = stand_in(repo.path(), "#!/bin/sh\ntouch started\nsleep 5\n");
+    let (terminal, slave) = Terminal::open();
+    let null = File::open("/dev/null").expect("/dev/null opens");
+    // A session of its own, so there is no controlling terminal behind it
+    // whatever terminal the tests themselves were started from.
+    let mut shell = Command::new("perl")
+        .args(["-MPOSIX", "-e", "POSIX::setsid(); exec @ARGV or die $!"])
+        .arg(env!("CARGO_BIN_EXE_niobe"))
+        .current_dir(repo.path())
+        .env("XDG_CONFIG_HOME", home.path())
+        .env(
+            "PATH",
+            format!("{}:/bin:/usr/bin", repo.path().join("bin").display()),
+        )
+        .stdin(Stdio::from(null))
+        .stdout(Stdio::from(
+            slave.try_clone().expect("the slave can be duplicated"),
+        ))
+        .stderr(Stdio::from(
+            slave.try_clone().expect("the slave can be duplicated"),
+        ))
+        .spawn()
+        .expect("perl runs niobe");
+
+    let (_, status) = ended(&mut shell);
+    drop(slave);
+    let drawn = terminal.drained();
+
+    assert_eq!(status.code(), Some(1), "{drawn}");
+    assert!(
+        drawn.contains("standard input is not a terminal"),
+        "{drawn}"
+    );
+    assert!(
+        !drawn.contains(ENTER_ALTERNATE_SCREEN),
+        "the screen was taken: {drawn:?}"
+    );
+    assert!(
+        !repo.path().join("started").exists(),
+        "the backend was started for a shell that could not read a key"
+    );
+}
+
+/// A `claude` that writes down that it was started, and reads until it is
+/// closed.
+const MARKS_ITS_START_CLAUDE: &str =
+    "#!/bin/sh\necho started > started\nwhile read -r line; do :; done\n";
+
+/// What the shell asks as it opens on a repository config nobody trusted.
+const TRUST_QUESTION: &str = "Trust this repository's config?";
+
+/// Longer than the shell waits on a quiet keyboard before a key answers a
+/// question, so that the key the test presses next is taken as an answer.
+const PAST_THE_QUIET: Duration = Duration::from_millis(800);
+
+/// A repository whose config allows a command without asking, which only a
+/// trusted file may, and a `claude` that marks its start; with the user config
+/// that runs that `claude`.
+fn repo_with_an_untrusted_config() -> (tempfile::TempDir, tempfile::TempDir) {
+    let repo = repo();
+    let home = stand_in(repo.path(), MARKS_ITS_START_CLAUDE);
+    let config = repo.path().join(".niobe");
+    std::fs::create_dir(&config).expect("the config directory can be made");
+    std::fs::write(
+        config.join("config.toml"),
+        "[permissions]\nallow = [\"Bash(cargo test)\"]\n",
+    )
+    .expect("the repository config is written");
+    (repo, home)
+}
+
+/// Opens the shell on a repository config nobody trusted, waits for the
+/// question, checks the backend has not been started under it, and answers
+/// with `keys` once the keyboard has been quiet long enough to answer.
+fn answering_the_trust_question(
+    keys: &[u8],
+) -> (tempfile::TempDir, tempfile::TempDir, Terminal, File, Reaped) {
+    let (repo, home, terminal, slave, shell) = asked_the_trust_question();
+    terminal.typed(keys);
+    (repo, home, terminal, slave, shell)
+}
+
+/// Opens the shell on a repository config nobody trusted, waits for the
+/// question, and answers it by choosing to trust and pressing Enter.
+fn trusting_from_the_question() -> (tempfile::TempDir, tempfile::TempDir, Terminal, File, Reaped) {
+    let (repo, home, terminal, slave, shell) = answering_the_trust_question(b"1");
+    std::thread::sleep(PAST_THE_QUIET);
+    terminal.typed(ENTER);
+    (repo, home, terminal, slave, shell)
+}
+
+/// Opens the shell on a repository config nobody trusted, waits for the
+/// question, and checks the backend has not been started under it once the
+/// keyboard has been quiet long enough for a key to answer.
+fn asked_the_trust_question() -> (tempfile::TempDir, tempfile::TempDir, Terminal, File, Reaped) {
+    let (repo, home) = repo_with_an_untrusted_config();
+    let (terminal, slave) = Terminal::open();
+    let shell = Reaped(
+        shell_driving_the_stand_in(&slave, repo.path(), home.path())
+            .spawn()
+            .expect("the niobe binary runs"),
+    );
+    terminal.shows(TRUST_QUESTION);
+    terminal.shows("allow Bash(cargo test)");
+    std::thread::sleep(PAST_THE_QUIET);
+    assert!(
+        !repo.path().join("started").exists(),
+        "the backend was started before the question was answered"
+    );
+    (repo, home, terminal, slave, shell)
+}
+
+/// Rewrites the repository config of a repository made by
+/// [`repo_with_an_untrusted_config`] to allow `cargo build` where it allowed
+/// `cargo test`, with a profile of its own for `niobe profiles` to list.
+fn rewrite_the_untrusted_config(repo: &Path) {
+    std::fs::write(
+        repo.join(".niobe").join("config.toml"),
+        "[permissions]\nallow = [\"Bash(cargo build)\"]\n\n[profiles.work]\nbackend = \"claude\"\n",
+    )
+    .expect("the repository config is rewritten");
+}
+
+/// Trusting the file from the question records it as `niobe trust` would,
+/// and the session it opens is one the file is in force for.
+#[test]
+fn an_untrusted_repository_config_is_asked_about_before_the_backend_starts() {
+    let (repo, home, terminal, slave, mut shell) = trusting_from_the_question();
+    terminal.shows(OPENING_FRAME);
+    written(&repo.path().join("started"));
+    terminal.typed(CTRL_Q);
+
+    let (_, status) = ended(&mut shell);
+    let (drawn, cooked) = released(terminal, slave);
+    assert!(status.success(), "the shell ended with {status}: {drawn}");
+    assert_handed_back_times(
+        &drawn,
+        cooked,
+        "a quit after trusting the config",
+        Keys::Reported,
+        2,
+    );
+    let record = written(&home.path().join("niobe").join("trusted.list"));
+    assert!(record.contains(".niobe/config.toml"), "{record}");
+    // The session the answer opened is one the file was in force for: had it
+    // loaded the config still withheld, it would have said so.
+    assert!(!drawn.contains("config not trusted"), "{drawn}");
+}
+
+/// A prompt typed at the question by an operator who did not read it, and
+/// sent with Enter, trusts nothing and starts nothing: the question stays up
+/// and says why the keys were not taken.
+#[test]
+fn a_prompt_typed_and_sent_at_the_trust_question_trusts_nothing() {
+    let (repo, home, terminal, slave, mut shell) = asked_the_trust_question();
+    for key in b"hello" {
+        terminal.typed(&[*key]);
+        std::thread::sleep(Duration::from_millis(150));
+    }
+    std::thread::sleep(PAST_THE_QUIET);
+    terminal.typed(ENTER);
+    terminal.shows("typed at the question");
+    std::thread::sleep(PAST_THE_QUIET);
+    terminal.typed(CTRL_Q);
+
+    let (_, status) = ended(&mut shell);
+    let (drawn, cooked) = released(terminal, slave);
+    assert!(status.success(), "the shell ended with {status}: {drawn}");
+    assert_handed_back(&drawn, cooked, "a quit after typing at the trust question");
+    assert!(
+        !repo.path().join("started").exists(),
+        "the backend was started though nobody answered the question"
+    );
+    assert!(
+        !home.path().join("niobe").join("trusted.list").exists(),
+        "a prompt typed at the question recorded the file as trusted"
+    );
+}
+
+/// A first prompt that is the digit `1`, sent with Enter at the pace of
+/// typing, chooses trusting as the numbered answer does but does not give it:
+/// the Enter came before anyone could have looked at the cursor.
+#[test]
+fn a_prompt_of_the_digit_one_sent_at_the_trust_question_trusts_nothing() {
+    let (repo, home, terminal, slave, mut shell) = answering_the_trust_question(b"1");
+    std::thread::sleep(Duration::from_millis(150));
+    terminal.typed(ENTER);
+    terminal.shows("straight after choosing");
+    std::thread::sleep(PAST_THE_QUIET);
+    terminal.typed(CTRL_Q);
+
+    let (_, status) = ended(&mut shell);
+    let (drawn, cooked) = released(terminal, slave);
+    assert!(status.success(), "the shell ended with {status}: {drawn}");
+    assert_handed_back(
+        &drawn,
+        cooked,
+        "a quit after sending 1 at the trust question",
+    );
+    assert!(
+        !repo.path().join("started").exists(),
+        "the backend was started though nobody answered the question"
+    );
+    assert!(
+        !home.path().join("niobe").join("trusted.list").exists(),
+        "a prompt of 1 sent at the question recorded the file as trusted"
+    );
+}
+
+/// Answering no opens the session as an untrusted file always has, says so
+/// in a line, and records nothing.
+#[test]
+fn answering_no_to_the_trust_question_opens_the_session_without_the_file() {
+    let (repo, home, terminal, slave, mut shell) = answering_the_trust_question(b"\x1b");
+    terminal.shows("config not trusted");
+    written(&repo.path().join("started"));
+    terminal.typed(CTRL_Q);
+
+    let (_, status) = ended(&mut shell);
+    let (drawn, cooked) = released(terminal, slave);
+    assert!(status.success(), "the shell ended with {status}: {drawn}");
+    assert_handed_back_times(
+        &drawn,
+        cooked,
+        "a quit after declining to trust the config",
+        Keys::Reported,
+        2,
+    );
+    assert!(
+        !home.path().join("niobe").join("trusted.list").exists(),
+        "declining recorded the file as trusted"
+    );
+}
+
+/// What trusting from the question records is the file the question showed:
+/// one rewritten while the question waited is asked about again, with what
+/// it says now, rather than trusted unread.
+#[test]
+fn a_config_rewritten_while_the_trust_question_waits_is_asked_about_again() {
+    let (repo, home, terminal, slave, mut shell) = asked_the_trust_question();
+    rewrite_the_untrusted_config(repo.path());
+    terminal.typed(b"1");
+    std::thread::sleep(PAST_THE_QUIET);
+    let answered = terminal.mark();
+    terminal.typed(ENTER);
+    terminal.shows_since(answered, TRUST_QUESTION);
+    terminal.shows_since(answered, "allow Bash(cargo build)");
+    std::thread::sleep(PAST_THE_QUIET);
+    terminal.typed(CTRL_Q);
+
+    let (_, status) = ended(&mut shell);
+    let (drawn, cooked) = released(terminal, slave);
+    assert!(status.success(), "the shell ended with {status}: {drawn}");
+    assert_handed_back_times(
+        &drawn,
+        cooked,
+        "a quit from the second trust question",
+        Keys::Reported,
+        2,
+    );
+    assert!(
+        !repo.path().join("started").exists(),
+        "the backend was started under a config nobody was shown"
+    );
+    let record = written(&home.path().join("niobe").join("trusted.list"));
+    assert!(record.contains(".niobe/config.toml"), "{record}");
+}
+
+/// Quitting from the question starts nothing and hands the terminal back.
+#[test]
+fn quitting_from_the_trust_question_starts_nothing() {
+    let (repo, home, terminal, slave, mut shell) = answering_the_trust_question(CTRL_Q);
+
+    let (_, status) = ended(&mut shell);
+    let (drawn, cooked) = released(terminal, slave);
+    assert!(status.success(), "the shell ended with {status}: {drawn}");
+    assert_handed_back(&drawn, cooked, "a quit from the trust question");
+    assert!(
+        !repo.path().join("started").exists(),
+        "the backend was started though the operator quit from the question"
+    );
+    assert!(!home.path().join("niobe").join("trusted.list").exists());
+}
+
+/// Runs `niobe trust` on a terminal in a repository whose config nobody
+/// trusted, waits for it to ask, and answers with `keys`.
+fn answering_niobe_trust(keys: &[u8]) -> (tempfile::TempDir, Terminal, File, Reaped) {
+    let (repo, terminal, slave, shell) = asked_by_niobe_trust();
+    terminal.typed(keys);
+    (repo, terminal, slave, shell)
+}
+
+/// Runs `niobe trust` on a terminal in a repository whose config nobody
+/// trusted, and waits for it to ask.
+fn asked_by_niobe_trust() -> (tempfile::TempDir, Terminal, File, Reaped) {
+    let (repo, _home) = repo_with_an_untrusted_config();
+    let (terminal, slave) = Terminal::open();
+    let mut command = shell_command(&slave, repo.path());
+    let shell = Reaped(command.arg("trust").spawn().expect("the niobe binary runs"));
+    terminal.shows("permissions  allow Bash(cargo test)");
+    terminal.shows("trust it? [y/N]");
+    (repo, terminal, slave, shell)
+}
+
+/// The record `niobe trust` keeps for the repository in `repo`, under the
+/// user config directory [`shell_command`] names.
+fn trust_record(repo: &Path) -> PathBuf {
+    repo.join("no-profile-here")
+        .join("niobe")
+        .join("trusted.list")
+}
+
+#[test]
+fn niobe_trust_on_a_terminal_shows_what_it_would_trust_and_records_it_on_yes() {
+    let (repo, terminal, slave, mut shell) = answering_niobe_trust(b"y\r");
+
+    let (_, status) = ended(&mut shell);
+    terminal.shows("trusted /");
+    drop(slave);
+    let drawn = terminal.drained();
+    assert!(status.success(), "niobe trust ended with {status}: {drawn}");
+    let record = written(&trust_record(repo.path()));
+    assert!(record.contains(".niobe/config.toml"), "{record}");
+}
+
+#[test]
+fn niobe_trust_on_a_terminal_records_nothing_unless_the_answer_is_yes() {
+    let (repo, terminal, slave, mut shell) = answering_niobe_trust(b"\r");
+
+    let (_, status) = ended(&mut shell);
+    terminal.shows("nothing was recorded");
+    drop(slave);
+    let drawn = terminal.drained();
+    assert!(status.success(), "niobe trust ended with {status}: {drawn}");
+    assert!(
+        !trust_record(repo.path()).exists(),
+        "declining recorded the file as trusted"
+    );
+}
+
+/// A yes to `niobe trust` trusts the file it listed: one rewritten while the
+/// question waited is not in force, and neither is what it says now.
+#[test]
+fn a_config_rewritten_while_niobe_trust_asks_is_not_trusted_by_the_yes() {
+    let (repo, terminal, slave, mut shell) = asked_by_niobe_trust();
+    rewrite_the_untrusted_config(repo.path());
+    terminal.typed(b"y\r");
+
+    let (_, status) = ended(&mut shell);
+    terminal.shows("trusted /");
+    drop(slave);
+    let drawn = terminal.drained();
+    assert!(status.success(), "niobe trust ended with {status}: {drawn}");
+    let profiles = niobe(repo.path(), &["profiles"]);
+    let out = String::from_utf8_lossy(&profiles.stdout);
+    assert!(out.contains("not trusted"), "{out}");
+    assert!(
+        out.contains("permissions allow `Bash(cargo build)`"),
+        "{out}"
+    );
+    assert!(out.contains("are not in force"), "{out}");
 }
 
 /// Puts `script` in `cwd` as the `claude` a session runs, and gives back a
 /// user config whose default profile runs it.
 fn stand_in(cwd: &Path, script: &str) -> tempfile::TempDir {
+    put_stand_in(cwd, script);
+    user_config("default_profile = \"max\"\n\n[profiles.max]\nbackend = \"claude\"\n")
+}
+
+/// Puts `script` in `cwd` as the `claude` [`shell_driving_the_stand_in`]
+/// finds first on its `PATH`.
+fn put_stand_in(cwd: &Path, script: &str) {
     let bin = cwd.join("bin");
     std::fs::create_dir(&bin).expect("a directory for the stand-in");
     let claude = bin.join("claude");
@@ -1373,7 +2994,6 @@ fn stand_in(cwd: &Path, script: &str) -> tempfile::TempDir {
         std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755))
             .expect("the stand-in is made executable");
     }
-    user_config("default_profile = \"max\"\n\n[profiles.max]\nbackend = \"claude\"\n")
 }
 
 /// The shell on `slave`, recording into `cwd` under the config in `home`,
@@ -1385,6 +3005,132 @@ fn shell_driving_the_stand_in(slave: &File, cwd: &Path, home: &Path) -> Command 
         format!("{}:/bin:/usr/bin", cwd.join("bin").display()),
     );
     command
+}
+
+/// With no config file anywhere, the shell runs the `claude` on `PATH` under
+/// the implied profile: a prompt is answered and the session is recorded
+/// under it.
+#[test]
+fn a_shell_with_no_config_runs_the_claude_on_path_under_the_implied_profile() {
+    let repo = repo();
+    put_stand_in(repo.path(), WRITES_DOWN_ITS_ARGUMENTS_CLAUDE);
+    let none = repo.path().join("no-user-config-here");
+    let (terminal, slave) = Terminal::open();
+    let mut shell = shell_driving_the_stand_in(&slave, repo.path(), &none)
+        .spawn()
+        .expect("the niobe binary runs");
+
+    terminal.shows(OPENING_FRAME);
+    terminal.typed(b"go\r");
+    terminal.shows("answered-the-turn");
+    terminal.typed(CTRL_Q);
+    let (_, status) = ended(&mut shell);
+    let (drawn, _) = released(terminal, slave);
+
+    assert!(status.success(), "ended with {status}: {drawn}");
+    let store = rusqlite::Connection::open(repo.path().join(".niobe").join("sessions.db"))
+        .expect("the session was recorded in the repository's store");
+    let profile: String = store
+        .query_row(
+            "SELECT json_extract(event, '$.profile') FROM events \
+             WHERE json_extract(event, '$.profile') IS NOT NULL LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("the session recorded the profile it ran under");
+    assert_eq!(profile, "claude");
+}
+
+/// With no config and no `claude`, the shell still opens, on a line that says
+/// what is missing and how to get it, and not on an error about a file.
+#[test]
+fn a_shell_with_no_config_and_no_claude_opens_on_what_is_missing() {
+    let repo = repo();
+    let (terminal, slave) = Terminal::open();
+    let mut shell = shell_command(&slave, repo.path())
+        .env("XDG_CONFIG_HOME", repo.path().join("no-user-config-here"))
+        .env("PATH", repo.path().join("nothing-here"))
+        .spawn()
+        .expect("the niobe binary runs");
+
+    terminal.shows("is not on PATH");
+    terminal.typed(CTRL_Q);
+    let (_, status) = ended(&mut shell);
+    let (drawn, _) = released(terminal, slave);
+
+    assert!(status.success(), "ended with {status}: {drawn}");
+    assert!(!drawn.contains("config.toml"), "{drawn}");
+}
+
+/// With `NIOBE_STREAM_DIR` set, a session leaves a file holding the
+/// arguments the CLI was started with and what crossed its pipes, outside the
+/// repository, and says once that it is doing so.
+#[test]
+fn a_session_with_a_stream_directory_keeps_what_crossed_the_cli_s_pipes() {
+    let repo = repo();
+    let home = stand_in(repo.path(), WRITES_DOWN_ITS_ARGUMENTS_CLAUDE);
+    let taps = tempfile::tempdir().expect("a temporary directory can be created");
+    let (terminal, slave) = Terminal::open();
+    let mut shell = shell_driving_the_stand_in(&slave, repo.path(), home.path())
+        .env("NIOBE_STREAM_DIR", taps.path())
+        .spawn()
+        .expect("the niobe binary runs");
+
+    terminal.shows("stream kept");
+    terminal.typed(b"go\r");
+    terminal.shows("answered-the-turn");
+    terminal.typed(CTRL_Q);
+    let (_, status) = ended(&mut shell);
+    let (drawn, _) = released(terminal, slave);
+    assert!(status.success(), "ended with {status}: {drawn}");
+
+    let files: Vec<_> = std::fs::read_dir(taps.path())
+        .expect("the directory is there")
+        .collect();
+    assert_eq!(files.len(), 1, "one file for the one process: {files:?}");
+    let kept = std::fs::read_to_string(files[0].as_ref().expect("an entry").path())
+        .expect("the file is text");
+    let lines: Vec<&str> = kept.lines().collect();
+    assert!(lines[0].starts_with("[\"-p\""), "{kept}");
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.starts_with("in ") && line.contains("go")),
+        "{kept}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.starts_with("out ") && line.contains("answered-the-turn")),
+        "{kept}"
+    );
+    assert!(
+        !repo
+            .path()
+            .join(".niobe")
+            .join("sessions.db")
+            .to_string_lossy()
+            .is_empty()
+    );
+}
+
+/// A directory inside the repository is refused before the shell opens: the
+/// files hold the conversation, and are where a `git add` would find them.
+#[test]
+fn a_stream_directory_inside_the_repository_stops_the_session() {
+    let repo = repo();
+    let (terminal, slave) = Terminal::open();
+    let mut shell = shell_command(&slave, repo.path())
+        .env("NIOBE_STREAM_DIR", repo.path().join("taps"))
+        .spawn()
+        .expect("the niobe binary runs");
+
+    let (_, status) = ended(&mut shell);
+    drop(slave);
+    let drawn = terminal.drained();
+
+    assert_eq!(status.code(), Some(1), "{drawn}");
+    assert!(drawn.contains("inside the repository"), "{drawn}");
 }
 
 /// A `claude` that starts something of its own on its standard output and
@@ -1431,8 +3177,7 @@ fn quits_without_waiting_on_what_the_cli_started(path: &str, end: impl FnOnce(&T
     end(&terminal, &shell);
 
     let (took, status) = ended(&mut shell);
-    drop(slave);
-    let drawn = terminal.drained();
+    let (drawn, cooked) = released(terminal, slave);
     assert!(
         took < DEADLINE,
         "on {path} the shell took {took:?} to end, over the {DEADLINE:?} it has"
@@ -1441,7 +3186,7 @@ fn quits_without_waiting_on_what_the_cli_started(path: &str, end: impl FnOnce(&T
         status.success(),
         "on {path} the shell ended with {status}: {drawn}"
     );
-    assert_handed_back(&drawn, path);
+    assert_handed_back(&drawn, cooked, path);
 
     // What was killed is reaped by whoever inherited it, a moment later.
     let deadline = Instant::now() + DEADLINE;
@@ -1508,8 +3253,7 @@ fn a_cli_that_dies_while_something_it_started_holds_its_output_is_reported_ended
 
     terminal.typed(CTRL_Q);
     let (_, status) = ended(&mut shell);
-    drop(slave);
-    let drawn = terminal.drained();
+    let (drawn, cooked) = released(terminal, slave);
     assert!(
         took < DEADLINE,
         "the end was drawn {took:?} after the reply, over the {DEADLINE:?} it has"
@@ -1522,7 +3266,7 @@ fn a_cli_that_dies_while_something_it_started_holds_its_output_is_reported_ended
     let end = drawn.find("fell-over-mid-session");
     assert!(reply < end, "the end was drawn before the reply: {drawn}");
     assert!(status.success(), "the shell ended with {status}: {drawn}");
-    assert_handed_back(&drawn, "a quit after the CLI fell over");
+    assert_handed_back(&drawn, cooked, "a quit after the CLI fell over");
 }
 
 #[test]
@@ -1576,14 +3320,13 @@ fn a_signal_hands_back_the_terminal_and_ends_the_bang_command(path: &str, sent: 
 
     let (took, status) = ended(&mut shell);
     let modes = rustix::termios::tcgetattr(&slave).expect("the pty's modes can be read");
-    drop(slave);
-    let drawn = terminal.drained();
+    let (drawn, cooked) = released(terminal, slave);
     assert!(
         took < DEADLINE,
         "the shell took {took:?} to act on {path}, over the {DEADLINE:?} it has"
     );
     assert!(status.success(), "{path} ended the shell with {status}");
-    assert_handed_back(&drawn, path);
+    assert_handed_back(&drawn, cooked, path);
     let cooked = rustix::termios::LocalModes::ICANON
         | rustix::termios::LocalModes::ECHO
         | rustix::termios::LocalModes::ISIG;
@@ -1643,6 +3386,9 @@ const LEAVES_SOMETHING_DETACHED_CLAUDE: &str = "#!/bin/sh\n\
 /// A `!` command's `sh` ending does not end what it put in the background,
 /// and a shell that forgets the command's group once its `sh` has gone has
 /// nothing left to stop at the end of the session.
+///
+/// The shell leads a process group of its own, as a job an operator's shell
+/// starts does, so that `end` can signal the whole of it without the test.
 fn ends_with_nothing_left_running(
     path: &str,
     within: Duration,
@@ -1652,6 +3398,7 @@ fn ends_with_nothing_left_running(
     let home = stand_in(repo.path(), LEAVES_SOMETHING_DETACHED_CLAUDE);
     let (terminal, slave) = Terminal::open();
     let mut shell = shell_driving_the_stand_in(&slave, repo.path(), home.path())
+        .process_group(0)
         .spawn()
         .expect("the niobe binary runs");
     terminal.shows(OPENING_FRAME);
@@ -1724,6 +3471,16 @@ fn a_quit_takes_along_what_the_cli_and_an_ended_bang_command_left_running() {
 fn a_sigkill_leaves_nothing_the_session_started_running() {
     ends_with_nothing_left_running("a SIGKILL", 2 * DEADLINE, |_, shell| {
         signal(shell, Signal::KILL);
+    });
+}
+
+/// An operator's shell signals a job's whole process group. The session is
+/// in it, and what ends what the session started must not be.
+#[test]
+fn a_sigkill_to_the_sessions_whole_group_leaves_nothing_it_started_running() {
+    ends_with_nothing_left_running("a SIGKILL to its group", 2 * DEADLINE, |_, shell| {
+        rustix::process::kill_process_group(Pid::from_child(shell), Signal::KILL)
+            .expect("the shell's group can be signalled");
     });
 }
 
@@ -1825,6 +3582,64 @@ fn a_stop_hands_the_terminal_back_and_a_continue_takes_it_again(
     );
     assert!(after.contains(RESTORED), "{after:?}");
     assert_eq!(after.matches(KEYBOARD_OFF).count(), 1, "{after:?}");
+}
+
+/// A SIGSTOP cannot be caught: the shell stops holding the terminal as it
+/// had it, and the operator's shell may take it back and leave it cooked, as
+/// bash does. Continued, the shell takes the terminal again whatever it
+/// finds — raw mode, the screen, the keys — and draws the whole frame; a quit
+/// afterwards still hands it back once.
+#[test]
+fn a_sigstop_nothing_could_catch_is_followed_by_taking_the_terminal_again() {
+    let repo = repo();
+    let (terminal, slave) = Terminal::open();
+    let mut shell = shell_on(&slave, repo.path());
+    terminal.shows(OPENING_FRAME);
+    assert!(
+        !cooked(&slave),
+        "the shell never put the terminal in raw mode"
+    );
+
+    signal(&shell, Signal::STOP);
+    stopped(&shell);
+    let mut modes = rustix::termios::tcgetattr(&slave).expect("the pty's modes can be read");
+    modes.local_modes |= rustix::termios::LocalModes::ICANON
+        | rustix::termios::LocalModes::ECHO
+        | rustix::termios::LocalModes::ISIG;
+    rustix::termios::tcsetattr(&slave, rustix::termios::OptionalActions::Now, &modes)
+        .expect("the pty's modes can be set");
+    assert!(cooked(&slave), "the test could not cook the terminal");
+
+    let continued = terminal.mark();
+    signal(&shell, Signal::CONT);
+    terminal.shows_since(continued, ENTER_ALTERNATE_SCREEN);
+    terminal.shows_since(continued, KEYBOARD_ON);
+    terminal.shows_since(continued, OPENING_FRAME);
+    assert!(
+        !cooked(&slave),
+        "the shell was continued without taking raw mode back"
+    );
+
+    terminal.typed(CTRL_Q);
+    let (_, status) = ended(&mut shell);
+    drop(slave);
+    let drawn = terminal.drained();
+
+    assert!(
+        status.success(),
+        "a quit after the continue ended with {status}"
+    );
+    let after = &drawn[continued..];
+    assert_eq!(
+        after.matches(LEAVE_ALTERNATE_SCREEN).count(),
+        1,
+        "the quit did not leave the screen exactly once: {after:?}"
+    );
+    assert_eq!(after.matches(RESTORED).count(), 1, "{after:?}");
+    assert!(
+        after.rfind(KEYBOARD_OFF) > after.rfind(KEYBOARD_ON),
+        "the keys were left enhanced: {after:?}"
+    );
 }
 
 #[test]

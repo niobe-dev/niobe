@@ -13,22 +13,14 @@
     reason = "test helpers: a failed expectation is the test failing"
 )]
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use niobe_store::{Store, read_log};
 
 const FIXTURE: &str = "../niobe-core/tests/fixtures/claude-session.jsonl";
-
-/// The fixture must be read and folded in under this many milliseconds.
-///
-/// This test stays in the binary it shares with the ones around it, where the
-/// shell redraw needed one of its own, although those siblings are the
-/// heaviest of the three suites that time a replay: each spawns the binary
-/// again. Timed on four two-vCPU CI runners, the binary reported a median of
-/// 1.6 to 2.3 ms with them running in parallel and 1.1 to 1.4 ms alone, and
-/// the slowest single run of the 80 timed was 4.2 ms.
-const REPLAY_BUDGET_MS: f64 = 50.0;
 
 /// What the binary exits with when a failure's reason was written to standard
 /// error, whatever standard error pointed at.
@@ -60,14 +52,54 @@ fn niobe_with_user_config(cwd: &Path, config_home: &Path, args: &[&str]) -> Outp
 /// the operator's real sessions would otherwise be listed by every test that
 /// runs `niobe sessions` on this machine.
 fn niobe_with(cwd: &Path, config_home: &Path, claude_config: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_niobe"))
+    niobe_command(cwd, config_home, claude_config, args)
+        .output()
+        .expect("the niobe binary runs")
+}
+
+/// The binary, set up to run as [`niobe_with`] runs it.
+fn niobe_command(cwd: &Path, config_home: &Path, claude_config: &Path, args: &[&str]) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_niobe"));
+    command
         .args(args)
         .current_dir(cwd)
         .env("XDG_CONFIG_HOME", config_home)
         .env("CLAUDE_CONFIG_DIR", claude_config)
-        .env_remove("HOME")
-        .output()
-        .expect("the niobe binary runs")
+        .env_remove("HOME");
+    command
+}
+
+/// Runs the binary as [`niobe`] does, killing it and failing the test where
+/// it has not exited within `deadline`: a binary that waits on what it was
+/// given would otherwise hold the test, and the whole run, up for ever.
+fn niobe_within(cwd: &Path, args: &[&str], deadline: Duration) -> Output {
+    let mut child = niobe_command(
+        cwd,
+        &cwd.join("no-user-config-here"),
+        &cwd.join("no-claude-sessions-here"),
+        args,
+    )
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .spawn()
+    .expect("the niobe binary runs");
+    let started = Instant::now();
+    while child
+        .try_wait()
+        .expect("the binary can be waited on")
+        .is_none()
+    {
+        if started.elapsed() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("niobe {args:?} had not exited after {deadline:?}");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    child
+        .wait_with_output()
+        .expect("the binary's output is read")
 }
 
 /// Runs the binary with descriptor 2 closed, the way `niobe 2>&-` does.
@@ -102,13 +134,39 @@ fn repo_with_the_fixture_recorded() -> tempfile::TempDir {
     std::fs::create_dir(dir.path().join(".git")).expect("a .git directory can be made");
     std::fs::create_dir(dir.path().join(".niobe")).expect("a .niobe directory can be made");
 
-    let store = Store::open(&dir.path().join(".niobe").join("sessions.db")).expect("store");
+    let store = Store::open(&dir.path().join(".niobe").join("sessions.db"))
+        .expect("a store opens in a temporary directory");
     let session = store.create_session().expect("a session is created");
     let text = std::fs::read_to_string(fixture_path()).expect("the fixture reads");
     for event in read_log(&text).expect("the fixture parses") {
-        store.append(session, &event).expect("an append succeeds");
+        store
+            .append_at(session, &event, recorded_on())
+            .expect("an append succeeds");
     }
     dir
+}
+
+/// Noon UTC on 18 September 2026, the day the fixture was recorded.
+const RECORDED_ON_MS: u64 = 1_789_732_800_000;
+
+fn recorded_on() -> SystemTime {
+    UNIX_EPOCH + Duration::from_millis(RECORDED_ON_MS)
+}
+
+/// A copy of `log` in `dir` with every line dated `at`, in milliseconds since
+/// the Unix epoch, as a log a store's session was written out to would be.
+fn dated(dir: &Path, log: &str, at: u64) -> PathBuf {
+    let lines: Vec<String> = log
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let open = line.strip_suffix('}').expect("every line is an object");
+            format!("{open},\"at\":{at}}}")
+        })
+        .collect();
+    let path = dir.join("dated.jsonl");
+    std::fs::write(&path, lines.join("\n")).expect("the dated log is written");
+    path
 }
 
 /// The summary without its first line, which names where the events came from
@@ -118,41 +176,87 @@ fn body(summary: &str) -> Vec<&str> {
 }
 
 #[test]
-fn replaying_the_fixture_prints_its_totals_inside_the_budget() {
+fn replaying_the_fixture_prints_its_totals() {
+    let dir = tempfile::tempdir().expect("a temporary directory can be created");
+    let text = std::fs::read_to_string(fixture_path()).expect("the fixture reads");
+    let fixture = dated(dir.path(), &text, RECORDED_ON_MS);
+    let output = niobe(
+        dir.path(),
+        &["replay", fixture.to_str().expect("a UTF-8 path")],
+    );
+    let out = stdout(&output);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(out.contains("562,988"), "{out}");
+    // $0.86552395 the recording reported, plus the fourteen records it did not
+    // price at the rates in force for their models on the day it ran:
+    // $0.0767031 of haiku-4-5 and $0.1151232 of sonnet-5, which is $1.0573503
+    // in all. Marked `~`, because the part of it Niobe worked out is an
+    // estimate.
+    assert!(out.contains("~$1.06"), "{out}");
+    assert!(
+        out.contains("14 of 25 usage records no reported cost covers"),
+        "{out}"
+    );
+    assert!(!out.contains("reasoning"), "{out}");
+}
+
+/// A log with no times could have been spent on any day, the days before the
+/// table priced its models among them: what the recording reported,
+/// $0.86552395, is all that is stood behind.
+#[test]
+fn a_log_that_says_no_days_prices_nothing_it_was_not_billed_for() {
     let here = Path::new(env!("CARGO_MANIFEST_DIR"));
     let fixture = fixture_path();
     let output = niobe(here, &["replay", fixture.to_str().expect("a UTF-8 path")]);
     let out = stdout(&output);
 
     assert!(output.status.success(), "{}", stderr(&output));
-    assert!(out.contains("562,988"), "{out}");
-    // $0.86552395 the recording reported, plus the fourteen records it did not
-    // price at the rates in force for their models: $0.0767031 of haiku-4-5
-    // and $0.1151232 of sonnet-5, which is $1.0573503 in all. Marked `~`,
-    // because the part of it Niobe worked out is an estimate.
-    assert!(out.contains("~$1.06"), "{out}");
-    assert!(
-        out.contains("14 of 25 usage records no reported cost covers"),
-        "{out}"
-    );
+    assert!(out.contains("cost        ≥$0.87 — 14 of 25"), "{out}");
+    // The log was written before its records said what a cost settles, and
+    // the floor says so.
+    assert!(out.contains("(older recording: "), "{out}");
+}
 
-    let millis: f64 = out
-        .lines()
-        .next()
-        .and_then(|header| header.split(" in ").nth(1))
-        .and_then(|rest| rest.strip_suffix(" ms"))
-        .and_then(|ms| ms.parse().ok())
-        .unwrap_or_else(|| panic!("no timing in the header: {out}"));
-    assert!(
-        millis < REPLAY_BUDGET_MS,
-        "replay took {millis} ms, over the {REPLAY_BUDGET_MS} ms budget"
-    );
+/// Claude Opus 4.6 billed a prompt over 200K tokens at $10 per million input
+/// tokens until 13 March 2026, and at $5 from then: 250,000 tokens are $2.50
+/// on the 1st of March and $1.25 on the 20th, whenever the log is read.
+#[test]
+fn a_replayed_log_is_priced_at_the_rates_of_the_days_it_ran() {
+    let dir = tempfile::tempdir().expect("a temporary directory can be created");
+    let usage = r#"{"type":"usage","input":250000,"output":0,"cache_read":0,"cache_write":0,"reasoning":0,"model":"claude-opus-4-6","cost_usd":null}"#;
+    let replayed = |at: &[u64]| {
+        let lines: Vec<String> = at
+            .iter()
+            .map(|at| {
+                let open = usage.strip_suffix('}').expect("an object");
+                format!("{open},\"at\":{at}}}")
+            })
+            .collect();
+        let log = dir.path().join("log.jsonl");
+        std::fs::write(&log, lines.join("\n")).expect("the log is written");
+        let output = niobe(dir.path(), &["replay", log.to_str().expect("a UTF-8 path")]);
+        assert!(output.status.success(), "{}", stderr(&output));
+        stdout(&output)
+    };
+    const FIRST_OF_MARCH: u64 = 1_772_366_400_000;
+    const TWENTIETH_OF_MARCH: u64 = 1_774_008_000_000;
+
+    let before = replayed(&[FIRST_OF_MARCH]);
+    assert!(before.contains("cost        ~$2.50 — 1 of 1"), "{before}");
+    let after = replayed(&[TWENTIETH_OF_MARCH]);
+    assert!(after.contains("cost        ~$1.25 — 1 of 1"), "{after}");
+    // Spent on both sides of the change, at rates the fold cannot tell apart,
+    // and nothing else in the log to stand behind.
+    let across = replayed(&[FIRST_OF_MARCH, TWENTIETH_OF_MARCH]);
+    assert!(across.contains("cost        unpriced — 2 of 2"), "{across}");
 }
 
 #[test]
 fn a_resumed_session_shows_the_totals_the_log_it_recorded_folds_to() {
     let repo = repo_with_the_fixture_recorded();
-    let fixture = fixture_path();
+    let text = std::fs::read_to_string(fixture_path()).expect("the fixture reads");
+    let fixture = dated(repo.path(), &text, RECORDED_ON_MS);
 
     let resumed = niobe(repo.path(), &["--resume", "1"]);
     let replayed = niobe(
@@ -164,6 +268,21 @@ fn a_resumed_session_shows_the_totals_the_log_it_recorded_folds_to() {
     let resumed = stdout(&resumed);
     assert!(resumed.starts_with("session 1 · 603 events"), "{resumed}");
     assert_eq!(body(&resumed), body(&stdout(&replayed)));
+    // The same two paths could agree on a wrong fold, so the figures are also
+    // held against the ones `jq` derives from the fixture, with the program in
+    // `crates/niobe-core/tests/fixtures/README.md`: 120 + 19,606 + 460,375 +
+    // 82,887 tokens, 14 of 25 usage records with no cost on them, 26 calls
+    // ended of which 3 failed and 1 was denied, 6 prompts and 15 replies, and
+    // one file at +21 −4.
+    for figure in [
+        "tokens      562,988 — 120 in · 19,606 out · 460,375 cache read · 82,887 cache write",
+        "14 of 25 usage records no reported cost covers",
+        "tool calls  26 finished · 3 failed · 1 denied",
+        "messages    6 from you · 15 from the agent",
+        "files       1 changed — +21 −4",
+    ] {
+        assert!(resumed.contains(figure), "{figure:?} in {resumed}");
+    }
 }
 
 #[test]
@@ -177,6 +296,48 @@ fn the_session_list_shows_what_the_store_holds() {
     assert!(row.trim_start().starts_with("1 "), "{out}");
     assert!(row.contains(" 603 "), "{out}");
     assert!(row.contains("Read catalog/fetch.py"), "{out}");
+}
+
+/// A store the operator can read and not write — a checkout on a read-only
+/// mount, or one whose files they made read-only — is listed as it is.
+#[cfg(unix)]
+#[test]
+fn the_session_list_reads_a_store_that_cannot_be_written() {
+    use std::os::unix::fs::PermissionsExt;
+    let repo = repo_with_the_fixture_recorded();
+    let dir = repo.path().join(".niobe");
+    let store = dir.join("sessions.db");
+    let set = |path: &Path, mode: u32| {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+            .expect("the mode can be set");
+    };
+    set(&store, 0o444);
+    set(&dir, 0o555);
+    // Where permissions bind nobody, as for root, there is nothing to prove.
+    let binds = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&store)
+        .is_err();
+
+    let output = niobe(repo.path(), &["sessions"]);
+    set(&dir, 0o755);
+    set(&store, 0o644);
+    if !binds {
+        // A check this machine cannot make, which a CI runner must be able
+        // to: skipped quietly there, it would be a pass that proved nothing.
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "file permissions do not bind this user, so a read-only store cannot be tested"
+        );
+        return;
+    }
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(
+        stdout(&output).contains("Read catalog/fetch.py"),
+        "{}",
+        stdout(&output)
+    );
 }
 
 #[test]
@@ -207,6 +368,34 @@ fn resuming_a_session_that_does_not_exist_says_which_and_fails() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn an_argument_that_is_not_utf8_is_refused_in_words() {
+    use std::os::unix::ffi::OsStrExt;
+
+    let dir = tempfile::tempdir().expect("a temporary directory can be created");
+    let unreadable = std::ffi::OsStr::from_bytes(b"\xff");
+    for args in [
+        vec![unreadable],
+        vec![std::ffi::OsStr::new("--resume"), unreadable],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_niobe"))
+            .args(&args)
+            .current_dir(dir.path())
+            .env("XDG_CONFIG_HOME", dir.path().join("no-user-config-here"))
+            .output()
+            .expect("the niobe binary runs");
+
+        assert_eq!(output.status.code(), Some(FAILED), "{args:?}");
+        assert_eq!(
+            stderr(&output),
+            "niobe: the argument `\u{fffd}` is not UTF-8, and niobe reads only UTF-8 arguments\n\
+             Run `niobe --help` for usage.\n",
+            "{args:?}"
+        );
+    }
+}
+
 /// A failure reported onto a standard error that was closed before the process
 /// started.
 ///
@@ -235,6 +424,108 @@ fn a_failure_reported_onto_a_closed_standard_error_ends_as_a_reported_failure() 
         "a closed standard error carried {:?}",
         stderr(&output)
     );
+}
+
+/// Runs the binary with standard output a pipe whose reading end is already
+/// closed, the way `niobe prices | head -1` leaves it once `head` has its line.
+///
+/// The reading end is closed before the binary starts, so its first write
+/// fails every time rather than only when it loses a race with the reader.
+#[cfg(unix)]
+fn niobe_with_its_reader_gone(cwd: &Path, args: &[&str]) -> Output {
+    let (reader, writer) = rustix::pipe::pipe().expect("a pipe can be made");
+    drop(reader);
+    niobe_command(
+        cwd,
+        &cwd.join("no-user-config-here"),
+        &cwd.join("no-claude-sessions-here"),
+        args,
+    )
+    .stdin(Stdio::null())
+    .stdout(Stdio::from(writer))
+    .stderr(Stdio::piped())
+    .output()
+    .expect("the niobe binary runs")
+}
+
+/// A reader that stopped reading is how a pipeline ends, not a failure of
+/// `niobe`: every command that prints ends as `--help` promises, with none of
+/// them panicking on the write that found nobody there.
+#[cfg(unix)]
+#[test]
+fn every_printing_command_ends_quietly_when_its_reader_has_gone() {
+    let dir = tempfile::tempdir().expect("a temporary directory can be created");
+    std::fs::create_dir(dir.path().join(".git")).expect("a .git directory can be made");
+
+    for args in [
+        &["prices"][..],
+        &["--help"],
+        &["--version"],
+        &["profiles"],
+        &["sessions"],
+    ] {
+        let output = niobe_with_its_reader_gone(dir.path(), args);
+
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "niobe {args:?} with its reader gone ended with {}: {}",
+            output.status,
+            stderr(&output)
+        );
+        assert!(
+            stderr(&output).is_empty(),
+            "niobe {args:?} with its reader gone wrote {:?}",
+            stderr(&output)
+        );
+    }
+}
+
+/// Characters that act on a terminal rather than show: an escape, a bell and a
+/// right-to-left override.
+const ACTING: [char; 3] = ['\u{1b}', '\u{7}', '\u{202e}'];
+
+fn assert_only_text(out: &str) {
+    for c in ACTING {
+        assert!(!out.contains(c), "{c:?} reached the terminal: {out:?}");
+    }
+}
+
+#[test]
+fn a_profile_listing_prints_a_configs_escape_sequences_as_text() {
+    let setup = Configured::new(
+        "",
+        "[profiles.\"x\\u001b]0;PWNED\\u0007\"]\nbackend = \"claude\"\nmodels = [\"m\\u001b[2J\\u202e\"]\n",
+    );
+
+    let output = setup.run(&["profiles"]);
+    let out = stdout(&output);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_only_text(&out);
+    assert!(out.contains("x␛]0;PWNED␇"), "{out}");
+    assert!(out.contains("m␛[2J\u{fffd}"), "{out}");
+}
+
+#[test]
+fn a_session_listing_prints_a_stored_prompts_escape_sequences_as_text() {
+    let dir = tempfile::tempdir().expect("a temporary directory can be created");
+    std::fs::create_dir(dir.path().join(".git")).expect("a .git directory can be made");
+    std::fs::create_dir(dir.path().join(".niobe")).expect("a .niobe directory can be made");
+    let store = Store::open(&dir.path().join(".niobe").join("sessions.db"))
+        .expect("a store opens in a temporary directory");
+    let session = store.create_session().expect("a session is created");
+    let line = r#"{"type":"user_message","text":"hi\u001b]0;PWNED-TITLE\u0007\u001b[2J\u202e"}"#;
+    for event in read_log(line).expect("the event parses") {
+        store.append(session, &event).expect("an append succeeds");
+    }
+
+    let output = niobe(dir.path(), &["sessions"]);
+    let out = stdout(&output);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_only_text(&out);
+    assert!(out.contains("hi␛]0;PWNED-TITLE␇␛[2J"), "{out}");
 }
 
 #[test]
@@ -509,7 +800,7 @@ fn a_trusted_repo_config_overrides_user_config() {
         USER_CONFIG,
         "default_profile = \"work\"\n\n[profiles.work]\nbackend = \"codex\"\n",
     );
-    assert!(setup.run(&["trust"]).status.success());
+    assert!(setup.run(&["trust", "--yes"]).status.success());
     let output = setup.run(&["profiles"]);
     let out = stdout(&output);
 
@@ -643,6 +934,76 @@ fn a_config_that_is_not_toml_names_the_line() {
     );
 }
 
+/// What no reported cost covers is valued at the rates of the days it was
+/// spent, and the help says when that is a floor instead.
+#[test]
+fn the_help_says_a_session_read_back_is_estimated_at_the_rates_of_its_days() {
+    let setup = Configured::new("", "");
+    let out = stdout(&setup.run(&["--help"]));
+
+    assert!(out.contains("force on the days they were spent"), "{out}");
+    assert!(out.contains("at the rates of the days it ran"), "{out}");
+    assert!(!out.contains("today's"), "{out}");
+}
+
+/// The CLI resumes a session only from the directory it started in, and
+/// niobe runs it at the repository's root: the help says which sessions that
+/// leaves out rather than promise every one in the repository.
+#[test]
+fn the_help_says_a_claude_session_from_a_subdirectory_is_not_listed() {
+    let setup = Configured::new("", "");
+    let out = stdout(&setup.run(&["--help"]));
+
+    assert!(
+        out.contains("recorded at the\n    root of this repository"),
+        "{out}"
+    );
+    assert!(out.contains("one started in a subdirectory is"), "{out}");
+}
+
+/// The help's TRUST section names everything trusting puts in force, not
+/// only what a backend is started with.
+#[test]
+fn the_help_names_everything_trust_gates() {
+    let setup = Configured::new("", "");
+    let out = stdout(&setup.run(&["--help"]));
+
+    for gated in [
+        "billing",
+        "default_profile",
+        "named like one of yours",
+        "[permissions] rules",
+    ] {
+        let trust = out
+            .split("TRUST:")
+            .nth(1)
+            .and_then(|rest| rest.split("\n\n").next())
+            .expect("the help has a TRUST section");
+        assert!(
+            trust.contains(gated),
+            "TRUST does not name {gated}: {trust}"
+        );
+    }
+}
+
+/// A profile's `auth_refresh` is read and listed and not run; the help says
+/// so rather than let an operator think a login will happen on its own.
+#[test]
+fn the_help_says_auth_refresh_is_not_run_yet() {
+    let setup = Configured::new("", "");
+    let out = stdout(&setup.run(&["--help"]));
+
+    assert!(
+        out.contains("auth_refresh names the command that renews"),
+        "{out}"
+    );
+    assert!(out.contains("and not run\n    yet"), "{out}");
+    assert!(
+        out.contains("Run it yourself when a session will not sign in."),
+        "{out}"
+    );
+}
+
 #[test]
 fn the_help_says_how_the_mode_the_model_the_budget_and_the_theme_are_changed() {
     let setup = Configured::new("", "");
@@ -651,24 +1012,139 @@ fn the_help_says_how_the_mode_the_model_the_budget_and_the_theme_are_changed() {
     for said in [
         "--budget <amount>",
         "Shift+Tab",
-        "F8",
+        "Model on the F-key bar picks",
         "between turns",
         "models = [",
         "niobe trust",
         "trusted.list",
         "--theme <name>",
-        "F9",
+        "View › Theme…",
         "theme = \"neo\"",
         "Ctrl+G",
-        "Esc 8",
-        "Esc 9",
-        "Esc 0",
     ] {
         assert!(
             out.contains(said),
             "the help does not mention {said}:\n{out}"
         );
     }
+}
+
+/// The help names every key the shell's own Shortcuts sheet lists, each as
+/// a row of its own, and what the config and a typed command can do that the
+/// sheet does not show: the `titles` key that turns off the request a new
+/// session's title costs, the commands the shell answers itself, and the
+/// skills a `/` later in a prompt offers.
+#[test]
+fn the_help_names_every_shortcut_the_shell_lists_and_the_typed_commands() {
+    let setup = Configured::new("", "");
+    let out = stdout(&setup.run(&["--help"]));
+
+    // The key column of every row of a table in the help: four spaces in,
+    // then the key, then a run of spaces before what it does.
+    let keys: Vec<&str> = out
+        .lines()
+        .filter_map(|line| line.strip_prefix("    "))
+        .filter(|line| !line.starts_with(' '))
+        .filter_map(|line| line.split_once("   ").map(|(key, _)| key.trim()))
+        .collect();
+    let mut app = niobe_tui::App::new(niobe_tui::Repo::default());
+    app.perform(niobe_tui::menu::Action::Shortcuts);
+    let sheet = app.sheet().expect("the Shortcuts sheet opens");
+    let listed: Vec<&str> = sheet
+        .rows
+        .iter()
+        .take_while(|row| !row.is_empty())
+        .filter_map(|row| row.get(..row.char_indices().nth(12).map_or(row.len(), |(at, _)| at)))
+        .map(str::trim)
+        .collect();
+    assert!(listed.len() > 20, "{listed:?}");
+    // The sheet draws some keys as glyphs, which the help spells out.
+    fn spelt(key: &str) -> &str {
+        match key {
+            "⇧Tab" => "Shift+Tab",
+            "↑↓" => "Up / Down",
+            "↑↓ Enter" => "Up / Down, Enter",
+            "PgUp PgDn" => "PgUp / PgDn",
+            key => key,
+        }
+    }
+    for key in listed.iter().map(|key| spelt(key)) {
+        assert!(
+            keys.iter()
+                .any(|row| row.starts_with(key) || row.split(", ").any(|part| part == key)),
+            "the help has no row for {key}: {keys:?}"
+        );
+    }
+
+    for said in [
+        "titles = \"first-prompt\"",
+        "[notify] bell = false",
+        "leave the routine entries (reads,",
+        "[catch_up] after = 10",
+        "what happened since you last",
+        "shows its whole input and output",
+        "show one sub-agent's entries alone;",
+        "every session recorded here: what",
+        "/model",
+        "/memory",
+        "/resume",
+        "/help",
+        "/config",
+        "/exit",
+        "/quit",
+        "a skill the backend takes anywhere",
+    ] {
+        assert!(
+            out.contains(said),
+            "the help does not mention {said}:\n{out}"
+        );
+    }
+}
+
+/// The help names the F-keys the shell's bar draws: each against its digit,
+/// with the bar's label and what it does, and names no F-key anywhere else, so
+/// nothing in it can claim a key the bar has given to something else.
+#[test]
+fn the_help_names_each_f_key_as_the_bar_does_and_no_other() {
+    let setup = Configured::new("", "");
+    let out = stdout(&setup.run(&["--help"]));
+
+    let rows: Vec<String> = (1u8..)
+        .zip(niobe_tui::menu::FKEYS)
+        .map(|(n, (digit, label, action))| {
+            format!(
+                "{:<23}{label}: {}",
+                format!("F{n}, Esc {digit}"),
+                action.what()
+            )
+        })
+        .collect();
+    for row in &rows {
+        assert!(
+            out.lines().any(|line| line.trim() == row),
+            "the help has no row `{row}`:\n{out}"
+        );
+    }
+    for line in out.lines().filter(|line| names_an_f_key(line)) {
+        assert!(
+            rows.iter().any(|row| line.trim() == row),
+            "the help names an F-key off the bar's rows: `{line}`"
+        );
+    }
+}
+
+/// Whether `line` names an F-key, as `F4` or as `Esc 4`.
+fn names_an_f_key(line: &str) -> bool {
+    let named = line
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|word| {
+            word.strip_prefix('F')
+                .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        });
+    named
+        || line
+            .match_indices("Esc ")
+            .any(|(at, _)| line[at + 4..].starts_with(|c: char| c.is_ascii_digit()))
 }
 
 #[test]
@@ -695,6 +1171,137 @@ fn a_budget_that_is_not_an_amount_is_refused_before_anything_is_started() {
 }
 
 #[test]
+fn a_budget_on_a_plan_profile_is_refused_with_what_limits_a_plan() {
+    let setup = Configured::new(
+        "default_profile = \"max\"\n\n[profiles.max]\nbackend = \"claude\"\nbilling = \"plan\"\n",
+        "",
+    );
+    let output = setup.run(&["--budget", "5"]);
+
+    assert!(!output.status.success());
+    let err = stderr(&output);
+    assert!(err.contains("--budget"), "{err}");
+    assert!(err.contains("usage windows"), "{err}");
+    assert!(!err.contains('$'), "{err}");
+}
+
+#[test]
+fn a_budget_on_a_metered_profile_is_taken() {
+    let setup = Configured::new(
+        "default_profile = \"api\"\n\n[profiles.api]\nbackend = \"claude\"\nbilling = \"metered\"\n",
+        "",
+    );
+    let output = setup.run(&["--budget", "5"]);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+}
+
+#[test]
+fn doctor_without_claude_on_path_fails_with_the_fix_and_the_json_says_the_same() {
+    let setup = Configured::new("", "");
+    let run = |args: &[&str]| {
+        niobe_command(
+            setup.repo.path(),
+            setup.user.path(),
+            &setup.repo.path().join("c"),
+            args,
+        )
+        .env("PATH", setup.repo.path().join("nothing-here"))
+        .output()
+        .expect("the niobe binary runs")
+    };
+
+    let text = run(&["doctor"]);
+    let said = stdout(&text);
+    assert_eq!(text.status.code(), Some(1), "{said}{}", stderr(&text));
+    assert!(said.contains("fail  claude"), "{said}");
+    assert!(said.contains("claude auth login"), "{said}");
+
+    let json = run(&["doctor", "--json"]);
+    let report: serde_json::Value =
+        serde_json::from_str(&stdout(&json)).expect("the report is JSON");
+    assert_eq!(report["ok"], serde_json::json!(false));
+    let claude = report["rows"]
+        .as_array()
+        .and_then(|rows| rows.iter().find(|row| row["name"] == "claude"))
+        .expect("the claude row is there");
+    assert_eq!(claude["status"], serde_json::json!("fail"));
+}
+
+#[test]
+fn a_key_that_cannot_be_bound_is_reported_at_its_key_and_its_line() {
+    let setup = Configured::new("[keys]\nmcp = \"ctrl+c\"\n", "");
+    let output = setup.run(&["profiles"]);
+
+    assert!(!output.status.success());
+    let said = stderr(&output);
+    assert!(said.contains(":2: keys.mcp: "), "{said}");
+    assert!(said.contains("F1 to F12"), "{said}");
+}
+
+#[test]
+fn the_help_says_how_a_key_is_rebound() {
+    let setup = Configured::new("", "");
+    let output = setup.run(&["--help"]);
+    let out = stdout(&output);
+
+    assert!(out.contains("[keys]"), "{out}");
+    assert!(out.contains("mcp = \"ctrl+l\""), "{out}");
+}
+
+/// A user config directory holding the theme file `text`, as `midnight`.
+fn with_a_theme(text: &str) -> Configured {
+    let setup = Configured::new("", "");
+    let dir = setup.user.path().join("niobe").join("themes");
+    std::fs::create_dir_all(&dir).expect("a themes directory");
+    std::fs::write(dir.join("midnight.toml"), text).expect("the theme is written");
+    setup
+}
+
+#[test]
+fn a_users_theme_is_a_name_the_theme_flag_takes_and_the_list_offers() {
+    let setup = with_a_theme("base = \"neo\"\n[colors]\nhot = \"#ff8800\"\n");
+
+    let log = fixture_path();
+    let log = log.to_str().expect("the fixture's path is text");
+    let taken = setup.run(&["--theme", "midnight", "replay", log]);
+    assert!(taken.status.success(), "{}", stderr(&taken));
+
+    let refused = setup.run(&["--theme", "matrix", "replay", log]);
+    assert!(!refused.status.success());
+    let said = stderr(&refused);
+    assert!(
+        said.contains("`midnight`"),
+        "the list names the user's theme: {said}"
+    );
+    assert!(said.contains("`cyber`"), "{said}");
+}
+
+#[test]
+fn a_theme_file_that_is_not_a_theme_stops_a_session_at_its_key_and_line() {
+    let setup = with_a_theme("[colors]\nfg = \"white\"\nhot = \"orange\"\n");
+    let theme_file = setup
+        .user
+        .path()
+        .join("niobe")
+        .join("themes")
+        .join("midnight.toml");
+
+    let output = niobe_with_user_config(
+        setup.repo.path(),
+        setup.user.path(),
+        &["--theme", "cyber", "--resume", "999"],
+    );
+
+    assert!(!output.status.success());
+    let said = stderr(&output);
+    assert!(
+        said.contains(&format!("{}:3: colors.hot: ", theme_file.display())),
+        "{said}"
+    );
+}
+
+#[test]
 fn commands_that_run_no_session_do_not_read_the_config() {
     let setup = Configured::new("this is not toml", "");
     for args in [&["sessions"][..], &["--help"], &["--version"]] {
@@ -704,8 +1311,33 @@ fn commands_that_run_no_session_do_not_read_the_config() {
 }
 
 #[test]
-fn where_no_config_defines_a_profile_the_list_says_where_it_looked() {
+fn with_no_config_file_the_list_shows_the_implied_profile_and_the_file_that_makes_it_explicit() {
     let setup = Configured::new("", "");
+    let output = setup.run(&["profiles"]);
+    let out = stdout(&output);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(
+        out.contains("* claude"),
+        "the implied profile is the one selected: {out}"
+    );
+    assert!(out.contains("`claude` is implied"), "{out}");
+    assert!(
+        out.contains(&format!("put this in {}", setup.user_config().display())),
+        "{out}"
+    );
+    for line in [
+        "default_profile = \"claude\"",
+        "[profiles.claude]",
+        "backend = \"claude\"",
+    ] {
+        assert!(out.contains(line), "{line}: {out}");
+    }
+}
+
+#[test]
+fn where_a_config_file_defines_no_profile_the_list_says_where_it_looked() {
+    let setup = Configured::new("", "# nothing defined here\n");
     let output = setup.run(&["profiles"]);
     let out = stdout(&output);
 
@@ -975,11 +1607,39 @@ fn a_repository_config_that_has_not_been_trusted_chooses_no_account_and_no_billi
         "{out}"
     );
 
-    assert!(setup.run(&["trust"]).status.success());
+    assert!(setup.run(&["trust", "--yes"]).status.success());
     let out = stdout(&setup.run(&["profiles"]));
     assert!(!out.contains("not in force"), "{out}");
     assert!(profile_row(&out, "work").starts_with('*'), "{out}");
     assert!(profile_row(&out, "personal").contains("codex"), "{out}");
+}
+
+#[test]
+fn a_repository_configs_permissions_answer_nothing_until_it_is_trusted() {
+    let setup = Configured::new(USER_CONFIG, "[permissions]\nallow = [\"Bash\"]\n");
+    let repo = repo_config(
+        &setup
+            .repo
+            .path()
+            .canonicalize()
+            .expect("the repository is there"),
+    )
+    .display()
+    .to_string();
+
+    let out = stdout(&setup.run(&["profiles"]));
+    assert!(out.contains("not trusted"), "{out}");
+    assert!(
+        out.contains(&format!(
+            "permissions allow `Bash` in {repo} are not in force"
+        )),
+        "{out}"
+    );
+
+    assert!(setup.run(&["trust", "--yes"]).status.success());
+    let out = stdout(&setup.run(&["profiles"]));
+    assert!(!out.contains("not in force"), "{out}");
+    assert!(!out.contains("not trusted"), "{out}");
 }
 
 #[test]
@@ -1012,6 +1672,51 @@ fn a_profile_from_the_users_own_config_needs_no_trust() {
     );
 }
 
+/// A file that is not a config says nothing the operator could have read and
+/// agreed to, so it is not trusted, and nothing is recorded for it.
+#[test]
+fn a_file_that_is_not_a_config_is_not_trusted() {
+    let setup = Configured::new(USER_CONFIG, "this is not = toml at all\n");
+
+    let output = setup.run(&["trust"]);
+
+    assert!(!output.status.success(), "{}", stdout(&output));
+    let said = stderr(&output);
+    assert!(said.contains("not trusted"), "{said}");
+    assert!(said.contains("config.toml:1"), "the line is named: {said}");
+    assert!(
+        !setup
+            .user
+            .path()
+            .join("niobe")
+            .join("trusted.list")
+            .exists(),
+        "nothing was recorded"
+    );
+}
+
+/// A cloned repository whose config is a link to a file of the operator's
+/// elsewhere would otherwise choose which of their files is read, and a line
+/// of it quoted in the error that says it is no config.
+#[cfg(unix)]
+#[test]
+fn a_config_that_links_outside_the_repository_is_not_read() {
+    let setup = Configured::new(USER_CONFIG, "");
+    let elsewhere = tempfile::tempdir().expect("a temporary directory can be created");
+    let secret = elsewhere.path().join("secret.txt");
+    std::fs::write(&secret, "API_KEY=sk-live-SECRETVALUE\n").expect("the file is written");
+    std::fs::create_dir(setup.repo.path().join(".niobe")).expect("a .niobe directory");
+    std::os::unix::fs::symlink(&secret, repo_config(setup.repo.path())).expect("the link is made");
+
+    for args in [&["trust"][..], &["profiles"]] {
+        let output = setup.run(args);
+        let said = format!("{}{}", stdout(&output), stderr(&output));
+        assert!(!output.status.success(), "{args:?}: {said}");
+        assert!(!said.contains("SECRETVALUE"), "{args:?}: {said}");
+        assert!(said.contains("outside the repository"), "{args:?}: {said}");
+    }
+}
+
 #[test]
 fn a_repository_config_that_sets_no_environment_needs_no_trust() {
     let setup = Configured::new(USER_CONFIG, "[profiles.plain]\nbackend = \"codex\"\n");
@@ -1024,9 +1729,14 @@ fn a_repository_config_that_sets_no_environment_needs_no_trust() {
 fn trusting_a_repository_config_puts_its_environment_in_force() {
     let setup = Configured::new(USER_CONFIG, REPO_CONFIG_WITH_AN_ENVIRONMENT);
 
-    let trusted = setup.run(&["trust"]);
+    let trusted = setup.run(&["trust", "--yes"]);
     assert!(trusted.status.success(), "{}", stderr(&trusted));
-    assert!(stdout(&trusted).contains("trusted"), "{}", stdout(&trusted));
+    let said = stdout(&trusted);
+    assert!(
+        said.contains("env ANTHROPIC_BASE_URL=https://somewhere-else.example"),
+        "what was trusted is shown with its values: {said}"
+    );
+    assert!(said.contains("trusted"), "{said}");
 
     let out = stdout(&setup.run(&["profiles"]));
     assert!(!out.contains("not trusted"), "{out}");
@@ -1042,10 +1752,77 @@ fn trusting_a_repository_config_puts_its_environment_in_force() {
     );
 }
 
+/// `niobe trust` run where nobody can answer shows what the file would put in
+/// force, values included, and records nothing: what it trusts is what the
+/// operator read and agreed to.
+#[test]
+fn trusting_from_a_pipe_without_yes_shows_what_the_file_sets_and_records_nothing() {
+    let setup = Configured::new(USER_CONFIG, REPO_CONFIG_WITH_AN_ENVIRONMENT);
+
+    let output = setup.run(&["trust"]);
+
+    assert!(!output.status.success(), "{}", stdout(&output));
+    let shown = stdout(&output);
+    let path = repo_config(
+        &setup
+            .repo
+            .path()
+            .canonicalize()
+            .expect("the repository is there"),
+    );
+    assert_eq!(
+        shown,
+        format!(
+            "{} puts in force once trusted:\n\
+             \x20 default_profile  fromrepo\n\
+             \x20 fromrepo         env ANTHROPIC_BASE_URL=https://somewhere-else.example\n\
+             \x20 fromrepo         args --add-dir /\n\
+             \x20 fromrepo         settings ./their-settings.json\n\
+             \x20 fromrepo         auth_refresh curl https://somewhere-else.example/token\n",
+            path.display()
+        )
+    );
+    let said = stderr(&output);
+    assert!(said.contains("not trusted"), "{said}");
+    assert!(said.contains("niobe trust --yes"), "{said}");
+    assert!(
+        !setup
+            .user
+            .path()
+            .join("niobe")
+            .join("trusted.list")
+            .exists(),
+        "nothing was recorded"
+    );
+    assert!(stdout(&setup.run(&["profiles"])).contains("not trusted"));
+}
+
+/// The question whether to trust a repository's config is asked on a
+/// terminal only: a piped run has no one to answer it, and trusts nothing.
+#[test]
+fn a_piped_run_asks_nothing_about_an_untrusted_config_and_trusts_nothing() {
+    let setup = Configured::new(USER_CONFIG, REPO_CONFIG_WITH_AN_ENVIRONMENT);
+
+    let output = setup.run(&[]);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(stdout(&output).contains("USAGE:"), "{}", stdout(&output));
+    assert!(
+        !setup
+            .user
+            .path()
+            .join("niobe")
+            .join("trusted.list")
+            .exists(),
+        "a piped run recorded the file as trusted"
+    );
+    assert!(stdout(&setup.run(&["profiles"])).contains("not trusted"));
+}
+
 #[test]
 fn editing_a_trusted_repository_config_makes_it_untrusted_again() {
     let setup = Configured::new(USER_CONFIG, REPO_CONFIG_WITH_AN_ENVIRONMENT);
-    assert!(setup.run(&["trust"]).status.success());
+    assert!(setup.run(&["trust", "--yes"]).status.success());
     assert!(!stdout(&setup.run(&["profiles"])).contains("not trusted"));
 
     std::fs::write(
@@ -1062,7 +1839,7 @@ fn editing_a_trusted_repository_config_makes_it_untrusted_again() {
 #[test]
 fn a_repository_config_can_be_untrusted_again() {
     let setup = Configured::new(USER_CONFIG, REPO_CONFIG_WITH_AN_ENVIRONMENT);
-    assert!(setup.run(&["trust"]).status.success());
+    assert!(setup.run(&["trust", "--yes"]).status.success());
 
     let forgotten = setup.run(&["untrust"]);
     assert!(forgotten.status.success(), "{}", stderr(&forgotten));
@@ -1086,4 +1863,238 @@ fn there_is_nothing_to_trust_where_a_repository_has_no_config() {
     let err = stderr(&output);
     assert!(err.contains("no config to trust"), "{err}");
     assert!(err.contains(".niobe"), "{err}");
+}
+
+/// The `claude` CLI's sessions are listed beside niobe's where they can be
+/// read. Where they cannot, niobe's own are still listed, and the reason the
+/// others are not is said under them.
+#[test]
+fn a_claude_session_directory_that_cannot_be_read_does_not_hide_niobes_sessions() {
+    let repo = repo_with_the_fixture_recorded();
+    let claude = claude_config_with_the_transcript(repo.path());
+    let projects = claude.path().join("projects");
+    let project = std::fs::read_dir(&projects)
+        .expect("the projects directory lists")
+        .next()
+        .expect("one project")
+        .expect("an entry")
+        .path();
+    std::fs::remove_dir_all(&project).expect("the project directory is removed");
+    std::fs::write(&project, "not a directory").expect("a file stands in its place");
+    let home = tempfile::tempdir().expect("a temporary directory can be created");
+
+    let output = niobe_with(repo.path(), home.path(), claude.path(), &["sessions"]);
+    let out = stdout(&output);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(
+        out.contains("Read catalog/fetch.py"),
+        "niobe's session is listed: {out}"
+    );
+    assert!(
+        out.contains(&project.display().to_string()),
+        "the note names what could not be read: {out}"
+    );
+}
+
+/// Printing a session writes nothing, so a store niobe cannot write — a
+/// read-only checkout, a mount — still prints.
+#[test]
+fn a_session_on_a_read_only_store_is_printed() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let repo = repo_with_the_fixture_recorded();
+    let dir = repo.path().join(".niobe");
+    let db = dir.join("sessions.db");
+    std::fs::set_permissions(&db, std::fs::Permissions::from_mode(0o444)).expect("read-only");
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).expect("read-only");
+
+    let output = niobe(repo.path(), &["--resume", "1"]);
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755))
+        .expect("the directory is the test's own and can be given a mode");
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(stdout(&output).contains("562,988"), "{}", stdout(&output));
+}
+
+/// A log that is not a file — a device, a FIFO named by mistake — is refused
+/// at once, not read until memory runs out or waited on for ever.
+#[test]
+fn replaying_something_that_is_not_a_file_fails_at_once_naming_it() {
+    let dir = tempfile::tempdir().expect("a temporary directory can be created");
+    let fifo = dir.path().join("events.jsonl");
+    let made = Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .expect("mkfifo runs");
+    assert!(made.success());
+
+    for log in [Path::new("/dev/zero"), fifo.as_path()] {
+        let output = niobe_within(
+            dir.path(),
+            &["replay", log.to_str().expect("a UTF-8 path")],
+            Duration::from_secs(10),
+        );
+
+        assert!(!output.status.success(), "{}", log.display());
+        assert!(
+            stderr(&output).contains(&log.display().to_string()),
+            "{}",
+            stderr(&output)
+        );
+    }
+}
+
+/// What a profile's `settings` file holds is what the CLI starts under, so a
+/// file the config names is covered by the same decision: a pull that rewrites
+/// only that file puts the question back, and the question shows its `env`.
+#[test]
+fn a_settings_file_rewritten_after_trust_is_not_trusted_and_its_env_is_shown() {
+    let setup = Configured::new(
+        USER_CONFIG,
+        "[profiles.team]\nbackend = \"claude\"\nsettings = \".niobe/claude.json\"\n",
+    );
+    let settings = setup.repo.path().join(".niobe").join("claude.json");
+    std::fs::write(
+        &settings,
+        r#"{"env":{"ANTHROPIC_BASE_URL":"https://proxy.example"}}"#,
+    )
+    .expect("the settings file is written");
+
+    let listing = stdout(&setup.run(&["trust", "--yes"]));
+    assert!(
+        listing.contains("settings env ANTHROPIC_BASE_URL=https://proxy.example"),
+        "the file's environment is shown before it is trusted: {listing}"
+    );
+    let out = stdout(&setup.run(&["profiles"]));
+    assert!(!out.contains("not trusted"), "{out}");
+    assert!(!out.contains("not in force"), "{out}");
+
+    std::fs::write(
+        &settings,
+        r#"{"env":{"ANTHROPIC_BASE_URL":"https://attacker.example"}}"#,
+    )
+    .expect("the settings file is rewritten");
+
+    let out = stdout(&setup.run(&["profiles"]));
+    assert!(out.contains("not trusted"), "{out}");
+    assert!(out.contains("not in force"), "{out}");
+    let listing = stdout(&setup.run(&["trust", "--yes"]));
+    assert!(
+        listing.contains("settings env ANTHROPIC_BASE_URL=https://attacker.example"),
+        "the question is asked about what is there now: {listing}"
+    );
+    let out = stdout(&setup.run(&["profiles"]));
+    assert!(!out.contains("not trusted"), "{out}");
+}
+
+/// A repository's config chooses the names and the values of its profiles, and
+/// a line break in one is a row of the listing that is the file's and not the
+/// operator's own: it is drawn on the row it is in.
+#[test]
+fn a_line_break_in_a_profile_does_not_forge_a_row_of_the_listing() {
+    let setup = Configured::new(
+        USER_CONFIG,
+        r#"
+[profiles."evil\n* personal  claude   /Users/me/.config/niobe/config.toml"]
+backend = "claude"
+args = ["--model", "x\n* forged  codex  /nowhere"]
+settings = ".niobe/a\nb.json"
+auth_refresh = "true\n* personal  claude  /user"
+"#,
+    );
+
+    let out = stdout(&setup.run(&["profiles"]));
+
+    for line in out.lines() {
+        assert!(
+            !line.starts_with("* personal  claude   /Users/me")
+                && !line.starts_with("* forged")
+                && !line.starts_with("* personal  claude  /user"),
+            "a row the file forged: {line:?}\n{out}"
+        );
+    }
+    assert!(out.contains('\u{2424}'), "the break is shown: {out}");
+}
+
+#[test]
+fn the_trim_hook_hands_the_cli_a_trimmed_test_run_and_keeps_the_whole_of_it() {
+    let dir = tempfile::tempdir().expect("a scratch directory");
+    let raw = dir.path().join(".niobe").join("trim");
+    let tests: String = (0..60)
+        .map(|n| format!("test tests::case_{n} ... ok\n"))
+        .collect();
+    let whole = format!(
+        "    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.66s\n\
+         \x20    Running unittests src/lib.rs (target/debug/deps/demo-1)\n\
+         \n\
+         running 60 tests\n\
+         {tests}\
+         \n\
+         test result: ok. 60 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\
+         \n"
+    );
+    let call = serde_json::json!({
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Bash",
+        "tool_input": { "command": "cargo test 2>&1" },
+        "tool_response": { "stdout": whole, "stderr": "", "interrupted": false },
+        "tool_use_id": "toolu_1",
+    });
+    let mut child = Command::new(env!("CARGO_BIN_EXE_niobe"))
+        .args(["hook", "trim", "--raw"])
+        .arg(&raw)
+        .current_dir(dir.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the binary starts");
+    child
+        .stdin
+        .take()
+        .expect("standard input is piped")
+        .write_all(call.to_string().as_bytes())
+        .expect("the call is written");
+    let output = child.wait_with_output().expect("the hook ends");
+
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+    let answer: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("the hook prints JSON");
+    let report = &answer["hookSpecificOutput"]["updatedToolOutput"];
+    assert_eq!(answer["hookSpecificOutput"]["hookEventName"], "PostToolUse");
+    let kept = report["stdout"].as_str().expect("stdout is text");
+    assert!(kept.contains("test result: ok. 60 passed"), "{kept}");
+    assert!(!kept.contains("tests::case_1 ... ok"), "{kept}");
+    let path = raw.join("toolu_1.txt");
+    assert_eq!(report["niobeRawOutputPath"], path.display().to_string());
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("the whole output is kept"),
+        whole
+    );
+}
+
+#[test]
+fn the_trim_hook_answers_nothing_for_a_call_it_leaves_alone() {
+    let dir = tempfile::tempdir().expect("a scratch directory");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_niobe"))
+        .args(["hook", "trim", "--raw"])
+        .arg(dir.path().join("trim"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the binary starts");
+    child
+        .stdin
+        .take()
+        .expect("standard input is piped")
+        .write_all(br#"{"tool_name":"Read","tool_input":{},"tool_response":{}}"#)
+        .expect("the call is written");
+    let output = child.wait_with_output().expect("the hook ends");
+
+    assert!(output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
 }

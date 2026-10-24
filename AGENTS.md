@@ -37,28 +37,79 @@ and is deliberately not part of the public repository. It never overrides §4.
 
 A Cargo workspace. The crate graph is the architecture: who may depend on whom is enforced in CI.
 
+At the root beside this file: `PRINCIPLES.md` is the binding standard a change is graded against —
+each principle with its trigger, its check and a Niobe example, the change-risk tiers, the review
+ownership matrix and the one severity rubric every reviewer cites (§3.2); `CONTRIBUTING.md` is the
+short version for a contributor; `.claude/skills/` and `.claude/agents/` are the workflows and the
+reviewers that encode both, for an agent working in this tree.
+
 - **`crates/niobe-core/`** — the shared vocabulary. `event.rs` is the event model, the one type
-  every backend produces into; `session.rs` is `SessionState`, the fold every consumer derives its
+  every backend produces into, where a file change says whether it was the project's or one of
+  the notes the agent keeps for itself, which the session's figures leave out; `session.rs` is `SessionState`, the fold every consumer derives its
   numbers from, for each turn that has ended as well as for the whole session; `permission.rs` is the standing answer to a permission prompt (`Rule`,
-  `Allowlist`), which the shell matches and the config stores; `diff.rs` is the line arithmetic
+  `Allowlist`), which the shell matches and the config stores, and which refuses a rule copied in
+  Claude Code's own `:*` or `**` form with the rule to write instead; `diff.rs` is the line arithmetic
   every backend counts a file change with, so two bridges cannot disagree about what a changed
-  line is, and the `Hunk` a change's lines travel in where the backend reported them; `test_run.rs` recognises a shell
+  line is, and the `Hunk` a change's lines travel in where the backend reported them, and the
+  lines an edit still waiting on the operator would remove and add; `keys.rs` is the F-key bar's ten actions and the few chords a config may rebind them to —
+  F1 to F12 and the Ctrl letters nothing else answers to — checked once for a key two actions would
+  share or another action's own, so the config that writes them and the shell that draws them agree;
+  `proposal.rs` is what a call
+  waiting on the operator would do — replace text in a file, write a file whole, run a command,
+  let a plan go ahead — as the backend read it out of the call's arguments, and which arguments that reading covers; `test_run.rs` recognises a shell
   command that runs `cargo test` and reads the counts out of its output, only where the output
   holds the whole run, and where it does not, whether what is left shows the run failing after its
   tests started, and which tests each failing binary listed wherever its list survived, so
-  every backend reads a test run the same way. Depends on no other workspace crate and on no wire format.
+  every backend reads a test run the same way; `trim.rs` is a cargo command's output with cargo's progress
+  lines and libtest's passing-test lines left out, every other line kept in order, so that it
+  reads the same to `test_run.rs` as the whole; `tests/trim.rs` trims the cargo runs recorded in
+  `tests/fixtures/trim/`, whose README carries the byte counts it asserts, worked out with `grep`;
+  `work.rs` puts each tool call under the kind of
+  work it did — exploring code, editing files, building and testing, version control, the web,
+  delegating, an MCP server, housekeeping — from the tool's name or, for a shell call, from the
+  whole command the backend reports on the call's end, read with `test_run.rs`'s splitting, and
+  names the programs that did it; `image.rs` is an image the operator attached to a
+  prompt — its bytes and the kind they were read as, from their signature, never from a name —
+  refused past the 5 MB a model takes, and the `[Image #N]` placeholder a prompt holds where it
+  went; `attention.rs` is how much an event asks of the operator — it needs them, it is notable,
+  or it is routine — read from the event alone, never by a model, so the shell's transcript can
+  leave the routine out and a session read back reads as it did live. `catch_up.rs` is what happened
+  since the operator last looked — the turns ended, the files changed and by how much, the
+  sub-agents started and finished, the errors, the questions asked and waiting, how far the
+  five-hour window moved — as the fold now less a `Mark` of it, so every figure is the fold of
+  the events after the mark and no model sums anything up; the shell records the mark as
+  `Event::Looked` on a key pressed after something it counts, so a session taken up again
+  tells the operator what happened after they last looked. `decision.rs` reads the
+  decisions a reply states — each line that opens `DECISION:`, outside fenced code — which
+  the binary asks the agent for and the fold keeps as the agent's own account, never as a
+  fact it checked. Depends on no other
+  workspace crate and on no wire format.
 - **`crates/niobe-ledger/`** — token and cost accounting, and the provenance label every figure
   carries (`Measured`, `ApiEquivalent`, `Unpriced`). `prices.toml` is the bundled price table:
   per-model rates, each dated from the day it took effect, with the published source of every
   number in its comments; `parse.rs` walks it by hand like the config, `table.rs` looks a model
-  up by exact id on a day and prices a usage record against it. The same file dates each model's
+  up by exact id on a day and prices a usage record against it. `price.rs` is a model's price
+  from the day it took effect — its rates, any long-context tier and the multiple fast mode
+  costs — held as whole millionths of a dollar per million tokens, so a cost is summed in
+  integers and becomes dollars once; `date.rs` is the day a price is in force from, and
+  `error.rs` names the file, line and key of a price that cannot be used. The same file dates each model's
   context window in its `[[context]]` entries, which the shell's context meter falls back on where
   the backend has not reported one. `tests/prices.rs` checks the table against costs computed by
   hand, and `tests/contexts.rs` its windows against the published sizes.
 - **`crates/niobe-config/`** — the config: profiles, each a backend plus the environment,
-  arguments and credential refresh it runs with and, where the backend cannot tell, how the
-  account behind it is billed, and the `[permissions]` rules a session answers
-  prompts with before asking. `parse.rs` walks the spanned TOML document by hand so that an
+  arguments and credential refresh it runs with (the refresh command is read and listed, and not
+  run yet: nothing tells an expired login from another failure) and, where the backend cannot tell, how the
+  account behind it is billed, the `[permissions]` rules a session answers
+  prompts with before asking, whether a new session is titled by the model (`titles`), which a
+  file nobody trusted can turn off and not on, whether a new conversation asks for terse replies
+  (`terse`, off unless a file turns it on, from any file since the words are Niobe's own),
+  whether a new conversation is asked to state its decisions (`decisions`, on unless a file
+  turns it off, from any file for the same reason),
+  whether the agent reads cargo's output trimmed (`trim`, the same), and
+  whether the shell rings the bell and sends a
+  desktop notification when it calls the operator back (`[notify]`), and how many minutes
+  with no key pressed are away and whether the first key back shows what happened
+  (`[catch_up]`). `parse.rs` walks the spanned TOML document by hand so that an
   invalid file is reported as its key and line; `write.rs` splices one rule into the `allow`
   array at the byte range the parser gives it, so the operator's comments and ordering survive,
   under a lock on the file's directory so two sessions adding rules at once both keep theirs;
@@ -68,65 +119,195 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   mebibyte — because a repository can commit its config as a link to `/dev/zero`;
   `trust.rs` records which config files may put an `env`, `args`, a `settings` file or an
   `auth_refresh` in front of a backend — or say how a profile is billed, choose the default
-  profile, or replace one of the user's — as each file's SHA-256 under the user's own config
-  directory, because a repository's file arrives with the clone; `lib.rs` layers a repository's file over the user's, withholds
+  profile, allow tool calls without asking, or replace one of the user's — as each file's SHA-256 under the user's own config
+  directory, because a repository's file arrives with the clone; `error.rs` names the file in
+  every failure, and the line and key of every invalid value; `lib.rs` layers a repository's file over the user's, withholds
   what an untrusted file may not set, and selects the profile a session runs under.
 - **`crates/niobe-store/`** — the session store: every event of every session, append-only, in
-  SQLite (`store.rs`; the triggers in its schema refuse an update or a delete). `recorder.rs` is
-  the write side a running session holds; `jsonl.rs` reads a JSON Lines event log.
+  SQLite (`store.rs`; the triggers in its schema refuse an update or a delete), which also reads
+  every prompt of every session in one statement, and the backend conversations each carried
+  on, for the shell's history, and the newest plan usage windows a profile's sessions recorded,
+  which a new session shows, dated, until its own backend reports. `recorder.rs` is
+  the write side a running session holds, and says whether another holds a session without
+  taking it; `jsonl.rs` reads a JSON Lines event log, each line dated where it carries an
+  `at` in the milliseconds the store dates an event by.
 - **`crates/niobe-tui/`** — the terminal UI (ratatui). `app.rs` is the state the shell draws from,
   including which pane has the keyboard — the one the scroll keys, the wheel and a section cursor
-  go to — `ui.rs` draws it, `run.rs` is the event loop, `journal.rs` is the trait the loop hands the
-  operator's events to and `rules.rs` the one it hands their standing answers to, `terminal.rs`
-  enters and restores the terminal — and hands it back for a stop and takes it again after — the mouse it takes for the wheel and clicks, the bracketing it
+  go to — and each transcript entry's attention, the highest of the events that built it, `ui.rs`
+  draws it, leaving the routine entries out where `n` is pressed in a side pane, each run of them
+  a row that counts them, its Activity pane listing the decisions the agent's replies stated,
+  newest first under a heading that says they are its own account, and counting tool calls by kind of work with what
+  did each under it, and by the tools' own names where `t` is pressed in that pane, `run.rs` is the event loop, `journal.rs` is the trait the loop hands the
+  operator's events to and `rules.rs` the one it hands their standing answers to, `bridge.rs`
+  the one it sends turns to and takes events from, `watch.rs` the one it asks what the
+  repository looks like now, and `prices.rs` the one it asks to value the tokens no reported
+  cost covers yet, which it shows marked as an estimate, `terminal.rs`
+  enters and restores the terminal — and hands it back for a stop and takes it again after — the mouse it takes for the wheel, clicks and drags, the bracketing it
   asks pastes to arrive in, and the keyboard
   enhancement it pushes where the terminal says it can tell Shift+Enter from Enter — or the
   modifyOtherKeys it asks for where the terminal answers only its attributes, as tmux does —
   `input.rs` waits on the terminal and, where `poll(2)` sees it, reads it too, `keys.rs` makes
   events of those bytes as crossterm would, plus the modifyOtherKeys form crossterm drops, and
-  a bracketed paste as one paste whose line breaks are not Enter, `theme.rs` is the
+  a bracketed paste as one paste whose line breaks are not Enter, `menu.rs` is the menus and
+  the F-key bar — every action the shell can be asked for, the key or backend command that
+  reaches each without the menu, what each does in the words `niobe --help` lists the F-keys
+  with, and where each is drawn so a click lands on it, and the commands that, typed as a
+  prompt, do what an action does — `/model`, `/memory`, `/mcp`, `/resume`, `/help` and the
+  rest — so each action has one path however it is asked for; F7 and `/mcp` open the MCP
+  view; F6 and `/rewind` list the prompts sent from here since the conversation started, newest
+  first, to put the files back as they were before one, the conversation kept; a backend
+  command is sent only where the backend listed it, and an action no backend offers says why —
+  `theme.rs` is the
   palette — one table entry per theme in the sixteen ANSI names, which is what a terminal gets
   unless `COLORTERM` says it draws 24-bit colour; then the designed themes draw their own values,
-  and `classic`, which is the sixteen, still honours the user's scheme — `text.rs` wraps, truncates and expands tabs, `find.rs` finds a query in the transcript as it is drawn and marks
-  where, `mention.rs` completes an `@` word from the files the CLI listed, `slash.rs` offers the
-  backend's own commands where a prompt opens with `/` — typed `//`, since one `/` on an empty
-  composer searches — from the list the backend sent, `shell.rs` is the trait the loop
+  and `classic`, which is the sixteen, still honours the user's scheme — `text.rs` wraps, truncates, pads to a column by cells and expands tabs, `find.rs` finds a query in the transcript as it is drawn and marks
+  where, `select.rs` is a drag's selection of the transcript as drawn, the text it copies and
+  the link under a click, `desktop.rs` the trait the loop hands what to copy, what to open and what to edit to,
+  `trust.rs` the question a session opens on where the repository's config sets what only a
+  trusted file may — `run::ask_trust` asks it on a loop of its own, before any backend is
+  started, because the answer decides what one starts with — `mention.rs` completes an `@` word from the files the CLI listed, `slash.rs` offers the
+  backend's own commands and skills where a prompt opens with `/`, and the skills alone where a
+  later word does, from the list the backend sent, and finds where a prompt names one, which the
+  composer and the transcript draw in the theme's command colour — the transcript is searched
+  with Ctrl+F — `shell.rs` is the trait the loop
   hands the operator's `!` commands to, and where who allows them and what they reach is written
-  down, `markdown.rs` draws the assistant's replies
+  down, `images.rs` the one it asks for an image from — the clipboard on Ctrl+V or an empty paste,
+  or the file a pasted or dropped path names — and what numbers each and sends it with the prompt
+  it was attached in, where that still holds its placeholder — never with a recalled prompt that
+  names its number — `history.rs` the one it asks for the repository's earlier
+  sessions — and the walk Up and Down take through earlier prompts from the composer's first and
+  last row, the draft set aside and given back, by Down past the newest or after the prompt shown is
+  sent, or by Esc while the rule above the composer says the prompt in it is a recalled one, and an
+  edit that ends the walk — `browse.rs` draws the history dialog Ctrl+R
+  and Session › Resume… open, its prompts or its sessions filtered by what is typed, with the
+  row under the cursor in full below the list; Enter on a session ends this one and the loop
+  hands the chosen one back for the binary to open — one another niobe has open is marked in
+  use and refused while this one is still open, `memory.rs` is the trait the loop asks for
+  the files the agent is given as memory when F8 opens the Memory view, and draws it — each
+  file's scope, path and size in the order the agent is given them, imports under the file
+  importing them, one the session changed marked, Enter showing a file's text read-only and
+  `e` opening it in a text editor on the terminal the loop lends it, never through the system's
+  opener — `mcp.rs` draws the MCP view from the servers the session's fold last holds, so a
+  newer report is what an open view shows: a server a row with how it stands, the scope it is
+  configured in and its tool count, Enter showing one whole — why it failed, how it is reached,
+  what it calls itself, its tools — and `r` asking the backend to reconnect it, the one change
+  offered, since it is the one recorded leaving nothing changed past the session; it sends no
+  turn, so it opens while one runs, and names the CLI and files that add, remove, turn off or
+  sign in to one — `markdown.rs` draws the assistant's replies
   from their markdown and wraps the styled text itself, so the transcript's line count stays
   exact, `hunks.rs` draws a file change under the call that made it as the lines that changed,
   cut at twenty rows until Ctrl+T opens every cut diff in place,
-  `calls.rs` draws a tool call as a row of a table — its name in a fixed column, what it does
-  behind the name of the sub-agent that made it where one did, and on the right what it cost, by what the backend reported and the shell's own clock — with
-  what a test run reported under the call that ran it, and a run of calls to one tool as one
-  group that Ctrl+O folds, `turns.rs` draws the rule under a
-  finished turn with what that turn spent — its tokens, how far it moved the five-hour window and
-  how long it took — giving up whole figures where the pane is narrow,
-  and `fx.rs` is what the desktop behind the panes does while a turn is running — rain, drifting
-  words or a radar, by theme, and nothing where `effects = false` — a picture of the whole screen
-  that is a pure function of the theme, the screen's size and how long the turn has run, so a
-  frame of it can be asserted rather than merely observed to move. The panes cover it: it is
-  worked out only for the cells they leave uncovered, and a test proves no pane cell changes. Snapshot pictures of the screen live in
-  `tests/snapshots/`.
+  `calls.rs` draws a tool call as a row of a table — its name, the tag of the sub-agent that made
+  it where one did, each in a column as wide as the transcript's widest, what it does, and on the
+  right what it cost, by what the backend reported and the shell's own clock — the whole row dim
+  but for a failure, so the agents' words in the body colour are what the eye finds, and a shell
+  call named by the programs it ran (`cargo test · tail`, read with `work.rs`) with the whole
+  command under the row behind Ctrl+T — with
+  what a test run reported under the call that ran it, beside a bar of its counts — and while it
+  runs, how long it has run against the last whole run of the same command — a sub-agent's words as a reply under a head
+  that names the agent, rows with nothing under them on consecutive lines, a run of calls to one tool as one
+  group that Ctrl+O folds, edits to the agent's own notes as one `updated memory` row whose
+  lines Ctrl+T shows, and — where `a` is pressed in a side pane — each turn's sub-agent rows
+  grouped under a heading per agent — `arguments.rs` lays out a permission question's arguments one key to a row, with
+  the JSON as sent behind Ctrl+T, `proposed.rs` draws what a question's call would do where the
+  backend read it — an edit as the lines it removes and adds, wrapped and cut where a transcript
+  diff is, a file written as the lines it will hold and whether what it held is lost, a command
+  once, a plan whole as its markdown, with no standing answer offered and its refusal named
+  "keep planning" — and the arguments that reading does not cover by key, `tags.rs` names each sub-agent by one short word of the kind of agent
+  it was asked to be, numbered where two would read alike, `turns.rs` draws the rule under a
+  finished turn with what that turn did and spent — its sub-agents and calls, its tokens, how far
+  it moved the five-hour window and how long it took — giving up whole figures where the pane is narrow,
+  and names a turn that compacted the conversation as one, under the row that says what the
+  compaction shrank the context from and to. `usage.rs` is the arithmetic under the Usage
+  pane's breakdown — each model's share in whole percent that add up to 100, what each model
+  is called in a row and what the cache saved — `meter.rs` the two-tone bar every share in that
+  pane is drawn with, `tree.rs` groups the working tree's files under the directories they
+  share, and `spike.rs` finds a turn that spent more than three times the tokens the session's earlier
+  turns averaged, which the loop, never the fold, calls out by the turn's number; the loop also
+  has the app name the files a turn changed that no edit call reported, from a read of the
+  working tree that began after the turn started and one that began after it ended; and
+  `clock.rs` is the time the shell draws by, read by the loop once a tick and handed
+  in, and absent where the machine has no timezone or a log recorded no times. `alert.rs` is how
+  the shell calls the operator back — the bell, and the `OSC 9` or `OSC 777` notification the
+  binary says the terminal shows — when a question no standing rule answers comes up or a turn
+  sent from this shell ends without being stopped, which the app works out after the rules have
+  answered and the loop writes after the frame that shows it. `catch_up.rs` is the sheet of what
+  happened since the operator last looked, a row a figure, which the first key after minutes
+  with none opens — that key is spent on it — and `c` in a side pane or View › What happened…
+  opens since the last one shown. `detail.rs` is one tool call read whole — the arguments it
+  started with and the output its end carried, each headed by its size, nothing cut, and where
+  Niobe's hook trimmed that output, the whole of it behind `w` — opened from
+  the list of the conversation's calls that `d` in a side pane or View › Tool calls… shows, or by a click on the
+  call's row, a run of calls opening that list on its first; it
+  wraps only the rows on screen, so a megabyte of output pages as fast as a screenful. `s` in a side
+  pane or View › Just one agent… narrows the transcript to one sub-agent's own entries — what the
+  bridge read under that agent's id, and nothing of the session's — and its title says whose,
+  until the key again shows everything. `overview.rs` is the trait the loop asks for the project
+  overview that `o` in a side pane or View › Project overview… opens — written by the binary each
+  time it opens, never waited on — read in the dialog a call is read in, its lines broken
+  between words. A dialog, and a
+  permission question in the transcript, casts a shadow on what is under it. Snapshot pictures of the screen live in
+  `tests/snapshots/`, with the SVG picture of each theme the README shows, and `snapshots.rs` is the one switch that has a test rewrite them —
+  `UPDATE_SNAPSHOTS=1` exactly, and never on a CI runner.
 - **`crates/niobe-bridge-claude/`**, **`crates/niobe-bridge-codex/`** — drive the official CLIs
   and translate their output into `niobe_core::Event`. Vendor wire types stay inside the bridge.
   In the Claude bridge: `wire.rs` is the CLI's stream-json protocol and is private to the crate,
-  `translate.rs` turns one message of it into events and owns no process, `driver.rs` spawns the
-  binary, asks it with `initialize` what it offers — the answer is where the slash commands a
-  session starts with are listed, `commands_changed` only reports a change to them — keeps its
+  `translate.rs` turns one message of it into events and owns no process — and reads the CLI's
+  own mark of a call it did not run for want of permission, beside the result live and as the
+  transcript's `permissionDecision`, as refused, whoever refused it — and reads an `Edit`,
+  `Write`, `Bash` or `ExitPlanMode` permission prompt's arguments as what the call would do, and the MCP
+  servers every `init` lists, each with the tools of the session's that are its own, and the
+  CLI's answer to `mcp_status` — why a server failed, its scope, its transport and command or
+  address (never its arguments, environment or headers) — which it keeps for every later
+  `init`, and marks an edit
+  under the CLI's `projects/<project>/memory/` as the agent's own notes — `driver.rs` spawns the
+  binary, writes a turn with its attached images as base64 image blocks after the text, as the
+  CLI's own transcripts hold a pasted screenshot (`base64.rs` encodes them), looks, as a `Write` is asked about, whether a file is at the path it would replace, asks it with
+  `initialize` what it offers — the answer is where the slash commands a
+  session starts with are listed, `commands_changed` only reports a change to them — asks it
+  `mcp_status` whenever an `init` lists a server standing otherwise than it last said, and after
+  `mcp_reconnect`, which it sends for the MCP view's `r` — starts it with
+  `CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING` and sends each prompt with a `uuid`, which
+  `rewind_files` names to put the files back as they were before that prompt: a dry run first,
+  for which files, and the rewind itself only once the dry run has answered, said as one notice — asks it once,
+  where the config leaves titles on, to title a new session from its first prompt that is not a
+  command (`generate_session_title`, which the CLI answers from its small model and bills into the
+  session's running totals), and the only place the models the signed-in account can run are
+  listed, which the model picker offers — keeps its
   standard input open for the life of the session and writes it from a queue on a thread of its
   own, so a CLI that is not reading never holds up the screen, answers the permission prompts the CLI
   stops turns on, and starts it as the leader of a process group of its own, which a closing
   session ends whole, and so does a CLI that leaves mid-session, so nothing the CLI started
-  outlives it or holds the quit, or the report of its end, up on its pipes; `spilled.rs` reads the file the CLI saves a shell output
+  outlives it or holds the quit, or the report of its end, up on its pipes — a CLI that something
+  stops with a signal between turns is reported with a notice rather than as the session's end,
+  and the binary's bridge starts it again on its conversation, with `--resume`, at the next
+  prompt — and passes over a
+  line of its output past 64 MiB with a notice rather than hold it; `tap.rs` keeps, where the binary names a directory outside the repository with
+  `NIOBE_STREAM_DIR`, one file per CLI process holding its argv and every line that crossed its pipes
+  in order, written on a thread of its own, so a recording needs no shim on `PATH`; `spilled.rs` reads the file the CLI saves a shell output
   too large to hand over to, so a whole test run is counted from it rather than from the
-  preview, and both the driver and the transcript reader hand it to the translator;
+  preview, and the file under `.niobe/trim/` Niobe's hook wrote an output it trimmed to, which the
+  call's end carries as its `untrimmed` output, and both the driver and the transcript reader hand it to the translator;
+  `memory.rs` finds the files the CLI gives the agent as memory by the CLI's documented lookup —
+  the user's, every directory's from the root down, their `@` imports and the CLI's
+  auto-memory index and its notes — since the CLI does not say which it loaded;
   `transcript.rs` reads the session files the CLI keeps for
   itself, so a session started in plain Claude Code can be listed and carried on — it writes
-  nothing back, and folds through the same `translate.rs` as the live stream; a sub-agent's
+  nothing back, and folds through the same `translate.rs` as the live stream, each event beside
+  the time its record was stamped (`stamp.rs` reads the CLI's UTC stamps and nothing else), which
+  is what an import shows it at and stores it at — and a resumed
+  session's translator starts from the spend its last `cost-state` records, because the CLI
+  restores those running totals on `--resume` — where the file cannot be read, that spend is
+  unknown, the session says so and counts nothing of its first bill, rather than bill the
+  earlier session again — and a record the CLI was cut off writing, even inside a character,
+  is left out while the rest still reads, and only a regular file of at most 256 MiB is read,
+  so a FIFO or a vast file in the CLI's directory is refused rather than waited on or held in
+  memory; a sub-agent's
   own messages — its calls, its edits, its model and its tokens — are read from the file the CLI
   keeps for that agent beside the session's and folded in where the CLI's timestamps put them,
-  and its answer from the same file; `conformance.rs`
+  and its answer from the same file; a shell command the CLI ran in the
+  background ends, where the CLI says it did, as a notice naming the command, how it
+  ended and the exit code the CLI's summary names; `conformance.rs`
   names the CLI releases every shape in the crate was recorded from, which is what a session says
   once when it is driving a release nobody recorded. `tests/stream.rs` and `tests/transcript.rs`
   fold the recordings in `tests/fixtures/`, whose README carries the arithmetic the tests assert —
@@ -141,27 +322,111 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
   The codex bridge names its binary and does not spawn it yet.
 - **`crates/niobe-cli/`** — the `niobe` binary. The only crate that writes to the terminal outside
   the TUI, and the only one that wires the others together: it finds the config files and opens
-  the shell under the selected profile, with the session store as its journal and the
-  repository's config as the place a standing answer is kept, and where `niobe trust` records
-  that a repository's config may start a backend with what it names. `commands.rs` runs the
-  operator's `!` commands, off the draw path, and stops one when the operator asks — killing it if it will not end — and every one when the session ends, killing what has not ended half a second later; a command is over when its `sh` is, and what it put in the background is still stopped with the session. `reaper.rs` is a `sh` in a process group of its own, told every group the session starts — the CLI's and each `!` command's — which ends them when the pipe the session holds to it closes, so a session killed outright leaves nothing running. `backend.rs` is the only module
-  that names a bridge, so it is also where the `claude` CLI's own sessions are found and read in.
+  the shell under the selected profile, with the session store as its journal — written by
+  `journal.rs` on a thread of its own, so a store another process holds locked never holds the
+  screen up, and every event it could not keep is reported — and the repository's config as the place a standing answer is kept, and where `niobe trust` shows what a repository's config would put in force, values included,
+  and, once the operator agrees — on the terminal, or with `--yes` — records that it may start a
+  backend with what it names. `commands.rs` runs the
+  operator's `!` commands, off the draw path, each in a session of its own so that nothing it runs can write on the terminal the shell draws on, and stops one when the operator asks — killing it if it will not end — and every one when the session ends, killing what has not ended half a second later; a command is over when its `sh` is, and what it put in the background is still stopped with the session — all but a process that left the command's process group with `setsid`, which nothing is told of and which is left running. `images.rs` fetches the images the operator attaches, off the draw path: the clipboard through `osascript` on macOS and `wl-paste` or `xclip` on Linux, each with no terminal and a deadline, a pasted path relative to the session's directory, and an image too large to send shrunk with `sips` on macOS before it is refused. `memory.rs` reads the selected profile's backend's memory files for the Memory view, through `backend.rs`, on a thread of its own, so a slow lookup never holds a frame. `history.rs` reads the repository's earlier sessions on a thread of its own — the store's prompts and sessions, and the `claude` CLI's own sessions there that no Niobe session carried on and no program started over the CLI's SDK protocol — and the binary opens the session the history dialog chose, as `--resume` would, once the shell that chose it has closed. `alerts.rs` names the notification the terminal shows from `TERM_PROGRAM` and `TERM` — none inside tmux, or on a terminal it does not know — and lays the config's `[notify]` switches over it. `themes.rs` reads the user's own `themes/*.toml` — a base theme and the colours laid over it,
+  refused at their key and line, with a pairing drawn on its own colour or text under 3 to 1 — and
+  registers them with the TUI's theme table before the arguments are read, from the user's
+  directory only, never a repository's. `desktop.rs` copies what the operator selected with `pbcopy`, or `wl-copy`, `xclip` or `xsel`, and opens a clicked link with `open` or `xdg-open`, each with no terminal, in a process group of its own and not waited on; a memory file the operator asks to edit goes to `$VISUAL` or `$EDITOR` — or `open -t` on macOS and `vi` elsewhere — on the terminal the shell lends it, waited on, and never to `open` or `xdg-open`, which run a `.command` or `.desktop` file rather than show it. `reaper.rs` is a `sh` in a process group of its own, told every group the session starts — the CLI's and each `!` command's — which ends them when the pipe the session holds to it closes, so a session killed outright leaves nothing in them running; the CLI's group is let go of once it is seen empty, as each command's is. `consent.rs` builds that trust question, and the rows `niobe trust` prints, from the file as written, values included, since
+  the operator is deciding on them, and records the answer as `niobe trust` does, for the text
+  that was shown. `backend.rs` is the only module
+  that names a bridge, so it is also where the `claude` CLI's own sessions are found and read in,
+  and where the words a terse conversation, and one asked for its decisions, append to the
+  CLI's system prompt are written.
+  `trim.rs` is `trim = true`: `niobe hook trim --raw <dir>`, the `PostToolUse` hook on `Bash` the
+  CLI runs after a shell call succeeds, which hands back the call's report with its output trimmed
+  by `niobe-core`'s `trim.rs`, the whole of it written to `.niobe/trim/` and named in the report
+  (`niobeRawOutputPath`) and in a note under what the agent reads, and clears out the whole
+  outputs there older than fourteen days; and the settings the CLI is
+  started with, the profile's own file with the hook added, written there too, since the CLI reads
+  only the last `--settings` it is given. `main` answers the hook before reading anything else.
+  `args.rs` parses the command line by hand; `config.rs` finds the user's and the repository's
+  config files, layers them under the trust record and names the selected profile to the shell;
+  `repo.rs` is where the session runs — the repository's root, name and branch, the store under
+  `.niobe/`, kept to the operator alone and refused where a link would write it elsewhere, and
+  the `git` reads of the working tree made on a thread of its own as the shell's `Watch`,
+  each dated by when it began and, where the shell asked for it, sent though nothing changed;
+  `rules.rs` writes a standing answer into the repository's `.niobe/config.toml`, keeping the
+  operator's trust decision about that file; `prices.rs` is the price table `niobe prices`
+  prints and the sheet the shell values tokens with, at the rates of the days a session
+  spent them — a session read back is priced only where its rates held across those days, and
+  a log with no times is a floor; `profiles.rs` and `sessions.rs` are what
+  `niobe profiles` and `niobe sessions` print; `overview.rs` is what `niobe overview` prints —
+  every session the store holds, or the newest `--last` or those `--since` a day, folded, as one Markdown page of what went well and what went
+  wrong, what was left open — the files the sessions changed that git still lists uncommitted among it — the tools used most, the paths changed most and the decisions the
+  agents stated, newest first and marked as their own account, with no figure a
+  model wrote, and the page the shell's overview shows, written on a thread of its own; `cost.rs` is
+  what `niobe cost` prints — the same sessions, each with its tokens per kind and per model and
+  the money its backend reported, as a table, as `--csv`, as `--by-day` — each UTC day's
+  sessions and tokens summed by profile, with no money, since a day's would add a plan's nothing to a bill —
+  or `--by-turn`, each turn's tokens and a row for what no ended turn's figure holds, so a
+  session's rows add up to its total —
+  or as `--json` in the shape
+  `schema/cost.schema.json` publishes at the repository's root, with no money on a plan or where
+  nothing said how a session was billed and no figure priced by the table; `headless.rs` is
+  `niobe -p`: one turn sent through the same `Bridge` and recorded through the same `Journal` as
+  the shell's, each permission prompt answered by the standing rules — the config's, and those
+  `--allow` gave for that run alone, which nothing writes down — and every other refused with
+  words that tell the agent no one is there, and an outcome — finished, failed, or stopped on the
+  budget, read off the figures rather than the backend's wording — that the binary exits 0, 1 or
+  3 on, with `--json` in the shape `schema/print.schema.json` publishes, where the plan's windows
+  stood when it ended included; `bench.rs` is `niobe bench` — each task of a suite (`bench/` at
+  the repository's root holds twenty, each with its prompt, its files, a `check.sh` with hidden
+  tests beside it and a reference solution) run as its own `niobe -p` in a copy of the task's
+  files under the system's temporary directory, allowed to edit and write inside that copy and
+  nowhere else beyond the bench's own `--allow` rules, ended at its deadline, then judged by the
+  task's check run from the suite so that the agent cannot rewrite it, with a failing task's
+  copy kept, as a table or as `--json` in the shape `schema/bench.schema.json` publishes, and
+  with `--ab terse` the suite without the technique and then with it, side by side;
+  `doctor.rs` is what `niobe doctor` prints — one row each for
+  the CLIs found on `PATH`, whether each is signed in (asked of the CLI's own status command, never
+  read from its files), the config files and whether the repository's is trusted, and the terminal,
+  with the fix for each that is not fine, as text or as `--json` with nothing under the home
+  directory beyond `~`; `summary.rs` is what `niobe replay` and
+  `--resume` print where standard output is not a terminal, a cost left a floor by a session
+  recorded before its records said what a cost settles marked as an older recording, as the
+  Usage pane marks it, and a cache-write total with the share of it bought for an hour and the
+  share no record split, which `niobe overview` prints the same way; `playback.rs` is `niobe replay <log> --speed <n>`: the log handed to the shell as a backend hands it a live session's events, each at its recorded gap divided by the speed and none more than two seconds after the last, so the real panes fill as they did then; every line the binary prints goes
+  through `printable.rs`, which shows a character that would act on the terminal as one that
+  says where it was, and `stdout.rs`, which writes it without panicking, so a reader that stops
+  reading ends the run quietly.
   `tests/cli.rs` runs the binary;
   `tests/pty.rs` runs it on a real terminal, including against stand-in `claude` scripts; `tests/permission.rs` walks a recorded permission
   prompt from the bridge's translation to the rule in the config, which is the one path only this
   crate may name both ends of.
+  `tests/headless.rs` runs `niobe -p` against stand-in `claude` scripts — a reply, a prompt
+  refused and one a rule allows, a failure and a budget stop — and checks its JSON against the
+  published schema with the validator in `tests/schema/`, which `tests/cost.rs` uses too.
+  `tests/bench.rs` runs `niobe bench` against stand-in `claude` scripts — a task passed and one
+  failed, a turn that never ends and the CLI under it ended with it — and checks that every task
+  of the bundled suite fails as laid out and passes with its solution laid over it.
+  `tests/cost.rs` exports a store of a recording billed by use, the same on a plan and one that
+  never said, checks the JSON against the published schema and its figures against `jq`.
+  `tests/overview.rs` prints that page for a store of two recorded sessions, against a picture
+  and against counts `jq` reads off the recordings.
   `tests/billing.rs` folds the bridge's recordings into the shell and compares the Usage pane
-  with the pictures in its `tests/snapshots/`, one per way a session is billed.
+  with the pictures in its `tests/snapshots/`, one per way a session is billed. `tests/agents.rs` folds the
+  recording with sub-agents and narrows the transcript to each, against what the bridge said each
+  agent sent.
 - **`xtask/`** — workspace automation, run as `cargo xtask <task>`; the checks CI runs.
   `version.rs` is the workspace version: the eight places the root manifest writes it, and
-  what the conventional-commit subjects since the last release tag call for (§8).
+  what the conventional-commit subjects since the last release tag call for (§8). `headers.rs`
+  is the copyright header each file type carries (§5), `network.rs` the names the layering check
+  reads the tree for (§2.2), and `formula.rs` writes the Homebrew formula from the SHA-256 files a release published, which the
+  release workflow commits to the tap, `audit.rs` the sweep over whole-line comments for a section
+  banner, a reference to planning outside the repository or a `FIXME`, `HACK` or `XXX` (§4), each
+  failing the gate.
 - **`install.sh`** — what users install niobe with: POSIX `sh`, picks the archive for the machine,
   checks it against its published SHA-256 and puts `niobe` in `~/.local/bin`. It is published
   with every release, so `releases/latest/download/install.sh` always matches the archives beside
   it. `crates/niobe-cli/tests/install.rs` runs it against a release laid out on disk.
 - **`.github/workflows/release.yml`** — a tag `v<version>` builds macOS (arm64, x86_64) and static
   musl Linux (x86_64, arm64) binaries and publishes them, with their checksums and `install.sh`,
-  as a GitHub Release. The tag must equal the workspace version, and an annotated tag's own message
+  as a GitHub Release, then commits the Homebrew formula for it to the tap and fails red where it cannot.
+  The tag must equal the workspace version, and an annotated tag's own message
   is what the release page says, so the notes are written and reviewed in git rather than in a web
   form after the binaries are out. Run by hand it builds and publishes nothing.
 
@@ -197,9 +462,29 @@ These hold for every change. Breaking one is a bug even when the feature ships g
    spoofing — this is the line the whole bridge-first design stands on. A repository's config
    is not where that line is crossed either: a profile it defines does not set an `env`, pass
    `args`, name a `settings` file, run an `auth_refresh` or say how the account is billed, the
-   file does not choose the default profile, and it does not replace a profile the user's file
-   defines, until the operator has trusted that file's contents.
-2. **No telemetry.** Network calls go only to configured providers and the CLIs.
+   file does not choose the default profile, its `[permissions]` rules answer no prompt, and it
+   does not replace a profile the user's file defines, until the operator has trusted that
+   file's contents.
+2. **No telemetry.** Network calls go only to configured providers and the CLIs. `cargo xtask
+   layering` checks names and text, not behaviour. It reads the tree of crates the product is
+   built from — every workspace member's normal and build dependencies, with every feature on
+   and on every target; dev-dependencies are not in it — and fails on a crate that exists to
+   talk over the network (`NETWORK_CRATES` in `xtask/src/network.rs`), on any crate that is
+   not a workspace member and not on `ALLOWED_CRATES` — a crate vendored beside the workspace
+   and depended on by path included — and on a path crate outside the repository. It reads
+   every Rust file git lists, tracked or untracked and not ignored, but `xtask`'s, and fails on
+   a line that is not a `//` comment and names a CLI's credentials file (`.credentials.json`, a
+   `".credentials` literal, `auth.json`) or a user agent (`user-agent`, `user_agent`), in any
+   case; and, in a file under a `src/` directory or a `build.rs`, on one that opens or resolves
+   a connection (`std::net`, `net` in a `std::{…}` group, `TcpStream`, `TcpListener`,
+   `UdpSocket`, `ToSocketAddrs`), names the keychain (`Keychain`, `find-generic-password`,
+   `find-internet-password`), or hands a network program (`curl`, `wget`, `nc`, `ssh`,
+   `security` and the rest of `NETWORK_PROGRAMS`) to a `new(` as a literal — read as a path
+   (`/usr/bin/curl`), in any case, as a raw string, and behind a launcher such as `env` that
+   a later literal on the line gives it to. A line
+   `ALLOWED_MARKS` names is passed over. A name built at run time, a program named through a
+   variable, and a connection opened under a crate's `tests/` or by a dev-dependency all pass
+   it, which is what review is for.
 3. **The terminal is restored on every exit path**, including panics and SIGTERM. This is why the
    release profile keeps `panic = "unwind"`.
 4. **Every cost number is traceable to a `usage` field, or it is labelled** "estimate" /
@@ -209,14 +494,15 @@ These hold for every change. Breaking one is a bug even when the feature ships g
 5. **Each optimization has an off switch and a measured savings figure.** An optimization nobody
    measured is a behaviour change sold as a feature.
 6. **`niobe-tui` sees no backend-specific type** (§1.1).
-7. **CI is green on macOS and Linux**: format, clippy, tests, layering, headers and the release
-   binary size budget.
+7. **CI is green on macOS and Linux**: format, clippy, tests, layering, headers, the comment
+   audit and the release binary size budget.
 
 ---
 
 ## 3. Rust coding standards
 
-- **Edition and toolchain**: edition 2024, `rust-version` from the workspace manifest. New
+- **Edition and toolchain**: edition 2024, `rust-version` from the workspace manifest — the
+  oldest compiler the workspace builds on, and CI builds it there. New
   dependencies go in `[workspace.dependencies]` and are inherited with `workspace = true`.
 - **Naming**: `UpperCamelCase` for types and traits, `snake_case` for functions and variables,
   `SCREAMING_SNAKE_CASE` for constants. Test names are sentences that state the behaviour
@@ -227,7 +513,12 @@ These hold for every change. Breaking one is a bug even when the feature ships g
 - **Matching**: exhaustive `match` on domain enums (`Event`, `ToolOutcome`, `Backend`, …). Never
   `_` for a domain enum: a new variant must fail to compile everywhere it needs handling.
   A wildcard is acceptable only on foreign enums the code deliberately ignores most of.
-- **No `unsafe`.** `unsafe_code` is denied workspace-wide.
+- **No `unsafe`.** `unsafe_code` is denied workspace-wide. The exception is a call that must run
+  in a child between fork and exec, where `CommandExt::pre_exec` is the only hook and nothing safe
+  does it: `setsid` for a `!` command (`niobe-cli/src/commands.rs`), and `setsid` plus
+  `TIOCSCTTY` for the pty test that gives the binary a controlling terminal. Each is one
+  `#[allow(unsafe_code)]` function with a `SAFETY:` comment saying why the closure is
+  async-signal-safe; add no other.
 - **No stray output.** `println!`/`eprintln!` are linted; only `niobe-cli` and `xtask` write to
   the terminal directly. No `dbg!`, no `todo!` in committed code.
 - **Arithmetic on counters** saturates (`saturating_add`); a token total must never wrap.
@@ -245,7 +536,35 @@ These hold for every change. Breaking one is a bug even when the feature ships g
 Comments explain *why* — the constraint, the invariant, the alternative that was rejected — not
 *what* the next line does. Keep them true: an edit that invalidates a comment updates or deletes it
 in the same change. No commented-out code. No section banners (`// ---- helpers ----`); split into
-functions or modules instead.
+functions or modules instead. `cargo xtask audit` refuses a banner, and a `FIXME`, `HACK` or
+`XXX`, which mark a gap without saying what is missing; a `TODO` is allowed where it does (§7.7).
+
+### 3.2 The principles, and which skill to run
+
+`PRINCIPLES.md` is the binding standard for every change: what the crate graph means for what may
+cross a boundary, state as a fold, every figure measured or labelled or absent, SOLID read for a
+terminal tool, clean code with its ceilings, hostile input and the terminal, the test traps that are
+Niobe's own — each with a trigger, a check and a self-check — then the **change-risk tiers** (§8
+there) that decide how much review a change earns, the **ownership matrix** (§9) that gives each
+review axis one owner, and the **severity rubric** (§10) every reviewer cites. Read the sections a
+change touches before writing code; walk the self-checks before asking for review. Disagree with a
+principle in the commit body, never by silent deviation.
+
+The skills under `.claude/skills/` encode the workflow, and the agents under `.claude/agents/` the
+reviewers. Pick the cheapest that fits — the panel is not the default:
+
+- **`niobe-task`** — the default for a feature or a fix. One agent, no subagents: classifies the
+  tier, implements with TDD, self-reviews through every lens, runs the gate, lands the work.
+- **`niobe-panel-task`** — the same with the specialist panel, only for Major-tier work
+  (`PRINCIPLES.md` §8.1) or when the panel is asked for by name.
+- **`niobe-audit`** — a review-and-fix pass over an existing diff, crate or range with the panel,
+  ending in a CTO verdict. `--report-only` reviews without fixing.
+- **`niobe-scout`**, **`niobe-bolt`**, **`niobe-sentinel`** — one proven bug fixed at the root, one
+  measured performance win, one hardening at a boundary; each stops and changes nothing when nothing
+  qualifies.
+- **`niobe-hilo`** — one highlight and one lowlight of the architecture, with evidence; read-only.
+- The **`niobe-reviewer`** agent alone reviews a Standard-tier diff; **`niobe-test-runner`** runs
+  the gate off the main context; **`niobe-explorer`** answers where something lives.
 
 ---
 
@@ -268,6 +587,11 @@ names, snapshots, fixtures and their READMEs, manifests, CI config, and commit m
 **Rule of thumb**: if a sentence would be confusing to someone without access to a private plan,
 rewrite it to describe the implementation's actual behaviour, invariants or constraints.
 
+`cargo xtask audit` mechanizes the part a sweep can: every whole-line comment in every Rust file git
+would publish is refused for a section banner, for a milestone, a task or phase number, a ticket, a
+priority label or a `§` that names no file in the tree, and for a `FIXME`, `HACK` or `XXX`. The rest
+of the rule — strings, test names, fixtures, commits — is review's to read.
+
 ---
 
 ## 5. Copyright headers (BINDING)
@@ -283,10 +607,15 @@ Every file that can carry a comment starts with the SPDX header, followed by a b
 - TOML, YAML, `.gitignore`: the same two lines with `#`.
 - Shell scripts (`.sh`): the same two lines with `#`, directly under the `#!` line.
 - Markdown: the two lines inside a leading `<!-- … -->` block.
+- A skill or agent definition under `.claude/` (`*.md`): the same block directly under the YAML
+  frontmatter, with a blank line between, because the tool that reads the definition takes the
+  frontmatter from the file's first line.
 
 Exempt, because the format has no comments or the bytes are compared exactly: `LICENSE`,
-`CLAUDE.md`, `Cargo.lock`, `*.jsonl` fixtures, `tests/snapshots/*.txt`, and recorded output
-under `tests/fixtures/` as `*.txt` or `*.json`. The list lives in
+`CLAUDE.md`, `Cargo.lock`, `*.jsonl` fixtures, `tests/snapshots/*.txt` and `*.svg`, and recorded output
+under `tests/fixtures/` as `*.txt` or `*.json`, and the published JSON Schemas under `schema/`.
+Python (`.py`), which the bench suite's tasks are written in, carries the `#` lines.
+The list lives in
 `xtask/src/headers.rs`; a file type with neither a rule nor an exemption fails the check, so a new
 kind of file forces a decision. Run `cargo xtask headers`.
 
@@ -317,18 +646,49 @@ Where tests live:
     snapshot files before accepting it. The session both draw is in `tests/common/mod.rs`.
   - `niobe-tui/tests/frame_budget.rs` times a 200×60 resize, and the steady redraw of a long
     session of markdown replies, against a 16 ms budget, and a long line typed or pasted into
-    the composer: a 100 KB paste against 50 ms, and keys read together against a linear ratio. It is a test binary of its own and its
+    the composer: a paste as long as the composer holds against 50 ms, a key typed into it
+    against 16 ms, and keys read together against a linear ratio — and a
+    100,000-line file written from scratch, applied and drawn against 50 ms — and a key in the
+    history dialog over 20,000 remembered prompts, landed and drawn against 16 ms. It is a test binary of its own and its
     tests take turns on a lock, so that nothing shares their cores, and each asserts the median
     of 31 frames so that a frame the scheduler interrupted cannot fail it. The frames are timed
     only in an optimised build, `cargo test --release -p niobe-tui --test frame_budget`, because
     a debug build draws them at 10–18 ms, where the budget measures the machine's load rather
     than the drawing code; `cargo test --workspace` reports them ignored.
+  - `niobe-store/tests/replay_budget.rs` times a stored session opened, loaded and folded again,
+    asserting the fastest of 31 runs, since it waits on the disk too, and
+    `niobe-cli/tests/replay_budget.rs` the fold `niobe replay` reports, asserting the median of 31.
+    Each is against 50 ms, a binary of its own, and timed only in an optimised build
+    (`cargo test --release -p niobe-store --test replay_budget`, and the same for `niobe-cli`):
+    in the debug suite under other builds' load they took from 20 ms to over a second.
+  - `niobe-core/tests/work.rs` reads shell commands and tool names that are easy to misread as
+    the program that did the work and the kind of work it was.
+  - `niobe-store/tests/store.rs` runs the session store against a real SQLite file, a restart
+    being the store dropped and the file opened again; `tests/failures.rs` runs it with something
+    else in the way — a second `niobe` writing the same file, a lock held past the timeout, a
+    read-only file, a row that no longer decodes and a log cut off mid-line.
+  - `niobe-tui/tests/escape.rs` hands every place the shell draws content a payload of control
+    characters, escape sequences and direction marks, and checks that the bytes a real crossterm
+    backend writes hold none of them; `tests/select.rs` drags and clicks on the shell as drawn,
+    for the text a selection copies and the link a click opens.
+  - `niobe-bridge-claude/tests/undecodable.rs` runs a `Session` against stand-in CLIs that write
+    bytes that are not UTF-8, or close their output and keep running.
+  - `niobe-cli/tests/cache_lifetime.rs` and `tests/owed.rs` price recorded and constructed usage
+    against the bundled table, across the crates only the binary may name together: a cache
+    write at the lifetime the CLI reported it with, and tokens no reported cost covers at the
+    rate of each request rather than of their sum. The expected amounts are worked out by hand.
+  - The other test binaries are described with their crates in §1.
   - `niobe-cli/tests/pty.rs` runs the binary on a pty the test owns and reads back what reached
     the terminal. It is where **terminal restoration** is proven, on a clean quit, a SIGTERM,
     SIGINT or SIGQUIT and a panic, and around a stop — a SIGTSTP or Ctrl+Z hands the terminal
     back and a SIGCONT takes it again and redraws; a unit test cannot, because the panic hook writes to the
     process's own standard output and the signal disposition belongs to the process. Watch it
     after touching `terminal.rs` or `run.rs`.
+
+  - `niobe-bridge-claude/tests/conformance.rs` holds one test that asks the `claude` installed on
+    this machine whether its release is one the recordings cover. It is ignored by `cargo test`,
+    since the CLI updates itself; after it does, run
+    `cargo test -p niobe-bridge-claude --test conformance -- --ignored`.
 
 ### 6.1 The gate
 
@@ -339,13 +699,17 @@ cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo test --release -p niobe-tui --test frame_budget
+cargo test --release -p niobe-store --test replay_budget
+cargo test --release -p niobe-cli --test replay_budget
 cargo xtask layering
 cargo xtask headers
+cargo xtask audit
 cargo xtask version --check
 cargo xtask size
 ```
 
-`cargo xtask ci` runs the same sequence with `fmt --check`, exactly as CI does.
+`cargo xtask ci` runs the same sequence with `fmt --check` and `RUSTFLAGS` denying warnings,
+exactly as CI does, and lints `install.sh` with `shellcheck -s sh` where shellcheck is installed.
 
 **Definition of done**: the gate is green, every acceptance criterion of the change has passed
 RED-GREEN-REFACTOR, and the work is committed (§7.9). If a subagent reports a failure as
@@ -469,7 +833,7 @@ cargo xtask version <patch|minor|major|X.Y.Z>
 git add Cargo.toml Cargo.lock         # a release commit carries nothing else
 git commit -m "chore: release <version>"
 git tag -a v<version> -F <notes-file> # annotated: its message is the release notes
-git push origin HEAD v<version>
+git push --atomic origin HEAD v<version>  # all or nothing: a refused branch publishes no tag
 ```
 
 `cargo xtask version <bump>` moves all eight sites — `[workspace.package]` and the seven `niobe-*`
@@ -497,8 +861,10 @@ at the moment the maintainer approves them.
   terminal, not to a writer. Tests use `TerminalGuard::enter_screen_only`, never `enter`.
 - **Release binary over budget**: check what a new dependency pulls in with
   `cargo tree -p niobe-cli -e normal` before tuning the profile.
-- **Timing tests flake**: the replay budget is generous for debug builds, and the frame budgets
-  are timed in an optimised build only, because a debug frame lands within noise of 16 ms; a failure
+- **Timing tests flake**: the fold's replay budget is generous for debug builds, and the frame
+  and stored-replay budgets are timed in an optimised build only, because a debug build lands
+  within noise of them; a test that waits on a process gives it a ceiling set by a loaded
+  machine, not by the code, since starting `sh` takes seconds there; a failure
   on a loaded machine should be re-run once before being treated as a regression, then
   investigated. A timing test that shares a binary with tests that draw or replay is timing them
   too: give it a binary of its own, as `frame_budget.rs` has.

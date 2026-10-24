@@ -19,7 +19,6 @@
 //! shows the tool mix instead, which is measured.
 
 use std::collections::BTreeMap;
-use std::time::Duration;
 
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Flex, Layout, Margin, Rect};
@@ -27,25 +26,27 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Block, BorderType, Clear, Padding, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
-    Widget,
+    Widget, Wrap,
 };
 
-use niobe_core::event::{AgentOutcome, Billing, Context, UsageWindow};
-use niobe_core::session::{FileChanges, SessionState, TestRunRecord, ToolTotals, Totals};
-use niobe_core::test_run::FailedTests;
+use niobe_core::attention::Attention;
+use niobe_core::event::{
+    Billing, Context, Overage, OverageRefusal, SlashCommand, UsageWindow, UsageWindows,
+};
+use niobe_core::session::{SessionState, ToolTotals, Totals, WorkTotals};
 
 use crate::app::{
-    Activity, Answer, App, Ask, AskFocus, Change, Entry, EntryKind, Focus, Pane, Picker, Section,
-    SelectedProfile, SubAgent, tool_label,
+    Activity, Answer, App, Ask, AskFocus, Change, Entry, EntryKind, Focus, Pane, Picker,
+    PlanWindows, Purpose, Section, SelectedProfile, SubAgent, tool_label,
 };
 use crate::calls::Detail;
 use crate::clock::{self, Stamp};
-use crate::fx;
 use crate::meter::meter;
 use crate::prices::Prices;
 use crate::text;
-use crate::theme::{Motion, Theme};
+use crate::theme::Theme;
 use crate::tree;
+use crate::trust;
 use crate::usage;
 
 /// Smallest terminal the shell draws in, as (columns, rows).
@@ -74,11 +75,19 @@ const ASK_COLUMNS: usize = 72;
 const ASK_INSET: usize = 4;
 
 /// Columns of margin a dialog leaves on each side of a narrow screen.
-const DIALOG_MARGIN: u16 = 4;
+pub(crate) const DIALOG_MARGIN: u16 = 4;
 
-/// Widest the model list is drawn, in columns. A model id is a word or two, so
-/// the list is narrow enough to read as a list rather than as a pane.
+/// Widest a list of bare words is drawn, in columns. An effort level or a
+/// theme is a word, so the list is narrow enough to read as a list rather
+/// than as a pane.
 const PICK_COLUMNS: u16 = 44;
+
+/// Widest a list the backend described is drawn: a model's name, its id and
+/// what it is for, side by side, with room for the last to say something.
+const DESCRIBED_PICK_COLUMNS: u16 = 84;
+
+/// What stands between a described row's columns.
+const PICK_GAP: &str = "  ";
 
 /// What marks the model the session is on, and the one the cursor is over.
 const PICK_CURSOR: &str = "› ";
@@ -87,41 +96,15 @@ const PICK_CURRENT: &str = "· ";
 /// The share of a budget at which the Usage pane starts saying so in the
 /// colour it uses for anything waiting on the operator. The same fraction the
 /// transcript warning uses, so the pane and the warning agree.
-///
-/// A plan's usage window is read against the same fraction, because on a
-/// flat-rate plan the window is the budget: what runs out is the hours, not
-/// the money.
 const BUDGET_SHOWN_HOT: f64 = 0.8;
 
-/// What the F-key bar starts with: the key that makes each digit after it the
-/// F-key of that number.
-///
-/// The bar names Esc and a digit rather than F1 to F10 because on a Mac the
-/// top row is media keys unless Fn is held or the system is set to send
-/// function keys, so an F-key the bar named would not reach the shell on a
-/// default setup. Esc and a digit reach every terminal as two plain bytes, and
-/// the F-keys still work where they arrive.
-const FKEYS_LEAD: &str = "Esc ";
+/// The share of a plan's usage window from which its meter is drawn in the
+/// theme's warning colour.
+const WINDOW_RUNNING_LOW: f64 = 0.5;
 
-/// The F-key bar, which is also the list of what the shell can be asked to do:
-/// the digit that follows Esc for each, `0` being F10.
-const FKEYS: [(&str, &str); 10] = [
-    ("1", "Help"),
-    ("2", "Plan"),
-    ("3", "Diff"),
-    ("4", "Undo"),
-    ("5", "Usage"),
-    ("6", "Files"),
-    ("7", "Tools"),
-    ("8", "Model"),
-    ("9", "Theme"),
-    ("0", "Quit"),
-];
-
-/// The menu bar's items. The first letter is the hot key.
-const MENUS: [&str; 7] = [
-    "Niobe", "Session", "Files", "Tools", "Usage", "Options", "Help",
-];
+/// The share of a plan's usage window from which its meter is drawn in the
+/// theme's error colour: what is left may not see a long turn through.
+const WINDOW_RUN_OUT: f64 = 0.9;
 
 /// Columns between the menus and the session's identity, and between one
 /// segment of that identity and the next.
@@ -129,11 +112,46 @@ const MENU_GAP: usize = 2;
 
 /// Draws one frame.
 pub fn draw(frame: &mut Frame, app: &mut App) {
+    draw_frame(frame, app);
+    strip_direction_marks(frame.buffer_mut());
+}
+
+/// The characters that reorder the text around them rather than show
+/// anything: the embeddings and overrides U+202A–U+202E, the isolates
+/// U+2066–U+2069 and the marks U+200E, U+200F and U+061C.
+fn is_direction_mark(c: char) -> bool {
+    matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{200e}' | '\u{200f}' | '\u{61c}')
+}
+
+/// Takes every direction mark out of what was drawn.
+///
+/// ratatui drops control characters as it lays text out but keeps a
+/// zero-width character with the cell before it, so a right-to-left override
+/// in a title, a repository's name or anything a backend said reaches the
+/// terminal and reverses what is drawn after it. Done once over the finished
+/// frame rather than at every place text is drawn, so that no place can be
+/// missed.
+fn strip_direction_marks(buffer: &mut ratatui::buffer::Buffer) {
+    for cell in &mut buffer.content {
+        if cell.symbol().chars().any(is_direction_mark) {
+            let kept: String = cell
+                .symbol()
+                .chars()
+                .filter(|c| !is_direction_mark(*c))
+                .collect();
+            cell.set_symbol(if kept.is_empty() { " " } else { &kept });
+        }
+    }
+}
+
+fn draw_frame(frame: &mut Frame, app: &mut App) {
     let theme = *app.theme();
     let area = frame.area();
 
-    if area.width < MIN_SIZE.0 || area.height < MIN_SIZE.1 {
-        draw_too_small(frame, area, &theme);
+    let too_small = area.width < MIN_SIZE.0 || area.height < MIN_SIZE.1;
+    app.drew_too_small(too_small);
+    if too_small {
+        draw_too_small(frame, area, app.hint(), &theme);
         return;
     }
 
@@ -151,73 +169,555 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     draw_menu(frame, menu, app, &theme);
     draw_body(frame, body, app, &theme);
-    draw_fkeys(frame, fkeys, &theme);
+    draw_fkeys(frame, fkeys, app, &theme);
+    app.drew_bars(menu, fkeys);
 
     // Last, and over the body: the list is something the operator opened, and
     // nothing drawn afterwards may cover it. A permission prompt is not drawn
     // here — it is in the transcript, under the work that led to it.
     if let Some(picker) = app.picking() {
-        draw_pick(frame, body, picker, app.session().model(), &theme);
+        draw_pick(frame, body, picker, app.picked(), &theme);
+    }
+    if app.sheet().is_some() {
+        draw_sheet(frame, body, app, &theme);
+    }
+    crate::memory::draw(frame, body, app, &theme);
+    crate::mcp::draw(frame, body, app, &theme);
+    crate::detail::draw(frame, body, app, &theme);
+    crate::browse::draw(frame, body, app, &theme);
+    // The open menu hangs from the bar over everything, a list included: it
+    // was opened last.
+    let list = app
+        .menu()
+        .map(|open| draw_menu_list(frame, area, open, app, &theme));
+    app.drew_menu_list(list);
+    if let Some(asking) = app.trusting() {
+        draw_trust(frame, body, asking, app.hint(), &theme);
     }
 }
 
-/// The model list: what the profile offers, which one the session is on, and
-/// the three keys that work.
+/// What a list says on its top edge, its bottom edge and under its rows:
+/// what it is for, and the three keys that work.
 ///
-/// The footer says when a choice takes effect. A switch applies from the next
-/// turn, and a list that did not say so would read as though the reply being
-/// written were already coming from the new model.
-fn draw_pick(frame: &mut Frame, body: Rect, picker: &Picker, current: Option<&str>, theme: &Theme) {
-    let width = PICK_COLUMNS.min(body.width.saturating_sub(DIALOG_MARGIN * 2));
+/// The model list says when a choice takes effect. A switch applies from the
+/// next turn, and a list that did not say so would read as though the reply
+/// being written were already coming from the new model.
+fn pick_words(purpose: Purpose) -> (&'static str, &'static str, &'static str) {
+    match purpose {
+        Purpose::Model => (
+            "Model",
+            " applied from the next turn ",
+            "↑↓ choose · Enter switch · Esc keep this one",
+        ),
+        Purpose::Effort => (
+            "Effort",
+            " sent to the backend as /effort ",
+            "↑↓ choose · Enter set · Esc leave it",
+        ),
+        Purpose::Theme => ("Theme", "", "↑↓ choose · Enter switch · Esc keep this one"),
+        Purpose::Call => (
+            "Tool calls",
+            " oldest first ",
+            "↑↓ choose · Enter read · Esc close",
+        ),
+        Purpose::Agent => (
+            "Sub-agents",
+            " oldest first ",
+            "↑↓ choose · Enter show its entries alone · Esc close",
+        ),
+        Purpose::Rewind => (
+            "Put the files back as they were before",
+            " the conversation keeps what was said ",
+            "↑↓ choose · Enter put back · Esc leave them",
+        ),
+    }
+}
+
+/// A list the operator opened: what it offers, which one is in force where
+/// that is known, and the keys that work.
+///
+/// A row the backend described reads as its name, the exact id choosing it
+/// sends, and what it is for, dimmed; each in a column as wide as the list's
+/// widest. Where the profile left some of what the backend offers out, a line
+/// under the rows says how many, so the list does not read as all there is.
+/// A list taller than the screen shows the rows around the cursor, with the
+/// keys always under them.
+fn draw_pick(
+    frame: &mut Frame,
+    body: Rect,
+    picker: &Picker,
+    current: Option<usize>,
+    theme: &Theme,
+) {
+    let described = picker
+        .options
+        .iter()
+        .any(|choice| choice.name.is_some() || choice.note.is_some());
+    let widest = match described {
+        true => DESCRIBED_PICK_COLUMNS,
+        false => PICK_COLUMNS,
+    };
+    let width = widest.min(body.width.saturating_sub(DIALOG_MARGIN * 2));
     if width < 20 {
         return;
     }
 
+    let (title, footer, keys) = pick_words(picker.purpose);
     let text_width = usize::from(width).saturating_sub(DIALOG_INSET);
+    let room = text_width.saturating_sub(2);
+    let columns = PickColumns::of(picker, described);
+    let plain = Style::new().fg(theme.dialog_fg);
+
+    let mut tail: Vec<Line> = Vec::new();
+    if picker.more > 0 {
+        tail.push(Line::from(""));
+        tail.push(
+            Line::from(text::truncate(
+                &format!(
+                    "  {} more the backend offers; the profile's models leave them out",
+                    picker.more
+                ),
+                text_width,
+            ))
+            .style(Style::new().fg(theme.dim)),
+        );
+    }
+    tail.push(Line::from(""));
+    // Wrapped to the box, which is sized for what it offers: cut at its edge
+    // the last key would read as a different one.
+    tail.extend(
+        text::wrap(keys, text_width)
+            .into_iter()
+            .map(|line| Line::from(line).style(plain)),
+    );
+
+    // The rows the box has once the blank row above the list and everything
+    // under it are drawn. A list longer than that shows the part of it the
+    // cursor is in, so the row Enter would pick and the keys are always on
+    // screen.
+    let rows = usize::from(body.height)
+        .saturating_sub(DIALOG_CLEARANCE)
+        .saturating_sub(1 + tail.len())
+        .max(1);
+    let first = picker.at.saturating_sub(rows - 1);
     let mut lines: Vec<Line> = vec![Line::from("")];
-    for (i, model) in picker.models.iter().enumerate() {
+    for (i, choice) in picker.options.iter().enumerate().skip(first).take(rows) {
         let on_it = i == picker.at;
-        let marker = match (on_it, current == Some(model.as_str())) {
+        let marker = match (on_it, current == Some(i)) {
             (true, _) => PICK_CURSOR,
             (false, true) => PICK_CURRENT,
             (false, false) => "  ",
         };
-        let row = format!(
-            "{marker}{:<room$}",
-            text::truncate(model, text_width.saturating_sub(2)),
-            room = text_width.saturating_sub(2)
+        let (said, note) = columns.row(choice, picker.purpose);
+        let said = text::truncate(&said, room);
+        let note = text::pad(
+            &text::truncate(&note, room.saturating_sub(text::width(&said))),
+            room.saturating_sub(text::width(&said)),
         );
         lines.push(match on_it {
+            true => Line::from(format!("{marker}{said}{note}"))
+                .style(Style::new().bg(theme.cursor_bg).fg(theme.cursor_fg).bold()),
+            false => Line::from(vec![
+                Span::styled(format!("{marker}{said}"), plain),
+                Span::styled(note, Style::new().fg(theme.dim)),
+            ]),
+        });
+    }
+    lines.extend(tail);
+
+    let inner = dialog(frame, body, (width, lines.len()), (title, footer), theme);
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// How wide a described list's name and id columns are: as wide as the widest
+/// of each, so every row's id starts in one column and its note in another.
+struct PickColumns {
+    described: bool,
+    name: usize,
+    value: usize,
+}
+
+impl PickColumns {
+    fn of(picker: &Picker, described: bool) -> Self {
+        let widest = |width: fn(&crate::app::Choice) -> usize| {
+            picker.options.iter().map(width).max().unwrap_or(0)
+        };
+        Self {
+            described,
+            name: widest(|choice| text::width(choice.name.as_deref().unwrap_or(&choice.value))),
+            value: widest(|choice| match choice.name {
+                Some(_) => text::width(&choice.value),
+                None => 0,
+            }),
+        }
+    }
+
+    /// A row's name and id, set in their columns, and its note.
+    ///
+    /// A row with no name of its own is its id, in the name column: the id
+    /// again beside it would say nothing more.
+    fn row(&self, choice: &crate::app::Choice, purpose: Purpose) -> (String, String) {
+        let value = match purpose {
+            Purpose::Theme => choice.value.to_lowercase(),
+            Purpose::Model | Purpose::Effort => choice.value.clone(),
+            // Where the call is in the list is what choosing sends, and the
+            // list already says it by where the row is.
+            Purpose::Call | Purpose::Agent | Purpose::Rewind => String::new(),
+        };
+        if !self.described {
+            return (value, String::new());
+        }
+        let (name, id) = match &choice.name {
+            Some(name) => (name.clone(), value),
+            None => (value, String::new()),
+        };
+        let said = format!(
+            "{}{PICK_GAP}{}",
+            text::pad(&name, self.name),
+            text::pad(&id, self.value)
+        );
+        let note = choice
+            .note
+            .as_deref()
+            .map(|note| format!("{PICK_GAP}{note}"))
+            .unwrap_or_default();
+        (said, note)
+    }
+}
+
+/// Widest a sheet is drawn, in columns: a paragraph's measure, with room
+/// for a config file's path on one line.
+const SHEET_COLUMNS: u16 = 80;
+
+/// The open sheet: its rows wrapped to its width, scrolled to where the
+/// operator put it, and the keys that work on its bottom edge.
+fn draw_sheet(frame: &mut Frame, body: Rect, app: &mut App, theme: &Theme) {
+    let Some(sheet) = app.sheet() else {
+        return;
+    };
+    let width = SHEET_COLUMNS.min(body.width.saturating_sub(DIALOG_MARGIN * 2));
+    let text_width = usize::from(width).saturating_sub(DIALOG_INSET);
+    let wrapped: Vec<String> = sheet
+        .rows
+        .iter()
+        // A row that fits is drawn as written, so the columns its spaces
+        // line up are kept; only a longer one is wrapped.
+        .flat_map(|row| match text::width(row) <= text_width {
+            true => vec![row.clone()],
+            false => text::wrap(row, text_width),
+        })
+        .collect();
+    // A row of room above and below, and one each for the border and the
+    // shadow, which the dialog keeps inside the body.
+    let room = usize::from(body.height).saturating_sub(5);
+    let max_scroll = wrapped.len().saturating_sub(room);
+    let scroll = sheet.scroll.min(max_scroll);
+    let footer = match (&sheet.link, max_scroll > 0) {
+        (Some(_), true) => " ↑↓ scroll · o open · Esc close ",
+        (Some(_), false) => " o open · Esc close ",
+        (None, true) => " ↑↓ scroll · Esc close ",
+        (None, false) => " Esc close ",
+    };
+    let title = sheet.title.clone();
+
+    let mut lines = vec![Line::from("")];
+    lines.extend(
+        wrapped
+            .into_iter()
+            .skip(scroll)
+            .take(room)
+            .map(|line| Line::from(line).style(Style::new().fg(theme.dialog_fg))),
+    );
+    lines.push(Line::from(""));
+
+    let inner = dialog(frame, body, (width, lines.len()), (&title, footer), theme);
+    frame.render_widget(Paragraph::new(lines), inner);
+    app.measured_sheet(max_scroll);
+}
+
+/// The open menu's list, hung from its name on the bar and cast on what is
+/// under it, and where it was drawn.
+///
+/// An item the session cannot do is dimmed rather than left out: the menu is
+/// the catalogue of what the shell can be asked, and choosing one says why it
+/// cannot. A pane the View menu shows and hides says which it is.
+fn draw_menu_list(
+    frame: &mut Frame,
+    screen: Rect,
+    open: crate::menu::Open,
+    app: &App,
+    theme: &Theme,
+) -> Rect {
+    let menu = open.menu();
+    let rows: Vec<(String, String)> = menu
+        .items
+        .iter()
+        .map(|item| {
+            let keys = match item.action {
+                crate::menu::Action::Pane(pane) => match app.shows(pane) {
+                    true => "shown",
+                    false => "hidden",
+                },
+                // Only a pane's row, and a rebound action's, say something that
+                // changes; every other action's keys are fixed in its menu.
+                _ => return (item.label.to_owned(), app.item_keys(item)),
+            };
+            (item.label.to_owned(), keys.to_owned())
+        })
+        .collect();
+    let label_width = rows
+        .iter()
+        .map(|(label, _)| label.chars().count())
+        .max()
+        .unwrap_or(0);
+    let keys_width = rows
+        .iter()
+        .map(|(_, keys)| keys.chars().count())
+        .max()
+        .unwrap_or(0);
+    // A column of room either side of the text, and four between an item and
+    // its keys, inside the border.
+    let inner_width = label_width + keys_width + MENU_KEYS_GAP + 2;
+    let width = u16::try_from(inner_width + 2)
+        .unwrap_or(u16::MAX)
+        .min(screen.width);
+    let height = u16::try_from(rows.len() + 2)
+        .unwrap_or(u16::MAX)
+        .min(screen.height.saturating_sub(1));
+    let (start, _) = crate::menu::title_columns()
+        .get(open.menu)
+        .copied()
+        .unwrap_or((0, 0));
+    let x = start.min(screen.right().saturating_sub(width));
+    let area = Rect::new(x, screen.y.saturating_add(1), width, height);
+
+    cast_shadow(frame, area, screen, theme);
+    let bar = Style::new().bg(theme.menu_bg).fg(theme.pulldown_fg);
+    let block = Block::bordered()
+        .border_type(theme.menu_border)
+        .border_style(bar.fg(theme.pulldown_frame))
+        .style(bar);
+    let inner = block.inner(area);
+    frame.render_widget(Clear, area);
+    frame.render_widget(block, area);
+
+    let hot = Style::new().fg(theme.hot).bold().underlined();
+    let lines: Vec<Line> = menu
+        .items
+        .iter()
+        .zip(rows)
+        .enumerate()
+        .map(|(at, (item, (label, keys)))| {
+            let on_it = at == open.item;
+            let able = app.can(item.action);
+            let base = match (on_it, able) {
+                (true, _) => Style::new()
+                    .bg(theme.menu_cursor_bg)
+                    .fg(theme.menu_cursor_fg),
+                (false, true) => bar,
+                (false, false) => bar.fg(theme.pulldown_dim),
+            };
+            let mut spans = vec![Span::styled(" ", base)];
+            for (i, c) in label.chars().enumerate() {
+                let style = match i == item.hot && able && !on_it {
+                    true => base.patch(hot),
+                    false if i == item.hot => base.underlined(),
+                    false => base,
+                };
+                spans.push(Span::styled(c.to_string(), style));
+            }
+            let pad = inner_width.saturating_sub(label.chars().count() + keys.chars().count() + 2);
+            spans.push(Span::styled(" ".repeat(pad), base));
+            spans.push(Span::styled(keys, base.add_modifier(Modifier::DIM)));
+            spans.push(Span::styled(" ", base));
+            Line::from(spans)
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), inner);
+    area
+}
+
+/// Columns between a menu item and the keys that do the same.
+const MENU_KEYS_GAP: usize = 4;
+
+/// Widest the trust question is drawn, in columns: room for a permission
+/// rule or an environment variable and its value on one line.
+const TRUST_COLUMNS: u16 = 84;
+
+/// What the trust question says above the rows of what the file sets.
+const TRUST_SAYS: &str = "It sets what only a config you trust may:";
+
+/// What it says under them: what each answer leaves in force.
+const TRUST_UNTIL: &str =
+    "Trusted, it stays in force until the file changes. Without it, none of the above is.";
+
+/// The keys the trust question answers to, on its bottom edge. The pause is
+/// part of the answer: an Enter straight after trusting is chosen is taken as
+/// the end of a typed prompt (see [`trust::Asking::on_key`]).
+const TRUST_KEYS: &str = " ↑↓ choose, pause, Enter answer · Esc no · Ctrl+C twice quit ";
+
+/// Columns between what a row of the trust question names and what it is set
+/// to, and the most the name may take.
+const TRUST_GAP: usize = 2;
+const TRUST_NAME_COLUMNS: usize = 16;
+
+/// The question whether to trust the repository's config: the file, what
+/// trusting it puts in force, and the two answers.
+///
+/// The answers are always drawn. A file that sets more than fits keeps the
+/// rows that do and says how many it left out — cutting the answers instead
+/// would ask a question nobody can answer. `hint` is what the shell has to say
+/// about a key it held back, said where the operator is looking.
+fn draw_trust(
+    frame: &mut Frame,
+    body: Rect,
+    asking: &trust::Asking,
+    hint: Option<&str>,
+    theme: &Theme,
+) {
+    let width = TRUST_COLUMNS.min(body.width.saturating_sub(DIALOG_MARGIN * 2));
+    let text_width = usize::from(width).saturating_sub(DIALOG_INSET);
+    let plain = Style::new().fg(theme.dialog_fg);
+    let wrapped = |text: &str, style: Style| -> Vec<Line<'static>> {
+        text::wrap(text, text_width)
+            .into_iter()
+            .map(|line| Line::from(line).style(style))
+            .collect()
+    };
+
+    let mut head = vec![Line::from("")];
+    head.extend(wrapped(
+        &text::controls_shown(&asking.question.path),
+        plain.bold(),
+    ));
+    head.push(Line::from(""));
+    head.extend(wrapped(TRUST_SAYS, plain));
+    head.push(Line::from(""));
+
+    let mut tail = vec![Line::from("")];
+    match hint {
+        Some(hint) => tail.extend(wrapped(hint, Style::new().fg(theme.hot).bold())),
+        None => tail.extend(wrapped(TRUST_UNTIL, plain)),
+    }
+    tail.push(Line::from(""));
+    for (i, answer) in trust::Answer::OFFERED.into_iter().enumerate() {
+        let on_it = i == asking.at;
+        let marker = if on_it { PICK_CURSOR } else { "  " };
+        let row = format!(
+            "{marker}{}",
+            text::pad(
+                &format!("{}. {}", i + 1, answer.label()),
+                text_width.saturating_sub(2)
+            )
+        );
+        tail.push(match on_it {
             true => {
                 Line::from(row).style(Style::new().bg(theme.cursor_bg).fg(theme.cursor_fg).bold())
             }
-            false => Line::from(row).style(Style::new().fg(theme.dialog_fg)),
+            false => Line::from(row).style(plain),
         });
     }
-    lines.push(Line::from(""));
-    lines.push(
-        Line::from("↑↓ choose · Enter switch · Esc keep this one")
-            .style(Style::new().fg(theme.dialog_fg)),
-    );
+    tail.push(Line::from(""));
 
+    // A border above and below, and the row the shadow falls on.
+    let room = usize::from(body.height)
+        .saturating_sub(3)
+        .saturating_sub(head.len() + tail.len());
+    let grants = trust_grants(&asking.question.grants, text_width, room, theme);
+
+    let mut lines = head;
+    lines.extend(grants);
+    lines.extend(tail);
     let inner = dialog(
         frame,
         body,
         (width, lines.len()),
-        ("Model", " applied from the next turn "),
+        ("Trust this repository's config?", TRUST_KEYS),
         theme,
     );
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
+/// The rows of what a config sets, in `columns`, the name of each in a column
+/// of its own and its value wrapped beside it, in no more than `room` lines.
+///
+/// A value is drawn as it was written — every space kept and every control
+/// character shown — since what is asked for is what the operator agrees to.
+/// Rows are kept whole: half a permission rule reads as a different rule.
+/// What is left out is counted on the last line.
+fn trust_grants(
+    grants: &[(String, String)],
+    columns: usize,
+    room: usize,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let name_width = grants
+        .iter()
+        .map(|(name, _)| text::width(name))
+        .max()
+        .unwrap_or(0)
+        .min(TRUST_NAME_COLUMNS);
+    let value_width = columns.saturating_sub(name_width + TRUST_GAP).max(1);
+    let name_style = Style::new().fg(theme.dialog_fg).bold();
+    let value_style = Style::new().fg(theme.dialog_fg);
+
+    let rows: Vec<Vec<Line<'static>>> = grants
+        .iter()
+        .map(|(name, value)| {
+            text::wrap_exact(&text::controls_shown(value), value_width)
+                .into_iter()
+                .enumerate()
+                .map(|(i, part)| {
+                    let name = match i {
+                        0 => text::truncate(name, name_width),
+                        _ => String::new(),
+                    };
+                    Line::from(vec![
+                        Span::styled(text::pad(&name, name_width + TRUST_GAP), name_style),
+                        Span::styled(part, value_style),
+                    ])
+                })
+                .collect()
+        })
+        .collect();
+    if rows.iter().map(Vec::len).sum::<usize>() <= room {
+        return rows.into_iter().flatten().collect();
+    }
+
+    // The last line the room has goes to the count of what is left out.
+    let mut lines = Vec::new();
+    let mut kept = 0;
+    for row in &rows {
+        if lines.len() + row.len() >= room {
+            break;
+        }
+        lines.extend(row.iter().cloned());
+        kept += 1;
+    }
+    if room > 0 {
+        lines.push(
+            Line::from(format!(
+                "… and {} more; the file has them all",
+                rows.len() - kept
+            ))
+            .style(value_style.italic()),
+        );
+    }
+    lines
+}
+
 /// Columns a dialog's frame and padding take from its width: a border and two
 /// columns of padding on each side.
-const DIALOG_INSET: usize = 6;
+pub(crate) const DIALOG_INSET: usize = 6;
+
+/// The rows of the body a dialog's contents cannot have: its top and bottom
+/// borders, and the row [`dialog`] leaves under it.
+const DIALOG_CLEARANCE: usize = 3;
 
 /// Draws a dialog's frame, centred in `body` over whatever is there, with its
 /// shadow, and returns the area inside it. `size` is the width and the number
 /// of lines it will hold; `titles` are the text on its top and bottom edges.
-fn dialog(
+pub(crate) fn dialog(
     frame: &mut Frame,
     body: Rect,
     size: (u16, usize),
@@ -236,6 +736,7 @@ fn dialog(
         .flex(Flex::Center)
         .areas(area);
 
+    uncover_left_edge(frame.buffer_mut(), area);
     cast_shadow(frame, area, body, theme);
 
     let frame_style = Style::new().fg(theme.dialog_frame).bg(theme.dialog_bg);
@@ -246,7 +747,7 @@ fn dialog(
         .padding(Padding::horizontal(2))
         .title_top(
             Line::from(format!(" {title} "))
-                .style(frame_style.bold())
+                .style(frame_style.fg(theme.dialog_title).bold())
                 .centered(),
         )
         .title_bottom(Line::from(footer.to_owned()).style(frame_style).centered());
@@ -256,17 +757,43 @@ fn dialog(
     inner
 }
 
+/// Blanks each character two columns wide whose second half is under the
+/// left edge of `area`. A terminal draws such a character over the column
+/// after it whatever is drawn there, so the dialog's border would be missing
+/// on that row; the half left outside reads as a blank instead.
+fn uncover_left_edge(buffer: &mut ratatui::buffer::Buffer, area: Rect) {
+    let Some(left) = area.x.checked_sub(1) else {
+        return;
+    };
+    for y in area.top()..area.bottom() {
+        if let Some(cell) = buffer.cell_mut((left, y))
+            && text::width(cell.symbol()) > 1
+        {
+            cell.set_char(' ');
+        }
+    }
+}
+
 /// Darkens the two columns right of `area` and the row under it, offset by
-/// one, the way a dialog in Turbo Vision stands off the screen. What is under
-/// the shadow keeps its characters, so the transcript still reads through it.
+/// one, the way a dialog in Far Manager or Turbo Vision stands off the
+/// screen, within `bounds`.
+///
+/// Every cell under the shadow keeps its own character and is redrawn in the
+/// theme's shadow colours with no attribute of its own, so the text under it
+/// recedes and still reads. Nothing is drawn over a blank: a shading glyph
+/// there would join the words around it into one, and where the shadow is
+/// the panes' own colour the dialog's face is what marks its edge.
 fn cast_shadow(frame: &mut Frame, area: Rect, bounds: Rect, theme: &Theme) {
-    let style = Style::new().bg(theme.shadow).fg(theme.dim);
-    let right = Rect::new(area.right(), area.y + 1, 2, area.height);
-    let below = Rect::new(area.x + 2, area.bottom(), area.width, 1);
+    let right = Rect::new(area.right(), area.y.saturating_add(1), 2, area.height);
+    let below = Rect::new(area.x.saturating_add(2), area.bottom(), area.width, 1);
+    let buffer = frame.buffer_mut();
     for strip in [right, below] {
-        frame
-            .buffer_mut()
-            .set_style(strip.intersection(bounds), style);
+        for at in strip.intersection(bounds).positions() {
+            if let Some(cell) = buffer.cell_mut(at) {
+                cell.set_fg(theme.shadow_fg).set_bg(theme.shadow);
+                cell.modifier = Modifier::empty();
+            }
+        }
     }
 }
 
@@ -274,63 +801,84 @@ fn cast_shadow(frame: &mut Frame, area: Rect, bounds: Rect, theme: &Theme) {
 ///
 /// Drawing the four regions anyway would produce panes one row high with their
 /// borders overlapping their contents, which reads as a broken program rather
-/// than a small window.
-fn draw_too_small(frame: &mut Frame, area: Rect, theme: &Theme) {
+/// than a small window. `hint` is what the shell has to say about a key it
+/// held back: a question waiting is not drawn here, and a key pressed at it
+/// is answered with why it was not taken.
+fn draw_too_small(frame: &mut Frame, area: Rect, hint: Option<&str>, theme: &Theme) {
     let (columns, rows) = MIN_SIZE;
-    let lines = vec![
+    let mut lines = vec![
         Line::from("niobe").style(Style::new().fg(theme.hot).bold()),
         Line::from(format!("needs {columns}×{rows}")),
         Line::from(format!("this window is {}×{}", area.width, area.height))
             .style(Style::new().fg(theme.dim)),
     ];
+    if let Some(hint) = hint {
+        lines.push(Line::from(""));
+        lines.push(Line::from(hint.to_owned()).style(Style::new().fg(theme.hot).bold()));
+    }
 
     frame.render_widget(
         Paragraph::new(lines)
+            .wrap(Wrap { trim: true })
             .alignment(Alignment::Center)
             .style(Style::new().bg(theme.pane_bg).fg(theme.fg)),
         area,
     );
 }
 
-/// The menu row: the seven menus on the left, and on the right what the
-/// session is, what it is doing and the time of day.
+/// The menu row: the menus on the left, and on the right what the session
+/// is, what it is doing and the time of day.
 ///
-/// The theme is not named here. `9 Theme` in the F-key row is where a palette
-/// is changed, and a row that says which one is on says nothing the screen
-/// does not already show.
+/// The theme is not named here. The View menu is where a palette is changed,
+/// and a row that says which one is on says nothing the screen does not
+/// already show.
 fn draw_menu(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let bar = Style::new().bg(theme.menu_bg).fg(theme.menu_fg);
-    let left = Line::from(menu_spans(theme));
+    let left = Line::from(menu_spans(app.menu().map(|open| open.menu), theme));
 
     let room = usize::from(area.width).saturating_sub(left.width() + MENU_GAP);
     let identity = fitted(identity_segments(app, theme), room);
 
     frame.render_widget(Paragraph::new(left).style(bar), area);
     if !identity.is_empty() {
-        frame.render_widget(
-            Paragraph::new(Line::from(segment_spans(identity)))
-                .alignment(Alignment::Right)
-                .style(bar),
-            area,
-        );
+        // Only the identity's own cells: a paragraph's style is laid over its
+        // whole area, which over the row would repaint the menus' titles.
+        let line = Line::from(segment_spans(identity));
+        let width = u16::try_from(line.width())
+            .unwrap_or(u16::MAX)
+            .min(area.width);
+        let right = Rect {
+            x: area.right().saturating_sub(width),
+            width,
+            ..area
+        };
+        frame.render_widget(Paragraph::new(line).style(bar), right);
     }
 }
 
-/// The seven menus, each with its hot key accented and underlined.
+/// The menus, each with its hot key accented and underlined, and the one
+/// that is open, if one is, drawn as a block.
 ///
 /// A terminal with no underline drops the underline and keeps the colour, so
 /// the hot key is still marked on one that has only the sixteen attributes.
-fn menu_spans(theme: &Theme) -> Vec<Span<'static>> {
-    let hot = Style::new().fg(theme.hot).bold().underlined();
-    let plain = Style::new().fg(theme.menu_fg);
-
-    let mut spans = vec![Span::raw(" ")];
-    for name in MENUS {
-        let mut chars = name.chars();
+/// Each name has a column either side, which is where
+/// [`crate::menu::title_columns`] says it is.
+fn menu_spans(open: Option<usize>, theme: &Theme) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    for (at, menu) in crate::menu::MENUS.iter().enumerate() {
+        let plain = match open == Some(at) {
+            true => Style::new().fg(theme.menu_bg).bg(theme.menu_fg),
+            false => Style::new().fg(theme.menu_fg),
+        };
+        let mut chars = menu.name.chars();
         let first = chars.next().unwrap_or(' ');
-        spans.push(Span::styled(first.to_string(), hot));
+        spans.push(Span::styled(" ", plain));
+        spans.push(Span::styled(
+            first.to_string(),
+            plain.fg(theme.hot).bold().underlined(),
+        ));
         spans.push(Span::styled(chars.as_str().to_owned(), plain));
-        spans.push(Span::raw("  "));
+        spans.push(Span::styled(" ", plain));
     }
     spans
 }
@@ -404,15 +952,29 @@ fn identity_segments(app: &App, theme: &Theme) -> Vec<Segment> {
 /// nowhere it will be answered from.
 fn state_label(app: &App) -> String {
     let pulse = app.pulse();
-    // A turn that is running settles it: whatever the backend has or has not
-    // said about itself, the session is working and nothing else is truer.
+    // A turn that is running settles it: the session is working and nothing
+    // else is truer — unless the backend has not said a word since it
+    // started, which is a turn waiting on an answer that may never come.
     if pulse.working {
-        return pulse_label(pulse);
+        return match (app.heard(), pulse.since) {
+            (false, Some(since)) => {
+                format!("\u{25cf} no answer yet {}", clock::spent(since))
+            }
+            (false, None) => "\u{25cf} no answer yet".to_owned(),
+            (true, _) => pulse_label(pulse),
+        };
     }
     if !app.is_attached() {
         return "\u{25cb} not attached".to_owned();
     }
-    if app.session().meta().is_none() {
+    // A backend that ended is not starting, however little it said first.
+    if app.session().fatal_error().is_some() {
+        return "\u{25cb} ended".to_owned();
+    }
+    // The CLI says what it runs only when a turn starts, but it answers what
+    // it offers — its commands, its models — as soon as it is up: anything it
+    // has said means it is no longer starting.
+    if app.session().meta().is_none() && !app.heard() {
         return "\u{25cb} starting".to_owned();
     }
     pulse_label(pulse)
@@ -465,7 +1027,13 @@ fn segment_spans(segments: Vec<Segment>) -> Vec<Span<'static>> {
 }
 
 fn draw_body(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
-    if area.width < WIDE_COLUMNS {
+    use crate::menu::SidePane;
+
+    let shown: Vec<SidePane> = [SidePane::Usage, SidePane::Changes, SidePane::Activity]
+        .into_iter()
+        .filter(|pane| app.shows(*pane))
+        .collect();
+    if area.width < WIDE_COLUMNS || shown.is_empty() {
         app.right_stack_hidden();
         draw_session(frame, area, false, app, theme);
         return;
@@ -479,8 +1047,8 @@ fn draw_body(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
         .spacing(DESKTOP_MARGIN)
         .areas(area);
 
-    // And a column of desktop at each edge of the screen, so the motion
-    // behind the panes shows in three places rather than one seam. Both come
+    // And a column of desktop at each edge of the screen, so the panes stand
+    // off the screen's edges as they stand off each other. Both come
     // out of the session pane: its prose rewraps a column narrower, where the
     // right stack's rows are as wide as their figures need and a column less
     // would cost the context meter a cell. Narrow, the columns are worth more
@@ -494,60 +1062,39 @@ fn draw_body(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
 
     // Usage takes the rows its figures need and no more; what is left goes to
     // the two panes that grow with the session, 1.3 : 1 in favour of the files
-    // it changed.
-    let [usage, changes, activity] = Layout::vertical([
-        Constraint::Length(usage_height(app).min(right.height)),
-        Constraint::Fill(13),
-        Constraint::Fill(10),
-    ])
-    .areas(right);
-
-    draw_usage(frame, usage, app, theme);
-    draw_changes(frame, changes, app, theme);
-    draw_activity(frame, activity, app, theme);
-    draw_desktop(frame, area, &[left, usage, changes, activity], app, theme);
-}
-
-/// The desktop the panes leave uncovered in `body`, animated while a turn is
-/// running.
-///
-/// The motion is a picture of the whole screen and the panes are opaque, so
-/// it is worked out only for the cells no pane owns: a pane's cell is never
-/// written here, whatever the motion is. It is the one part of the screen
-/// that says the session is alive without the operator reading anything, and
-/// it is drawn from the same clock as the spinner under the transcript, so
-/// the two cannot disagree about whether a turn is going. A theme that does
-/// not animate, effects turned off, and a session with no turn running leave
-/// the desktop empty and work nothing out.
-fn draw_desktop(frame: &mut Frame, body: Rect, panes: &[Rect], app: &App, theme: &Theme) {
-    if !app.effects() || theme.motion == Motion::Still {
-        return;
+    // it changed. A pane the operator hid gives its rows to the others, and
+    // Usage alone leaves desktop under it.
+    let usage_rows = usage_height(app).min(right.height);
+    let mut constraints: Vec<Constraint> = shown
+        .iter()
+        .map(|pane| match pane {
+            SidePane::Usage => Constraint::Length(usage_rows),
+            SidePane::Changes => Constraint::Fill(13),
+            SidePane::Activity => Constraint::Fill(10),
+        })
+        .collect();
+    if shown == [SidePane::Usage] {
+        constraints.push(Constraint::Fill(1));
     }
-    let Some(activity) = app.activity() else {
-        return;
-    };
-    let screen = frame.area();
-    let field = fx::Field::new(
-        theme,
-        screen.width,
-        screen.height,
-        fx::frame_at(theme.motion, activity.elapsed),
-    );
-    let buffer = frame.buffer_mut();
-    for at in body.positions() {
-        if panes.iter().any(|pane| pane.contains(at)) {
-            continue;
+    let areas = Layout::vertical(constraints).split(right);
+
+    for pane in [Pane::Changes, Pane::Activity] {
+        let side = match pane {
+            Pane::Changes => SidePane::Changes,
+            Pane::Activity => SidePane::Activity,
+        };
+        if !shown.contains(&side) {
+            app.pane_not_drawn(pane);
         }
-        let glyph = field.at(at.x.saturating_sub(screen.x), at.y.saturating_sub(screen.y));
-        if let (Some(glyph), Some(cell)) = (glyph, buffer.cell_mut(at)) {
-            cell.set_char(glyph.symbol).set_fg(glyph.colour);
+    }
+    for (pane, at) in shown.iter().zip(areas.iter()) {
+        match pane {
+            SidePane::Usage => draw_usage(frame, *at, app, theme),
+            SidePane::Changes => draw_changes(frame, *at, app, theme),
+            SidePane::Activity => draw_activity(frame, *at, app, theme),
         }
     }
 }
-
-/// Rows of content a pane keeps before it will spare a blank row under its
-/// title.
-const PANE_ROOM: u16 = 2;
 
 /// How a pane's border is drawn: the pane with the keyboard in the theme's
 /// focus line and colour, every other pane in its plain line and the frame
@@ -584,48 +1131,103 @@ impl Border {
 }
 
 /// The pane frame every pane shares: the border [`Border`] says, the title
-/// centred on the top edge, and room between the border and what is written
-/// inside it.
+/// centred on the top edge, and a column either side between the border and
+/// what is written inside it.
 ///
-/// A column either side always, and a blank row under the title where the
-/// pane is tall enough to spare one. The blank row is the first thing a short
-/// pane gives up: at the smallest terminal the shell draws in, a row of the
-/// changed files is worth more than the room above them.
-fn pane(title: impl Into<String>, area: Rect, border: Border, theme: &Theme) -> Block<'static> {
-    // Two rows of border, the blank row itself, and PANE_ROOM left over.
-    let top = u16::from(area.height > 2 + PANE_ROOM);
-    // Reversed rather than painted, so that a terminal with no colour still
-    // draws the focused title as a solid bar.
-    let title_style = match border.focused {
-        true => Style::new()
-            .fg(theme.title)
-            .bg(theme.pane_bg)
-            .add_modifier(Modifier::REVERSED)
-            .bold(),
-        false => Style::new().fg(theme.title).bold(),
-    };
+/// What a pane holds starts on the row under its title, with no blank row
+/// between: the title already stands apart on the border, and a row of the
+/// changed files or of the agents at work is worth more than the room.
+fn pane(title: impl Into<String>, border: Border, theme: &Theme) -> Block<'static> {
+    frame_of(border, theme).title_top(
+        Line::from(format!(" {} ", title.into()))
+            .style(title_style(theme.title, border, theme))
+            .centered(),
+    )
+}
+
+/// The frame of [`pane`] with nothing on its top edge yet.
+fn frame_of(border: Border, theme: &Theme) -> Block<'static> {
     Block::bordered()
         .border_type(border.kind)
         .border_style(border.style)
         .style(Style::new().bg(theme.pane_bg).fg(theme.fg))
-        .padding(Padding::new(1, 1, top, 0))
-        .title_top(
-            Line::from(format!(" {} ", title.into()))
-                .style(title_style)
-                .centered(),
-        )
+        .padding(Padding::horizontal(1))
+}
+
+/// A title in `colour`. Reversed rather than painted when the pane has the
+/// keyboard, so that a terminal with no colour still draws it as a solid bar.
+fn title_style(colour: Color, border: Border, theme: &Theme) -> Style {
+    match border.focused {
+        true => Style::new()
+            .fg(colour)
+            .bg(theme.pane_bg)
+            .add_modifier(Modifier::REVERSED)
+            .bold(),
+        false => Style::new().fg(colour).bold(),
+    }
+}
+
+/// The session pane's frame: what the session is about at the left of the
+/// top edge, where a caption is known, and the repository's name centred, as
+/// every other pane's title is, where it is not.
+///
+/// The prompt that began the session is written the way the operator typed
+/// it — a bold `> ` and the user's colour. A title the backend made is not
+/// theirs, and is drawn as a title is: in the title colour, with no prompt
+/// marker.
+fn session_frame(
+    caption: Option<String>,
+    titled: bool,
+    repo: &str,
+    border: Border,
+    width: u16,
+    theme: &Theme,
+) -> Block<'static> {
+    let Some(caption) = caption else {
+        return pane(session_caption(None, repo, width), border, theme);
+    };
+    let edge = border.kind.to_border_set().horizontal_top;
+    let text = text::truncate_words(
+        &caption,
+        usize::from(width.saturating_sub(TITLE_MARGIN + 2)),
+    );
+    let line = match titled {
+        true => {
+            let style = title_style(theme.title, border, theme);
+            vec![
+                Span::styled(edge, border.style),
+                Span::styled(format!(" {text} "), style.remove_modifier(Modifier::BOLD)),
+            ]
+        }
+        false => {
+            let style = title_style(theme.user, border, theme);
+            vec![
+                Span::styled(edge, border.style),
+                Span::styled(" > ", style),
+                Span::styled(format!("{text} "), style.remove_modifier(Modifier::BOLD)),
+            ]
+        }
+    };
+    frame_of(border, theme).title_top(Line::from(line))
 }
 
 /// The session pane: the transcript, and the composer under it. `panes` is
 /// whether the right-hand stack is on screen beside it, which decides whether
 /// Tab has anywhere to go.
 fn draw_session(frame: &mut Frame, area: Rect, panes: bool, app: &mut App, theme: &Theme) {
-    let title = session_caption(app.session(), &app.repo().name, area.width);
-
     app.measured_session(area);
     app.drew_jump(None);
     let border = Border::of(app.focus() == Focus::Session, theme);
-    let block = pane(title, area, border, theme);
+    // Narrowed to one agent, the transcript says so where the eye reads
+    // what the session is about: below it is not the whole session.
+    let (caption, titled) = match app.only_agent_tag() {
+        Some(tag) => (
+            Some(format!("only {tag}'s entries · s in a side pane shows all")),
+            true,
+        ),
+        None => (app.caption(), app.titled()),
+    };
+    let block = session_frame(caption, titled, &app.repo().name, border, area.width, theme);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.height == 0 || inner.width == 0 {
@@ -639,13 +1241,15 @@ fn draw_session(frame: &mut Frame, area: Rect, panes: bool, app: &mut App, theme
     // so a long prompt is editable without hiding the transcript behind it.
     // The shell's own reply wraps in the bar rather than being cut, and takes
     // a row of its own only while it is too long for one.
+    // The box is as tall as the rows the editor wraps what is typed into, not
+    // its lines: a line too long for the box's width is drawn over several
+    // rows, and a box a row short of them scrolls the prompt's first rows out
+    // of sight.
     let said = bar_says(app, panes, theme, bar_room(app, inner.width));
-    // Split rather than `lines`, which does not count the empty line a
-    // just-opened one is: that line would take the only row, and scroll the
-    // one above it out of sight.
-    let typed = app.composed().split('\n').count().max(said.len()).max(1);
+    let typed = editor_rows(app, &said, inner.width);
     let cap = usize::from(inner.height / 3).max(1);
-    let composer_rows = u16::try_from(typed.min(cap)).unwrap_or(1);
+    let composer_rows = u16::try_from(typed.max(said.len()).min(cap)).unwrap_or(1);
+    app.composer_fits(typed <= cap);
 
     let [transcript, divider, composer] = Layout::vertical([
         Constraint::Min(1),
@@ -666,13 +1270,33 @@ fn draw_session(frame: &mut Frame, area: Rect, panes: bool, app: &mut App, theme
     );
 
     frame.render_widget(
-        Paragraph::new(Line::from("─".repeat(usize::from(divider.width))))
+        Paragraph::new(divider_line(app.recall_label(), divider.width, theme))
             .style(Style::new().fg(theme.frame).bg(theme.pane_bg)),
         divider,
     );
 
     draw_ask_bar(frame, composer, said, app, theme);
     draw_mention(frame, transcript, composer, app, theme);
+}
+
+/// The rule between the transcript and the composer, `width` columns wide,
+/// with `label` set into it where the composer holds a recalled prompt.
+///
+/// The label is on the divider rather than on the bar beside the prompt: a
+/// recalled prompt can fill every column of the bar, and this is the one
+/// thing the operator must not miss about it.
+fn divider_line(label: Option<String>, width: u16, theme: &Theme) -> Line<'static> {
+    let width = usize::from(width);
+    let Some(label) = label else {
+        return Line::from("─".repeat(width));
+    };
+    let label = text::truncate(&format!(" {label} "), width.saturating_sub(1));
+    let rest = width.saturating_sub(1).saturating_sub(text::width(&label));
+    Line::from(vec![
+        Span::raw("─".repeat(width.min(1))),
+        Span::styled(label, Style::new().fg(theme.hot).bold()),
+        Span::raw("─".repeat(rest)),
+    ])
 }
 
 /// The files an `@` word could name, or the backend's commands the `/` that
@@ -774,12 +1398,15 @@ fn draw_offer(
                 // A file's name is the end of its path, so a path too long
                 // for the list keeps that and gives up its leading
                 // directories.
-                let shown = format!(" {:<inside$} ", text::truncate_start(row, inside));
+                let shown = format!(
+                    " {} ",
+                    text::pad(&text::truncate_start(row, inside), inside)
+                );
                 return Line::from(shown).style(style);
             };
             // The names are a column, so the descriptions start together.
             let row = text::truncate(row, inside);
-            let row = format!("{row:<column$}", column = named.min(inside));
+            let row = text::pad(&row, named.min(inside));
             let left = inside.saturating_sub(text::width(&row));
             let said = match left > 2 {
                 true => format!("  {}", text::truncate(first_line(detail), left - 2)),
@@ -837,12 +1464,25 @@ fn find_in_transcript(app: &mut App, width: u16, theme: &Theme) {
         return;
     };
     let detail = transcript_detail(app);
-    let (entries, drawn) = app.entries_to_draw();
-    drawn.update(entries, usize::from(width), detail, theme);
-    let found = crate::find::Query::new(&query)
-        .map(|query| drawn.find(&query))
-        .unwrap_or_default();
-    app.found(found);
+    let headings = app.grouped_by_agent().then(|| app.agent_headings());
+    let only = app.only_agent_tag();
+    let (entries, commands, drawn) = app.entries_to_draw();
+    drawn.update(
+        entries,
+        commands,
+        usize::from(width),
+        detail,
+        Arrangement {
+            headings: headings.as_deref(),
+            only: only.as_deref(),
+        },
+        theme,
+    );
+    let changed = match crate::find::Query::new(&query) {
+        Some(query) => drawn.find(&query),
+        None => drawn.forget_search(),
+    };
+    app.found(changed);
 }
 
 /// The border cells a pane's title leaves on its top edge: a corner and a
@@ -851,13 +1491,13 @@ fn find_in_transcript(app: &mut App, width: u16, theme: &Theme) {
 const TITLE_MARGIN: u16 = 6;
 
 /// The session pane's title on a pane `width` wide: what the session is about
-/// where it says ([`SessionState::caption`]), and the repository it runs in
-/// where it does not yet.
+/// where it says ([`App::caption`]), and the repository it runs in where it
+/// does not yet.
 ///
 /// Cut between words where it is longer than the edge has room for, so that
 /// the corners and a cell of the edge either side survive at every width.
-fn session_caption(session: &SessionState, repo: &str, width: u16) -> String {
-    let title = match session.caption() {
+fn session_caption(caption: Option<String>, repo: &str, width: u16) -> String {
+    let title = match caption {
         Some(caption) => caption,
         None if repo.is_empty() => "Session".to_owned(),
         None => format!("Session ─ {repo}"),
@@ -944,13 +1584,7 @@ fn draw_ask_bar(
         marker,
     );
 
-    // A reply takes every column the composer leaves it, so no part of the
-    // placeholder is left showing beside it; the key hints take only their own.
-    let said_width = match app.hint() {
-        Some(_) if !said.is_empty() => bar_room(app, area.width),
-        _ => said.iter().map(Line::width).max().unwrap_or(0),
-    };
-    let said_width = u16::try_from(said_width).unwrap_or(0);
+    let said_width = u16::try_from(said_width(app, &said, area.width)).unwrap_or(0);
     let [editor, _, right] = Layout::horizontal([
         Constraint::Min(1),
         Constraint::Length(u16::from(said_width > 0)),
@@ -958,7 +1592,108 @@ fn draw_ask_bar(
     ])
     .areas(rest);
     editing(app).render(editor, frame.buffer_mut());
+    if app.finding().is_none() {
+        colour_commands(frame.buffer_mut(), editor, app, theme);
+    }
     frame.render_widget(Paragraph::new(said).style(pane), right);
+}
+
+/// `ranges` of bytes of `line`, in order and apart, as ranges of its
+/// characters, counted in one walk of the line.
+fn in_characters(line: &str, ranges: &[std::ops::Range<usize>]) -> Vec<std::ops::Range<usize>> {
+    let mut counted = (0usize, 0usize);
+    let mut at = |byte: usize| {
+        let (from, chars) = counted;
+        let chars = chars + line.get(from..byte).map_or(0, |part| part.chars().count());
+        counted = (byte, chars);
+        chars
+    };
+    ranges
+        .iter()
+        .map(|range| {
+            let start = at(range.start);
+            start..at(range.end)
+        })
+        .collect()
+}
+
+/// Draws each command the composer names where the backend reads it in the
+/// theme's command colour, over what the editor drew.
+///
+/// The editor draws its text in one style, so the colour goes on after it,
+/// cell by cell, where [`text::editor_spots`] says the name was drawn. Only
+/// while the composer shows its first row: the editor keeps where it has
+/// scrolled to to itself, so in a prompt taller than the box the cells of a
+/// name cannot be known, and nothing is coloured rather than the wrong cells.
+/// A cell the editor drew in anything but the plain text colour — the
+/// cursor, a selection — keeps what it was drawn in.
+fn colour_commands(buffer: &mut ratatui::buffer::Buffer, editor: Rect, app: &App, theme: &Theme) {
+    let commands = app.session().commands();
+    if commands.is_empty() || !app.composer_from_its_top() {
+        return;
+    }
+    let composer = app.composer();
+    let columns = usize::from(editor.width);
+    let tab = composer.tab_length();
+    let mut top = 0usize;
+    for (row, line) in composer.lines().iter().enumerate() {
+        if top >= usize::from(editor.height) {
+            break;
+        }
+        let named = crate::slash::named(line, row == 0, commands);
+        if !named.is_empty() {
+            let chars = in_characters(line, &named);
+            for (down, column, cells) in text::editor_spots(line, columns, tab, &chars) {
+                for across in column..column + cells {
+                    let (Ok(x), Ok(y)) = (u16::try_from(across), u16::try_from(top + down)) else {
+                        continue;
+                    };
+                    if x >= editor.width || y >= editor.height {
+                        continue;
+                    }
+                    if let Some(cell) = buffer.cell_mut((editor.x + x, editor.y + y))
+                        && cell.fg == theme.fg
+                    {
+                        cell.set_fg(theme.command);
+                    }
+                }
+            }
+        }
+        top += text::editor_rows(line, columns, tab);
+    }
+}
+
+/// The columns the bar's right-hand end takes on a pane `width` wide when it
+/// says `said`.
+///
+/// A reply takes every column the composer leaves it, so no part of the
+/// placeholder is left showing beside it; the key hints take only their own.
+fn said_width(app: &App, said: &[Line<'static>], width: u16) -> usize {
+    match app.hint() {
+        Some(_) if !said.is_empty() => bar_room(app, width),
+        _ => said.iter().map(Line::width).max().unwrap_or(0),
+    }
+}
+
+/// The rows the bar's editor draws what is in it in, on a pane `width` wide
+/// whose right-hand end says `said`: the editor's own wrapping, at the columns
+/// the badge, the marker and the right-hand end leave it.
+fn editor_rows(app: &App, said: &[Line<'static>], width: u16) -> usize {
+    let said = said_width(app, said, width);
+    let columns = usize::from(width)
+        .saturating_sub(lead_width(app))
+        .saturating_sub(match said {
+            0 => 0,
+            said => said + 1,
+        })
+        .max(1);
+    let editor = editing(app);
+    editor
+        .lines()
+        .iter()
+        .map(|line| text::editor_rows(line, columns, editor.tab_length()))
+        .sum::<usize>()
+        .max(1)
 }
 
 /// The columns the bar's right-hand end may take on a pane `width` wide.
@@ -1077,9 +1812,16 @@ fn loose(segments: Vec<Segment>) -> Vec<Hint> {
 /// it does, Tab is not offered as the way between the panes.
 fn bar_key_hints(app: &App, panes: bool, theme: &Theme) -> Vec<Hint> {
     let question_holds = app.asking().is_some() && app.ask_focus() != AskFocus::Deferred;
+    // The grouping key is offered only where there are agents to group.
+    let grouping = (!app.agents().is_empty()).then(|| app.grouped_by_agent());
     key_hints(
         app.session().mode().is_some(),
-        app.focus(),
+        (
+            app.focus(),
+            grouping,
+            app.tools_by_name(),
+            app.notable_only(),
+        ),
         panes && !question_holds,
         (app.newline_key(), app.sends_enter_for_shift_enter()),
         theme,
@@ -1102,7 +1844,7 @@ fn bar_key_hints(app: &App, panes: bool, theme: &Theme) -> Vec<Hint> {
 /// other keys are reminders, and give way first.
 fn key_hints(
     reported: bool,
-    focus: Focus,
+    (focus, grouping, by_name, notable_only): (Focus, Option<bool>, bool, bool),
     panes: bool,
     newline: (&str, bool),
     theme: &Theme,
@@ -1126,8 +1868,22 @@ fn key_hints(
                 hints.push(key("Tab panes", false));
             }
         }
-        Focus::Pane(_) => {
+        Focus::Pane(pane) => {
             hints.push(key("↑↓ Enter folds", false));
+            match grouping {
+                Some(false) => hints.push(key("a groups by agent", false)),
+                Some(true) => hints.push(key("a ungroups", false)),
+                None => {}
+            }
+            match (pane, by_name) {
+                (Pane::Activity, false) => hints.push(key("t tool names", false)),
+                (Pane::Activity, true) => hints.push(key("t kinds of work", false)),
+                (Pane::Changes, _) => {}
+            }
+            match notable_only {
+                false => hints.push(key("n notable only", false)),
+                true => hints.push(key("n shows all", false)),
+            }
             hints.push(key("Esc back", false));
         }
     }
@@ -1188,11 +1944,14 @@ fn draw_transcript(
     // at it, and it is never more than a screenful.
     let question = app
         .asking()
-        .map(|ask| question_lines(app, ask, width, theme))
+        .map(|ask| question_lines(app, ask, (width, height), theme))
         .unwrap_or_default();
+    let framed = question.framed;
+    let question = question.lines;
 
     if app.entries().is_empty() && question.is_empty() {
         let lines = empty_transcript(app.is_attached(), theme);
+        app.drew_transcript(area, 0);
         app.measured(lines.len(), height);
         frame.render_widget(
             Paragraph::new(lines).style(Style::new().bg(theme.pane_bg)),
@@ -1202,8 +1961,14 @@ fn draw_transcript(
     }
 
     let detail = transcript_detail(app);
-    let (entries, drawn) = app.entries_to_draw();
-    drawn.update(entries, width, detail, theme);
+    let headings = app.grouped_by_agent().then(|| app.agent_headings());
+    let only = app.only_agent_tag();
+    let (entries, commands, drawn) = app.entries_to_draw();
+    let arranged = Arrangement {
+        headings: headings.as_deref(),
+        only: only.as_deref(),
+    };
+    drawn.update(entries, commands, width, detail, arranged, theme);
     let above = drawn.line_count();
     app.keep_view();
     let total = above + question.len();
@@ -1211,12 +1976,17 @@ fn draw_transcript(
     app.measured(total, height);
     app.reveal_found();
     let start = app.scroll().min(total);
-    let (_, drawn) = app.entries_to_draw();
+    let (_, _, drawn) = app.entries_to_draw();
     let mut visible = drawn.lines(start, height);
     if let Some((found, current)) = app.find_marks() {
         mark_found(&mut visible, start, found, current, theme);
     }
+    if let Some(selection) = app.selection() {
+        mark_selected(&mut visible, start, selection, theme);
+    }
+    app.drew_transcript(area, above);
     let room = height.saturating_sub(visible.len());
+    app.drew_question_top(question.is_empty() || (start..start + height).contains(&above));
     visible.extend(
         question
             .into_iter()
@@ -1227,11 +1997,39 @@ fn draw_transcript(
         Paragraph::new(visible).style(Style::new().bg(theme.pane_bg)),
         area,
     );
+    if let Some(framed) = framed {
+        shadow_question(frame, area, framed, (above, start), theme);
+    }
     draw_scrollbar(frame, area, border, (start, total, height), theme);
     if !app.follows_tail() {
         let at = draw_jump(frame, area, app.asking().is_some(), theme);
         app.drew_jump(at);
     }
+}
+
+/// The question's shadow, on the transcript `area` its frame of `columns` by
+/// `rows` is drawn in: the question starts after the transcript's first
+/// `above` lines, and the view after its first `start`.
+fn shadow_question(
+    frame: &mut Frame,
+    area: Rect,
+    (columns, rows): (u16, usize),
+    (above, start): (usize, usize),
+    theme: &Theme,
+) {
+    let clamp = |n: usize| u16::try_from(n).unwrap_or(u16::MAX);
+    let (top, rows) = match above.checked_sub(start) {
+        Some(offset) => (area.y.saturating_add(clamp(offset)), rows),
+        // Scrolled into the question, its top is above the pane. The shadow
+        // starts a row under the frame's top, so the frame is taken to start
+        // on the row above the pane, with the rows scrolled past taken off.
+        None => (
+            area.y.saturating_sub(1),
+            (rows + 1).saturating_sub(start - above),
+        ),
+    };
+    let x = area.x.saturating_add(clamp(GUTTER));
+    cast_shadow(frame, Rect::new(x, top, columns, clamp(rows)), area, theme);
 }
 
 /// The way back down to the newest line, as a button at the bottom right of
@@ -1268,6 +2066,26 @@ fn draw_jump(frame: &mut Frame, area: Rect, waiting: bool, theme: &Theme) -> Opt
     Some(at)
 }
 
+/// Marks what the operator selected on the transcript lines drawn from line
+/// `start`, in reverse, as a terminal marks a selection of its own.
+fn mark_selected(
+    lines: &mut [Line<'static>],
+    start: usize,
+    selection: crate::select::Selection,
+    theme: &Theme,
+) {
+    let style = Style::new().fg(theme.pane_bg).bg(theme.fg);
+    for (row, line) in lines.iter_mut().enumerate() {
+        let Some((from, to)) = selection.columns_on(start + row) else {
+            continue;
+        };
+        let (first, count) = crate::select::chars_in(&crate::select::plain(line), from, to);
+        if count > 0 {
+            *line = crate::find::highlight(std::mem::take(line), &[(first, count, style)]);
+        }
+    }
+}
+
 /// Marks every match of a search on the transcript lines drawn from line
 /// `start`: the one the view was stepped to as a solid chip, the rest
 /// underlined, so the current one can be told from them without its colour.
@@ -1282,15 +2100,20 @@ fn mark_found(
     let other = Style::new().fg(theme.hot).underlined();
     for (row, line) in lines.iter_mut().enumerate() {
         let at = start + row;
-        let first = found.partition_point(|found| found.line < at);
-        let marks: Vec<(usize, usize, Style)> = found
+        // Matches do not overlap, so those that reach this line are the last
+        // ones to start on or above it, back to the first that ends above it.
+        let upto = found.partition_point(|found| found.line <= at);
+        let marks: Vec<(usize, usize, Style)> = found[..upto]
             .iter()
             .enumerate()
-            .skip(first)
-            .take_while(|(_, found)| found.line == at)
-            .map(|(index, found)| {
+            .rev()
+            .take_while(|(_, found)| found.last_line() >= at)
+            .flat_map(|(index, found)| {
                 let style = if Some(index) == current { here } else { other };
-                (found.start, found.len, style)
+                found
+                    .parts()
+                    .filter(move |(line, _, _)| *line == at)
+                    .map(move |(_, start, len)| (start, len, style))
             })
             .collect();
         if !marks.is_empty() {
@@ -1310,37 +2133,219 @@ fn mark_found(
 /// is everything its lines depend on.
 #[derive(Debug, Default)]
 pub struct DrawnEntries {
-    drawn: Vec<(u64, Vec<Line<'static>>)>,
+    drawn: Vec<Drawn>,
+    /// The query each entry's [`Drawn::found`] holds the matches of.
+    searched: Option<crate::find::Query>,
+    /// Every place `searched` is in the transcript as drawn, top to bottom,
+    /// as [`DrawnEntries::find`] last put them together.
+    found: Vec<crate::find::Found>,
+    /// Whether an entry has been drawn again, or the order changed, since
+    /// `found` was put together.
+    moved: bool,
+}
+
+/// One thing the transcript draws, in the order it is drawn: an entry, or
+/// the heading a sub-agent's rows are grouped under.
+#[derive(Debug)]
+struct Drawn {
+    /// What the lines were drawn from, as one number.
+    key: u64,
+    /// The entry drawn, or for a heading the first entry under it.
+    entry: usize,
+    heading: bool,
+    /// Whether this is the row that counts a run of routine entries left
+    /// out, rather than an entry drawn.
+    hidden: bool,
+    lines: Vec<Line<'static>>,
+    /// Where [`DrawnEntries::searched`] is in `lines`, counted from their
+    /// first, once they have been searched. Kept with the lines, so a search
+    /// held open reads again only the entries drawn again: every frame
+    /// counts the matches, and reading every line of a long session for them
+    /// is what the frame would otherwise spend its time on.
+    found: Option<Vec<crate::find::Found>>,
+}
+
+/// What the transcript draws at one place, before it is drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Slot {
+    Entry(usize),
+    /// The heading over a sub-agent's rows in a turn: the first of them, and
+    /// how many calls they hold.
+    Heading {
+        first: usize,
+        calls: usize,
+    },
+    /// A run of routine entries left out, where the transcript shows only
+    /// what is notable: the first of them, and how many.
+    Hidden {
+        first: usize,
+        count: usize,
+    },
 }
 
 impl DrawnEntries {
-    /// Brings every entry's lines up to date.
-    fn update(&mut self, entries: &[Entry], width: usize, detail: Detail, theme: &Theme) {
-        self.drawn.truncate(entries.len());
-        for (at, entry) in entries.iter().enumerate() {
-            let key = drawn_from(entry, width, detail, theme);
+    /// Brings every entry's lines up to date, in the order they are drawn.
+    ///
+    /// The columns are worked out here, from every entry, because a row is
+    /// drawn in the columns the widest row needs; and so is whether an entry
+    /// keeps the blank line after it, which depends on what is drawn next.
+    /// `arranged` says whether the rows are grouped by agent and narrowed to
+    /// one agent's: see [`Arrangement`].
+    fn update(
+        &mut self,
+        entries: &[Entry],
+        commands: &[SlashCommand],
+        width: usize,
+        detail: Detail,
+        arranged: Arrangement<'_>,
+        theme: &Theme,
+    ) {
+        let headings = arranged.headings.filter(|_| arranged.only.is_none());
+        let detail = Detail {
+            columns: crate::calls::Columns::of(entries),
+            grouped: headings.is_some(),
+            ..detail
+        };
+        let named = commands_key(commands);
+        let order = order(
+            entries,
+            headings.is_some(),
+            detail.notable_only,
+            arranged.only,
+        );
+        self.moved |= self.drawn.len() > order.len();
+        self.drawn.truncate(order.len());
+        for (at, slot) in order.iter().enumerate() {
+            let next_is_row = match order.get(at + 1) {
+                Some(Slot::Entry(next)) => entries.get(*next).is_some_and(is_row),
+                Some(Slot::Heading { .. } | Slot::Hidden { .. }) | None => false,
+            };
+            let (key, entry, heading) = match *slot {
+                Slot::Entry(index) => {
+                    let packed = entries.get(index).is_some_and(is_row) && next_is_row;
+                    let key = entries
+                        .get(index)
+                        .map_or(0, |entry| drawn_from(entry, width, detail, theme, named))
+                        ^ u64::from(packed);
+                    (key, index, false)
+                }
+                Slot::Heading { first, calls } => {
+                    let heading = heading_of(entries, first, headings);
+                    (
+                        heading_key(&heading, calls, width, detail, theme),
+                        first,
+                        true,
+                    )
+                }
+                Slot::Hidden { first, count } => (hidden_key(count, width, theme), first, false),
+            };
+            let counted = matches!(slot, Slot::Hidden { .. });
+            let draw = || match *slot {
+                Slot::Entry(index) => {
+                    let Some(entry) = entries.get(index) else {
+                        return Vec::new();
+                    };
+                    let mut lines = entry_lines(entry, width, detail, theme, commands);
+                    if is_row(entry)
+                        && next_is_row
+                        && lines.last().is_some_and(|line| line.width() == 0)
+                    {
+                        lines.pop();
+                    }
+                    lines
+                }
+                Slot::Heading { first, calls } => {
+                    let (tag, task) = heading_of(entries, first, headings);
+                    vec![crate::calls::heading(
+                        &tag, &task, calls, width, detail, theme,
+                    )]
+                }
+                Slot::Hidden { count, .. } => hidden(count, width, theme),
+            };
             match self.drawn.get_mut(at) {
-                Some((drawn_key, _)) if *drawn_key == key => {}
-                Some(slot) => *slot = (key, entry_lines(entry, width, detail, theme)),
-                None => self
-                    .drawn
-                    .push((key, entry_lines(entry, width, detail, theme))),
+                Some(drawn) if drawn.key == key => {
+                    self.moved |= drawn.entry != entry || drawn.heading != heading;
+                    drawn.entry = entry;
+                    drawn.heading = heading;
+                    drawn.hidden = counted;
+                }
+                Some(drawn) => {
+                    self.moved = true;
+                    *drawn = Drawn {
+                        key,
+                        entry,
+                        heading,
+                        hidden: counted,
+                        lines: draw(),
+                        found: None,
+                    }
+                }
+                None => {
+                    self.moved = true;
+                    self.drawn.push(Drawn {
+                        key,
+                        entry,
+                        heading,
+                        hidden: counted,
+                        lines: draw(),
+                        found: None,
+                    });
+                }
             }
         }
     }
 
-    /// Every place `query` is in the transcript as drawn, top to bottom.
-    fn find(&self, query: &crate::find::Query) -> Vec<crate::find::Found> {
-        self.drawn
-            .iter()
-            .flat_map(|(_, lines)| lines)
-            .enumerate()
-            .flat_map(|(at, line)| query.in_line(line, at))
-            .collect()
+    /// Finds every place `query` is in the transcript as drawn, top to
+    /// bottom, for [`DrawnEntries::found`]. Returns whether that changed.
+    ///
+    /// An entry is read for it only where its lines have changed since it
+    /// was last read for the same query, and the places are put together
+    /// again only where an entry has.
+    fn find(&mut self, query: &crate::find::Query) -> bool {
+        if self.searched.as_ref() != Some(query) {
+            for drawn in &mut self.drawn {
+                drawn.found = None;
+            }
+            self.searched = Some(query.clone());
+            self.moved = true;
+        }
+        if !std::mem::take(&mut self.moved) {
+            return false;
+        }
+        let mut first = 0;
+        let found = &mut self.found;
+        found.clear();
+        for drawn in &mut self.drawn {
+            let which = crate::find::Which {
+                entry: drawn.entry,
+                heading: drawn.heading,
+                nth: 0,
+            };
+            let lines = &drawn.lines;
+            let here = drawn.found.get_or_insert_with(|| query.in_lines(lines, 0));
+            found.extend(here.iter().map(|at| at.placed(first, which)));
+            first += lines.len();
+        }
+        true
+    }
+
+    /// Forgets the search, for a query with nothing in it, which finds
+    /// nothing. Returns whether anything had been found.
+    fn forget_search(&mut self) -> bool {
+        self.searched = None;
+        let had = !self.found.is_empty();
+        self.found.clear();
+        had
+    }
+
+    /// Every place the search is in the transcript as last drawn, top to
+    /// bottom.
+    pub(crate) fn found(&self) -> &[crate::find::Found] {
+        &self.found
     }
 
     fn line_count(&self) -> usize {
-        self.drawn.iter().map(|(_, lines)| lines.len()).sum()
+        self.drawn.iter().map(|drawn| drawn.lines.len()).sum()
     }
 
     /// Line `line` of the whole transcript as last drawn, named by what it
@@ -1348,16 +2353,17 @@ impl DrawnEntries {
     /// is drawn there.
     pub(crate) fn anchor(&self, line: usize) -> Option<Anchor> {
         let mut first = 0usize;
-        for (entry, (_, lines)) in self.drawn.iter().enumerate() {
+        for drawn in &self.drawn {
             let offset = line.checked_sub(first)?;
-            if offset < lines.len() {
+            if offset < drawn.lines.len() {
                 return Some(Anchor {
-                    entry,
+                    entry: drawn.entry,
+                    heading: drawn.heading,
                     offset,
-                    lines: lines.clone(),
+                    lines: drawn.lines.clone(),
                 });
             }
-            first = first.saturating_add(lines.len());
+            first = first.saturating_add(drawn.lines.len());
         }
         None
     }
@@ -1365,15 +2371,26 @@ impl DrawnEntries {
     /// Where `anchor` is in the transcript as drawn now: the same line of the
     /// same entry, and where that line is gone — a diff cut again, a run of
     /// calls folded — the nearest line above it that is still drawn, so the
-    /// view stops on what led up to the line rather than past it.
+    /// view stops on what led up to the line rather than past it. A heading
+    /// no longer drawn — the rows were ungrouped — is found as the first row
+    /// that was under it.
     pub(crate) fn line_of(&self, anchor: &Anchor) -> Option<usize> {
-        let (_, lines) = self.drawn.get(anchor.entry)?;
+        let at = self
+            .drawn
+            .iter()
+            .position(|drawn| drawn.entry == anchor.entry && drawn.heading == anchor.heading)
+            .or_else(|| {
+                self.drawn
+                    .iter()
+                    .position(|drawn| drawn.entry == anchor.entry)
+            })?;
+        let lines = &self.drawn.get(at)?.lines;
         let last = lines.len().checked_sub(1)?;
         let first: usize = self
             .drawn
             .iter()
-            .take(anchor.entry)
-            .map(|(_, lines)| lines.len())
+            .take(at)
+            .map(|drawn| drawn.lines.len())
             .sum();
         let above = (0..=anchor.offset).rev();
         let below = anchor.offset.saturating_add(1)..anchor.lines.len();
@@ -1392,16 +2409,276 @@ impl DrawnEntries {
         Some(first.saturating_add(offset))
     }
 
+    /// The entry drawn on line `line` of the whole transcript, where an entry
+    /// is drawn there whole rather than a heading over agents' rows or the
+    /// count of entries left out.
+    pub(crate) fn entry_at(&self, line: usize) -> Option<usize> {
+        let mut first = 0usize;
+        for drawn in &self.drawn {
+            let offset = line.checked_sub(first)?;
+            if offset < drawn.lines.len() {
+                return (!drawn.heading && !drawn.hidden).then_some(drawn.entry);
+            }
+            first = first.saturating_add(drawn.lines.len());
+        }
+        None
+    }
+
+    /// Line `line` of the whole transcript as drawn, without its styles.
+    pub(crate) fn plain_line(&self, line: usize) -> Option<String> {
+        self.lines(line, 1).first().map(crate::select::plain)
+    }
+
+    /// The link at `point` of the transcript as drawn `width` cells wide, if
+    /// there is one there. A link is looked for within the one entry it is
+    /// in: two entries' lines are never one run of text. `entries` are what
+    /// the transcript was drawn from, whose text says where a word the
+    /// drawing cut at the end of a line goes on.
+    pub(crate) fn link_at(
+        &self,
+        point: crate::select::Point,
+        width: usize,
+        entries: &[Entry],
+    ) -> Option<String> {
+        let mut first = 0usize;
+        for drawn in &self.drawn {
+            let offset = point.line.checked_sub(first)?;
+            if offset < drawn.lines.len() {
+                let lines: Vec<String> = drawn.lines.iter().map(crate::select::plain).collect();
+                let said = match drawn.heading {
+                    true => Vec::new(),
+                    false => entries.get(drawn.entry).map_or_else(Vec::new, said_in),
+                };
+                let said: Vec<&str> = said.iter().map(String::as_str).collect();
+                return crate::select::link_at(&lines, width, offset, point.column, &said);
+            }
+            first = first.saturating_add(drawn.lines.len());
+        }
+        None
+    }
+
     /// `count` lines from line `start` of the whole transcript.
     fn lines(&self, start: usize, count: usize) -> Vec<Line<'static>> {
         self.drawn
             .iter()
-            .flat_map(|(_, lines)| lines)
+            .flat_map(|drawn| &drawn.lines)
             .skip(start)
             .take(count)
             .cloned()
             .collect()
     }
+}
+
+/// The text `entry` is drawn from: its head, its detail, its body, and what
+/// each of its calls did, failed with and printed.
+fn said_in(entry: &Entry) -> Vec<String> {
+    let mut said = vec![entry.head.clone(), entry.meta.clone(), entry.body.clone()];
+    for call in &entry.calls {
+        said.push(call.what.clone());
+        said.extend(call.error.clone());
+        if let Some(printed) = &call.printed {
+            said.push(printed.tail.join("\n"));
+        }
+    }
+    said
+}
+
+/// How the transcript's entries are arranged, beside how each is drawn.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct Arrangement<'a> {
+    /// Each sub-agent's tag and task, where the rows are grouped by agent;
+    /// `None` where they are drawn as they happened.
+    pub(crate) headings: Option<&'a [(String, String)]>,
+    /// The tag of the one sub-agent whose entries alone are drawn, where the
+    /// operator narrowed the transcript to it; it is then drawn as it
+    /// happened, since there is nothing to group.
+    pub(crate) only: Option<&'a str>,
+}
+
+/// The order the transcript draws `entries` in.
+///
+/// Where `only` names a sub-agent, its entries alone, as they happened: its
+/// words, its calls and its refused calls, and nothing of the session's.
+///
+/// As they happened, unless `grouped`: then within each turn — between one
+/// prompt or turn's rule and the next — every sub-agent's rows are drawn
+/// together under a heading, at the place that agent first did something.
+/// The session's own entries, anything an agent did that is not a row of
+/// the calls table, and the turn's boundaries stay where they were. Where
+/// `notable_only`, the routine entries are left out, see [`notable`].
+pub(crate) fn order(
+    entries: &[Entry],
+    grouped: bool,
+    notable_only: bool,
+    only: Option<&str>,
+) -> Vec<Slot> {
+    let order = match only {
+        Some(tag) => (0..entries.len())
+            .filter(|&at| entries[at].agent.as_deref() == Some(tag))
+            .map(Slot::Entry)
+            .collect(),
+        None => by_agent(entries, grouped),
+    };
+    match notable_only {
+        true => notable(entries, order),
+        false => order,
+    }
+}
+
+/// `order` without its routine entries, each run of them one
+/// [`Slot::Hidden`] where they were.
+///
+/// A heading over a sub-agent's rows stays where every row under it is
+/// left out: it says what the agent did, in a line, and the count under it
+/// says how much of that is left out.
+fn notable(entries: &[Entry], order: Vec<Slot>) -> Vec<Slot> {
+    let mut shown: Vec<Slot> = Vec::with_capacity(order.len());
+    for slot in order {
+        let routine = match slot {
+            Slot::Entry(at) => entries
+                .get(at)
+                .is_some_and(|entry| entry.attention < Attention::Notable),
+            Slot::Heading { .. } | Slot::Hidden { .. } => false,
+        };
+        match (routine, slot, shown.last_mut()) {
+            (true, _, Some(Slot::Hidden { count, .. })) => *count += 1,
+            (true, Slot::Entry(first), _) => shown.push(Slot::Hidden { first, count: 1 }),
+            _ => shown.push(slot),
+        }
+    }
+    shown
+}
+
+/// The entries in the order they are drawn, each turn's sub-agent rows
+/// together under a heading where `grouped`.
+fn by_agent(entries: &[Entry], grouped: bool) -> Vec<Slot> {
+    if !grouped {
+        return (0..entries.len()).map(Slot::Entry).collect();
+    }
+    let mut order = Vec::with_capacity(entries.len());
+    let mut start = 0;
+    while start < entries.len() {
+        let end = (start + 1..entries.len())
+            .find(|&at| matches!(entries[at].kind, EntryKind::User | EntryKind::Turn(_)))
+            .unwrap_or(entries.len());
+        order.extend(grouped_turn(entries, start..end));
+        start = end;
+    }
+    order
+}
+
+/// One turn's entries, each sub-agent's rows drawn together.
+fn grouped_turn(entries: &[Entry], turn: std::ops::Range<usize>) -> Vec<Slot> {
+    enum Place {
+        One(usize),
+        Group(usize),
+    }
+    let mut places = Vec::new();
+    let mut groups: Vec<(&str, Vec<usize>)> = Vec::new();
+    for at in turn {
+        let Some(entry) = entries.get(at) else {
+            continue;
+        };
+        let grouped = is_row(entry) || entry.kind == EntryKind::SubAgent;
+        match entry.agent.as_deref().filter(|_| grouped) {
+            Some(tag) => match groups.iter_mut().find(|(group, _)| *group == tag) {
+                Some((_, rows)) => rows.push(at),
+                None => {
+                    groups.push((tag, vec![at]));
+                    places.push(Place::Group(groups.len() - 1));
+                }
+            },
+            None => places.push(Place::One(at)),
+        }
+    }
+    let mut slots = Vec::new();
+    for place in places {
+        match place {
+            Place::One(at) => slots.push(Slot::Entry(at)),
+            Place::Group(group) => {
+                let Some((_, rows)) = groups.get(group) else {
+                    continue;
+                };
+                let calls = rows
+                    .iter()
+                    .filter_map(|&at| entries.get(at))
+                    .map(|entry| entry.calls.len())
+                    .sum();
+                slots.push(Slot::Heading {
+                    first: rows.first().copied().unwrap_or_default(),
+                    calls,
+                });
+                slots.extend(rows.iter().copied().map(Slot::Entry));
+            }
+        }
+    }
+    slots
+}
+
+/// The tag and task a heading over entry `first`'s agent's rows names.
+fn heading_of(
+    entries: &[Entry],
+    first: usize,
+    headings: Option<&[(String, String)]>,
+) -> (String, String) {
+    let tag = entries
+        .get(first)
+        .and_then(|entry| entry.agent.clone())
+        .unwrap_or_default();
+    let task = headings
+        .unwrap_or_default()
+        .iter()
+        .find(|(named, _)| *named == tag)
+        .map(|(_, task)| task.clone())
+        .unwrap_or_default();
+    (tag, task)
+}
+
+/// What a heading's line is drawn from, as one number.
+fn heading_key(
+    heading: &(String, String),
+    calls: usize,
+    width: usize,
+    detail: Detail,
+    theme: &Theme,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    "heading".hash(&mut hasher);
+    heading.hash(&mut hasher);
+    calls.hash(&mut hasher);
+    width.hash(&mut hasher);
+    detail.columns.hash(&mut hasher);
+    theme.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// The row standing where `count` routine entries are left out, and the
+/// blank line after it that every entry keeps.
+fn hidden(count: usize, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    let entries = match count {
+        1 => "entry",
+        _ => "entries",
+    };
+    let said = format!("… {count} routine {entries} hidden");
+    vec![
+        Line::from(Span::styled(
+            text::truncate(&said, width),
+            Style::new().fg(theme.dim),
+        )),
+        Line::default(),
+    ]
+}
+
+/// What a [`hidden`] row is drawn from, as one number.
+fn hidden_key(count: usize, width: usize, theme: &Theme) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    "hidden".hash(&mut hasher);
+    count.hash(&mut hasher);
+    width.hash(&mut hasher);
+    theme.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// A transcript line as the entry it belongs to and its place among that
@@ -1411,29 +2688,127 @@ impl DrawnEntries {
 /// The lines are kept as well as the place because a switch moves lines
 /// within their own entry — opening a cut diff puts rows above the ones kept
 /// at its end — and takes some away, and what is still drawn of the entry is
-/// found by what it reads.
+/// found by what it reads. The entry is named by its place in the transcript
+/// rather than where it is drawn, which grouping the rows by agent changes.
 #[derive(Debug)]
 pub(crate) struct Anchor {
     entry: usize,
+    heading: bool,
     offset: usize,
     lines: Vec<Line<'static>>,
+}
+
+/// Whether `entry` is drawn as rows of the calls table — a call or a run of
+/// calls — with nothing under it that needs room to be
+/// read. Two such entries in a row are drawn on consecutive lines, so a
+/// session's calls read as one table rather than a list with a gap after
+/// every line; a diff or what a command printed keeps the blank line after
+/// it, and so does everything else the transcript shows.
+fn is_row(entry: &Entry) -> bool {
+    match entry.kind {
+        EntryKind::User
+        | EntryKind::SubAgent
+        | EntryKind::Agent
+        | EntryKind::Tool
+        | EntryKind::Failure
+        | EntryKind::Notice
+        | EntryKind::Turn(_)
+        | EntryKind::Compacted(_) => {
+            !entry.calls.is_empty()
+                && entry
+                    .calls
+                    .iter()
+                    .all(|call| call.change.is_none() && call.printed.is_none())
+        }
+    }
 }
 
 /// What an entry's lines are drawn from, as one number.
 ///
 /// Whether the diffs are open goes in only for an entry that holds a diff it
-/// would cut, so opening them lays out again those entries and no other.
-fn drawn_from(entry: &Entry, width: usize, detail: Detail, theme: &Theme) -> u64 {
+/// would cut or hide, or a shell command whose whole text it would draw, so
+/// opening them lays out again those entries and no other; the
+/// clock goes in only for one holding a test run still going.
+///
+/// The body goes in whole only while the entry is streaming. A finished
+/// entry's body is not written again unless something else about the entry
+/// changes with it ([`Entry::body`]), so its length stands in for it: this is
+/// asked on every frame, and reading a reply of twenty megabytes to answer it
+/// is what an idle shell holding one would otherwise spend its time on.
+fn drawn_from(entry: &Entry, width: usize, detail: Detail, theme: &Theme, named: u64) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    entry.hash(&mut hasher);
+    let Entry {
+        kind,
+        head,
+        meta,
+        body,
+        streaming,
+        at,
+        calls,
+        agent,
+        attention: _,
+    } = entry;
+    (kind, head, meta, streaming, at, calls, agent).hash(&mut hasher);
+    match streaming {
+        true => body.hash(&mut hasher),
+        false => body.len().hash(&mut hasher),
+    }
     width.hash(&mut hasher);
     detail.folded.hash(&mut hasher);
-    if holds_a_cut_diff(entry) {
+    detail.columns.hash(&mut hasher);
+    detail.grouped.hash(&mut hasher);
+    if holds_a_cut_diff(entry) || holds_a_hidden_diff(entry) || ran_a_command(entry) {
         detail.diffs_open.hash(&mut hasher);
     }
+    testing_for(entry, detail.now).hash(&mut hasher);
     theme.hash(&mut hasher);
+    // Only a prompt is drawn naming commands, so a new list lays out only
+    // the prompts again.
+    if matches!(entry.kind, EntryKind::User) {
+        named.hash(&mut hasher);
+    }
     hasher.finish()
+}
+
+/// The commands the backend lists, as one number: what a prompt is drawn
+/// from besides itself.
+fn commands_key(commands: &[SlashCommand]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for command in commands {
+        (&command.name, command.mid_prompt).hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+/// How many whole seconds the entry's test runs still going have run at
+/// `now`, which is what their lines say: only an entry holding one is laid
+/// out again as the clock moves, and only once a second.
+fn testing_for(entry: &Entry, now: Option<crate::clock::Stamp>) -> Vec<u64> {
+    entry
+        .calls
+        .iter()
+        .filter(|call| call.testing && call.running())
+        .filter_map(|call| now.zip(call.began()))
+        .filter_map(|(now, began)| now.since(began))
+        .map(|ran| ran.as_secs())
+        .collect()
+}
+
+/// Whether any call of `entry` ran a shell command, whose whole text is drawn
+/// under its row only while the diffs are open.
+fn ran_a_command(entry: &Entry) -> bool {
+    entry.calls.iter().any(|call| call.programs.is_some())
+}
+
+/// Whether any call of `entry` changed one of the agent's own notes, whose
+/// lines are drawn only while the diffs are open.
+fn holds_a_hidden_diff(entry: &Entry) -> bool {
+    entry
+        .calls
+        .iter()
+        .any(|call| call.memory && call.change.is_some())
 }
 
 /// Whether any call of `entry` changed more rows than a diff draws unopened.
@@ -1449,6 +2824,11 @@ fn transcript_detail(app: &App) -> Detail {
     Detail {
         folded: app.calls_folded(),
         diffs_open: app.diffs_open(),
+        // Worked out from the entries where they are drawn.
+        columns: crate::calls::Columns::default(),
+        grouped: false,
+        notable_only: app.notable_only(),
+        now: app.stamp(),
     }
 }
 
@@ -1487,6 +2867,11 @@ fn draw_scrollbar(
 /// The frames of the working line's spinner, one per tenth of a second.
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
+/// The frames the spinner draws while the conversation is compacted instead:
+/// a column filling and emptying, so a compaction does not read as a turn
+/// thinking.
+const SQUEEZING: [&str; 10] = ["⣀", "⣤", "⣶", "⣿", "⣿", "⣶", "⣤", "⣀", "⠀", "⠀"];
+
 /// `⠹ running Bash  cargo test · 1m 15s`: a spinner that moves while nothing
 /// else on screen does, what the turn is doing, and for how long.
 ///
@@ -1494,7 +2879,11 @@ const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "�
 /// to it: a line that loses its clock no longer says the session is alive.
 fn working_line(activity: &Activity, width: usize, theme: &Theme) -> Line<'static> {
     let tenths = activity.elapsed.as_millis() / 100;
-    let spinner = SPINNER[usize::try_from(tenths % 10).unwrap_or(0)];
+    let frames = match activity.compacting {
+        true => &SQUEEZING,
+        false => &SPINNER,
+    };
+    let spinner = frames[usize::try_from(tenths % 10).unwrap_or(0)];
     let clock = format!(" · {}", clock::spent(activity.elapsed));
     let room = width.saturating_sub(text::width(spinner) + 1 + text::width(&clock));
     Line::from(vec![
@@ -1536,91 +2925,321 @@ fn empty_transcript(attached: bool, theme: &Theme) -> Vec<Line<'static>> {
 ///
 /// The whole of the arguments is shown, wrapped rather than truncated:
 /// approving a call whose arguments were cut off at the edge is approving
-/// something the operator did not read.
-fn question_lines(app: &App, ask: &Ask, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+/// something the operator did not read. Except where the whole question is
+/// taller than the `height` rows the transcript has: the transcript follows
+/// its end, so the top of the question — what is asked, and the first
+/// answer, which Enter confirms — would be above the pane. There the
+/// arguments are cut instead, with a row saying how many lines are not shown
+/// and that Ctrl+T shows them, which draws the question whole again.
+fn question_lines(
+    app: &App,
+    ask: &Ask,
+    (width, height): (usize, usize),
+    theme: &Theme,
+) -> Question {
     let outer = width.saturating_sub(GUTTER).min(ASK_COLUMNS);
     let inner = outer.saturating_sub(ASK_INSET);
     let border = Style::new().fg(theme.hot);
     let indent = " ".repeat(GUTTER);
 
+    let body = question_body(app, ask, inner, theme);
+    // The frame's top and bottom rows and the blank row under it.
+    let framing = 3;
+    let fits = app.diffs_open() || body.len() + framing <= height;
+    let body = match fits {
+        true => body.whole(),
+        false => body.cut(height.saturating_sub(framing - 1), inner, theme),
+    };
+
     let mut lines = vec![question_top(app, ask, outer, theme)];
-    lines.extend(
-        question_body(app, ask, inner, theme)
-            .into_iter()
-            .map(|line| {
-                let used = line.width();
-                let mut spans = vec![Span::raw(indent.clone()), Span::styled("│ ", border)];
-                spans.extend(
-                    line.spans
-                        .into_iter()
-                        .map(|span| span.patch_style(line.style)),
-                );
-                spans.push(Span::raw(" ".repeat(inner.saturating_sub(used))));
-                spans.push(Span::styled(" │", border));
-                Line::from(spans)
-            }),
-    );
+    lines.extend(body.into_iter().map(|line| {
+        // Measured as ratatui draws it: `Line::width` counts a control
+        // character as a cell, which ratatui does not draw, so a row holding
+        // one would be padded short and pull its border in.
+        let used: usize = line
+            .spans
+            .iter()
+            .map(|span| text::width(&span.content))
+            .sum();
+        let mut spans = vec![Span::raw(indent.clone()), Span::styled("│ ", border)];
+        spans.extend(
+            line.spans
+                .into_iter()
+                .map(|span| span.patch_style(line.style)),
+        );
+        spans.push(Span::raw(" ".repeat(inner.saturating_sub(used))));
+        spans.push(Span::styled(" │", border));
+        Line::from(spans)
+    }));
     lines.push(Line::from(vec![
         Span::raw(indent),
         Span::styled(format!("└{}┘", "─".repeat(outer.saturating_sub(2))), border),
     ]));
-    lines.push(Line::from(""));
-    lines
+    let framed = Some((u16::try_from(outer).unwrap_or(u16::MAX), lines.len()));
+    // The row under the frame is where its shadow falls.
+    if fits {
+        lines.push(Line::from(""));
+    }
+    Question { lines, framed }
+}
+
+/// A permission prompt drawn as the transcript's last lines.
+#[derive(Default)]
+struct Question {
+    lines: Vec<Line<'static>>,
+    /// The frame's width and its rows from the top border to the bottom one,
+    /// which is what casts the shadow; `None` when nothing is asked.
+    framed: Option<(u16, usize)>,
+}
+
+/// What is inside a question's frame, in the parts a question too tall for
+/// its pane is cut by.
+struct QuestionBody {
+    /// `to run <tool>`, wrapped: a tool's name is what is being approved, so
+    /// it is read whole rather than cut at the frame.
+    head: Vec<Line<'static>>,
+    /// What would run: what the call does where the backend read it, or its
+    /// target, and the arguments under it.
+    call: crate::proposed::Call,
+    /// The numbered answers, after a blank row.
+    answers: Vec<Line<'static>>,
+    /// Any consequence too long for its column, said whole.
+    consequences: Vec<Line<'static>>,
+    /// The answer being written, and the keys.
+    rest: Vec<Line<'static>>,
+}
+
+impl QuestionBody {
+    fn len(&self) -> usize {
+        self.head.len()
+            + self.call.rows.len()
+            + self.answers.len()
+            + self.consequences.len()
+            + self.rest.len()
+    }
+
+    fn whole(self) -> Vec<Line<'static>> {
+        let mut lines = self.head;
+        lines.extend(self.call.rows);
+        lines.extend(self.answers);
+        lines.extend(self.consequences);
+        lines.extend(self.rest);
+        lines
+    }
+
+    /// The body in `rows` rows where it can be: the consequences said again
+    /// go first, as each is a copy of something above it, then the call's
+    /// last lines, down to its first, which is kept with what is asked and
+    /// every answer.
+    fn cut(mut self, rows: usize, inner: usize, theme: &Theme) -> Vec<Line<'static>> {
+        let fixed = self.head.len() + self.answers.len() + self.rest.len() + 1;
+        let room = rows.saturating_sub(fixed);
+        let dropped_consequences = !std::mem::take(&mut self.consequences).is_empty();
+        let kept = room.clamp(1, self.call.rows.len().max(1));
+        // The lines of the call that are not drawn, which the operator reads
+        // as how much more there is to see: not the blank rows between its
+        // parts, not a marker row, which is a count and not a line, and not
+        // the rule said again, which is a copy of the answer above it.
+        let hidden = self.call.hidden_after(kept);
+        self.call.rows.truncate(kept);
+        let said = match (hidden, dropped_consequences) {
+            (0, false) => None,
+            (0, true) => Some("… the rule is cut above · Ctrl+T shows it whole".to_owned()),
+            (1, _) => Some("… 1 more line · Ctrl+T shows the whole call".to_owned()),
+            (n, _) => Some(format!("… {n} more lines · Ctrl+T shows the whole call")),
+        };
+        if let Some(said) = said {
+            self.call.rows.extend(
+                text::wrap(&said, inner)
+                    .into_iter()
+                    .map(|line| Line::from(line).style(Style::new().fg(theme.hot))),
+            );
+        }
+        self.whole()
+    }
 }
 
 /// What is inside a question's frame, `inner` columns wide: what would run,
 /// the numbered answers, any consequence too long for its column said whole,
 /// the answer being written, and the keys.
-fn question_body(app: &App, ask: &Ask, inner: usize, theme: &Theme) -> Vec<Line<'static>> {
+fn question_body(app: &App, ask: &Ask, inner: usize, theme: &Theme) -> QuestionBody {
     let plain = Style::new().fg(theme.fg);
 
-    let mut body: Vec<Line<'static>> = vec![Line::from(vec![
-        Span::styled("to run ", plain),
-        Span::styled(tool_label(&ask.tool), plain.bold()),
-    ])];
-    for wrapped in text::wrap(ask.target.as_deref().unwrap_or(&ask.input), inner) {
-        body.push(Line::from(wrapped).style(plain.bold()));
-    }
-    if ask.target.is_some() {
-        body.push(Line::from(""));
-        for wrapped in text::wrap(&ask.input, inner) {
-            body.push(Line::from(wrapped).style(Style::new().fg(theme.dim)));
-        }
-    }
-    body.push(Line::from(""));
+    let mut head = question_head(&tool_label(&ask.tool), inner, plain);
+    head.extend(question_reason(ask, inner, theme));
+    let call = question_call(app, ask, inner, theme);
+    let mut answers = vec![Line::from("")];
     let focus = app.ask_focus();
     let selected = app.ask_selected();
     let mut cut = Vec::new();
     for (at, answer) in app.ask_options().into_iter().enumerate() {
         let lit = focus == AskFocus::Choosing && answer == selected;
-        let (row, whole) = option_row(at + 1, answer, ask, lit, inner, theme);
-        body.push(row);
+        let (label, hint) = option_words(answer, ask, app.diffs_open());
+        let (row, whole) = option_row(at + 1, (label, hint.clone()), lit, inner, theme);
+        answers.push(row);
         if !whole {
-            cut.push((at + 1, option_words(answer, ask).1));
+            cut.push((at + 1, hint));
         }
     }
     // A consequence cut off at the edge of its column is said again whole: a
     // standing answer is a rule the operator keeps, and keeping one nobody
     // could read to its end is agreeing to something unread.
+    let mut consequences = Vec::new();
     if !cut.is_empty() {
-        body.push(Line::from(""));
+        consequences.push(Line::from(""));
         for (number, hint) in cut {
-            for wrapped in text::wrap(&format!("{number}. {hint}"), inner) {
-                body.push(Line::from(wrapped).style(Style::new().fg(theme.dim)));
+            for wrapped in text::wrap_exact(&format!("{number}. {hint}"), inner) {
+                consequences.push(Line::from(wrapped).style(Style::new().fg(theme.dim)));
             }
         }
     }
+    let mut rest = Vec::new();
     if focus == AskFocus::Writing {
-        body.push(Line::from(""));
-        body.extend(written_answer(app.ask_draft(), inner, theme));
+        rest.push(Line::from(""));
+        rest.extend(written_answer(app.ask_draft(), inner, theme));
     }
-    body.push(Line::from(""));
-    body.extend(key_rows(
+    rest.push(Line::from(""));
+    rest.extend(key_rows(
         &ask_keys(focus, app.ask_options().len()),
         inner,
         theme,
     ));
-    body
+    QuestionBody {
+        head,
+        call,
+        answers,
+        consequences,
+        rest,
+    }
+}
+
+/// What would run, `inner` columns wide: what the call does where the
+/// backend read that out of its arguments, and otherwise its target and its
+/// arguments by key. Ctrl+T draws the arguments as they are sent instead of
+/// by key, and under what the call does, since they are what is approved.
+fn question_call(app: &App, ask: &Ask, inner: usize, theme: &Theme) -> crate::proposed::Call {
+    use crate::proposed::Call;
+
+    let open = app.diffs_open();
+    let proposed = ask
+        .proposed
+        .as_ref()
+        .and_then(|proposed| proposed.call(&ask.input, inner, open, theme));
+    if let Some(mut call) = proposed {
+        if open {
+            call.rows.push(Line::from(""));
+            call.rows.extend(sent_rows(&ask.input, inner, theme));
+        }
+        return call;
+    }
+    let Some(target) = &ask.target else {
+        return match open {
+            false => crate::arguments::lines(&ask.input, inner, theme)
+                .filter(|rows| !rows.is_empty())
+                .map_or_else(|| Call::of(bold_rows(&ask.input, inner, theme)), Call::of),
+            true => Call::of(bold_rows(&ask.input, inner, theme)),
+        };
+    };
+    let mut call = bold_rows(target, inner, theme);
+    let mut markers = Vec::new();
+    let under = match open {
+        true => sent_rows(&ask.input, inner, theme),
+        false => {
+            // The key that holds the target is the target, drawn above: said
+            // again by key it would be the same text under another name, and
+            // wrapped as words it was not the same text.
+            let fields = crate::arguments::fields_without(&ask.input, |_, value| {
+                value.as_str() == Some(target.as_str())
+            });
+            match fields {
+                Some(fields) => {
+                    let (laid, hidden, marker_rows) = crate::arguments::rows(&fields, inner, theme);
+                    if hidden > 0 {
+                        // After the blank row that sets them off.
+                        markers.push((
+                            call.len() + 1 + laid.len() - marker_rows,
+                            marker_rows,
+                            hidden,
+                        ));
+                    }
+                    laid
+                }
+                None => sent_rows(&ask.input, inner, theme),
+            }
+        }
+    };
+    if !under.is_empty() {
+        call.push(Line::from(""));
+        call.extend(under);
+    }
+    Call {
+        rows: call,
+        markers,
+    }
+}
+
+/// The most rows of the arguments as sent that are drawn behind Ctrl+T: they
+/// can be the whole of a file, and a row of them is drawn with every tick.
+const SENT_ROWS: usize = 2_000;
+
+/// The arguments as the backend sent them, `inner` columns wide, character for
+/// character, and — past [`SENT_ROWS`] rows of them — how many characters are
+/// not drawn.
+fn sent_rows(input: &str, inner: usize, theme: &Theme) -> Vec<Line<'static>> {
+    let dim = Style::new().fg(theme.dim);
+    let room = inner.max(1).saturating_mul(SENT_ROWS);
+    let cut = input.char_indices().nth(room).map(|(at, _)| at);
+    let shown = &input[..cut.unwrap_or(input.len())];
+    let mut rows: Vec<Line<'static>> = text::wrap_exact(shown, inner)
+        .into_iter()
+        .map(|wrapped| Line::from(wrapped).style(dim))
+        .collect();
+    if let Some(cut) = cut {
+        let rest = input[cut..].chars().count();
+        rows.push(
+            Line::from(format!("… {rest} more characters as sent are not drawn"))
+                .style(Style::new().fg(theme.hot)),
+        );
+    }
+    rows
+}
+
+/// `said` wrapped to `inner` columns exactly as written, in bold.
+fn bold_rows(said: &str, inner: usize, theme: &Theme) -> Vec<Line<'static>> {
+    text::wrap_exact(said, inner)
+        .into_iter()
+        .map(|wrapped| Line::from(wrapped).style(Style::new().fg(theme.fg).bold()))
+        .collect()
+}
+
+/// Why the backend asked, where it said, wrapped to `inner` columns under
+/// what is asked. A command it could not check reads as routine without it.
+fn question_reason(ask: &Ask, inner: usize, theme: &Theme) -> Vec<Line<'static>> {
+    const BECAUSE: &str = "asked because: ";
+    let Some(reason) = ask.reason.as_deref().filter(|said| !said.trim().is_empty()) else {
+        return Vec::new();
+    };
+    text::wrap_exact(&format!("{BECAUSE}{reason}"), inner)
+        .into_iter()
+        .map(|row| Line::from(row).style(Style::new().fg(theme.fg).italic()))
+        .collect()
+}
+
+/// `to run <tool>` wrapped to `inner` columns, the tool's name in bold on
+/// every row it takes.
+fn question_head(label: &str, inner: usize, plain: Style) -> Vec<Line<'static>> {
+    const TO_RUN: &str = "to run ";
+    text::wrap_exact(&format!("{TO_RUN}{label}"), inner)
+        .into_iter()
+        .enumerate()
+        .map(|(at, row)| match (at, row.strip_prefix(TO_RUN)) {
+            (0, Some(name)) => Line::from(vec![
+                Span::styled(TO_RUN, plain),
+                Span::styled(name.to_owned(), plain.bold()),
+            ]),
+            _ => Line::from(Span::styled(row, plain.bold())),
+        })
+        .collect()
 }
 
 /// `┌ ? claude asks ──── blocks turn 3 ┐`: who is asking at the left, in the
@@ -1663,18 +3282,22 @@ fn question_top(app: &App, ask: &Ask, outer: usize, theme: &Theme) -> Line<'stat
 /// what makes it legible without colour.
 fn option_row(
     number: usize,
-    answer: Answer,
-    ask: &Ask,
+    (label, hint): (String, String),
     lit: bool,
     width: usize,
     theme: &Theme,
 ) -> (Line<'static>, bool) {
-    let (label, hint) = option_words(answer, ask);
     let lead = format!("{} {number}. ", if lit { "▶" } else { " " });
     let rest = width.saturating_sub(text::width(&lead));
     let label = text::truncate(&label, rest);
     let hint_room = rest.saturating_sub(text::width(&label) + 2);
-    let whole = text::width(&hint) <= hint_room;
+    // A hint holding a control character is drawn with each shown by its
+    // glyph, and a tab or a line break turned into a space or a `↵`, which is
+    // not the rule as it is kept, so it is said again whole below however
+    // short it is.
+    let altered = hint.contains(char::is_control);
+    let hint = text::controls_shown_in_rows(&hint);
+    let whole = text::width(&hint) <= hint_room && !altered;
     let hint = text::truncate(&hint, hint_room);
     let gap = rest.saturating_sub(text::width(&label) + text::width(&hint));
 
@@ -1700,12 +3323,42 @@ fn option_row(
 /// of its own for a permission prompt. So the consequences say what Niobe
 /// does — `niobe saves …` for a standing answer — or what happens to the call,
 /// and never what the agent will say or think about it.
-fn option_words(answer: Answer, ask: &Ask) -> (String, String) {
+///
+/// A tool whose name the transcript shows in other words — an MCP tool, as
+/// `Notion·create-pages` — has its standing answer said in those words, as
+/// what is kept and where, since the label already names the tool. The rule
+/// as it is written into the config is shown where `spelled` asks for it,
+/// which Ctrl+T does: it is for the operator who wants the exact text.
+fn option_words(answer: Answer, ask: &Ask, spelled: bool) -> (String, String) {
+    let plan = ask
+        .proposed
+        .as_ref()
+        .is_some_and(|proposed| proposed.is_plan());
+    match (answer, plan) {
+        (Answer::Once, true) => (
+            "Go ahead with the plan".to_owned(),
+            "the agent stops planning".to_owned(),
+        ),
+        (Answer::No, true) => (
+            "Keep planning".to_owned(),
+            "Tab says what to change".to_owned(),
+        ),
+        (answer, _) => answer_words(answer, ask, spelled),
+    }
+}
+
+/// What an answer to any call but a plan is called, and what choosing it does.
+fn answer_words(answer: Answer, ask: &Ask, spelled: bool) -> (String, String) {
     match answer {
         Answer::Once => ("Allow once".to_owned(), "this call only".to_owned()),
         Answer::AlwaysTool => (
             format!("Always allow {}", tool_label(&ask.tool)),
-            format!("niobe saves {}", ask.tool_rule()),
+            ask.tool_rule()
+                .map(|rule| match spelled || tool_label(&ask.tool) == ask.tool {
+                    true => format!("niobe saves {rule}"),
+                    false => "saved in this repo's config".to_owned(),
+                })
+                .unwrap_or_default(),
         ),
         Answer::AlwaysTarget => (
             "Always allow this target".to_owned(),
@@ -1792,12 +3445,25 @@ fn key_rows(keys: &[(String, &str)], width: usize, theme: &Theme) -> Vec<Line<'s
 }
 
 /// One transcript entry, wrapped to the pane: a head line and its body.
-fn entry_lines(entry: &Entry, width: usize, detail: Detail, theme: &Theme) -> Vec<Line<'static>> {
+fn entry_lines(
+    entry: &Entry,
+    width: usize,
+    detail: Detail,
+    theme: &Theme,
+    commands: &[SlashCommand],
+) -> Vec<Line<'static>> {
     if !entry.calls.is_empty() {
         return crate::calls::lines(entry, width, detail, theme);
     }
-    if let EntryKind::Turn(rule) = &entry.kind {
-        return crate::turns::lines(rule, width, theme);
+    match &entry.kind {
+        EntryKind::Turn(rule) => return crate::turns::lines(rule, width, theme),
+        EntryKind::Compacted(row) => return crate::turns::compacted(row, width, theme),
+        EntryKind::SubAgent => return crate::calls::said(entry, width, detail, theme),
+        EntryKind::User
+        | EntryKind::Agent
+        | EntryKind::Tool
+        | EntryKind::Failure
+        | EntryKind::Notice => {}
     }
     let colour = entry.kind.colour(theme);
     let body_width = width.saturating_sub(GUTTER);
@@ -1810,14 +3476,13 @@ fn entry_lines(entry: &Entry, width: usize, detail: Detail, theme: &Theme) -> Ve
         Span::styled(entry.head.clone(), Style::new().fg(colour).bold()),
     ];
     let room = body_width.saturating_sub(text::width(&entry.head) + 2);
-    // A sub-agent's own words are headed with its whole name already; on
-    // anything else of an agent's — a refusal of its call — the name is said
-    // the way its calls' rows say it.
-    let agent = match (&entry.kind, &entry.agent) {
-        (EntryKind::SubAgent, _) | (_, None) => None,
-        (_, Some(agent)) => Some(crate::calls::agent_tag(agent, &entry.meta, room)),
-    }
-    .filter(|tag| !tag.is_empty());
+    // Anything else of an agent's — a refusal of its call — says the agent's
+    // tag the way its calls' rows do.
+    let agent = entry
+        .agent
+        .as_ref()
+        .map(|agent| crate::calls::agent_tag(agent, &entry.meta, room))
+        .filter(|tag| !tag.is_empty());
     if agent.is_some() || !entry.meta.is_empty() {
         head.push(Span::raw("  "));
     }
@@ -1838,7 +3503,7 @@ fn entry_lines(entry: &Entry, width: usize, detail: Detail, theme: &Theme) -> Ve
 
     let mut lines = vec![Line::from(head)];
     lines.extend(
-        body_lines(entry, body_width, theme)
+        body_lines(entry, body_width, theme, commands)
             .into_iter()
             .map(|line| {
                 let mut spans = vec![Span::raw(" ".repeat(GUTTER))];
@@ -1854,22 +3519,57 @@ fn entry_lines(entry: &Entry, width: usize, detail: Detail, theme: &Theme) -> Ve
 ///
 /// The assistant writes markdown and is drawn from it. The operator's own
 /// words and the shell's notices are shown as typed: a prompt with an asterisk
-/// in it means the asterisk. A tool call carries its whole story on the head
-/// line, so its empty body is no lines at all rather than a blank one.
-fn body_lines(entry: &Entry, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+/// in it means the asterisk, though a command it names where the backend
+/// reads one is drawn in the command colour, as it was in the composer. A
+/// tool call carries its whole story on the head line, so its empty body is
+/// no lines at all rather than a blank one.
+fn body_lines(
+    entry: &Entry,
+    width: usize,
+    theme: &Theme,
+    commands: &[SlashCommand],
+) -> Vec<Line<'static>> {
     match entry.kind {
         EntryKind::Agent | EntryKind::SubAgent => {
             crate::markdown::render(entry.body.trim_end(), width, theme)
         }
-        // The rule carries its figures on its one line and has no body.
-        EntryKind::Turn(_) => Vec::new(),
-        EntryKind::User | EntryKind::Tool | EntryKind::Failure | EntryKind::Notice => {
-            text::wrap(entry.body.trim_end(), width)
+        // The rule and the compaction's row carry their figures on their one
+        // line and have no body.
+        EntryKind::Turn(_) | EntryKind::Compacted(_) => Vec::new(),
+        // The operator's words keep their own colour through the body, so a
+        // prompt is found at a glance scrolling back through replies.
+        EntryKind::User => {
+            let body = entry.body.trim_end();
+            let named = crate::slash::named_in_prompt(body, commands);
+            text::wrap_marked(body, width, &named)
                 .into_iter()
-                .map(|wrapped| Line::from(wrapped).style(Style::new().fg(theme.fg)))
+                .map(|pieces| {
+                    let spans: Vec<Span<'static>> = pieces
+                        .into_iter()
+                        .map(|(piece, marked)| match marked {
+                            true => Span::styled(piece, Style::new().fg(theme.command)),
+                            false => Span::styled(piece, Style::new().fg(theme.user)),
+                        })
+                        .collect();
+                    Line::from(spans).style(Style::new().fg(theme.user))
+                })
                 .collect()
         }
+        EntryKind::Tool | EntryKind::Failure | EntryKind::Notice => {
+            plain_lines(&entry.body, width, theme.fg)
+        }
     }
+}
+
+/// Text shown as typed, wrapped to `width`, in `colour`.
+///
+/// The colour is on each span rather than on the line, because the entry's
+/// lines are rebuilt behind a gutter from their spans alone.
+fn plain_lines(body: &str, width: usize, colour: Color) -> Vec<Line<'static>> {
+    text::wrap(body.trim_end(), width)
+        .into_iter()
+        .map(|wrapped| Line::from(Span::styled(wrapped, Style::new().fg(colour))))
+        .collect()
 }
 
 /// The rows the Usage pane needs: its frame, whatever windows the session has
@@ -1884,7 +3584,7 @@ fn usage_height(app: &App) -> u16 {
     let windows = window_rows(app);
     let spend = spend_rows(app);
     let context = context_rows(app);
-    // Two rows of border and the blank row under the title; the windows, the
+    // Two rows of border; the windows, the
     // models and the money in the order the shape puts them, with a rule
     // between the windows and the models on a plan wherever both have rows,
     // and always under the money on a metered account; then the context,
@@ -1893,72 +3593,243 @@ fn usage_height(app: &App) -> u16 {
         true => money + windows + 1 + spend,
         false => windows + usize::from(windows > 0 && spend > 0) + spend + money,
     };
-    let rows = 3 + blocks + usize::from(context > 0) + context;
+    let rows = 2 + blocks + usize::from(context > 0) + context;
     u16::try_from(rows).unwrap_or(u16::MAX)
 }
 
 /// Whether the session is billed by use, which makes money the pane's
 /// headline.
 ///
-/// Only where something said so. A session nothing has said of keeps the
-/// plan's order, windows first where there are any, and shows no dollar
-/// figure at all: see [`money_lines`].
+/// Only where something said so and nothing said otherwise. A session
+/// nothing has said of keeps the plan's order, windows first where there are
+/// any, and shows no dollar figure at all; one billed both ways keeps it too,
+/// and its models' rows carry no cost, since each model's figure runs across
+/// both parts and only the metered one is money: see [`money_lines`].
 fn metered(app: &App) -> bool {
-    app.session().billing() == Some(Billing::Metered)
+    Billed::of(app.session()) == Billed::Metered
 }
 
-/// The widest label a window row carries — `extra` — and a column of gap.
-const WINDOW_LABEL: usize = 6;
+/// How wide the Usage pane's label column is, drawn `width` columns wide:
+/// the widest label any of its rows carries and a column of gap, or what is
+/// left once every row's figures are paid for, whichever is less.
+///
+/// Every block of the pane — the windows, the models and the cache, the
+/// money on a plan, the context — draws its rows in one grid of a label, a
+/// share, a meter and what follows it, so the shares stand in one column and
+/// the meters start in one. The column is as wide as the widest label the
+/// pane is drawing, so a session on one short-named model is not drawn as if
+/// it ran on the longest. A label is what gives way where the pane is too
+/// narrow for it: a figure pushed past the pane's edge is cut by it, and
+/// `200k` cut to `20` is a different number.
+fn usage_label_column(app: &App, width: usize) -> usize {
+    let room = width.saturating_sub(usage_figure_columns(app)).max(1);
+    usage_label_widest(app).saturating_add(1).min(room)
+}
 
-/// What a window's share is drawn in: a space, and three columns for the
-/// figure, which is one more than a full window needs so that a window
-/// reported past its end still lines up with the ones that are not.
-const WINDOW_SHARE: usize = 5;
+/// The widest label the Usage pane's rows carry.
+fn usage_label_widest(app: &App) -> usize {
+    let windows = match app.plan_windows() {
+        PlanWindows::None => 0,
+        PlanWindows::Awaited => text::width("5h"),
+        PlanWindows::Reported(windows) | PlanWindows::Carried { windows, .. } => [
+            (windows.five_hour.is_some(), "5h"),
+            (windows.seven_day.is_some(), "7d"),
+            (extra(&windows).is_some(), "extra"),
+        ]
+        .into_iter()
+        .filter(|(shown, _)| *shown)
+        .map(|(_, label)| text::width(label))
+        .max()
+        .unwrap_or(0),
+    };
+    // With no model to list, the block is one line saying so, not a row.
+    let spent = models(app);
+    let models = match spent.is_empty() {
+        true => 0,
+        false => usage::labels(spent.iter().map(|(model, _)| model.as_str()))
+            .iter()
+            .map(|label| text::width(label))
+            .chain([text::width(CACHE_LABEL)])
+            .max()
+            .unwrap_or(0),
+    };
+    let context = match context_rows(app) {
+        0 => 0,
+        _ => text::width(CONTEXT_LABEL),
+    };
+    windows.max(models).max(context)
+}
+
+/// The most any row of the Usage pane needs beside its label with no meter
+/// drawn: the share, its gap and the figures after it, each whole.
+///
+/// The context's window figure is counted, though the row can drop it: a
+/// label is cut before a figure is given up.
+fn usage_figure_columns(app: &App) -> usize {
+    let share = SHARE_COLUMNS + SHARE_GAP.len();
+    let windows = match app.plan_windows() {
+        PlanWindows::None => 0,
+        PlanWindows::Awaited => SHARE_COLUMNS,
+        PlanWindows::Reported(windows) | PlanWindows::Carried { windows, .. } => {
+            let reported = [windows.five_hour, windows.seven_day]
+                .into_iter()
+                .flatten()
+                .map(|window| share + reset_clause(app, &window).as_deref().map_or(0, text::width))
+                .max()
+                .unwrap_or(0);
+            let extra =
+                extra(&windows).map_or(0, |(said, _)| text::width(NO_FIGURE) + text::width(&said));
+            reported.max(extra)
+        }
+    };
+    let spend = match models(app).is_empty() {
+        true => 0,
+        false => share + MODEL_TOKENS + model_cost_columns(app),
+    };
+    let floor = app.session().context_is_a_floor();
+    let context = match app.session().context() {
+        Some(context) => match context_window(app, context) {
+            Some(window) => share + text::width(&context_figures(context.tokens, window, floor)),
+            None => text::width(&context_size(context.tokens, floor)),
+        },
+        None => context_rows(app) * text::width(NO_FIGURE),
+    };
+    windows.max(spend).max(context)
+}
+
+/// A label set in the Usage pane's label column `columns` wide: cut to leave
+/// the column of gap, and padded to the column.
+fn usage_label(label: &str, columns: usize) -> String {
+    text::pad(&text::truncate(label, columns.saturating_sub(1)), columns)
+}
+
+/// What a share is drawn in: three columns for the figure and the sign, one
+/// more than a full window needs so that a window reported past its end
+/// still lines up with the ones that are not.
+const SHARE_COLUMNS: usize = 4;
+
+/// What stands between a share and its meter.
+const SHARE_GAP: &str = " ";
 
 /// The longest a meter is drawn. Twelve cells read a share to within a tenth,
 /// which is as fine as a window is worth reading, and it leaves the reset time
 /// beside it room in a pane forty columns wide.
 const METER_CELLS: usize = 12;
 
+/// A share of a window as its column draws it: a percent, no wider than the
+/// column holds, and an em dash for a level that is not one — below nothing,
+/// or not a number — rather than a `0%` nobody measured. A level above
+/// nothing that rounds to nothing reads `<1%`, as [`share_label`] draws it.
+fn window_share(utilization: f64) -> String {
+    if !utilization.is_finite() || utilization < 0.0 {
+        return format!("{:>3} ", "—");
+    }
+    share_label(
+        crate::app::percent(utilization).min(999),
+        utilization > 0.0,
+        false,
+    )
+}
+
 /// How many rows the plan's windows take: one per window a backend reported,
-/// and one more where the plan has started spending beyond its flat fee.
+/// one more where the plan has started spending beyond its flat fee, and one
+/// that dates windows carried over from an earlier session; or, while they are
+/// awaited, a row for each window and one saying when they come.
 ///
 /// The pane is sized from this before it is drawn, so it has to agree with
 /// [`window_lines`] exactly; a test holds the two together.
 fn window_rows(app: &App) -> usize {
-    app.session().usage_windows().map_or(0, |windows| {
+    let levels = |windows: UsageWindows| {
         usize::from(windows.five_hour.is_some())
             + usize::from(windows.seven_day.is_some())
-            + usize::from(windows.using_overage)
-    })
+            + usize::from(extra(&windows).is_some())
+    };
+    match app.plan_windows() {
+        PlanWindows::None => 0,
+        PlanWindows::Reported(windows) => levels(windows),
+        PlanWindows::Carried { windows, .. } => levels(windows) + 1,
+        PlanWindows::Awaited => AWAITED.len() + 1,
+    }
 }
 
-/// When a window comes back, as the row says it: ` · resets 16:40` later today
-/// and ` · resets Tue 09:00` on another day.
+/// The windows a plan reports, labelled as their rows are, while none has
+/// been reported yet.
+const AWAITED: [&str; 2] = ["5h", "7d"];
+
+/// What the pane says under windows it has no figure for yet.
+const AWAITED_SAID: &str = "reported with the first reply";
+
+/// The line under windows carried over from an earlier session: when they
+/// were recorded, since they are not a measurement of now.
+fn carried_said(app: &App, at: Stamp) -> String {
+    match app.stamp().and_then(|now| clock::past(now, at)) {
+        Some(when) => format!("as of {when}, before this session"),
+        None => "as of an earlier session".to_owned(),
+    }
+}
+
+/// When a window comes back, as the row says it: ` resets 16:40` later today
+/// and ` resets Tue 09:00` on another day.
 ///
 /// `None` where there is no reset to name — the backend reported the share
-/// without one, the machine named no timezone, or the reset has already come
-/// around, which is what a recorded session read back a day later has. The row
+/// without one or with one past what the clock holds, the machine named no
+/// timezone, or the reset has already come around, which is what a recorded session read back a day later has. The row
 /// then carries the share alone rather than a time that is no longer true.
 fn reset_clause(app: &App, window: &UsageWindow) -> Option<String> {
     let at = window.resets_at?;
-    let when = clock::upcoming(app.stamp()?, app.moment(at))?;
-    Some(format!(" · resets {when}"))
+    let when = clock::upcoming(app.stamp()?, app.moment(at)?)?;
+    Some(format!(" resets {when}"))
 }
 
 /// The plan's windows, which on a flat-rate plan are what a budget is: a
 /// meter for each one a backend reported, the share beside it, and when it
 /// comes back.
 ///
+/// Before this session's backend has reported them, the levels an earlier
+/// session recorded stand in, under a line saying when they were recorded;
+/// and where none were, each window's row carries an em dash and a line says
+/// when a figure comes, rather than leaving the pane blank.
+fn window_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    let dim = Style::new().fg(theme.dim);
+    let said = |text: &str| Line::from(Span::styled(text::truncate(text, width), dim));
+    match app.plan_windows() {
+        PlanWindows::None => Vec::new(),
+        PlanWindows::Reported(windows) => level_lines(app, &windows, width, theme),
+        PlanWindows::Carried { windows, at } => {
+            let mut lines = level_lines(app, &windows, width, theme);
+            lines.push(said(&carried_said(app, at)));
+            lines
+        }
+        PlanWindows::Awaited => {
+            let labels = usage_label_column(app, width);
+            let mut lines: Vec<Line<'static>> = AWAITED
+                .iter()
+                .map(|label| {
+                    Line::from(vec![
+                        Span::styled(usage_label(label, labels), dim),
+                        Span::styled(format!("{NO_FIGURE:>3}"), dim),
+                    ])
+                })
+                .collect();
+            lines.push(said(AWAITED_SAID));
+            lines
+        }
+    }
+}
+
+/// A meter for each window `windows` holds, the share beside it and when it
+/// comes back, and the row that says the plan is spending beyond its fee.
+///
 /// A window no backend reported is not a window at zero — it draws no row at
 /// all. The meter shrinks before the reset time does: how much of a window is
 /// gone is worth a cell more or less, and `resets Tue 09:00` cut to
 /// `resets Tue 09` is a different time.
-fn window_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
-    let Some(windows) = app.session().usage_windows() else {
-        return Vec::new();
-    };
-
+fn level_lines(
+    app: &App,
+    windows: &UsageWindows,
+    width: usize,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
     let reported: Vec<(&str, UsageWindow, Option<String>)> =
         [("5h", windows.five_hour), ("7d", windows.seven_day)]
             .into_iter()
@@ -1974,24 +3845,26 @@ fn window_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
         .filter_map(|(_, _, clause)| clause.as_deref().map(text::width))
         .max()
         .unwrap_or(0);
+    let labels = usage_label_column(app, width);
     let cells = width
-        .saturating_sub(WINDOW_LABEL + WINDOW_SHARE + clause_columns)
+        .saturating_sub(labels + SHARE_COLUMNS + SHARE_GAP.len() + clause_columns)
         .min(METER_CELLS);
 
     let dim = Style::new().fg(theme.dim);
     let mut lines: Vec<Line<'static>> = reported
         .into_iter()
         .map(|(label, window, clause)| {
+            if !window.utilization.is_finite() {
+                return unmeasured_line(usage_label(label, labels), clause, cells, dim);
+            }
             let (filled, track) = meter(window.utilization, cells);
             let style = window_style(&window, theme);
             Line::from(vec![
-                Span::styled(format!("{label:<WINDOW_LABEL$}"), dim),
+                Span::styled(usage_label(label, labels), dim),
+                Span::styled(window_share(window.utilization), style.bold()),
+                Span::raw(SHARE_GAP),
                 Span::styled(filled, style),
                 Span::styled(track, dim),
-                Span::styled(
-                    format!(" {:>3}%", crate::app::percent(window.utilization)),
-                    style.bold(),
-                ),
                 Span::styled(clause.unwrap_or_default(), dim),
             ])
         })
@@ -2002,18 +3875,78 @@ fn window_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
     // money side is an em dash. A `$0.00` there would be a figure nobody
     // measured, and the one it would be mistaken for is zero.
     //
-    // The row is absent rather than `off` where the flag is not set: the flag
-    // is "spending extra, or the backend did not say", so drawing `off` would
+    // The row is absent where the backend said neither that the plan is
+    // spending extra nor whether it may: drawing `off` from silence would
     // promise something nothing reported.
-    if windows.using_overage {
+    if let Some((said, spending)) = extra(windows) {
+        let style = match spending {
+            true => Style::new().fg(theme.hot).bold(),
+            false => dim,
+        };
         lines.push(Line::from(vec![
-            Span::styled(format!("{:<WINDOW_LABEL$}", "extra"), dim),
-            Span::styled("—", dim),
-            Span::styled(" · on", Style::new().fg(theme.hot).bold()),
+            Span::styled(usage_label("extra", labels), dim),
+            Span::styled(NO_FIGURE, dim),
+            Span::styled(said, style),
         ]));
     }
 
     lines
+}
+
+/// A window's row where nothing measured its level — one carried from an
+/// earlier reading whose reset has come around since: an em dash where the
+/// share stands and no meter, since an empty track would read as nothing
+/// used. Where it names a reset, blank cells hold the meter's place so the
+/// reset stands in the column the other rows' do.
+fn unmeasured_line(
+    label: String,
+    clause: Option<String>,
+    cells: usize,
+    dim: Style,
+) -> Line<'static> {
+    let mut spans = vec![
+        Span::styled(label, dim),
+        Span::styled(format!("{NO_FIGURE:>3}"), dim),
+    ];
+    if let Some(clause) = clause {
+        let blank = " ".repeat(SHARE_COLUMNS - 3 + SHARE_GAP.len() + cells);
+        spans.push(Span::raw(blank));
+        spans.push(Span::styled(clause, dim));
+    }
+    Line::from(spans)
+}
+
+/// What the overage row draws where a figure would be: no backend reports
+/// what the extra costs.
+const NO_FIGURE: &str = "—";
+
+/// What the overage row says of the plan spending beyond its flat fee.
+const OVERAGE_ON: &str = " · on";
+
+/// What the `extra` row says after its em dash, and whether it is the plan
+/// spending beyond its fee, which is drawn hot. `None` where the backend said
+/// neither that it is spending nor whether it may, which is no row at all.
+///
+/// Spending is said first whatever else was: the CLI keeps reporting extra
+/// in use at the moment the extra itself runs out.
+fn extra(windows: &UsageWindows) -> Option<(String, bool)> {
+    if windows.using_overage {
+        return Some((OVERAGE_ON.to_owned(), true));
+    }
+    match windows.overage {
+        Overage::Unreported => None,
+        Overage::Allowed => Some((" · allowed".to_owned(), false)),
+        Overage::Refused(why) => {
+            let why = match why {
+                OverageRefusal::OutOfCredits => " · no credits left",
+                OverageRefusal::NotSetUp => " · not set up",
+                OverageRefusal::TurnedOff => " · turned off",
+                OverageRefusal::ZeroLimit => " · its limit is zero",
+                OverageRefusal::Unstated => "",
+            };
+            Some((format!(" · off{why}"), false))
+        }
+    }
 }
 
 /// What a model's tokens get: the widest figure [`compact`] produces for a
@@ -2021,15 +3954,27 @@ fn window_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
 /// gap before it, which is drawn whatever the figure's width.
 const MODEL_TOKENS: usize = 6;
 
-/// What a model's share is drawn in: three columns and the sign, with a space
-/// either side of them.
-const MODEL_SHARE: usize = 6;
-
-/// What a model's cost is drawn in on a metered account: the widest figure
-/// the pane prints for one (`≥~$12.34`) and a column of gap before it. A wider
-/// one pushes the row out rather than into the count beside it: the gap is
-/// drawn whatever the figure's width.
+/// The least a model's cost is drawn in on a metered account: the widest
+/// figure under a hundred dollars the pane prints for one (`≥~$12.34`) and a
+/// column of gap before it, so that the costs of a session stand in one
+/// column as they grow. A wider one widens the column: see
+/// [`model_cost_columns`].
 const MODEL_COST: usize = 9;
+
+/// What the models' costs are drawn in this frame: [`MODEL_COST`], or the
+/// widest cost a row draws and its gap where that is wider, so that no cost
+/// is cut by the pane's edge. Nothing where the account is not metered and
+/// the rows carry no cost.
+fn model_cost_columns(app: &App) -> usize {
+    if !metered(app) {
+        return 0;
+    }
+    let totals = app.session().totals();
+    models(app)
+        .iter()
+        .map(|(model, _)| text::width(&model_cost(totals, model, app.prices())) + 1)
+        .fold(MODEL_COST, usize::max)
+}
 
 /// The label the cache row carries. It names what its figure means, because a
 /// hit rate and a share of the session are two different questions and the
@@ -2038,16 +3983,36 @@ const CACHE_LABEL: &str = "cache hit";
 
 /// How many rows the tokens block takes: one per model that spent something,
 /// one for the cache, or one line saying the session has been billed for
-/// nothing yet.
+/// nothing yet — and one more where the backend's turn totals carried tokens
+/// no message reported.
 ///
 /// The pane is sized from this before it is drawn, so it has to agree with
 /// [`spend_lines`] exactly; a test holds the two together.
 fn spend_rows(app: &App) -> usize {
-    match models(app).len() {
+    let models = match models(app).len() {
         0 => 1,
         rows => rows + 1,
-    }
+    };
+    models + usize::from(beyond_messages(app) > 0)
 }
+
+/// The tokens the backend's turn totals carried beyond what the turns'
+/// messages reported, over the session.
+fn beyond_messages(app: &App) -> u64 {
+    app.session().beyond_messages().total()
+}
+
+/// The row that says how many of the session's tokens no message reported
+/// and only the backend's turn totals did, labelled for where they came
+/// from: they are in the rows above wherever the backend's bill carried
+/// them, but no per-message record accounts for them.
+fn beyond_messages_line(tokens: u64, width: usize, theme: &Theme) -> Line<'static> {
+    let row = format!("+{} {BEYOND_MESSAGES_LABEL}", compact(tokens));
+    Line::from(text::truncate(&row, width)).style(Style::new().fg(theme.dim))
+}
+
+/// What the row of tokens no message reported says they are.
+const BEYOND_MESSAGES_LABEL: &str = "reported by the CLI, not per message";
 
 /// The models that spent something, largest first, with their tokens.
 ///
@@ -2085,27 +4050,25 @@ fn models(app: &App) -> Vec<(String, u64)> {
 fn spend_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
     let dim = Style::new().fg(theme.dim);
     let spent = models(app);
+    let beyond = beyond_messages(app);
+    let beyond = (beyond > 0).then(|| beyond_messages_line(beyond, width, theme));
     if spent.is_empty() {
-        return vec![Line::from("no tokens reported yet").style(dim)];
+        let mut lines = vec![Line::from("no tokens reported yet").style(dim)];
+        lines.extend(beyond);
+        return lines;
     }
 
-    let labels = usage::labels(spent.iter().map(|(model, _)| model.as_str()));
-    let columns = labels
-        .iter()
-        .map(|label| text::width(label))
-        .chain(std::iter::once(text::width(CACHE_LABEL)))
-        .max()
-        .unwrap_or(0)
-        + 1;
+    let columns = usage_label_column(app, width);
+    let labels = usage::fitted(
+        &usage::labels(spent.iter().map(|(model, _)| model.as_str())),
+        columns.saturating_sub(1),
+    );
     // The meter gives up cells until the row fits, the way a window row's
     // does: how much of a bar is drawn is worth less than the figure beside it.
     let costed = metered(app);
-    let cost_columns = match costed {
-        true => MODEL_COST,
-        false => 0,
-    };
+    let cost_columns = model_cost_columns(app);
     let cells = width
-        .saturating_sub(columns + MODEL_SHARE + MODEL_TOKENS + cost_columns)
+        .saturating_sub(columns + SHARE_COLUMNS + SHARE_GAP.len() + MODEL_TOKENS + cost_columns)
         .min(METER_CELLS);
 
     // A label, a figure, a meter of the share that figure rounds, a count, and
@@ -2121,16 +4084,16 @@ fn spend_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
                style: Style| {
         let (filled, track) = meter(share, cells);
         let mut spans = vec![
-            Span::styled(format!("{label:<columns$}"), dim),
+            Span::styled(usage_label(label, columns), dim),
             Span::styled(figure, style.bold()),
-            Span::styled("  ", dim),
+            Span::raw(SHARE_GAP),
             Span::styled(filled, style),
             Span::styled(track, dim),
             Span::styled(format!(" {count:>width$}", width = MODEL_TOKENS - 1), dim),
         ];
         if let Some(cost) = cost {
             spans.push(Span::styled(
-                format!(" {cost:>width$}", width = MODEL_COST - 1),
+                format!(" {cost:>width$}", width = cost_columns - 1),
                 Style::new().fg(theme.fg),
             ));
         }
@@ -2140,6 +4103,7 @@ fn spend_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
     let totals = app.session().totals();
     let session_tokens = totals.tokens().max(1);
     let percents = usage::shares(&spent.iter().map(|(_, tokens)| *tokens).collect::<Vec<_>>());
+    let models = spent.iter().filter(|(_, tokens)| *tokens > 0).count();
     let mut lines: Vec<Line<'static>> = spent
         .iter()
         .zip(labels)
@@ -2147,7 +4111,7 @@ fn spend_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
         .map(|(((model, tokens), label), percent)| {
             row(
                 &label,
-                format!("{percent:>3}%"),
+                share_label(percent, *tokens > 0, *tokens > 0 && models > 1),
                 *tokens as f64 / session_tokens as f64,
                 compact(*tokens),
                 costed.then(|| model_cost(totals, model, app.prices())),
@@ -2163,7 +4127,7 @@ fn spend_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
     lines.push(row(
         CACHE_LABEL,
         match hit {
-            Some(hit) => format!("{:>3}%", crate::app::percent(hit)),
+            Some(hit) => share_label(crate::app::percent(hit), hit > 0.0, hit < 1.0),
             None => format!("{:>4}", "—"),
         },
         hit.unwrap_or(0.0),
@@ -2174,20 +4138,35 @@ fn spend_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
         None,
         Style::new().fg(theme.add),
     ));
+    lines.extend(beyond);
     lines
 }
 
-/// The widest label the context row carries, `context`, and a column of gap.
-const CONTEXT_LABEL: usize = 8;
+/// A share as its column draws it, four cells wide. One that rounds to
+/// nothing but is not nothing reads `<1%`, and one that rounds to the whole
+/// but is not all of it reads `>99%`: a `0%` beside tokens, or a `100%`
+/// beside a second model, says something that is not so.
+fn share_label(percent: u64, some: bool, not_all: bool) -> String {
+    match percent {
+        0 if some => " <1%".to_owned(),
+        100.. if not_all => ">99%".to_owned(),
+        _ => format!("{percent:>3}%"),
+    }
+}
+
+/// The label the context row carries.
+const CONTEXT_LABEL: &str = "context";
 
 /// How many rows the context takes: one once the main agent has sent a
 /// request, and none before — nothing has been measured, and a row at `0%`
-/// would say the context is empty.
+/// would say the context is empty. A compaction that did not say what it left
+/// keeps the row, as a dash, until the next request measures it: the figure
+/// it had is of a conversation the model no longer has.
 ///
 /// The pane is sized from this before it is drawn, so it has to agree with
 /// [`context_lines`] exactly; a test holds the two together.
 fn context_rows(app: &App) -> usize {
-    usize::from(app.session().context().is_some())
+    usize::from(app.session().context().is_some() || app.compaction_unmeasured())
 }
 
 /// How big the window the last request went into is: what the backend
@@ -2211,26 +4190,50 @@ fn context_window(app: &App, context: &Context) -> Option<u64> {
 /// calls it made, and nothing reports that until it goes.
 ///
 /// A model whose window nobody knows gets the size alone — no bar, and no
-/// share of a window assumed for it. The share is never clamped: a context
-/// past its window fills the bar, and the figure says by how much.
+/// share of a window assumed for it. A context past its window fills the bar,
+/// and the figure says by how much, up to the most its column holds.
+///
+/// Between a compaction and the next request the figure is what the backend
+/// said the compaction left, which leaves out what every request sends beside
+/// it: the share and the size are marked `≥` and rounded down, so the row
+/// claims no more than was reported.
 fn context_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
-    let Some(context) = app.session().context() else {
-        return Vec::new();
-    };
     let dim = Style::new().fg(theme.dim);
-    let label = Span::styled(format!("{:<CONTEXT_LABEL$}", "context"), dim);
+    let labels = usage_label_column(app, width);
+    let label = Span::styled(usage_label(CONTEXT_LABEL, labels), dim);
+    let Some(context) = app.session().context() else {
+        return match app.compaction_unmeasured() {
+            true => vec![Line::from(vec![label, Span::styled(NO_FIGURE, dim)])],
+            false => Vec::new(),
+        };
+    };
+    let floor = app.session().context_is_a_floor();
     let Some(window) = context_window(app, context) else {
         return vec![Line::from(vec![
             label,
-            Span::styled(compact(context.tokens), Style::new().fg(theme.fg)),
+            Span::styled(
+                context_size(context.tokens, floor),
+                Style::new().fg(theme.fg),
+            ),
         ])];
     };
 
     let share = context.tokens as f64 / window.max(1) as f64;
-    let figures = format!("  {} / {}", compact(context.tokens), compact(window));
-    let cells = width
-        .saturating_sub(CONTEXT_LABEL + WINDOW_SHARE + text::width(&figures))
-        .min(METER_CELLS);
+    // The bar goes first and then the window's size, whole: `12k / 20` is
+    // not what `12k / 200k` reads as with a cell less.
+    let beside = labels + SHARE_COLUMNS + SHARE_GAP.len();
+    let figures = context_figures(context.tokens, window, floor);
+    let (figures, cells) = match beside + text::width(&figures) <= width {
+        true => {
+            let cells = width - beside - text::width(&figures);
+            (figures, cells.min(METER_CELLS))
+        }
+        false => (format!(" {}", context_size(context.tokens, floor)), 0),
+    };
+    let shown = match floor {
+        true => floor_share(share),
+        false => window_share(share),
+    };
     let (filled, track) = meter(share, cells);
     let style = match share >= BUDGET_SHOWN_HOT {
         true => Style::new().fg(theme.hot),
@@ -2238,11 +4241,43 @@ fn context_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
     };
     vec![Line::from(vec![
         label,
+        Span::styled(shown, style.bold()),
+        Span::raw(SHARE_GAP),
         Span::styled(filled, style),
         Span::styled(track, dim),
-        Span::styled(format!(" {:>3}%", crate::app::percent(share)), style.bold()),
         Span::styled(figures, dim),
     ])]
+}
+
+/// What the context row says beside its meter: the size the last request
+/// sent, and the size of the window it went into.
+fn context_figures(tokens: u64, window: u64, floor: bool) -> String {
+    format!(" {} / {}", context_size(tokens, floor), compact(window))
+}
+
+/// The context's size: as [`compact`] draws a measurement, or for a `floor`
+/// marked `≥` and rounded down, since rounding up would claim more than the
+/// backend reported.
+fn context_size(tokens: u64, floor: bool) -> String {
+    match floor {
+        true => format!("≥{}", compact_floor(tokens)),
+        false => compact(tokens),
+    }
+}
+
+/// A floor's share of its window, in the share's four columns: marked `≥`
+/// and rounded down. A share of no whole point is `>0%`, which is all a floor
+/// that small says; one of a whole window or more is `>99%`, the most four
+/// columns hold of a floor.
+fn floor_share(share: f64) -> String {
+    if !share.is_finite() || share < 0.0 {
+        return format!("{:>3} ", NO_FIGURE);
+    }
+    match (share * 100.0).floor() as u64 {
+        0 => " >0%".to_owned(),
+        100.. => ">99%".to_owned(),
+        percent => format!("{:>4}", format!("≥{percent}%")),
+    }
 }
 
 /// The rule the mock draws between the pane's blocks. Its blocks answer
@@ -2255,7 +4290,7 @@ fn divider(width: usize, theme: &Theme) -> Line<'static> {
 fn draw_usage(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     // Usage has nothing to scroll and nothing to fold, so it never has the
     // keyboard.
-    let block = pane("Usage", area, Border::of(false, theme), theme);
+    let block = pane("Usage", Border::of(false, theme), theme);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.height == 0 {
@@ -2309,63 +4344,146 @@ fn usage_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
     lines
 }
 
-/// How many rows the money takes: the session's cost, and the budget where
-/// the session runs against one.
+/// How many rows the money takes: the session's cost, except on a plan, and
+/// the budget where the session runs against one.
 fn money_rows(app: &App) -> usize {
-    1 + usize::from(app.budget().is_some())
+    let cost = match Billed::of(app.session()) {
+        Billed::Plan => 0,
+        Billed::Metered | Billed::Both | Billed::Unknown => 1,
+    };
+    cost + usize::from(app.budget().is_some())
 }
 
 /// What the session cost, labelled for what is known about it, and what it
 /// has spent of its budget.
 ///
-/// What the figure is depends on how the session is billed. On a metered
-/// account it is the bill, drawn as the headline. On a plan no money moves
-/// with the work, and the same figure — the CLI prices a plan's work at list
-/// prices — is what the work would have cost on the API: kept on screen so a
-/// plan user sees what they consume, but dim and named for what it is, never
-/// as the session's cost. Where nothing has said which it is, it is neither,
-/// and the row says so rather than showing a figure it cannot vouch for.
+/// What is drawn depends on how the session is billed. On a metered account
+/// the cost is the bill, drawn as the headline. On a plan no money moves with
+/// the work and what runs out is the windows above, so there is no row: the
+/// figure the backend prints is what the work would have cost on the API,
+/// which tells a plan user nothing the tokens and the windows do not. Where
+/// nothing has said which it is, the row says so rather than showing a figure
+/// it cannot vouch for. A session billed both ways — resumed under a profile
+/// billed differently — shows what its metered part cost, named as a part.
 fn money_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
     let dim = Style::new().fg(theme.dim);
-    let cost = || session_cost(app.session(), app.prices());
-    let mut lines = vec![match app.session().billing() {
-        Some(Billing::Metered) => {
-            let cost = cost();
+    let billed = Billed::of(app.session());
+    let mut lines = Vec::new();
+    match billed {
+        Billed::Both => {
+            let totals = app.session().metered_totals();
+            let head = format!("{METERED_PART} ");
+            let cost = cost_of(totals, app.prices());
+            let mut spans = vec![
+                Span::styled(head.clone(), dim),
+                Span::styled(cost.clone(), Style::new().fg(theme.fg)),
+            ];
+            let used = text::width(&head) + text::width(&cost);
+            push_age(&mut spans, totals, used, width, dim);
+            lines.push(Line::from(spans));
+        }
+        Billed::Metered => {
+            let cost = session_cost(app.session(), app.prices());
             let mut spans = vec![
                 Span::styled("session ", dim),
                 Span::styled(cost.clone(), Style::new().fg(theme.hot).bold()),
             ];
+            let used = text::width("session ") + text::width(&cost);
+            let used = push_age(&mut spans, app.session().totals(), used, width, dim);
             let rate = spend_rate(app).map(|rate| format!(" · {rate}/h worked"));
-            if let Some(rate) = rate.filter(|rate| {
-                text::width("session ") + text::width(&cost) + text::width(rate) <= width
-            }) {
+            if let Some(rate) = rate.filter(|rate| used + text::width(rate) <= width) {
                 spans.push(Span::styled(rate, dim));
             }
-            Line::from(spans)
+            lines.push(Line::from(spans));
         }
-        Some(Billing::Plan) => Line::from(format!("API-equivalent {}", cost())).style(dim),
-        None => Line::from(vec![
+        Billed::Plan => {}
+        Billed::Unknown => lines.push(Line::from(vec![
             Span::styled("session ", dim),
             Span::styled("—", Style::new().fg(theme.fg)),
             Span::styled(" · billing not known", dim),
-        ]),
-    }];
+        ])),
+    }
     if let Some(budget) = app.budget() {
-        let spent = app.session().totals().reported_cost_usd;
-        lines.push(
-            Line::from(format!("budget {}/{}", dollars(spent), dollars(budget))).style(
-                match spent >= budget * BUDGET_SHOWN_HOT {
-                    true => Style::new().fg(theme.hot).bold(),
-                    false => Style::new().fg(theme.fg),
-                },
-            ),
-        );
+        lines.push(budget_line(app, budget, width, theme));
     }
     lines
 }
 
-/// Columns a tool's name gets in the Usage pane's mix.
-const BAR_NAME: usize = 18;
+/// What a floor says where it may be low only because the session was
+/// recorded before its records said what a cost settles — so that a figure an
+/// older recording leaves is not read as the backend having reported nothing.
+pub const OLDER_RECORDING: &str = "older recording";
+
+/// Appends ` · older recording` to a cost row of `used` columns where
+/// `totals` is a floor [`OLDER_RECORDING`] explains and the row has room for
+/// it, and returns the columns the row then takes.
+fn push_age(
+    spans: &mut Vec<Span<'static>>,
+    totals: &Totals,
+    used: usize,
+    width: usize,
+    style: Style,
+) -> usize {
+    if !totals.settlement_unrecorded() {
+        return used;
+    }
+    let age = format!(" · {OLDER_RECORDING}");
+    let wide = used + text::width(&age);
+    if wide > width {
+        return used;
+    }
+    spans.push(Span::styled(age, style));
+    wide
+}
+
+/// The `budget ~$1.15/$5.00` row: what the session has spent, labelled as
+/// the session's cost is, against the budget it was given.
+///
+/// An em dash where nothing was reported and nothing could be valued, never a
+/// `$0.00` that would read as a session that has cost nothing. A session
+/// billed both ways counts its metered part, and says so as its cost does.
+/// Where nothing said how the session is billed, the spend is an em dash as
+/// the session's cost is, and on a plan the row draws no dollar figure at all:
+/// it shows none the pane withholds, though it still turns hot as what the
+/// backend counts nears the budget, as the warning in the transcript still
+/// comes.
+fn budget_line(app: &App, budget: f64, width: usize, theme: &Theme) -> Line<'static> {
+    let billed = Billed::of(app.session());
+    let spent = known_spend(billed.counted(app.session()), app.prices());
+    let hot = spent
+        .as_ref()
+        .is_some_and(|(_, usd)| *usd >= budget * BUDGET_SHOWN_HOT);
+    let figure = match billed {
+        Billed::Metered | Billed::Both => spent.as_ref().map(|(text, _)| text.as_str()),
+        Billed::Plan | Billed::Unknown => None,
+    }
+    .unwrap_or("—");
+    let row = match billed {
+        Billed::Plan => format!("budget {figure}"),
+        Billed::Metered | Billed::Both | Billed::Unknown => {
+            let amounts = format!("{figure}/{}", dollars(budget));
+            let heads: &[&'static str] = match billed {
+                Billed::Both => &["metered part budget ", "metered budget "],
+                Billed::Metered | Billed::Plan | Billed::Unknown => &["budget "],
+            };
+            let head = heads
+                .iter()
+                .find(|head| text::width(head) + text::width(&amounts) <= width)
+                .or(heads.last())
+                .copied()
+                .unwrap_or("budget ");
+            format!("{head}{amounts}")
+        }
+    };
+    Line::from(row).style(match hot {
+        true => Style::new().fg(theme.hot).bold(),
+        false => Style::new().fg(theme.fg),
+    })
+}
+
+/// The most columns a tool's name gets in the mix; the column is as wide as
+/// the widest family it lists, up to this.
+const BAR_NAME: usize = 16;
 
 /// Columns a tool's count gets, right-aligned.
 const BAR_COUNT: usize = 4;
@@ -2378,16 +4496,20 @@ const BAR_FAILED: usize = 4;
 /// pane is a block of colour the count beside it gets lost in.
 const BAR_CELLS: usize = 12;
 
-/// One `Notion·*            16 ━━ ✗ 3` row: the family, its calls, a thin bar
-/// in the tool colour for how it compares with the busiest family, and its own
+/// One `Notion·*  16 ▓▓ ✗ 3` row: the family in a column `name` wide, its
+/// calls, a bar for how it compares with the busiest family, and its own
 /// failures where it has any.
+///
+/// The busiest family's bar is drawn in the hot colour and the rest dim: the
+/// bars are read for which tool the session leans on, and one bright bar
+/// answers that before any is measured against another.
 ///
 /// The failures are on the family's own row because the header's count says
 /// only that the session failed three calls, not which tool it kept failing
 /// at. A family with no failures carries no column at all — `✗ 0` is a
 /// reassurance dressed as a measurement.
 fn bar_line(
-    family: &str,
+    (family, name): (&str, usize),
     count: u64,
     failed: u64,
     busiest: u64,
@@ -2403,31 +4525,33 @@ fn bar_line(
         0 => String::new(),
         failed => format!(" ✗ {failed}"),
     };
+    let bar = match count == busiest {
+        true => theme.hot,
+        false => theme.dim,
+    };
 
     Line::from(vec![
         Span::styled(
             format!(
-                "{ROW_INDENT}{:<BAR_NAME$}",
-                text::truncate(family, BAR_NAME - 1)
+                "{ROW_INDENT}{}",
+                text::pad(&text::truncate(family, name), name)
             ),
             Style::new().fg(theme.dim),
         ),
+        Span::styled(format!("{count:>BAR_COUNT$} "), Style::new().fg(theme.fg)),
         Span::styled(
-            format!("{count:>BAR_COUNT$} "),
-            Style::new().fg(theme.hot).bold(),
-        ),
-        Span::styled(
-            format!("{:<width$}", "━".repeat(filled.min(width))),
-            Style::new().fg(theme.tool),
+            format!("{:<width$}", "▓".repeat(filled.min(width))),
+            Style::new().fg(bar),
         ),
         Span::styled(failures, Style::new().fg(theme.del)),
     ])
 }
 
-/// The Activity pane: the sub-agents the session spawned, the decisions it
-/// recorded, and the tools it called.
+/// The Activity pane: the sub-agents the session spawned, the decisions its
+/// replies stated, and the tools it called.
 ///
-/// One column for what the agent is doing and what it has decided. It scrolls
+/// One column for what the agent is doing and what it says it decided. It
+/// scrolls
 /// and its sections fold on the same mechanism the Changes pane uses.
 fn draw_activity(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
     draw_scrolling_pane(
@@ -2447,29 +4571,9 @@ fn activity_rows(app: &App, width: usize, theme: &Theme) -> PaneRows {
     let session = app.session();
     let mut rows = PaneRows::default();
     rows.section(Section::SubAgents, agent_rows(app, session, width, theme));
-    rows.section(
-        Section::Decisions,
-        decision_rows(app, session, width, theme),
-    );
+    rows.section(Section::Decisions, decision_rows(app, width, theme));
     rows.section(Section::Tools, tool_rows(app, session, width, theme));
     rows
-}
-
-/// The glyph, the colour and the word a sub-agent's state is drawn with.
-///
-/// The glyph carries the state on its own: a sixteen-colour terminal in a
-/// theme the operator chose is not somewhere a colour can be the only
-/// difference between an agent that finished and one that failed. One the
-/// session ended under is neither running nor failed: nobody will say how it
-/// went.
-fn agent_state(agent: &SubAgent, theme: &Theme) -> (&'static str, Color, &'static str) {
-    match agent.outcome {
-        None if agent.interrupted => ("⊘", theme.dim, "cut short"),
-        None => ("◆", theme.agent, "running"),
-        Some(AgentOutcome::Completed) => ("◇", theme.dim, "done"),
-        Some(AgentOutcome::Failed) => ("✗", theme.del, "failed"),
-        Some(AgentOutcome::Cancelled) => ("⊘", theme.dim, "cancelled"),
-    }
 }
 
 /// What the sub-agents section says about itself: how many are running, how
@@ -2523,14 +4627,25 @@ fn agent_figures(
     figures
 }
 
-/// A sub-agent per row: the state glyph, what it was spawned to do, the model
-/// it answers with, and the status column — then, on a row of its own, the
-/// last thing it was seen doing.
+/// A running sub-agent per row: the glyph, its tag — the word the
+/// transcript's rows name it by — what it was spawned to do, the model it
+/// answers with, and how long it has run on the right; then, on a row of its
+/// own, what it is doing.
 ///
-/// The model is drawn only where the agent's own messages named one, and
-/// shortened the way the Usage pane shortens the session's. The sub-line is
-/// drawn only where the backend reported a step or an answer: an empty `└` on
-/// every agent that said nothing would be half the pane's rows saying nothing.
+/// Only what is running is listed. An agent that finished, failed or was
+/// cancelled, or that the session ended under, leaves the list, and the
+/// header's counts are where it went: in a long session a list of every
+/// agent spawned buries the ones at work under the ones that stopped.
+///
+/// The tag and the model each have a column as wide as the widest in the
+/// list, so the tasks start in one column and the times end in another. The
+/// model is drawn only where the agent's own messages named one, by its
+/// family where no other listed agent's model shares it.
+///
+/// The sub-line is the call the agent has open, as its row in the transcript
+/// names it, and otherwise the last thing its backend reported it doing. It
+/// is drawn only where there is one: an empty `└` on every agent that said
+/// nothing would be half the pane's rows saying nothing.
 fn agent_rows(
     app: &App,
     session: &SessionState,
@@ -2553,40 +4668,46 @@ fn agent_rows(
         return rows;
     }
 
-    let models = agent_models(app.agents());
-    for (agent, model) in app.agents().iter().zip(models) {
-        let (glyph, colour, word) = agent_state(agent, theme);
-        let status = agent_status(agent, word, app.stamp());
+    // Tagged among every agent the session spawned, so that an agent keeps
+    // the tag the transcript names it by when another one stops.
+    let (running, tags): (Vec<&SubAgent>, Vec<String>) = app
+        .agents()
+        .iter()
+        .zip(app.agent_tags())
+        .filter(|(agent, _)| agent.is_running())
+        .unzip();
+    let models = agent_models(&running);
+    let tag_column = tags.iter().map(|tag| text::width(tag)).max().unwrap_or(0);
+    let model_column = models
+        .iter()
+        .flatten()
+        .map(|model| text::width(model))
+        .max()
+        .unwrap_or(0);
 
-        let room = width
-            .saturating_sub(AGENT_GLYPH + text::width(&status) + AGENT_GAP)
-            .max(1);
-        let (label, model) = agent_name(&agent.label, model, room);
-        let named = text::width(&label) + model.as_ref().map_or(0, |m| 1 + text::width(m));
-        // What is left between the two goes between them, so the status keeps
-        // the pane's right edge and the labels do not have to be one length.
-        let pad = width
-            .saturating_sub(AGENT_GLYPH + named + text::width(&status))
-            .max(AGENT_GAP);
+    for ((agent, tag), model) in running.into_iter().zip(tags).zip(models) {
+        let status = agent_status(agent, app.stamp());
+        // The status is right-aligned at the pane's edge, so it needs no
+        // column of its own: one as wide as `12m 40s` on every row would take
+        // the room of another agent's task.
+        let columns = AgentColumns {
+            tag: tag_column,
+            model: model.as_ref().map_or(0, |_| model_column),
+            status: text::width(&status),
+            task: 0,
+        };
+        rows.push(agent_row(
+            &tag,
+            agent.task(),
+            (model, &status),
+            columns.fitted(width),
+            theme,
+        ));
 
-        let mut row = vec![
-            Span::styled(format!("{glyph} "), Style::new().fg(colour).bold()),
-            Span::styled(label, Style::new().fg(theme.fg)),
-        ];
-        if let Some(model) = model {
-            row.push(Span::styled(
-                format!(" {model}"),
-                Style::new().fg(theme.dim),
-            ));
-        }
-        row.push(Span::raw(" ".repeat(pad)));
-        row.push(Span::styled(status, Style::new().fg(colour)));
-        rows.push(Line::from(row));
-
-        if let Some(latest) = &agent.latest {
+        if let Some(doing) = app.agent_doing(&agent.id).or_else(|| agent.latest.clone()) {
             let room = width.saturating_sub(AGENT_SUBLINE).max(1);
             rows.push(
-                Line::from(format!("  └ {}", text::truncate(latest, room)))
+                Line::from(format!("  └ {}", text::truncate(&doing, room)))
                     .style(Style::new().fg(theme.dim)),
             );
         }
@@ -2594,84 +4715,126 @@ fn agent_rows(
     rows
 }
 
-/// What each agent's model is called on its row, in the pane's order: the
-/// Usage pane's short names, which keep an id whole where two would read
-/// alike.
-fn agent_models(agents: &[SubAgent]) -> Vec<Option<String>> {
+/// The columns an agent's row is drawn in. The task takes what the others
+/// leave of the row.
+#[derive(Debug, Clone, Copy)]
+struct AgentColumns {
+    tag: usize,
+    model: usize,
+    status: usize,
+    task: usize,
+}
+
+impl AgentColumns {
+    /// The columns in a row `width` wide, with the model given up where it
+    /// would leave the task less than [`AGENT_LABEL_LEAST`]: a row that names
+    /// the model and not what the agent is for says nothing about which
+    /// agent it is.
+    fn fitted(self, width: usize) -> Self {
+        let task = |model: usize| {
+            width.saturating_sub(
+                AGENT_GLYPH + self.tag + AGENT_GAP + gapped(model) + AGENT_GAP + self.status,
+            )
+        };
+        match task(self.model) >= AGENT_LABEL_LEAST {
+            true => Self {
+                task: task(self.model),
+                ..self
+            },
+            false => Self {
+                model: 0,
+                task: task(0),
+                ..self
+            },
+        }
+    }
+}
+
+/// A column and the gap before it, or nothing for a column not drawn.
+fn gapped(column: usize) -> usize {
+    match column {
+        0 => 0,
+        column => AGENT_GAP + column,
+    }
+}
+
+/// One agent's row, in `columns`.
+fn agent_row(
+    tag: &str,
+    task: &str,
+    (model, status): (Option<String>, &str),
+    columns: AgentColumns,
+    theme: &Theme,
+) -> Line<'static> {
+    let room = columns.task;
+    let task = text::truncate(task, room);
+    let pad = room.saturating_sub(text::width(&task));
+    let colour = theme.agent;
+    let mut row = vec![
+        Span::styled("◆ ", Style::new().fg(colour).bold()),
+        Span::styled(text::pad(tag, columns.tag), Style::new().fg(colour)),
+        Span::raw(AGENT_SPACE),
+        Span::styled(task, Style::new().fg(theme.fg)),
+        Span::raw(" ".repeat(pad)),
+    ];
+    if columns.model > 0 {
+        let model = text::truncate(&model.unwrap_or_default(), columns.model);
+        row.push(Span::styled(
+            format!(" {}", text::pad(&model, columns.model)),
+            Style::new().fg(theme.dim),
+        ));
+    }
+    row.push(Span::styled(
+        format!(" {status:>width$}", width = columns.status),
+        Style::new().fg(colour),
+    ));
+    Line::from(row)
+}
+
+/// What each agent's model is called on its row, in the pane's order: its
+/// family — `opus`, `sonnet` — where no other agent's model is of the same
+/// family, and the Usage pane's short name where one is.
+fn agent_models(agents: &[&SubAgent]) -> Vec<Option<String>> {
     let named: Vec<&str> = agents
         .iter()
         .filter_map(|agent| agent.model.as_deref())
         .collect();
-    let mut labels = usage::labels(named).into_iter();
+    let mut labels = usage::families(named).into_iter();
     agents
         .iter()
         .map(|agent| agent.model.as_ref().and_then(|_| labels.next()))
         .collect()
 }
 
-/// An agent's label and model fitted into `room` cells.
-///
-/// The label is what the operator reads the row for, so it keeps the room:
-/// the model is dropped whole where the two do not fit with enough of the
-/// label left to say which agent this is, rather than both being cut.
-fn agent_name(label: &str, model: Option<String>, room: usize) -> (String, Option<String>) {
-    let Some(model) = model else {
-        return (text::truncate(label, room), None);
-    };
-    let left = room.saturating_sub(1 + text::width(&model));
-    match left >= AGENT_LABEL_LEAST.min(text::width(label)) && left > 0 {
-        true => (text::truncate(label, left), Some(model)),
-        false => (text::truncate(label, room), None),
-    }
-}
-
-/// A sub-agent's status column: `running 1m 42s`, `done 4100 ctx`, `failed`.
-///
-/// The elapsed time is there only while the agent runs, and only where the
+/// A running sub-agent's status column: how long it has run, where the
 /// shell has both the moment it started and the moment it is drawing at — a
-/// session read back from a log that kept no times has neither, and the state
-/// alone is what there is to say.
-///
-/// An agent that finished its task carries the size its conversation reached,
-/// where its backend counted one, marked `ctx` because that is what it is: the
-/// tokens the agent's latest message was answered over, not what the agent
-/// was billed. A failed or cancelled agent carries its state alone; why it
-/// stopped is on the row beneath it. So does one the session ended under: its
-/// clock stopped with the session, at a moment nobody recorded.
-fn agent_status(agent: &SubAgent, word: &str, now: Option<Stamp>) -> String {
-    if agent.interrupted {
-        return word.to_owned();
-    }
-    if let Some(outcome) = agent.outcome {
-        return match (outcome, agent.context_tokens) {
-            (AgentOutcome::Completed, Some(tokens)) => format!("{word} {} ctx", compact(tokens)),
-            (AgentOutcome::Completed, None)
-            | (AgentOutcome::Failed | AgentOutcome::Cancelled, _) => word.to_owned(),
-        };
-    }
+/// session read back from a log that kept no times has neither, and
+/// `running` is what there is to say.
+fn agent_status(agent: &SubAgent, now: Option<Stamp>) -> String {
     match agent.at.zip(now).and_then(|(at, now)| now.since(at)) {
-        Some(ran) => format!("{word} {}", clock::spent(ran)),
-        None => word.to_owned(),
+        Some(ran) => clock::spent(ran),
+        None => "running".to_owned(),
     }
 }
 
 /// The glyph a sub-agent row opens with, and the space after it.
 const AGENT_GLYPH: usize = 2;
 
-/// The least that stands between what an agent is doing and its status, so
-/// the two never run together on a row whose label fills the pane.
-const AGENT_GAP: usize = 1;
+/// What stands between one column of an agent's row and the next.
+const AGENT_SPACE: &str = " ";
 
-/// The least of an agent's label its model is drawn beside: fewer cells than
-/// this and the model is left off, because a row that names the model and not
-/// the agent says nothing about which agent it is.
+/// How wide [`AGENT_SPACE`] is.
+const AGENT_GAP: usize = AGENT_SPACE.len();
+
+/// The least of an agent's task its model is drawn beside: fewer cells than
+/// this and the model is left off.
 const AGENT_LABEL_LEAST: usize = 12;
 
 /// The indent and the `└ ` an agent's sub-line opens with.
 const AGENT_SUBLINE: usize = 4;
 
-/// The Changes pane: what the repository says about the working tree, what
-/// this session says it changed, and what it has committed.
+/// The Changes pane: the branch, and what the repository says the working
+/// tree holds that is not committed — whoever changed it.
 fn draw_changes(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
     draw_scrolling_pane(
         frame,
@@ -2699,7 +4862,7 @@ fn draw_scrolling_pane(
     rows: fn(&App, usize, &Theme) -> PaneRows,
 ) {
     let border = Border::of(app.focus() == Focus::Pane(which), theme);
-    let block = pane(title, area, border, theme);
+    let block = pane(title, border, theme);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.height == 0 || inner.width == 0 {
@@ -2769,34 +4932,38 @@ fn mark_cursor(rows: &mut [Line<'static>], headers: &[(Section, usize)], cursor:
     }
 }
 
-/// Every row the pane has, folded sections included as their header alone.
+/// Every row the pane has, the working tree folded to its header alone.
+///
+/// A directory that is not a repository has no branch and no working tree,
+/// and a section drawn empty would say it had nothing changed rather than
+/// that there is no repository to have changed anything; the pane says so in
+/// a line instead of standing empty.
 fn changes_rows(app: &App, width: usize, theme: &Theme) -> PaneRows {
     let repo = app.repo();
-    let session = app.session();
     let mut rows = PaneRows::default();
-
-    // A directory that is not a repository has no branch and no commits, and
-    // sections drawn empty would say it had none rather than that there is no
-    // repository to have any.
-    let in_repository = repo.branch.is_some();
-    if let Some(branch) = &repo.branch {
-        rows.extend([branch_row(branch, repo, width, theme)]);
+    match &repo.branch {
+        Some(branch) => {
+            rows.extend([branch_row(branch, repo, width, theme)]);
+            rows.section(
+                Section::WorkingTree,
+                working_tree_rows(app, repo, width, theme),
+            );
+        }
+        None => rows.extend([Line::from(Span::styled(
+            text::truncate(NOT_A_REPOSITORY, width),
+            Style::new().fg(theme.dim),
+        ))]),
     }
-
-    if in_repository {
-        rows.section(
-            Section::WorkingTree,
-            working_tree_rows(app, repo, width, theme),
-        );
-        rows.section(Section::Commits, commit_rows(app, repo, width, theme));
-    }
-    rows.section(
-        Section::Edited,
-        session_file_rows(app, session, width, theme),
-    );
-    rows.section(Section::Tests, test_rows(app, width, theme));
     rows
 }
+
+/// What the Changes pane says where the session is not in a repository.
+const NOT_A_REPOSITORY: &str = "not a git repository";
+
+/// What the branch row says of a branch that is neither ahead of its upstream
+/// nor behind it. Not `origin`: the upstream is whatever remote the branch
+/// tracks, and the repository's report does not name it.
+const IN_SYNC: &str = " · in sync with upstream";
 
 /// `⎇ main  ↑3 ↓1`: the branch, and how far it has drifted from its upstream.
 ///
@@ -2810,6 +4977,12 @@ fn branch_row(branch: &str, repo: &crate::app::Repo, width: usize, theme: &Theme
             Some(count) => Some(format!(" {arrow}{count}")),
         })
         .collect();
+
+    // Zero in both directions is a count, so it is said; no upstream is not.
+    let drift = match (repo.ahead, repo.behind) {
+        (Some(0), Some(0)) => IN_SYNC.to_owned(),
+        _ => drift,
+    };
 
     Line::from(vec![
         Span::styled(
@@ -2941,32 +5114,39 @@ fn section_header(
 /// What the repository measured the working tree to have changed.
 ///
 /// These are git's figures, exact, about every file in the tree — including
-/// files this session never touched. They are never mixed with the session's
-/// own counts, which are a different claim by a different party and have their
-/// own section below.
+/// files this session never touched — and for a file git does not track yet,
+/// its lines counted as git counts them once it is added, with the file marked
+/// new. They are never mixed with the session's own counts, which are a
+/// different claim by a different party and have their own section below.
 fn working_tree_rows(
     app: &App,
     repo: &crate::app::Repo,
     width: usize,
     theme: &Theme,
 ) -> Vec<Line<'static>> {
-    let (added, removed) = repo.working.iter().fold((0u64, 0u64), |(a, r), file| {
-        (
-            a.saturating_add(file.added.unwrap_or(0)),
-            r.saturating_add(file.removed.unwrap_or(0)),
+    // Git gives a binary file no line counts, and the header marks that the
+    // way a file's own row does: a floor where some file had none, and a dash
+    // where no file had any, never a zero standing in for the count.
+    let side = |count_of: fn(&crate::app::WorkingFile) -> Option<u64>, sign: char| {
+        let lines = repo
+            .working
+            .iter()
+            .filter_map(count_of)
+            .fold(0u64, u64::saturating_add);
+        count(
+            sign,
+            lines,
+            repo.working.iter().all(|file| count_of(file).is_some()),
         )
-    });
+    };
+    let added = side(|file| file.added, '+');
+    let removed = side(|file| file.removed, '−');
     let summary = match repo.read {
         false => vec![Figure::lead(
             0,
             Span::styled("—", Style::new().fg(theme.dim)),
         )],
-        true => changed_figures(
-            repo.working.len(),
-            format!("+{added}"),
-            format!("−{removed}"),
-            theme,
-        ),
+        true => changed_figures(repo.working.len(), added, removed, theme),
     };
 
     let folded = app.folded(Section::WorkingTree);
@@ -3001,8 +5181,9 @@ fn working_tree_rows(
             tree::Row::File { file, .. } => counted_row(
                 FILE_INDENT,
                 row.name(),
+                Tag::new(file.new),
                 &measured('+', file.added),
-                &measured('−', file.removed),
+                &removed_of(file),
                 width,
                 theme,
             ),
@@ -3011,401 +5192,28 @@ fn working_tree_rows(
     rows
 }
 
-/// What this session's own edit tools said they changed.
-///
-/// A floor rather than a measurement: where a call did not say how many lines
-/// it touched the figure carries `≥`, and where none of them did it is an em
-/// dash. The paths are the backend's — absolute where it could not say
-/// otherwise — which is the other reason these rows are not folded into the
-/// working tree's: the two lists do not even name their files the same way.
-fn session_file_rows(
-    app: &App,
-    session: &SessionState,
-    width: usize,
-    theme: &Theme,
-) -> Vec<Line<'static>> {
-    let files = session.files();
-    // Summed from the per-file fold rather than kept as a second counter, so
-    // the header and the rows under it cannot disagree. A section total is a
-    // floor as soon as any one file's is.
-    let added: u64 = files.iter().fold(0, |a, f| a.saturating_add(f.added));
-    let removed: u64 = files.iter().fold(0, |r, f| r.saturating_add(f.removed));
-    let added_stated = files.iter().all(FileChanges::added_stated);
-    let removed_stated = files.iter().all(FileChanges::removed_stated);
-    let summary = changed_figures(
-        files.len(),
-        count('+', added, added_stated),
-        count('−', removed, removed_stated),
-        theme,
-    );
-
-    let folded = app.folded(Section::Edited);
-    let mut rows = vec![section_header(
-        folded,
-        "This session",
-        summary,
-        width,
-        theme,
-    )];
-    if folded || files.is_empty() {
-        return rows;
-    }
-
-    for file in files {
-        rows.push(counted_row(
-            ROW_INDENT,
-            &file.path,
-            &count('+', file.added, file.added_stated()),
-            &count('−', file.removed, file.removed_stated()),
-            width,
-            theme,
-        ));
-        if let Some(why) = &file.why {
-            rows.push(
-                Line::from(format!(
-                    "    “{}”",
-                    text::truncate(why, width.saturating_sub(7))
-                ))
-                .style(Style::new().fg(theme.dim).italic()),
-            );
-        }
-    }
-    rows
-}
-
-/// `▾ Tests  637 passed · 0 failed · 30 suites · 4.2s ago`: what the
-/// session's latest test run said about itself, and how long ago its call
-/// finished. No section at all where the session has run no tests, which is
-/// not a run that passed nothing.
-///
-/// A run whose output did not hold the whole run says that it ran and that
-/// its result was not read, with the status it exited with where that was a
-/// failure — never a count it did not find. One the backend still knows
-/// failed after its tests started, or that listed a failing test, says that
-/// it failed and that its counts were not read, with each list it left under
-/// the header. Where the pane is too narrow for all of it, the suites go
-/// first, then the age, then the ignored and the passed: the failures are what
-/// the section is for.
-fn test_rows(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
-    let Some((run, at)) = app.test_run() else {
-        return Vec::new();
-    };
-    let age = at.zip(app.stamp()).and_then(|(at, now)| now.since(at));
-    let folded = app.folded(Section::Tests);
-    let mut rows = vec![section_header(
-        folded,
-        "Tests",
-        test_figures(run, age, theme),
-        width,
-        theme,
-    )];
-    if !folded {
-        rows.extend(failure_rows(&run.failures, width, theme));
-    }
-    rows
-}
-
-/// The most failing tests the section names one to a row, across every
-/// binary; the rest are counted, each binary's on a row of its own.
-const NAMED_FAILURES: usize = 8;
-
-/// For each binary that listed its failures, `failing in --test cli` and a
-/// row per test it listed, in the order they ran.
-///
-/// Labelled as each binary's because that is all they are: a binary whose
-/// list was cut away or filtered out may have failed too, and is not here.
-fn failure_rows(failures: &[FailedTests], width: usize, theme: &Theme) -> Vec<Line<'static>> {
-    let dim = Style::new().fg(theme.dim);
-    let room = width.saturating_sub(text::width("  ✗ "));
-    let mut left = NAMED_FAILURES;
-    let mut rows = Vec::new();
-    for list in failures {
-        rows.push(Line::from(Span::styled(
-            text::truncate(&format!("  failing in {}", list.binary), width),
-            dim,
-        )));
-        let shown = list.tests.len().min(left);
-        left = left.saturating_sub(shown);
-        rows.extend(list.tests.iter().take(shown).map(|test| {
-            Line::from(vec![
-                Span::styled("  ✗ ", Style::new().fg(theme.del)),
-                Span::styled(text::truncate(test, room), Style::new().fg(theme.del)),
-            ])
-        }));
-        let more = list.tests.len().saturating_sub(shown);
-        if more > 0 {
-            rows.push(Line::from(Span::styled(
-                format!("    … {more} more"),
-                dim.italic(),
-            )));
-        }
-    }
-    rows
-}
-
-/// Every figure a test run's header can carry, ranked for [`narrowed`].
-fn test_figures(run: &TestRunRecord, age: Option<Duration>, theme: &Theme) -> Vec<Figure> {
-    let dim = Style::new().fg(theme.dim);
-    let mut figures = match (run.counts, run.failed) {
-        (Some(counts), _) => test_counts(counts, theme),
-        (None, true) => test_failed_uncounted(run.exit_code, theme),
-        (None, false) => test_not_read(run.exit_code, theme),
-    };
-    if let Some(counts) = run.counts {
-        figures.push(Figure::after(
-            " · ",
-            4,
-            Span::styled(suites_said(counts.suites), dim),
-        ));
-    }
-    if let Some(age) = age {
-        figures.push(Figure::after(
-            " · ",
-            3,
-            Span::styled(format!("{} ago", clock::ago(age)), dim),
-        ));
-    }
-    figures
-}
-
-/// `637 passed · 0 failed`, with a failing run's failures in the failure
-/// colour and its passes no longer in the colour that says all is well.
-fn test_counts(counts: niobe_core::TestCounts, theme: &Theme) -> Vec<Figure> {
-    let dim = Style::new().fg(theme.dim);
-    let (passed, failed) = match counts.failing() {
-        true => (Style::new().fg(theme.fg), Style::new().fg(theme.del).bold()),
-        false => (Style::new().fg(theme.add), dim),
-    };
-    let mut figures = vec![
-        Figure::lead(1, Span::styled(format!("{} passed", counts.passed), passed)),
-        Figure::after(
-            " · ",
-            0,
-            Span::styled(format!("{} failed", counts.failed), failed),
-        ),
-    ];
-    if counts.ignored > 0 {
-        figures.push(Figure::after(
-            " · ",
-            2,
-            Span::styled(format!("{} ignored", counts.ignored), dim),
-        ));
-    }
-    figures
-}
-
-/// `exit 101 · result not read`: a run that happened and whose counts are not
-/// known. A zero status is not drawn, because a command whose output was
-/// filtered exits with the filter's status rather than the run's.
-fn test_not_read(exit_code: Option<i32>, theme: &Theme) -> Vec<Figure> {
-    let not_read = Span::styled("result not read", Style::new().fg(theme.dim));
-    match exit_code.filter(|code| *code != 0) {
-        Some(code) => vec![
-            Figure::lead(
-                0,
-                Span::styled(format!("exit {code}"), Style::new().fg(theme.del)),
-            ),
-            Figure::after(" · ", 1, not_read),
-        ],
-        None => vec![Figure::lead(0, not_read)],
-    }
-}
-
-/// `failed · exit 101 · counts not read`: a run known to have failed after its
-/// tests started, whose output did not hold the counts — how many failed, or
-/// how many ran, is not something the rest of it can say.
-///
-/// A status of `0` is left unsaid: that is a run known to have failed from the
-/// failures it listed, piped through a filter whose status the command's is,
-/// and `exit 0` beside `failed` would read as a contradiction.
-fn test_failed_uncounted(exit_code: Option<i32>, theme: &Theme) -> Vec<Figure> {
-    let mut figures = vec![Figure::lead(
-        0,
-        Span::styled("failed", Style::new().fg(theme.del).bold()),
-    )];
-    if let Some(code) = exit_code.filter(|code| *code != 0) {
-        figures.push(Figure::after(
-            " · ",
-            1,
-            Span::styled(format!("exit {code}"), Style::new().fg(theme.del)),
-        ));
-    }
-    figures.push(Figure::after(
-        " · ",
-        2,
-        Span::styled("counts not read", Style::new().fg(theme.dim)),
-    ));
-    figures
-}
-
-/// `1 suite`, `30 suites`.
-fn suites_said(suites: u64) -> String {
-    match suites {
-        1 => "1 suite".to_owned(),
-        n => format!("{n} suites"),
-    }
-}
-
-/// The commits the session has made, newest first.
-fn commit_rows(
-    app: &App,
-    repo: &crate::app::Repo,
-    width: usize,
-    theme: &Theme,
-) -> Vec<Line<'static>> {
-    // An upstream the repository could not compare against leaves the count
-    // not known, and a count would be a guess dressed as a figure.
-    let unpushed = match repo.commits.iter().any(|commit| commit.pushed.is_none()) {
-        true => None,
-        false => Some(
-            repo.commits
-                .iter()
-                .filter(|commit| commit.pushed == Some(false))
-                .count(),
-        ),
-    };
-    let summary = commit_figures(repo.read, repo.commits.len(), unpushed, theme);
-
-    let folded = app.folded(Section::Commits);
-    let mut rows = vec![section_header(folded, "Commits", summary, width, theme)];
-    if folded {
-        return rows;
-    }
-    let ages: Vec<String> = repo
-        .commits
-        .iter()
-        .map(|commit| age_of(commit, app.stamp()))
-        .collect();
-    // One column for every age in the section, so they line up under each
-    // other however the magnitudes differ.
-    let column = ages.iter().map(|age| text::width(age)).max().unwrap_or(0);
-    for (commit, age) in repo.commits.iter().zip(ages) {
-        rows.push(commit_row(commit, &age, column, width, theme));
-    }
-    rows
-}
-
-/// `2 this session  1 unpushed`. What has not reached the upstream is what the
-/// operator acts on, so it is kept where the count of commits gives way.
-fn commit_figures(
-    read: bool,
-    commits: usize,
-    unpushed: Option<usize>,
-    theme: &Theme,
-) -> Vec<Figure> {
-    let mut figures = vec![Figure::lead(
-        1,
-        Span::styled(
-            match (read, commits) {
-                (false, _) => "—".to_owned(),
-                (true, 0) => "none this session".to_owned(),
-                (true, n) => format!("{n} this session"),
-            },
-            Style::new().fg(match read {
-                true => theme.fg,
-                false => theme.dim,
-            }),
-        ),
-    )];
-    if commits > 0 {
-        figures.push(Figure::after(
-            "  ",
-            0,
-            Span::styled(
-                match unpushed {
-                    None => "unpushed —".to_owned(),
-                    Some(n) => format!("{n} unpushed"),
-                },
-                Style::new().fg(theme.hot),
-            ),
-        ));
-    }
-    figures
-}
-
-/// How long ago a commit was made, or an em dash where that cannot be told: a
-/// commit the repository did not date, a shell that has not read its clock
-/// yet, or a commit dated after the moment being drawn against — which is a
-/// clock that moved rather than an age.
-fn age_of(commit: &crate::app::Commit, now: Option<crate::clock::Stamp>) -> String {
-    commit
-        .at
-        .zip(now)
-        .and_then(|(at, now)| now.at().duration_since(at).ok())
-        .map(clock::ago)
-        .unwrap_or_else(|| "—".to_owned())
-}
-
-/// `↑ c4fed15  12m  the subject`: one commit, marked where its upstream has
-/// not got it.
-///
-/// The mark is what says pushed from unpushed, not the colour: the pane has to
-/// read on a terminal whose palette the operator chose, and in a theme where
-/// the warning colour is close to the body's.
-fn commit_row(
-    commit: &crate::app::Commit,
-    age: &str,
-    column: usize,
-    width: usize,
-    theme: &Theme,
-) -> Line<'static> {
-    let (mark, style) = match commit.pushed {
-        Some(false) => ("↑ ", Style::new().fg(theme.hot)),
-        Some(true) => ("  ", Style::new().fg(theme.dim)),
-        None => ("? ", Style::new().fg(theme.dim)),
-    };
-    let age = format!(
-        "{}{age}",
-        " ".repeat(column.saturating_sub(text::width(age)))
-    );
-    let used = text::width(mark) + text::width(&commit.hash) + 2 + text::width(&age) + 2;
-    let subject = text::truncate(&commit.subject, width.saturating_sub(used));
-
-    Line::from(vec![
-        Span::styled(mark, style),
-        Span::styled(commit.hash.clone(), style),
-        Span::raw("  "),
-        Span::styled(age, Style::new().fg(theme.dim)),
-        Span::raw("  "),
-        Span::styled(
-            subject,
-            match commit.pushed {
-                Some(true) => Style::new().fg(theme.dim),
-                Some(false) | None => Style::new().fg(theme.fg),
-            },
-        ),
-    ])
-}
-
 /// What a decision's time column is drawn in: `13:41` and a space.
 const DECISION_TIME: usize = 6;
 
-/// The decisions the session recorded, newest first.
+/// The decisions the agent's replies stated, newest first.
 ///
-/// **Newest first**, now that the pane scrolls and three sections share it.
-/// The alternative — appending, which is the order the mock draws and the
-/// order a transcript reads in — puts each new decision at the bottom of a
-/// section whose top is wherever the sub-agents above it happen to end. The
-/// pane does not follow its own tail, so a decision recorded while the
-/// operator was reading something else would land below the fold and never be
-/// seen. Under the header it is always one row from a heading the eye already
-/// has.
-fn decision_rows(
-    app: &App,
-    session: &SessionState,
-    width: usize,
-    theme: &Theme,
-) -> Vec<Line<'static>> {
+/// The heading says whose account they are: the agent reports its own
+/// reasoning and may have it wrong, and a pane that listed it bare would read
+/// as a log of what happened.
+///
+/// **Newest first**: the pane does not follow its own tail, so a decision
+/// appended at the bottom of a section whose top is wherever the sub-agents
+/// above it end would land below the fold and never be seen. Under the
+/// heading it is always one row from where the eye already is.
+fn decision_rows(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
     let folded = app.folded(Section::Decisions);
+    let count = app.session().decisions().len();
     let mut rows = vec![section_header(
         folded,
-        "Decisions",
+        "Decisions, as the agent says",
         vec![Figure::lead(
             0,
-            Span::styled(
-                session.decisions().len().to_string(),
-                Style::new().fg(theme.fg),
-            ),
+            Span::styled(count.to_string(), Style::new().fg(theme.fg)),
         )],
         width,
         theme,
@@ -3413,13 +5221,16 @@ fn decision_rows(
     if folded {
         return rows;
     }
-    if session.decisions().is_empty() {
-        rows.push(Line::from("  none recorded").style(Style::new().fg(theme.dim)));
+    if count == 0 {
+        let none = match app.decisions_asked() {
+            true => "  none stated yet",
+            false => "  not asked for: decisions = false",
+        };
+        rows.push(Line::from(none).style(Style::new().fg(theme.dim)));
         return rows;
     }
 
-    let indent = ROW_INDENT;
-    let column = text::width(indent) + DECISION_TIME;
+    let column = text::width(ROW_INDENT) + DECISION_TIME;
     for (decision, at) in app.decisions().collect::<Vec<_>>().into_iter().rev() {
         // A log that kept no times gives a decision no time. The column stays
         // so the summaries keep their edge, but it is left blank rather than
@@ -3433,7 +5244,7 @@ fn decision_rows(
             .enumerate()
         {
             let head = match i {
-                0 => format!("{indent}{when:<w$}", w = DECISION_TIME),
+                0 => format!("{ROW_INDENT}{when:<w$}", w = DECISION_TIME),
                 _ => " ".repeat(column),
             };
             rows.push(Line::from(vec![
@@ -3461,8 +5272,8 @@ fn tool_family(name: &str) -> String {
     }
 }
 
-/// What the session called, and how often: a row per family, busiest first,
-/// with a bar for how it compares and its own failures beside it.
+/// What the session called, and how often: a row per kind of work it did,
+/// or, while the operator has asked for them, a row per family of tools.
 fn tool_rows(app: &App, session: &SessionState, width: usize, theme: &Theme) -> Vec<Line<'static>> {
     let tools = session.tools();
     let folded = app.folded(Section::Tools);
@@ -3481,6 +5292,16 @@ fn tool_rows(app: &App, session: &SessionState, width: usize, theme: &Theme) -> 
         return rows;
     }
 
+    match app.tools_by_name() {
+        true => rows.extend(name_rows(tools, width, theme)),
+        false => rows.extend(work_rows(tools, width, theme)),
+    }
+    rows
+}
+
+/// A row per family of tools, busiest first, with a bar for how it compares
+/// and its own failures beside it.
+fn name_rows(tools: &ToolTotals, width: usize, theme: &Theme) -> Vec<Line<'static>> {
     let mut families: BTreeMap<String, (u64, u64)> = BTreeMap::new();
     for (name, count) in &tools.by_name {
         let entry = families.entry(tool_family(name)).or_default();
@@ -3496,13 +5317,88 @@ fn tool_rows(app: &App, session: &SessionState, width: usize, theme: &Theme) -> 
     // The cap the Usage pane drew them under was the price of a pane sized to
     // its content; here the rows below the fold are scrolled to.
     let busiest = mix.first().map(|(_, n)| n.0).unwrap_or(1).max(1);
-    let bar_width = width
-        .saturating_sub(text::width(ROW_INDENT) + BAR_NAME + BAR_COUNT + 2 + BAR_FAILED)
-        .min(BAR_CELLS);
-    for (family, (count, failed)) in mix {
-        rows.push(bar_line(family, *count, *failed, busiest, bar_width, theme));
+    let name = mix
+        .iter()
+        .map(|(family, _)| text::width(family))
+        .max()
+        .unwrap_or(0)
+        .min(BAR_NAME);
+    let bar_width = bar_width(width, name);
+    mix.into_iter()
+        .map(|(family, (count, failed))| {
+            bar_line((family, name), *count, *failed, busiest, bar_width, theme)
+        })
+        .collect()
+}
+
+/// A row per kind of work, busiest first, with a bar for how it compares, its
+/// own failures and refusals beside it, and under it a dim line of what did
+/// the work.
+fn work_rows(tools: &ToolTotals, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    let mut mix: Vec<(&niobe_core::work::Work, &WorkTotals)> = tools.by_work.iter().collect();
+    mix.sort_by(|a, b| b.1.calls.cmp(&a.1.calls).then_with(|| a.0.cmp(b.0)));
+    let busiest = mix.first().map(|(_, kind)| kind.calls).unwrap_or(1).max(1);
+    let name = mix
+        .iter()
+        .map(|(work, _)| text::width(work.label()))
+        .max()
+        .unwrap_or(0)
+        .min(BAR_NAME);
+    let bar_width = bar_width(width, name);
+    let mut rows = Vec::with_capacity(mix.len() * 2);
+    for (work, kind) in mix {
+        let mut row = bar_line(
+            (work.label(), name),
+            kind.calls,
+            kind.failed,
+            busiest,
+            bar_width,
+            theme,
+        );
+        if kind.denied > 0 {
+            row.spans.push(Span::styled(
+                format!(" {} denied", kind.denied),
+                Style::new().fg(theme.dim),
+            ));
+        }
+        rows.push(row);
+        rows.push(
+            Line::from(specifics_line(&kind.specifics, width)).style(Style::new().fg(theme.dim)),
+        );
     }
     rows
+}
+
+/// `    grep 21 · sed 18 · Read 4 · …`: what did a kind of work, busiest
+/// first, as many whole as fit in `width` columns, and `…` where some did
+/// not.
+fn specifics_line(specifics: &BTreeMap<String, u64>, width: usize) -> String {
+    const INDENT: &str = "    ";
+    const BETWEEN: &str = " · ";
+    let mut busiest: Vec<(&String, &u64)> = specifics.iter().collect();
+    busiest.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
+    let mut line = INDENT.to_owned();
+    for (at, (specific, count)) in busiest.iter().enumerate() {
+        let item = format!("{specific} {count}");
+        let between = if at == 0 { "" } else { BETWEEN };
+        let last = at + 1 == busiest.len();
+        // Room is kept for ` · …` after any item but the last.
+        let after = if last { 0 } else { text::width(BETWEEN) + 1 };
+        if text::width(&line) + text::width(between) + text::width(&item) + after > width {
+            line.push_str(if at == 0 { "…" } else { " · …" });
+            return text::truncate(&line, width);
+        }
+        line.push_str(between);
+        line.push_str(&item);
+    }
+    line
+}
+
+/// How long a tools row's bar may be beside a name column `name` wide.
+fn bar_width(width: usize, name: usize) -> usize {
+    width
+        .saturating_sub(text::width(ROW_INDENT) + name + BAR_COUNT + 2 + BAR_FAILED)
+        .min(BAR_CELLS)
 }
 
 /// The tools section's header: the calls, the failures in the error colour,
@@ -3567,12 +5463,23 @@ fn files_said(files: usize) -> String {
     }
 }
 
+/// A file's removed column. A file the repository does not track yet removed
+/// nothing by construction, so its column is left blank rather than saying
+/// `−0` as though that were a measurement.
+fn removed_of(file: &crate::app::WorkingFile) -> String {
+    match (file.new, file.removed) {
+        (true, Some(0)) => String::new(),
+        (_, removed) => measured('−', removed),
+    }
+}
+
 /// One side of a file's counts as the repository reported them.
 ///
 /// Exact, because git counts every line it reports: `+0` is a file that
 /// changed by no lines and is still a changed file. The em dash is kept for
-/// the one case git declines to count — a binary file, where no number exists
-/// rather than a number nobody read.
+/// what nobody counted — a binary file, which git declines to count, and a new
+/// file too large to read — where no number exists rather than a number
+/// nobody read.
 fn measured(sign: char, lines: Option<u64>) -> String {
     match lines {
         Some(lines) => format!("{sign}{lines}"),
@@ -3585,19 +5492,47 @@ fn measured(sign: char, lines: Option<u64>) -> String {
 const ROW_INDENT: &str = "  ";
 const FILE_INDENT: &str = "    ";
 
+/// What a counted row says of its file between the name and the counts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Tag {
+    /// Nothing: a file the repository already tracks, or the session's own.
+    None,
+    /// `new`: a file the repository does not track yet.
+    New,
+}
+
+impl Tag {
+    fn new(new: bool) -> Self {
+        match new {
+            true => Tag::New,
+            false => Tag::None,
+        }
+    }
+
+    /// The tag as drawn, with the space before the counts.
+    fn text(self) -> &'static str {
+        match self {
+            Tag::None => "",
+            Tag::New => "new ",
+        }
+    }
+}
+
 /// A row whose counts keep their columns and whose name gives way.
 ///
 /// The name loses its front rather than its tail: a path cut at the front
-/// still names the file, and a count cut anywhere is a different number.
+/// still names the file, and a count cut anywhere is a different number. The
+/// tag keeps its place beside the counts for the same reason.
 fn counted_row(
     indent: &'static str,
     name: &str,
+    tag: Tag,
     added: &str,
     removed: &str,
     width: usize,
     theme: &Theme,
 ) -> Line<'static> {
-    let counts = text::width(added) + 1 + text::width(removed);
+    let counts = text::width(tag.text()) + text::width(added) + 1 + text::width(removed);
     let room = width.saturating_sub(text::width(indent) + counts + 1);
     let name = text::truncate_start(name, room);
     let gap = width
@@ -3608,6 +5543,7 @@ fn counted_row(
         Span::raw(indent),
         Span::styled(name, Style::new().fg(theme.fg)),
         Span::raw(" ".repeat(gap)),
+        Span::styled(tag.text(), Style::new().fg(theme.dim)),
         Span::styled(added.to_owned(), Style::new().fg(theme.add)),
         Span::raw(" "),
         Span::styled(removed.to_owned(), Style::new().fg(theme.del)),
@@ -3629,46 +5565,59 @@ pub(crate) fn count(sign: char, lines: u64, stated: bool) -> String {
     }
 }
 
-/// How a window's meter and share are coloured: the same threshold and the
-/// same colour as a budget nearly spent, because on a flat-rate plan that is
-/// what a window nearly gone is.
+/// How a window's meter and share are coloured: plain, then in the theme's
+/// warning colour from [`WINDOW_RUNNING_LOW`], then in its error colour from
+/// [`WINDOW_RUN_OUT`].
 ///
-/// Two states and not the mock's three. The shell has one written-down
-/// threshold for *nearly gone* — [`BUDGET_SHOWN_HOT`] — and the budget row is
-/// already drawn by it; a middle colour would need a second threshold nobody
-/// measured, and would say that a window at one figure and a budget at the
-/// same figure are different kinds of trouble.
+/// A window gets three states where a budget gets two because the window is
+/// the one the operator can do nothing about until it comes back: half gone
+/// is when pacing the rest of it starts to matter, and nine tenths is when the
+/// next long turn may not finish inside it. A share that is not a share — a
+/// negative or a NaN, which [`window_share`] draws as a dash — is drawn plain,
+/// since nothing was reported to be low.
 fn window_style(window: &UsageWindow, theme: &Theme) -> Style {
-    match window.utilization >= BUDGET_SHOWN_HOT {
-        true => Style::new().fg(theme.hot),
-        false => Style::new().fg(theme.fg),
-    }
+    let share = window.utilization;
+    let colour = if share >= WINDOW_RUN_OUT {
+        theme.del
+    } else if share >= WINDOW_RUNNING_LOW {
+        theme.warn
+    } else {
+        theme.fg
+    };
+    Style::new().fg(colour)
 }
 
-fn draw_fkeys(frame: &mut Frame, area: Rect, theme: &Theme) {
-    let slot = usize::from(area.width).saturating_sub(FKEYS_LEAD.len()) / FKEYS.len();
-    let mut spans = vec![Span::styled(
-        FKEYS_LEAD,
-        Style::new().fg(theme.hot).bg(theme.menu_bg).bold(),
-    )];
+/// The F-key bar: Esc and what it stops, then the ten keys, each sized by
+/// [`crate::menu::fkey_widths`]. A key that cannot do anything in this
+/// session is drawn dimmed, as its menu item is.
+fn draw_fkeys(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+    let bar = Style::new().bg(theme.keybar_bg);
+    let key_style = Style::new().fg(theme.keybar_fg).bg(theme.keybar_bg).bold();
+    let label_style = Style::new().fg(theme.fkey_fg).bg(theme.fkey_bg);
+    let (stop_key, stop_label) = crate::menu::STOP;
+    let stopped = |able: bool| match able {
+        true => label_style,
+        false => label_style.add_modifier(Modifier::DIM),
+    };
+    let mut spans = vec![
+        Span::styled(stop_key, key_style),
+        Span::styled(stop_label, stopped(app.can(crate::menu::Action::Stop))),
+        Span::styled(" ", bar),
+    ];
 
-    for (number, label) in FKEYS {
-        let room = slot.saturating_sub(number.len() + 1);
+    let keys = app.fkey_labels();
+    let widths = crate::menu::fkey_widths_for(area.width, &keys);
+    for (((_, label, action), key), width) in crate::menu::FKEYS.iter().zip(&keys).zip(widths) {
+        let room = usize::from(width).saturating_sub(key.chars().count() + 1);
+        spans.push(Span::styled(key.clone(), key_style));
         spans.push(Span::styled(
-            number,
-            Style::new().fg(theme.hot).bg(theme.menu_bg).bold(),
+            text::pad(&text::truncate(label, room), room),
+            stopped(app.can(*action)),
         ));
-        spans.push(Span::styled(
-            format!("{:<room$}", text::truncate(label, room), room = room),
-            Style::new().fg(theme.fkey_fg).bg(theme.fkey_bg),
-        ));
-        spans.push(Span::styled(" ", Style::new().bg(theme.menu_bg)));
+        spans.push(Span::styled(" ", bar));
     }
 
-    frame.render_widget(
-        Paragraph::new(Line::from(spans)).style(Style::new().bg(theme.menu_bg)),
-        area,
-    );
+    frame.render_widget(Paragraph::new(Line::from(spans)).style(bar), area);
 }
 
 /// What the session is on, and what it is running under.
@@ -3700,13 +5649,84 @@ fn identity(
                 false => format!("{} · {}", meta.backend, meta.profile),
             }),
         ),
+        // Before the backend has said what it runs, a model the operator
+        // chose is what its first turn will run on.
         (None, Some(profile)) => (
-            None,
+            session.model().map(str::to_owned),
             Some(format!("{} · {}", profile.backend, profile.name)),
         ),
-        (None, None) => (None, None),
+        (None, None) => (session.model().map(str::to_owned), None),
     }
 }
+
+/// Which of a session's dollar figures are money, from what was said of how
+/// it is billed.
+///
+/// Every place that prints the session's money — the Usage pane's rows, its
+/// budget row, the budget warning and the printed summary — reads it here, so
+/// that no two of them show a different part of it or name it two ways.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Billed {
+    /// Billed by use throughout: the figure is money spent.
+    Metered,
+    /// On a flat-rate plan throughout. No money moves with the work, and
+    /// what limits it is the plan's usage windows, so no dollar figure is
+    /// shown: the figure the backend prints is what the work would have cost
+    /// on the API, which nobody pays.
+    Plan,
+    /// One way for part of the session and the other way for the rest, as a
+    /// session resumed under a profile billed differently is. Only the part
+    /// billed by use is money, and it is the only part shown, named as a
+    /// part.
+    Both,
+    /// Nothing said: the figure may be either, so none is shown as spent.
+    Unknown,
+}
+
+impl Billed {
+    /// How `session` has been billed, by every billing it was told of.
+    pub fn of(session: &SessionState) -> Self {
+        match (session.billing(), session.billing_changed()) {
+            (Some(_), true) => Billed::Both,
+            (Some(Billing::Metered), false) => Billed::Metered,
+            (Some(Billing::Plan), false) => Billed::Plan,
+            (None, _) => Billed::Unknown,
+        }
+    }
+
+    /// The usage whose cost is money spent, which every dollar figure of
+    /// `session` is drawn from: all of it where it was billed by use
+    /// throughout, the metered part where it was billed both ways, and none
+    /// on a plan or where nothing said.
+    pub fn spent(self, session: &SessionState) -> Option<&Totals> {
+        match self {
+            Billed::Metered => Some(session.totals()),
+            Billed::Both => Some(session.metered_totals()),
+            Billed::Plan | Billed::Unknown => None,
+        }
+    }
+
+    /// The usage a budget is measured against: what was spent where there
+    /// is money, and otherwise every figure the backend reported, which is
+    /// what the backend stops the session on even where no money moved.
+    pub(crate) fn counted(self, session: &SessionState) -> &Totals {
+        self.spent(session).unwrap_or_else(|| session.totals())
+    }
+
+    /// The words a dollar figure of this kind is printed after, where it is
+    /// not the whole session's: `None` where it is, and where no figure is
+    /// printed at all.
+    pub fn qualifier(self) -> Option<&'static str> {
+        match self {
+            Billed::Both => Some(METERED_PART),
+            Billed::Metered | Billed::Plan | Billed::Unknown => None,
+        }
+    }
+}
+
+/// What the money of a session billed both ways is called: the part of it
+/// billed by use.
+const METERED_PART: &str = "metered part";
 
 /// The session's cost, labelled for what it is.
 ///
@@ -3728,7 +5748,12 @@ fn identity(
 /// Public so that anything else printing a session's cost prints the same
 /// label the Usage pane does.
 pub fn session_cost(session: &SessionState, prices: Option<&dyn Prices>) -> String {
-    let totals = session.totals();
+    cost_of(session.totals(), prices)
+}
+
+/// The cost of `totals`, labelled as [`session_cost`] labels a session's:
+/// for a part of a session, such as what of it was billed by use.
+pub fn cost_of(totals: &Totals, prices: Option<&dyn Prices>) -> String {
     if totals.records == 0 {
         return "—".to_owned();
     }
@@ -3738,6 +5763,22 @@ pub fn session_cost(session: &SessionState, prices: Option<&dyn Prices>) -> Stri
         value_unsettled(totals, prices),
     )
     .unwrap_or_else(|| "unpriced".to_owned())
+}
+
+/// What `totals` cost, drawn with the label [`cost_of`] gives it, and the
+/// figure behind that label, which is a floor or an estimate wherever the
+/// label says so. `None` where there is no usage, or where nothing was
+/// reported and nothing could be valued.
+pub(crate) fn known_spend(totals: &Totals, prices: Option<&dyn Prices>) -> Option<(String, f64)> {
+    if totals.records == 0 {
+        return None;
+    }
+    let (label, usd) = known_cost(
+        totals.reported_cost_usd,
+        totals.cost_fully_reported(),
+        value_unsettled(totals, prices),
+    )?;
+    Some((label.format(usd), usd))
 }
 
 /// The least time worked a spend rate is drawn over.
@@ -3784,11 +5825,29 @@ fn model_cost(totals: &Totals, model: &str, prices: Option<&dyn Prices>) -> Stri
     if reported.is_none() && owed.is_none() {
         return "—".to_owned();
     }
+    if owed.is_none() && reported == Some(0.0) && billed_under_its_window(totals, model) {
+        return BILLED_UNDER_THE_WINDOW.to_owned();
+    }
     let valued = match owed.and_then(|owed| prices?.estimate_owed(owed)) {
         Some(usd) => Valued::All(usd),
         None => Valued::Nothing,
     };
     labelled(reported.unwrap_or_default(), owed.is_none(), valued).unwrap_or_else(|| "—".to_owned())
+}
+
+/// What a model's row says where its tokens were billed under the 1M-window
+/// id beside it, whose row carries the money.
+const BILLED_UNDER_THE_WINDOW: &str = "in [1m]";
+
+/// Whether `model` has a 1M-window sibling, `<model>[1m]`, that was reported a
+/// cost: the CLI bills a family's tokens there when a sub-agent's messages
+/// name the family and the session runs on the window, and settles the
+/// family at nothing. `$0.00` beside those tokens would read as free.
+fn billed_under_its_window(totals: &Totals, model: &str) -> bool {
+    totals
+        .reported_cost_by_model
+        .get(&format!("{model}[1m]"))
+        .is_some_and(|usd| *usd > 0.0)
 }
 
 /// A cost, labelled for how much of it is known: `$` where a reported cost
@@ -3827,7 +5886,9 @@ impl CostLabel {
                 format!("<{prefix}$0.01")
             }
             Self::EstimatedFloor | Self::Floor if usd < HALF_A_CENT => ">$0.00".to_owned(),
-            _ => format!("{prefix}{}", dollars(usd)),
+            Self::Reported | Self::Estimate | Self::EstimatedFloor | Self::Floor => {
+                format!("{prefix}{}", dollars(usd))
+            }
         }
     }
 }
@@ -3899,12 +5960,54 @@ fn value_unsettled(totals: &Totals, prices: Option<&dyn Prices>) -> Valued {
 
 /// Token counts, short enough for a column of them: thousands above ten
 /// thousand, millions from the count that would round to a thousand
-/// thousands — `1000k` is a million drawn in the wrong unit.
+/// thousands — `1000k` is a million drawn in the wrong unit — and each larger
+/// unit from the count that would round to a thousand of the one below, so
+/// no count a `u64` holds takes more than six columns.
+/// `n` as [`compact`] writes it, but rounded down rather than to the
+/// nearest, for a figure that is a floor: `10,763` is `10k`, not `11k`.
+pub(crate) fn compact_floor(n: u64) -> String {
+    const LARGE: [(u64, &str); 5] = [
+        (1_000_000, "M"),
+        (1_000_000_000, "G"),
+        (1_000_000_000_000, "T"),
+        (1_000_000_000_000_000, "P"),
+        (1_000_000_000_000_000_000, "E"),
+    ];
+    match n {
+        0..=9_999 => n.to_string(),
+        10_000..=999_999 => format!("{}k", n / 1_000),
+        _ => {
+            let (size, unit) = LARGE
+                .iter()
+                .rev()
+                .find(|&&(size, _)| n >= size)
+                .copied()
+                .unwrap_or((1_000_000, "M"));
+            let tenths = n / (size / 10);
+            format!("{}.{}{unit}", tenths / 10, tenths % 10)
+        }
+    }
+}
+
 pub(crate) fn compact(n: u64) -> String {
+    const LARGE: [(f64, &str); 5] = [
+        (1e6, "M"),
+        (1e9, "G"),
+        (1e12, "T"),
+        (1e15, "P"),
+        (1e18, "E"),
+    ];
     match n {
         0..=9_999 => n.to_string(),
         10_000..=999_499 => format!("{:.0}k", n as f64 / 1_000.0),
-        _ => format!("{:.1}M", n as f64 / 1_000_000.0),
+        _ => {
+            let (scaled, unit) = LARGE
+                .iter()
+                .map(|&(size, unit)| (n as f64 / size, unit))
+                .find(|&(scaled, _)| scaled < 999.95)
+                .unwrap_or((n as f64 / 1e18, "E"));
+            format!("{scaled:.1}{unit}")
+        }
     }
 }
 
@@ -3920,12 +6023,12 @@ mod tests {
             output: 100,
             cache_read: 0,
             cache_write: 0,
-            cache_write_1h: 0,
+            cache_write_1h: Some(0),
             reasoning: 0,
             model: "opus-5".to_owned(),
             cost_usd: cost,
-            cost_basis: None,
-            settles_model: false,
+            settles_model: Some(false),
+            fast: false,
         })
     }
 
@@ -3959,15 +6062,18 @@ mod tests {
     #[test]
     fn a_session_with_nothing_said_is_titled_by_its_repository() {
         let session = SessionState::new();
-        assert_eq!(session_caption(&session, "niobe", 80), "Session ─ niobe");
-        assert_eq!(session_caption(&session, "", 80), "Session");
+        assert_eq!(
+            session_caption(session.caption(), "niobe", 80),
+            "Session ─ niobe"
+        );
+        assert_eq!(session_caption(session.caption(), "", 80), "Session");
     }
 
     #[test]
     fn a_session_is_titled_by_what_it_is_about() {
         let session = SessionState::replay(&[said("Cost floors and replay pricing")]);
         assert_eq!(
-            session_caption(&session, "niobe", 80),
+            session_caption(session.caption(), "niobe", 80),
             "Cost floors and replay pricing"
         );
     }
@@ -3978,11 +6084,11 @@ mod tests {
         // Thirty columns of caption and six of margin: one short, and the
         // last word goes whole.
         assert_eq!(
-            session_caption(&session, "niobe", 35),
+            session_caption(session.caption(), "niobe", 35),
             "Cost floors and replay…"
         );
         for width in 0..=40 {
-            let caption = session_caption(&session, "niobe", width);
+            let caption = session_caption(session.caption(), "niobe", width);
             assert!(
                 text::width(&caption) <= usize::from(width.saturating_sub(TITLE_MARGIN)),
                 "{width}: {caption}"
@@ -4111,7 +6217,7 @@ mod tests {
     fn a_settled_turn_is_the_backends_own_figure_and_carries_no_mark() {
         let mut settled = priced(Some(1.1521625));
         if let niobe_core::event::Event::Usage(usage) = &mut settled {
-            usage.settles_model = true;
+            usage.settles_model = Some(true);
         }
         let session = SessionState::replay(&[priced(None), priced(None), settled]);
         assert_eq!(
@@ -4150,6 +6256,7 @@ mod tests {
             name: "work".to_owned(),
             backend: Backend::Claude,
             models: Vec::new(),
+            billing: None,
         };
         assert_eq!(
             identity(&SessionState::new(), Some(&work)),
@@ -4174,6 +6281,7 @@ mod tests {
             name: "max".to_owned(),
             backend: Backend::Claude,
             models: Vec::new(),
+            billing: None,
         };
         let selected = App::new(crate::app::Repo {
             name: "niobe".to_owned(),
@@ -4192,6 +6300,103 @@ mod tests {
             vec!["claude · max".to_owned(), "○ starting".to_owned()],
             "a subprocess that has not spoken is starting, not absent"
         );
+    }
+
+    fn started_on_max() -> App {
+        App::new(crate::app::Repo {
+            name: "niobe".to_owned(),
+            branch: None,
+            ..Default::default()
+        })
+        .with_profile(SelectedProfile {
+            name: "max".to_owned(),
+            backend: Backend::Claude,
+            models: Vec::new(),
+            billing: None,
+        })
+        .attached()
+    }
+
+    fn typed(app: &mut App, text: &str) {
+        for c in text.chars() {
+            app.type_into_composer(ratatui_textarea::Input {
+                key: ratatui_textarea::Key::Char(c),
+                ..Default::default()
+            });
+        }
+    }
+
+    /// A CLI that died as it started never says what it runs, and the row
+    /// that said "starting" would say it for ever. A prompt it could not take
+    /// does not become the session's caption either: nothing was asked.
+    #[test]
+    fn a_backend_that_ended_before_it_spoke_is_ended_not_starting() {
+        let mut app = started_on_max();
+        app.apply(&niobe_core::event::Event::Error {
+            message: "the `claude` session ended with exit status: 1".to_owned(),
+            fatal: true,
+        });
+        assert_eq!(row_of(&app).last(), Some(&"○ ended".to_owned()));
+
+        typed(&mut app, "hello there");
+        app.submit();
+        app.not_sent("the `claude` session has ended");
+        assert_eq!(row_of(&app).last(), Some(&"○ ended".to_owned()));
+        assert_eq!(
+            session_caption(app.caption(), &app.repo().name, 80),
+            "Session ─ niobe"
+        );
+    }
+
+    /// A CLI that has answered what it offers has spoken, though it says what
+    /// it runs only when a turn starts: the row no longer says it is
+    /// starting.
+    #[test]
+    fn a_backend_that_listed_its_models_is_not_starting() {
+        let mut app = started_on_max();
+        assert_eq!(row_of(&app).last(), Some(&"○ starting".to_owned()));
+
+        app.apply(&niobe_core::event::Event::Models { models: Vec::new() });
+
+        assert_ne!(row_of(&app).last(), Some(&"○ starting".to_owned()));
+    }
+
+    /// A model chosen before the first turn is what that turn will run on,
+    /// and the row names it rather than nothing.
+    #[test]
+    fn a_model_chosen_before_the_backend_said_what_it_runs_is_named_in_the_row() {
+        let mut app = started_on_max();
+
+        app.apply(&niobe_core::event::Event::ModelSelected {
+            model: "haiku".to_owned(),
+        });
+
+        assert_eq!(row_of(&app).first(), Some(&"haiku".to_owned()));
+    }
+
+    /// A turn sent to a CLI that has not said a word since it started — not
+    /// even what it runs — is not the same as one it is working on, and the
+    /// row says so rather than counting "working" up.
+    #[test]
+    fn a_turn_the_backend_has_said_nothing_about_is_waiting_on_an_answer() {
+        let mut app = started_on_max();
+        typed(&mut app, "hello there");
+        app.submit();
+        let sent = std::time::Instant::now();
+        app.tick(sent, None);
+        app.tick(sent + std::time::Duration::from_secs(30), None);
+        assert_eq!(
+            row_of(&app),
+            vec!["claude · max".to_owned(), "● no answer yet 30s".to_owned()]
+        );
+
+        app.apply(&niobe_core::event::Event::SessionMeta(SessionMeta {
+            backend: Backend::Claude,
+            profile: "max".to_owned(),
+            model: "claude-opus-5".to_owned(),
+            backend_session: None,
+        }));
+        assert_eq!(row_of(&app).last(), Some(&"● working 30s".to_owned()));
     }
 
     /// What the menu row's right-hand group reads as, segment by segment.
@@ -4345,50 +6550,145 @@ mod tests {
 
     #[test]
     fn the_pane_that_shows_what_a_session_used_is_called_usage_everywhere() {
-        assert!(MENUS.contains(&"Usage"), "{MENUS:?}");
-        assert!(FKEYS.contains(&("5", "Usage")), "{FKEYS:?}");
+        let labels: Vec<&str> = crate::menu::MENUS
+            .iter()
+            .flat_map(|menu| menu.items)
+            .map(|item| item.label)
+            .collect();
+        assert!(labels.contains(&"Usage pane"), "{labels:?}");
         assert!(
-            !MENUS.contains(&"Cost") && !FKEYS.iter().any(|(_, label)| *label == "Cost"),
+            !labels.iter().any(|label| label.starts_with("Cost pane")),
             "nothing the operator reads still calls this pane Cost"
         );
     }
 
     #[test]
-    fn the_bar_names_the_digit_after_esc_and_every_label_fits_at_the_narrowest() {
+    fn the_bar_names_the_digit_after_esc_and_every_label_is_whole_at_the_narrowest() {
         // A Mac's top row is media keys unless Fn is held, so the bar names
         // the key that reaches every terminal: Esc, then one digit.
         assert!(
-            FKEYS.iter().all(|(key, _)| key.len() == 1),
-            "one digit per action, 0 for the tenth: {FKEYS:?}"
+            crate::menu::FKEYS.iter().all(|(key, _, _)| key.len() == 1),
+            "one digit per action, 0 for the tenth"
         );
-        assert_eq!(FKEYS[9], ("0", "Quit"));
-
-        let slot = (usize::from(MIN_SIZE.0) - FKEYS_LEAD.len()) / FKEYS.len();
-        for (key, label) in FKEYS {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(MIN_SIZE.0, MIN_SIZE.1))
+                .expect("a test terminal");
+        let mut app = App::new(crate::app::Repo::default());
+        terminal
+            .draw(|frame| draw(frame, &mut app))
+            .expect("drawing never fails on a test backend");
+        let buffer = terminal.backend().buffer();
+        let row: String = (0..MIN_SIZE.0)
+            .map(|x| buffer[(x, MIN_SIZE.1 - 1)].symbol().to_owned())
+            .collect();
+        assert!(row.starts_with("EscStop 1Help"), "{row}");
+        for (key, label, _) in crate::menu::FKEYS {
             assert!(
-                key.len() + label.len() < slot,
-                "{key}{label} is cut at {} columns",
-                MIN_SIZE.0
+                row.contains(&format!("{key}{label}")),
+                "{key}{label} is cut: {row}"
             );
         }
     }
 
-    fn changed(path: &str, added: Option<u64>, removed: Option<u64>) -> niobe_core::Event {
-        niobe_core::Event::FileChange {
-            path: path.to_owned(),
-            added,
-            removed,
-            hunks: Vec::new(),
+    /// A shadow darkens what it falls on and hides none of it: every cell
+    /// keeps its own character, blanks included, so the words under it still
+    /// read as words, in every theme.
+    #[test]
+    fn a_shadow_keeps_every_character_under_it() {
+        for theme in crate::theme::THEMES {
+            let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(20, 6))
+                .expect("a test terminal");
+            let under = "a b  cd e f g h i j ";
+            terminal
+                .draw(|frame| {
+                    let body = frame.area();
+                    let text = Line::from(under).style(Style::new().fg(theme.fg).bold());
+                    frame.render_widget(Paragraph::new(vec![text; 6]), body);
+                    cast_shadow(frame, Rect::new(2, 1, 10, 3), body, &theme);
+                })
+                .expect("drawing never fails on a test backend");
+            let buffer = terminal.backend().buffer();
+            let right = (2..=4).flat_map(|y| [(12, y), (13, y)]);
+            let below = (4..14).map(|x| (x, 4));
+            for (x, y) in right.chain(below) {
+                let cell = &buffer[(x, y)];
+                let kept = under.chars().nth(usize::from(x)).map(String::from);
+                assert_eq!(
+                    Some(cell.symbol().to_owned()),
+                    kept,
+                    "{}: column {x}, row {y}",
+                    theme.name
+                );
+                assert_eq!(
+                    (cell.fg, cell.bg, cell.modifier),
+                    (theme.shadow_fg, theme.shadow, Modifier::empty()),
+                    "{}: column {x}, row {y}",
+                    theme.name
+                );
+            }
         }
     }
 
-    /// What one row of the session's own files reads as, counts and all.
-    fn row(file: &FileChanges, width: usize) -> String {
+    #[test]
+    fn a_dialog_over_wide_characters_keeps_its_left_border() {
+        let theme = Theme::default();
+        let set = theme.border_focus.to_border_set();
+        // Shifted by a column, so that one of the two runs has a character
+        // whose second half is under the border.
+        for lead in ["", " "] {
+            let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 12))
+                .expect("a test terminal");
+            let mut inner = Rect::default();
+            terminal
+                .draw(|frame| {
+                    let body = frame.area();
+                    let under = format!("{lead}{}", "漢字".repeat(20));
+                    frame.render_widget(Paragraph::new(vec![Line::from(under); 12]), body);
+                    inner = dialog(frame, body, (20, 4), ("History", ""), &theme);
+                })
+                .expect("drawing never fails on a test backend");
+            let left = inner.x - 3;
+            let buffer = terminal.backend().buffer();
+            for y in inner.y - 1..=inner.bottom() {
+                let border = match y {
+                    y if y < inner.y => set.top_left,
+                    y if y == inner.bottom() => set.bottom_left,
+                    _ => set.vertical_left,
+                };
+                let shown = as_a_terminal_shows(buffer, y);
+                assert_eq!(
+                    shown.get(usize::from(left)).copied(),
+                    Some(border),
+                    "row {y} with {lead:?} before it: {shown:?}"
+                );
+            }
+        }
+    }
+
+    /// Row `y` of `buffer` as a terminal draws it, a cell to a column: a
+    /// character two columns wide covers the column after it, whatever the
+    /// buffer holds there.
+    fn as_a_terminal_shows(buffer: &ratatui::buffer::Buffer, y: u16) -> Vec<&str> {
+        let mut shown = Vec::new();
+        let mut x = 0;
+        while x < buffer.area.width {
+            let symbol = buffer[(x, y)].symbol();
+            let wide = text::width(symbol).max(1);
+            shown.push(symbol);
+            shown.extend(std::iter::repeat_n("", wide - 1));
+            x = x.saturating_add(u16::try_from(wide).unwrap_or(1));
+        }
+        shown
+    }
+
+    /// What one row of the working tree reads as, counts and all.
+    fn row(path: &str, added: Option<u64>, removed: Option<u64>, width: usize) -> String {
         counted_row(
             ROW_INDENT,
-            &file.path,
-            &count('+', file.added, file.added_stated()),
-            &count('−', file.removed, file.removed_stated()),
+            path,
+            Tag::None,
+            &measured('+', added),
+            &measured('−', removed),
             width,
             &Theme::default(),
         )
@@ -4411,22 +6711,17 @@ mod tests {
     }
 
     #[test]
-    fn a_file_row_reads_as_the_counts_the_session_can_defend() {
-        let mut state = SessionState::new();
-        state.apply(&changed("catalog/fetch.ts", Some(38), Some(9)));
-        state.apply(&changed("notes.md", Some(1), None));
-        state.apply(&changed("run.ipynb", None, None));
-
+    fn a_file_row_reads_as_the_counts_the_repository_gave() {
         assert_eq!(
-            row(&state.files()[0], 40),
+            row("catalog/fetch.ts", Some(38), Some(9), 40),
             "  catalog/fetch.ts                +38 −9"
         );
         assert_eq!(
-            row(&state.files()[1], 40),
-            "  notes.md                          +1 —"
+            row("notes.md", Some(1), Some(0), 40),
+            "  notes.md                         +1 −0"
         );
         assert_eq!(
-            row(&state.files()[2], 40),
+            row("run.ipynb", None, None, 40),
             "  run.ipynb                          — —"
         );
     }
@@ -4435,49 +6730,15 @@ mod tests {
     /// the file; a count cut anywhere is a different number.
     #[test]
     fn a_path_too_long_for_the_pane_gives_way_to_its_counts() {
-        let mut state = SessionState::new();
-        state.apply(&changed(
+        let row = row(
             "crates/niobe-bridge-claude/src/translate.rs",
             Some(120),
             Some(44),
-        ));
-
-        let row = row(&state.files()[0], 32);
+            32,
+        );
         assert!(row.ends_with(" +120 −44"), "{row:?}");
         assert!(row.contains("translate.rs"), "{row:?}");
         assert_eq!(text::width(&row), 32, "{row:?}");
-    }
-
-    /// The pane has to read on a sixteen-colour terminal and in a theme whose
-    /// warning colour is close to its body colour, so what says pushed from
-    /// unpushed cannot be the colour alone.
-    #[test]
-    fn a_commit_the_upstream_has_not_got_is_marked_and_not_only_coloured() {
-        let theme = Theme::default();
-        let commit = |pushed| crate::app::Commit {
-            hash: "c4fed15".to_owned(),
-            subject: "keep the etag beside the body".to_owned(),
-            at: None,
-            pushed,
-        };
-        let text = |pushed| -> String {
-            commit_row(&commit(pushed), "12m", 3, 60, &theme)
-                .spans
-                .iter()
-                .map(|span| span.content.as_ref())
-                .collect()
-        };
-
-        assert!(
-            text(Some(false)).starts_with("↑ "),
-            "{:?}",
-            text(Some(false))
-        );
-        assert!(text(Some(true)).starts_with("  "), "{:?}", text(Some(true)));
-        assert!(
-            text(None).starts_with("? "),
-            "an upstream git would not compare against is not a commit that is pushed"
-        );
     }
 
     /// `+0 −0` is a file the repository counted and found unchanged by any
@@ -4505,6 +6766,44 @@ mod tests {
         assert_eq!(compact(1_000_000), "1.0M");
     }
 
+    /// Past a thousand millions the figure moves up a unit rather than
+    /// growing digits, so any count a backend can report fits the column.
+    #[test]
+    fn a_count_past_any_real_size_still_fits_in_six_columns() {
+        assert_eq!(compact(999_949_999), "999.9M");
+        assert_eq!(compact(999_950_000), "1.0G");
+        assert_eq!(compact(1_500_000_000_000), "1.5T");
+        assert_eq!(compact(u64::MAX), "18.4E");
+        for n in [999_999_999, 999_999_999_999, 999_999_999_999_999, u64::MAX] {
+            assert!(compact(n).len() <= 6, "{n}: {}", compact(n));
+        }
+    }
+
+    #[test]
+    fn a_share_that_rounds_to_nothing_or_to_everything_says_it_does_not() {
+        assert_eq!(share_label(0, true, true), " <1%");
+        assert_eq!(share_label(100, true, true), ">99%");
+        assert_eq!(share_label(100, true, false), "100%");
+        assert_eq!(share_label(0, false, false), "  0%");
+        assert_eq!(share_label(42, true, true), " 42%");
+    }
+
+    #[test]
+    fn a_level_that_is_not_a_level_draws_a_dash_and_a_huge_one_fits_its_column() {
+        assert_eq!(window_share(-5.0), "  — ");
+        assert_eq!(window_share(f64::NAN), "  — ");
+        assert_eq!(window_share(1e300), "999%");
+        assert_eq!(window_share(0.5), " 50%");
+    }
+
+    #[test]
+    fn a_level_above_nothing_that_rounds_to_nothing_reads_under_one_percent() {
+        assert_eq!(window_share(0.004), " <1%");
+        assert_eq!(window_share(6.0 / 1_000_000.0), " <1%");
+        assert_eq!(window_share(0.0), "  0%");
+        assert_eq!(window_share(0.005), "  1%");
+    }
+
     fn window(utilization: f64, resets_at: Option<u64>) -> UsageWindow {
         UsageWindow {
             utilization,
@@ -4512,19 +6811,33 @@ mod tests {
         }
     }
 
-    /// Either window nearly gone is the plan nearly gone: on a flat-rate plan
+    /// Either window running low is the plan running low: on a flat-rate plan
     /// the seven-day window running out stops the session just as surely as
     /// the five-hour one, so neither may be marked at the other's expense.
     #[test]
-    fn a_window_nearly_gone_is_marked_the_way_a_budget_nearly_spent_is() {
-        let theme = crate::theme::CLASSIC;
-        let hot = Style::new().fg(theme.hot);
+    fn a_window_reads_plain_then_running_low_then_run_out() {
+        for theme in crate::theme::THEMES {
+            let plain = Style::new().fg(theme.fg);
+            let low = Style::new().fg(theme.warn);
+            let out = Style::new().fg(theme.del);
+
+            assert_eq!(window_style(&window(0.0, None), &theme), plain);
+            assert_eq!(window_style(&window(0.49, None), &theme), plain);
+            assert_eq!(window_style(&window(0.50, None), &theme), low);
+            assert_eq!(window_style(&window(0.89, None), &theme), low);
+            assert_eq!(window_style(&window(0.90, None), &theme), out);
+            assert_eq!(window_style(&window(1.04, None), &theme), out);
+        }
+    }
+
+    /// A share no backend could mean is not a window running low.
+    #[test]
+    fn a_window_whose_share_is_not_a_share_is_drawn_plain() {
+        let theme = Theme::default();
         let plain = Style::new().fg(theme.fg);
 
-        assert_eq!(window_style(&window(0.62, None), &theme), plain);
-        assert_eq!(window_style(&window(0.79, None), &theme), plain);
-        assert_eq!(window_style(&window(0.80, None), &theme), hot);
-        assert_eq!(window_style(&window(1.04, None), &theme), hot);
+        assert_eq!(window_style(&window(f64::NAN, None), &theme), plain);
+        assert_eq!(window_style(&window(-0.5, None), &theme), plain);
     }
 
     /// The first moment of a day twenty thousand days after the epoch, which
@@ -4551,6 +6864,74 @@ mod tests {
         app
     }
 
+    /// A fresh session, attached, read at 13:41 on [`A_FRIDAY`] as
+    /// [`windowed`] is, whose earlier session under the same profile recorded
+    /// `windows` at 13:02 the same day, where it recorded any.
+    fn fresh(windows: Option<UsageWindows>) -> App {
+        let clock = crate::clock::Clock::fixed(0).expect("UTC is an offset");
+        let mut app = App::new(crate::app::Repo {
+            name: "niobe".to_owned(),
+            branch: None,
+            ..Default::default()
+        })
+        .with_clock(clock.clone())
+        .attached();
+        if let Some(windows) = windows {
+            app = app.with_carried_windows(
+                windows,
+                std::time::UNIX_EPOCH
+                    + std::time::Duration::from_secs(A_FRIDAY + 13 * 3_600 + 2 * 60),
+            );
+        }
+        app.tick(
+            std::time::Instant::now(),
+            Some(clock.at(std::time::UNIX_EPOCH
+                + std::time::Duration::from_secs(A_FRIDAY + 13 * 3_600 + 41 * 60))),
+        );
+        app
+    }
+
+    /// A sub-agent's messages can name the family while the CLI bills them
+    /// under the 1M-window id beside it, which settles the family's row at
+    /// no cost of its own. Its money is in the `[1m]` row, and the row says
+    /// so rather than drawing `$0.00` beside tokens that were spent. Where
+    /// the `[1m]` row was reported no money either, there is none to point to.
+    #[test]
+    fn a_family_row_billed_under_its_1m_window_says_where_its_money_is() {
+        let usage = |model: &str, input: u64, cost: Option<f64>, settles: bool| {
+            niobe_core::event::Event::Usage(Usage {
+                input,
+                output: 0,
+                cache_read: 0,
+                cache_write: 0,
+                cache_write_1h: Some(0),
+                reasoning: 0,
+                model: model.to_owned(),
+                cost_usd: cost,
+                settles_model: Some(settles),
+                fast: false,
+            })
+        };
+        let session = SessionState::replay(&[
+            usage("opus-5[1m]", 100, None, false),
+            usage("opus-5", 50, None, false),
+            usage("opus-5[1m]", 0, Some(0.9), true),
+            usage("opus-5", 0, Some(0.0), true),
+        ]);
+
+        assert_eq!(model_cost(session.totals(), "opus-5", None), "in [1m]");
+        assert_eq!(model_cost(session.totals(), "opus-5[1m]", None), "$0.90");
+
+        let free = SessionState::replay(&[usage("opus-5", 50, Some(0.0), true)]);
+        assert_eq!(model_cost(free.totals(), "opus-5", None), "$0.00");
+
+        let both_free = SessionState::replay(&[
+            usage("opus-5[1m]", 100, Some(0.0), true),
+            usage("opus-5", 50, Some(0.0), true),
+        ]);
+        assert_eq!(model_cost(both_free.totals(), "opus-5", None), "$0.00");
+    }
+
     /// A model's cost carries the same labels the session's does, with an em
     /// dash where the session would say `unpriced`: a column of figures reads
     /// the dash as "no figure", and a word there would crowd the tokens.
@@ -4573,6 +6954,108 @@ mod tests {
     /// The column above the pane is laid out from the height it asks for, so
     /// a row it draws and did not count is a row cut off the bottom, and one
     /// it counted and did not draw is a blank the other panes lose.
+    /// The budget row of a session billed `billing` that has seen `events`,
+    /// drawn `width` columns wide.
+    fn budget_row(billing: Billing, events: &[niobe_core::event::Event], width: usize) -> String {
+        let mut app = App::new(crate::app::Repo::default()).with_budget(5.0);
+        app.apply(&niobe_core::event::Event::Billing { billing });
+        for event in events {
+            app.apply(event);
+        }
+        let lines = money_lines(&app, width, &crate::theme::CLASSIC);
+        line_text(lines.last().expect("a budget draws its row"))
+    }
+
+    /// A line ratatui measures wider than the width it was laid out for is
+    /// clipped at the pane's edge, and what it held past it is lost with no
+    /// mark. A drawn buffer cannot show that — every write is clipped to it —
+    /// so the lines themselves are measured, the way ratatui measures them.
+    #[test]
+    fn every_line_laid_out_fits_the_width_ratatui_draws_it_in() {
+        use niobe_core::event::Event;
+
+        let heart = "\u{2764}\u{fe0f}";
+        let family = "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}";
+        let mut app = App::new(crate::app::Repo::default()).with_budget(5.0);
+        for event in [
+            Event::UserMessage {
+                text: format!("{} end {}", heart.repeat(30), family.repeat(12)),
+            },
+            Event::AssistantMessage {
+                text: format!(
+                    "{} 漢字かな混じり文 {}\n\n```\n\tindented\t{}\n```\n- {}",
+                    heart.repeat(25),
+                    "終わり".repeat(9),
+                    heart.repeat(8),
+                    family.repeat(20)
+                ),
+                agent: None,
+            },
+            Event::ToolCallStart {
+                id: "t1".into(),
+                name: "Bash".to_owned(),
+                input: format!(r#"{{"command":"echo {}"}}"#, heart.repeat(40)),
+                summary: Some(format!("echo {}", heart.repeat(40))),
+                agent: None,
+            },
+            priced(None),
+        ] {
+            app.apply(&event);
+        }
+
+        // From narrower than the session pane is at the shell's least size,
+        // and than the Usage pane is inside its border, up.
+        let transcript = (40..=120).step_by(7).map(|width| {
+            let lines: Vec<Line<'static>> = app
+                .entries()
+                .iter()
+                .flat_map(|entry| {
+                    entry_lines(entry, width, Detail::default(), &crate::theme::CLASSIC, &[])
+                })
+                .collect();
+            (width, lines)
+        });
+        let usage = (30..=60)
+            .step_by(3)
+            .map(|width| (width, usage_lines(&app, width, &crate::theme::CLASSIC)));
+        for (width, lines) in transcript.chain(usage) {
+            for line in &lines {
+                assert!(
+                    line.width() <= width,
+                    "a line ratatui draws {} wide was laid out for {width}: {:?}",
+                    line.width(),
+                    line_text(line)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_budget_against_a_cost_nobody_reported_draws_a_dash_not_a_zero() {
+        assert_eq!(
+            budget_row(Billing::Metered, &[priced(None)], 40),
+            "budget —/$5.00"
+        );
+        assert_eq!(budget_row(Billing::Metered, &[], 40), "budget —/$5.00");
+    }
+
+    #[test]
+    fn a_budget_against_a_partly_reported_cost_draws_the_floor() {
+        assert_eq!(
+            budget_row(Billing::Metered, &[priced(Some(1.25)), priced(None)], 40),
+            "budget ≥$1.25/$5.00"
+        );
+    }
+
+    #[test]
+    fn a_budget_on_a_plan_draws_a_dash_and_no_dollars() {
+        assert_eq!(
+            budget_row(Billing::Plan, &[priced(Some(1.25))], 40),
+            "budget —"
+        );
+        assert_eq!(budget_row(Billing::Plan, &[priced(None)], 40), "budget —");
+    }
+
     #[test]
     fn the_usage_pane_asks_for_exactly_the_rows_it_draws() {
         let windows = niobe_core::event::Event::UsageWindows(UsageWindows {
@@ -4582,6 +7065,7 @@ mod tests {
             }),
             seven_day: None,
             using_overage: true,
+            overage: niobe_core::event::Overage::Unreported,
         });
         let spent = priced(Some(0.25));
         let context = niobe_core::event::Event::Context(Context {
@@ -4609,11 +7093,25 @@ mod tests {
                     }
                     assert_eq!(
                         usize::from(usage_height(&app)),
-                        usage_lines(&app, 40, &crate::theme::CLASSIC).len() + 3,
+                        usage_lines(&app, 40, &crate::theme::CLASSIC).len() + 2,
                         "{billing:?} {events:?} {budget:?}"
                     );
                 }
             }
+        }
+        let carried = UsageWindows {
+            five_hour: Some(window(0.37, None)),
+            seven_day: Some(window(0.12, None)),
+            using_overage: true,
+            overage: niobe_core::event::Overage::Unreported,
+        };
+        for app in [fresh(None), fresh(Some(carried))] {
+            assert_eq!(
+                usize::from(usage_height(&app)),
+                usage_lines(&app, 40, &crate::theme::CLASSIC).len() + 2,
+                "{:?}",
+                app.plan_windows()
+            );
         }
     }
 
@@ -4631,13 +7129,14 @@ mod tests {
             // Day 20_004 is a Tuesday.
             seven_day: Some(window(0.71, Some(A_FRIDAY + 4 * 86_400 + 9 * 3_600))),
             using_overage: false,
+            overage: niobe_core::event::Overage::Unreported,
         });
 
         assert_eq!(
             rows_of(&app, 66),
             vec![
-                "5h    ▓▓▓▓▓▓░░░░░░  51% · resets 16:40".to_owned(),
-                "7d    ▓▓▓▓▓▓▓▓▓░░░  71% · resets Tue 09:00".to_owned(),
+                "5h  51% ▓▓▓▓▓▓░░░░░░ resets 16:40".to_owned(),
+                "7d  71% ▓▓▓▓▓▓▓▓▓░░░ resets Tue 09:00".to_owned(),
             ]
         );
     }
@@ -4648,28 +7147,27 @@ mod tests {
             five_hour: Some(window(0.51, None)),
             seven_day: None,
             using_overage: false,
+            overage: niobe_core::event::Overage::Unreported,
         });
 
         assert_eq!(
             rows_of(&app, 66),
-            vec!["5h    ▓▓▓▓▓▓░░░░░░  51%".to_owned()],
+            vec!["5h  51% ▓▓▓▓▓▓░░░░░░".to_owned()],
             "a window nobody timed was given a reset, or the window nobody \
              reported was given a row"
         );
     }
 
     #[test]
-    fn a_reset_that_has_already_come_around_is_not_drawn_as_one_still_to_come() {
+    fn a_reset_that_has_already_come_around_leaves_the_level_unmeasured() {
         let app = windowed(UsageWindows {
             five_hour: Some(window(0.51, Some(A_FRIDAY + 9 * 3_600))),
             seven_day: None,
             using_overage: false,
+            overage: niobe_core::event::Overage::Unreported,
         });
 
-        assert_eq!(
-            rows_of(&app, 66),
-            vec!["5h    ▓▓▓▓▓▓░░░░░░  51%".to_owned()]
-        );
+        assert_eq!(rows_of(&app, 66), vec!["5h   —".to_owned()]);
     }
 
     #[test]
@@ -4690,6 +7188,7 @@ mod tests {
             five_hour: Some(window(1.0, None)),
             seven_day: None,
             using_overage: true,
+            overage: niobe_core::event::Overage::Unreported,
         });
         let rows = rows_of(&app, 66);
 
@@ -4697,6 +7196,62 @@ mod tests {
         assert!(
             !rows.iter().any(|row| row.contains("$0.00")),
             "a figure nobody reported reached the pane: {rows:?}"
+        );
+    }
+
+    /// What the backend said about extra usage, in the pane's words: a refusal
+    /// with its reason, an allowance, and nothing where it said nothing.
+    #[test]
+    fn whether_extra_usage_is_allowed_is_said_where_the_backend_said_it() {
+        for (overage, row) in [
+            (
+                Overage::Refused(OverageRefusal::OutOfCredits),
+                Some("extra — · off · no credits left"),
+            ),
+            (
+                Overage::Refused(OverageRefusal::NotSetUp),
+                Some("extra — · off · not set up"),
+            ),
+            (
+                Overage::Refused(OverageRefusal::TurnedOff),
+                Some("extra — · off · turned off"),
+            ),
+            (
+                Overage::Refused(OverageRefusal::ZeroLimit),
+                Some("extra — · off · its limit is zero"),
+            ),
+            (
+                Overage::Refused(OverageRefusal::Unstated),
+                Some("extra — · off"),
+            ),
+            (Overage::Allowed, Some("extra — · allowed")),
+            (Overage::Unreported, None),
+        ] {
+            let app = windowed(UsageWindows {
+                five_hour: Some(window(0.4, None)),
+                seven_day: None,
+                using_overage: false,
+                overage,
+            });
+            let rows = rows_of(&app, 66);
+            let extra = rows.iter().find(|row| row.starts_with("extra"));
+            assert_eq!(extra.map(String::as_str), row, "{overage:?}: {rows:?}");
+        }
+    }
+
+    /// Spending beyond the fee is what the row says while it happens, whatever
+    /// the backend says of whether more may follow.
+    #[test]
+    fn a_plan_spending_extra_says_on_even_where_more_is_refused() {
+        let app = windowed(UsageWindows {
+            five_hour: Some(window(1.0, None)),
+            seven_day: None,
+            using_overage: true,
+            overage: Overage::Refused(OverageRefusal::OutOfCredits),
+        });
+        assert_eq!(
+            rows_of(&app, 66).last().map(String::as_str),
+            Some("extra — · on")
         );
     }
 
@@ -4709,6 +7264,7 @@ mod tests {
             five_hour: Some(window(0.51, None)),
             seven_day: None,
             using_overage: false,
+            overage: niobe_core::event::Overage::Unreported,
         });
 
         assert!(!rows_of(&app, 66).iter().any(|row| row.contains("extra")));
@@ -4724,11 +7280,13 @@ mod tests {
                 five_hour: Some(window(0.51, Some(A_FRIDAY + 16 * 3_600))),
                 seven_day: None,
                 using_overage: false,
+                overage: niobe_core::event::Overage::Unreported,
             },
             UsageWindows {
                 five_hour: Some(window(0.51, None)),
                 seven_day: Some(window(0.71, None)),
                 using_overage: true,
+                overage: niobe_core::event::Overage::Unreported,
             },
         ] {
             let app = windowed(windows);
@@ -4746,6 +7304,7 @@ mod tests {
             five_hour: Some(window(0.51, Some(A_FRIDAY + 16 * 3_600 + 40 * 60))),
             seven_day: Some(window(0.71, Some(A_FRIDAY + 4 * 86_400 + 9 * 3_600))),
             using_overage: true,
+            overage: niobe_core::event::Overage::Unreported,
         });
 
         for width in [39, 45, 66] {
@@ -4765,6 +7324,317 @@ mod tests {
         );
     }
 
+    /// A plan's windows are the account's, so a fresh session shows the last
+    /// level an earlier one saw, saying when it was seen, rather than an empty
+    /// pane until its first reply.
+    #[test]
+    fn a_fresh_session_shows_the_windows_an_earlier_one_recorded_and_when() {
+        let app = fresh(Some(UsageWindows {
+            five_hour: Some(window(0.37, Some(A_FRIDAY + 16 * 3_600 + 40 * 60))),
+            seven_day: Some(window(0.12, Some(A_FRIDAY + 4 * 86_400 + 9 * 3_600))),
+            using_overage: false,
+            overage: niobe_core::event::Overage::Unreported,
+        }));
+
+        assert_eq!(
+            rows_of(&app, 66),
+            vec![
+                "5h  37% ▓▓▓▓░░░░░░░░ resets 16:40".to_owned(),
+                "7d  12% ▓░░░░░░░░░░░ resets Tue 09:00".to_owned(),
+                "as of 13:02, before this session".to_owned(),
+            ]
+        );
+        assert_eq!(window_rows(&app), 3);
+    }
+
+    #[test]
+    fn the_first_report_replaces_what_was_carried_and_its_date() {
+        let mut app = fresh(Some(UsageWindows {
+            five_hour: Some(window(0.37, None)),
+            seven_day: None,
+            using_overage: false,
+            overage: niobe_core::event::Overage::Unreported,
+        }));
+        app.apply(&niobe_core::event::Event::UsageWindows(UsageWindows {
+            five_hour: Some(window(0.40, None)),
+            seven_day: None,
+            using_overage: false,
+            overage: niobe_core::event::Overage::Unreported,
+        }));
+
+        assert_eq!(rows_of(&app, 66), vec!["5h  40% ▓▓▓▓▓░░░░░░░".to_owned()]);
+    }
+
+    /// A level recorded before a window came back is not the level now, and
+    /// nothing has measured the level since: other clients on the account may
+    /// have spent from it. It reads as an em dash, never a `0%`. The seven-day
+    /// window comes back at the same moment every week, so its next reset is
+    /// still named, where a meter would stand; the five-hour one starts again
+    /// with the next request.
+    #[test]
+    fn a_carried_window_that_has_reset_since_has_no_level() {
+        let app = fresh(Some(UsageWindows {
+            five_hour: Some(window(0.87, Some(A_FRIDAY + 9 * 3_600))),
+            // A week before the Tuesday the window comes back on.
+            seven_day: Some(window(0.64, Some(A_FRIDAY - 3 * 86_400 + 9 * 3_600))),
+            using_overage: true,
+            overage: niobe_core::event::Overage::Unreported,
+        }));
+
+        let rows = rows_of(&app, 66);
+        assert_eq!(
+            rows,
+            vec![
+                "5h   —".to_owned(),
+                "7d   —               resets Tue 09:00".to_owned(),
+                "as of 13:02, before this session".to_owned(),
+            ]
+        );
+        assert!(
+            rows.iter().all(|row| !row.contains('%')),
+            "a reset window drew a level: {rows:?}"
+        );
+        assert_eq!(window_rows(&app), 3);
+    }
+
+    /// A window at its limit still names when it comes back, in the column the
+    /// other rows' reset times stand in.
+    #[test]
+    fn a_reported_window_at_its_limit_names_its_reset() {
+        let app = windowed(UsageWindows {
+            five_hour: Some(window(1.0, Some(A_FRIDAY + 16 * 3_600 + 40 * 60))),
+            seven_day: Some(window(0.64, Some(A_FRIDAY + 4 * 86_400 + 3_600))),
+            using_overage: false,
+            overage: niobe_core::event::Overage::Unreported,
+        });
+
+        let rows = rows_of(&app, 66);
+        assert!(rows[0].contains("100%"), "{rows:?}");
+        assert!(rows[0].ends_with("resets 16:40"), "{rows:?}");
+    }
+
+    /// A limited session hears nothing more from the CLI, so the draw clock is
+    /// what ends a reported level once its window has come back: an em dash,
+    /// never the old share.
+    #[test]
+    fn a_reported_window_whose_reset_has_passed_stops_reading_as_current() {
+        let mut app = windowed(UsageWindows {
+            five_hour: Some(window(1.0, Some(A_FRIDAY + 14 * 3_600))),
+            seven_day: Some(window(0.64, Some(A_FRIDAY + 4 * 86_400 + 3_600))),
+            using_overage: true,
+            overage: niobe_core::event::Overage::Unreported,
+        });
+        assert!(rows_of(&app, 66)[0].contains("100%"));
+
+        let clock = crate::clock::Clock::fixed(0).expect("UTC is an offset");
+        app.tick(
+            std::time::Instant::now(),
+            Some(
+                clock.at(std::time::UNIX_EPOCH
+                    + std::time::Duration::from_secs(A_FRIDAY + 14 * 3_600 + 60)),
+            ),
+        );
+
+        let rows = rows_of(&app, 66);
+        assert_eq!(
+            rows[0].split_whitespace().collect::<Vec<_>>(),
+            ["5h", "—"],
+            "{rows:?}"
+        );
+        assert!(rows[1].contains("64%"), "{rows:?}");
+        assert!(rows.iter().all(|row| !row.contains("100%")), "{rows:?}");
+        assert_eq!(rows.len(), window_rows(&app), "{rows:?}");
+    }
+
+    /// A window that has reset since stands in the same columns as one that
+    /// has not, so the reset times still read down one column.
+    #[test]
+    fn a_reset_carried_window_keeps_the_reset_column_of_one_that_has_not() {
+        let app = fresh(Some(UsageWindows {
+            five_hour: Some(window(0.37, Some(A_FRIDAY + 16 * 3_600 + 40 * 60))),
+            seven_day: Some(window(0.64, Some(A_FRIDAY - 3 * 86_400 + 9 * 3_600))),
+            using_overage: false,
+            overage: niobe_core::event::Overage::Unreported,
+        }));
+
+        assert_eq!(
+            rows_of(&app, 66),
+            vec![
+                "5h  37% ▓▓▓▓░░░░░░░░ resets 16:40".to_owned(),
+                "7d   —               resets Tue 09:00".to_owned(),
+                "as of 13:02, before this session".to_owned(),
+            ]
+        );
+    }
+
+    /// A session recorded on the Tuesday before [`A_FRIDAY`], whose record
+    /// holds `windows` reported at 13:02 that day, taken up again and read at
+    /// 13:41 on the Friday, as `niobe --resume` folds it in.
+    fn resumed(windows: UsageWindows) -> App {
+        let clock = crate::clock::Clock::fixed(0).expect("UTC is an offset");
+        let mut app = App::new(crate::app::Repo {
+            name: "niobe".to_owned(),
+            branch: None,
+            ..Default::default()
+        })
+        .with_clock(clock.clone());
+        let recorded = clock.at(std::time::UNIX_EPOCH
+            + std::time::Duration::from_secs(A_FRIDAY - 3 * 86_400 + 13 * 3_600 + 2 * 60));
+        let event = niobe_core::event::Event::UsageWindows(windows);
+        app.extend_at([(&event, recorded)]);
+        app.resumed();
+        app.leave();
+        let mut app = app.attached();
+        app.tick(
+            std::time::Instant::now(),
+            Some(clock.at(std::time::UNIX_EPOCH
+                + std::time::Duration::from_secs(A_FRIDAY + 13 * 3_600 + 41 * 60))),
+        );
+        app
+    }
+
+    /// What a resumed session's record says the windows stood at is a reading
+    /// from when it was recorded, not from now: it is dated, and a window
+    /// whose reset has come around since is drawn reset, as a level an earlier
+    /// session recorded is.
+    #[test]
+    fn a_resumed_session_draws_the_windows_it_recorded_dated_and_reset_since() {
+        let app = resumed(UsageWindows {
+            five_hour: Some(window(
+                0.83,
+                Some(A_FRIDAY - 3 * 86_400 + 13 * 3_600 + 2 * 60 + 10_000),
+            )),
+            // The Thursday before the Friday it is read on.
+            seven_day: Some(window(0.40, Some(A_FRIDAY - 86_400 + 9 * 3_600))),
+            using_overage: false,
+            overage: niobe_core::event::Overage::Unreported,
+        });
+
+        assert!(
+            matches!(app.plan_windows(), PlanWindows::Carried { .. }),
+            "{:?}",
+            app.plan_windows()
+        );
+        assert_eq!(
+            rows_of(&app, 66),
+            vec![
+                "5h   —".to_owned(),
+                "7d   —               resets Thu 09:00".to_owned(),
+                "as of Tue 13:02, before this session".to_owned(),
+            ]
+        );
+        assert_eq!(window_rows(&app), 3);
+    }
+
+    /// Once the resumed session's own backend reports, its figures are the
+    /// ones drawn, undated.
+    #[test]
+    fn a_resumed_session_draws_its_backends_first_report_as_reported() {
+        let mut app = resumed(UsageWindows {
+            five_hour: Some(window(0.83, None)),
+            seven_day: None,
+            using_overage: false,
+            overage: niobe_core::event::Overage::Unreported,
+        });
+        let live = UsageWindows {
+            five_hour: Some(window(0.05, None)),
+            seven_day: None,
+            using_overage: false,
+            overage: niobe_core::event::Overage::Unreported,
+        };
+        app.apply(&niobe_core::event::Event::UsageWindows(live));
+
+        assert_eq!(app.plan_windows(), PlanWindows::Reported(live));
+        assert_eq!(rows_of(&app, 66), vec!["5h   5% ▓░░░░░░░░░░░".to_owned()]);
+    }
+
+    /// An earlier session under the same profile that saw the windows later
+    /// than the resumed one's record did is the newer reading, and is the one
+    /// drawn; and the other way round.
+    #[test]
+    fn a_resumed_session_draws_the_newer_of_its_own_record_and_another_sessions() {
+        let own = UsageWindows {
+            five_hour: Some(window(0.83, None)),
+            seven_day: None,
+            using_overage: false,
+            overage: niobe_core::event::Overage::Unreported,
+        };
+        let other = UsageWindows {
+            five_hour: Some(window(0.21, None)),
+            seven_day: None,
+            using_overage: false,
+            overage: niobe_core::event::Overage::Unreported,
+        };
+        let at = |secs: u64| std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs);
+
+        let newer = resumed(own).with_carried_windows(other, at(A_FRIDAY + 9 * 3_600));
+        assert_eq!(
+            rows_of(&newer, 66),
+            vec![
+                "5h  21% ▓▓▓░░░░░░░░░".to_owned(),
+                "as of 09:00, before this session".to_owned(),
+            ]
+        );
+
+        let older = resumed(own).with_carried_windows(other, at(A_FRIDAY - 5 * 86_400));
+        assert_eq!(
+            rows_of(&older, 66),
+            vec![
+                "5h  83% ▓▓▓▓▓▓▓▓▓▓░░".to_owned(),
+                "as of Tue 13:02, before this session".to_owned(),
+            ]
+        );
+    }
+
+    /// Nothing recorded and nothing reported yet: the rows are there, with no
+    /// figure, and say when one comes rather than leaving the pane blank.
+    #[test]
+    fn a_fresh_session_with_nothing_recorded_says_the_windows_come_with_the_first_reply() {
+        let app = fresh(None);
+
+        assert_eq!(
+            rows_of(&app, 66),
+            vec![
+                "5h   —".to_owned(),
+                "7d   —".to_owned(),
+                "reported with the first reply".to_owned(),
+            ]
+        );
+        assert_eq!(window_rows(&app), 3);
+    }
+
+    /// A metered account has no plan windows, and a profile that says it is
+    /// metered is drawn none while its first reply is awaited, nor any an
+    /// earlier session recorded.
+    #[test]
+    fn a_metered_profile_draws_no_plan_rows_before_its_first_reply() {
+        let metered = || crate::app::SelectedProfile {
+            name: "api".to_owned(),
+            backend: niobe_core::event::Backend::Claude,
+            models: Vec::new(),
+            billing: Some(Billing::Metered),
+        };
+        let recorded = UsageWindows {
+            five_hour: Some(window(0.37, None)),
+            seven_day: None,
+            using_overage: false,
+            overage: niobe_core::event::Overage::Unreported,
+        };
+        for app in [
+            fresh(None).with_profile(metered()),
+            fresh(Some(recorded)).with_profile(metered()),
+        ] {
+            assert!(rows_of(&app, 66).is_empty());
+            assert_eq!(window_rows(&app), 0);
+        }
+
+        let mut told = fresh(None);
+        told.apply(&niobe_core::event::Event::Billing {
+            billing: Billing::Metered,
+        });
+        assert!(rows_of(&told, 66).is_empty());
+    }
+
     /// A session that spent tokens under three models, one of which settled.
     fn spending(records: &[(&str, u64)]) -> App {
         let mut app = App::new(crate::app::Repo {
@@ -4778,12 +7648,12 @@ mod tests {
                 output: 0,
                 cache_read: 0,
                 cache_write: 0,
-                cache_write_1h: 0,
+                cache_write_1h: Some(0),
                 reasoning: 0,
                 model: (*model).to_owned(),
                 cost_usd: Some(0.01),
-                cost_basis: None,
-                settles_model: false,
+                settles_model: Some(false),
+                fast: false,
             }));
         }
         app
@@ -4843,7 +7713,7 @@ mod tests {
         sent(&mut app, 76_000, "opus-5", Some(200_000));
         assert_eq!(
             context_of(&app, 39),
-            ["context ▓▓▓▓▓░░░░░░░  38%  76k / 200k"]
+            ["context  38% ▓▓▓▓▓░░░░░░░ 76k / 200k"]
         );
     }
 
@@ -4864,7 +7734,7 @@ mod tests {
         sent(&mut app, 50_000, "opus-5", None);
         assert_eq!(
             context_of(&app, 39),
-            ["context ▓▓▓░░░░░░░░░  25%  50k / 200k"]
+            ["context  25% ▓▓▓░░░░░░░░░ 50k / 200k"]
         );
     }
 
@@ -4876,7 +7746,7 @@ mod tests {
         sent(&mut app, 50_000, "opus-5", Some(1_000_000));
         assert_eq!(
             context_of(&app, 39),
-            ["context ▓░░░░░░░░░░░   5%  50k / 1.0M"]
+            ["context   5% ▓░░░░░░░░░░░ 50k / 1.0M"]
         );
     }
 
@@ -4891,20 +7761,69 @@ mod tests {
         assert!(!rows[0].contains('%'), "{rows:?}");
     }
 
+    fn compacted(app: &mut App, after: Option<u64>) {
+        app.apply(&niobe_core::event::Event::Compacted {
+            trigger: niobe_core::event::CompactTrigger::Auto,
+            before: Some(180_000),
+            after,
+        });
+    }
+
     /// A compaction makes the next request smaller, and the row follows it
     /// down rather than keeping the largest context the session ever had.
     #[test]
     fn a_compacted_context_is_drawn_at_the_size_of_the_next_request() {
         let mut app = bare();
         sent(&mut app, 180_000, "opus-5", Some(200_000));
-        app.apply(&niobe_core::event::Event::Notice {
-            message: "the context was compacted (auto).".to_owned(),
-        });
+        compacted(&mut app, Some(10_763));
         sent(&mut app, 30_000, "opus-5", Some(200_000));
         assert_eq!(
             context_of(&app, 39),
-            ["context ▓▓░░░░░░░░░░  15%  30k / 200k"]
+            ["context  15% ▓▓░░░░░░░░░░ 30k / 200k"]
         );
+    }
+
+    /// Between a compaction and the next request the row is what the backend
+    /// said is left, drawn as the floor it is: the share and the size each
+    /// say "at least", the share rounded down so that it never claims more.
+    #[test]
+    fn a_compacted_context_is_drawn_as_a_floor_until_the_next_request() {
+        let mut app = bare();
+        sent(&mut app, 180_000, "opus-5", Some(200_000));
+        compacted(&mut app, Some(10_763));
+        assert_eq!(
+            context_of(&app, 39),
+            ["context  ≥5% ▓░░░░░░░░░░░ ≥10k / 200k"]
+        );
+    }
+
+    /// A floor is never written larger than it is: each size rounds down
+    /// where a measurement would round to the nearest.
+    #[test]
+    fn a_floor_is_written_rounded_down() {
+        for (tokens, written) in [
+            (4_282, "4282"),
+            (10_763, "10k"),
+            (999_999, "999k"),
+            (1_049_999, "1.0M"),
+            (u64::MAX, "18.4E"),
+        ] {
+            assert_eq!(compact_floor(tokens), written, "{tokens}");
+        }
+        assert_eq!(floor_share(0.004), " >0%");
+        assert_eq!(floor_share(0.059), " ≥5%");
+        assert_eq!(floor_share(1.2), ">99%");
+    }
+
+    /// A compaction that did not say what it left has no figure, and the row
+    /// says so with a dash rather than going on with the old size or a zero.
+    #[test]
+    fn a_compacted_context_with_no_figure_is_a_dash() {
+        let mut app = bare();
+        sent(&mut app, 180_000, "opus-5", Some(200_000));
+        compacted(&mut app, None);
+        assert_eq!(context_of(&app, 39), ["context —"]);
+        assert_eq!(context_rows(&app), 1);
     }
 
     /// Past the window, the bar is full and the figure says by how much.
@@ -4914,7 +7833,19 @@ mod tests {
         sent(&mut app, 210_000, "opus-5", Some(200_000));
         assert_eq!(
             context_of(&app, 39),
-            ["context ▓▓▓▓▓▓▓▓▓▓▓▓ 105%  210k / 200k"]
+            ["context 105% ▓▓▓▓▓▓▓▓▓▓▓▓ 210k / 200k"]
+        );
+    }
+
+    /// A context no window could hold draws the most the column shows rather
+    /// than twenty digits of percent.
+    #[test]
+    fn a_context_far_past_its_window_draws_at_most_999_percent() {
+        let mut app = bare();
+        sent(&mut app, u64::MAX, "opus-5", Some(1));
+        assert_eq!(
+            context_of(&app, 39),
+            ["context 999% ▓▓▓▓▓▓▓▓▓▓▓▓ 18.4E / 1"]
         );
     }
 
@@ -4923,7 +7854,7 @@ mod tests {
     fn a_narrow_pane_shortens_the_meter_and_keeps_the_figures() {
         let mut app = bare();
         sent(&mut app, 76_000, "opus-5", Some(200_000));
-        assert_eq!(context_of(&app, 30), ["context ▓▓░░░  38%  76k / 200k"]);
+        assert_eq!(context_of(&app, 30), ["context  38% ▓▓░░░░ 76k / 200k"]);
     }
 
     #[test]
@@ -4946,6 +7877,35 @@ mod tests {
             let app = spending(records);
             assert_eq!(spend_rows(&app), spend_of(&app, 66).len(), "{records:?}");
         }
+    }
+
+    /// Tokens only the backend's turn totals reported get a row of their own
+    /// under the cache, saying where they came from, and the pane is sized
+    /// for it.
+    #[test]
+    fn tokens_no_message_reported_are_a_labelled_row_of_their_own() {
+        let mut app = spending(&[("opus-5", 100)]);
+        let counts = |input, cache_read| niobe_core::event::TokenCounts {
+            input,
+            output: 0,
+            cache_read,
+            cache_write: 0,
+            cache_write_1h: None,
+        };
+        app.apply(&niobe_core::event::Event::TurnTotalDiffers {
+            per_message: counts(10, 0),
+            reported: counts(12, 118_070),
+            backend_session: None,
+            unfinished: Vec::new(),
+        });
+
+        let rows = spend_of(&app, 66);
+        assert_eq!(
+            rows.last().map(String::as_str),
+            Some("+118k reported by the CLI, not per message")
+        );
+        assert_eq!(spend_rows(&app), rows.len());
+        assert!(rows[rows.len() - 2].starts_with(CACHE_LABEL), "{rows:?}");
     }
 
     /// A model nothing was billed under is not a model at 0%: the row is
@@ -5009,12 +7969,12 @@ mod tests {
             output: 400,
             cache_read: 0,
             cache_write: 0,
-            cache_write_1h: 0,
+            cache_write_1h: Some(0),
             reasoning: 0,
             model: "opus-5".to_owned(),
             cost_usd: Some(0.01),
-            cost_basis: None,
-            settles_model: false,
+            settles_model: Some(false),
+            fast: false,
         }));
 
         let rows = spend_of(&app, 66);
@@ -5036,47 +7996,52 @@ mod tests {
             output_bytes: 168_000,
             ..ToolTotals::default()
         };
-        let counted = TestRunRecord {
-            counts: Some(niobe_core::TestCounts {
-                passed: 637,
-                failed: 2,
-                ignored: 4,
-                suites: 30,
-            }),
-            exit_code: Some(101),
-            failed: true,
-            failures: Vec::new(),
-        };
-        let uncounted = TestRunRecord {
-            counts: None,
-            exit_code: Some(101),
-            failed: true,
-            failures: Vec::new(),
-        };
-        let unread = TestRunRecord {
-            counts: None,
-            exit_code: Some(101),
-            failed: false,
-            failures: Vec::new(),
-        };
-        let age = Some(Duration::from_secs(95));
         vec![
             ("Sub-agents", agent_figures(2, 13, 4, (1, 0), theme)),
             (
                 "Working tree",
                 changed_figures(23, "+9770".to_owned(), "−2590".to_owned(), theme),
             ),
-            (
-                "This session",
-                changed_figures(3, "+≥3000".to_owned(), "−≥200".to_owned(), theme),
-            ),
-            ("Commits", commit_figures(true, 12, Some(11), theme)),
-            ("Commits", commit_figures(true, 12, None, theme)),
             ("Tools", tool_summary(&tools, theme)),
-            ("Tests", test_figures(&counted, age, theme)),
-            ("Tests", test_figures(&uncounted, age, theme)),
-            ("Tests", test_figures(&unread, age, theme)),
         ]
+    }
+
+    fn decision_text(app: &App, width: usize) -> Vec<String> {
+        decision_rows(app, width, &Theme::default())
+            .iter()
+            .map(line_text)
+            .collect()
+    }
+
+    #[test]
+    fn the_decisions_section_says_whose_account_it_is_and_lists_the_newest_first() {
+        let mut app = App::new(crate::app::Repo::default());
+        app.apply(&niobe_core::Event::AssistantMessage {
+            text: "DECISION: reused the cache\nDECISION: left the exporter alone".to_owned(),
+            agent: None,
+        });
+
+        let rows = decision_text(&app, 60);
+        assert!(rows[0].contains("Decisions, as the agent says"), "{rows:?}");
+        assert!(rows[0].ends_with('2'), "{rows:?}");
+        assert!(rows[1].contains("left the exporter alone"), "{rows:?}");
+        assert!(rows[2].contains("reused the cache"), "{rows:?}");
+        assert!(
+            rows[1].starts_with("        "),
+            "no clock, so the time column is blank rather than a made-up moment"
+        );
+    }
+
+    #[test]
+    fn an_empty_decisions_section_says_whether_any_were_asked_for() {
+        let asked = App::new(crate::app::Repo::default());
+        assert_eq!(decision_text(&asked, 40)[1].trim(), "none stated yet");
+
+        let unasked = App::new(crate::app::Repo::default()).with_decisions_asked(false);
+        assert_eq!(
+            decision_text(&unasked, 40)[1].trim(),
+            "not asked for: decisions = false"
+        );
     }
 
     fn line_text(line: &Line<'_>) -> String {
@@ -5120,6 +8085,41 @@ mod tests {
                 .collect();
             (header_of(name, &kept) == drawn).then_some(kept)
         })
+    }
+
+    #[test]
+    fn a_wide_agent_tag_leaves_the_agents_status_whole_at_the_pane_edge() {
+        let theme = Theme::default();
+        let columns = AgentColumns {
+            tag: text::width("漢字漢字"),
+            model: 0,
+            status: text::width("running"),
+            task: 0,
+        };
+        let row = line_text(&agent_row(
+            "漢字漢字",
+            "書く",
+            (None, "running"),
+            columns.fitted(60),
+            &theme,
+        ));
+        assert!(row.ends_with(" running"), "{row:?}");
+        assert_eq!(text::width(&row), 60, "{row:?}");
+    }
+
+    #[test]
+    fn a_wide_tool_family_keeps_the_count_column_in_line() {
+        let theme = Theme::default();
+        let name = text::width("漢字サーバー");
+        let wide = line_text(&bar_line(("漢字サーバー", name), 3, 0, 3, 12, &theme));
+        let plain = line_text(&bar_line(("Read", name), 3, 0, 3, 12, &theme));
+        let count_cell = |row: &str| row.find(" 3 ").map(|at| text::width(&row[..at]));
+        assert_eq!(count_cell(&wide), count_cell(&plain), "{wide:?} {plain:?}");
+        assert_eq!(
+            text::width(&wide),
+            text::width(&plain),
+            "{wide:?} {plain:?}"
+        );
     }
 
     #[test]
@@ -5203,6 +8203,8 @@ mod tests {
             summary: Some(path.clone()),
             exit_code: None,
             error: None,
+            command: None,
+            untrimmed: None,
         });
         let written: String = (1..=lines).map(|n| format!("line {n}\n")).collect();
         app.apply(&Event::FileChange {
@@ -5210,11 +8212,288 @@ mod tests {
             added: Some(lines as u64),
             removed: Some(0),
             hunks: vec![niobe_core::diff::Hunk::created(&written).expect("lines to write")],
+            scope: niobe_core::event::ChangeScope::Project,
         });
         app.apply(&Event::AssistantMessage {
             text: format!("wrote {id}"),
             agent: None,
         });
+    }
+
+    /// Calls with nothing under them are rows of one table: no blank line
+    /// between them, and one after the last before the assistant speaks. A
+    /// call with a diff under it keeps its blank line.
+    #[test]
+    fn calls_with_nothing_under_them_are_drawn_on_consecutive_lines() {
+        use niobe_core::event::{Event, ToolOutcome};
+        let mut app = App::new(crate::app::Repo::default());
+        for (id, name) in [("t1", "Read"), ("t2", "Bash"), ("t3", "Read")] {
+            app.apply(&Event::ToolCallStart {
+                id: id.into(),
+                name: name.to_owned(),
+                input: String::new(),
+                summary: Some(format!("{id} does")),
+                agent: None,
+            });
+            app.apply(&Event::ToolCallEnd {
+                id: id.into(),
+                name: name.to_owned(),
+                input: String::new(),
+                output: String::new(),
+                bytes: 64,
+                outcome: ToolOutcome::Ok,
+                summary: Some(format!("{id} does")),
+                exit_code: None,
+                error: None,
+                command: None,
+                untrimmed: None,
+            });
+        }
+        edited(&mut app, "after", 2);
+
+        let theme = Theme::default();
+        let (entries, commands, drawn) = app.entries_to_draw();
+        drawn.update(
+            entries,
+            commands,
+            60,
+            Detail::default(),
+            Arrangement::default(),
+            &theme,
+        );
+        let rows: Vec<String> = drawn
+            .lines(0, 12)
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect()
+            })
+            .collect();
+        // The name column is as wide as `Write`, the widest name drawn.
+        assert!(rows[0].starts_with("⚙ Read  t1 does"), "{rows:?}");
+        // A shell call names the program it ran, `t2`, not the command.
+        assert!(rows[1].starts_with("⚙ Bash  t2 "), "{rows:?}");
+        assert!(rows[2].starts_with("⚙ Read  t3 does"), "{rows:?}");
+        assert_eq!(rows[3], "", "a call with a diff stands apart: {rows:?}");
+        assert!(rows[4].starts_with("⚙ Write after.rs"), "{rows:?}");
+        let diff_ends = rows
+            .iter()
+            .position(|row| row.contains("wrote after"))
+            .expect("the reply is drawn");
+        assert_eq!(
+            rows[diff_ends - 2],
+            "",
+            "a diff keeps its blank line: {rows:?}"
+        );
+    }
+
+    /// Notable only, each run of routine entries is one row saying how many
+    /// it left out, where they were; what is notable is drawn as it was.
+    #[test]
+    fn notable_only_leaves_each_run_of_routine_entries_as_a_count_where_it_was() {
+        use niobe_core::event::{Event, ToolOutcome};
+        let mut app = App::new(crate::app::Repo::default());
+        let read = |app: &mut App, id: &str| {
+            app.apply(&Event::ToolCallStart {
+                id: id.into(),
+                name: if id == "t2" { "Grep" } else { "Read" }.to_owned(),
+                input: String::new(),
+                summary: Some(format!("{id} does")),
+                agent: None,
+            });
+            app.apply(&Event::ToolCallEnd {
+                id: id.into(),
+                name: "Read".to_owned(),
+                input: String::new(),
+                output: String::new(),
+                bytes: 64,
+                outcome: ToolOutcome::Ok,
+                summary: Some(format!("{id} does")),
+                exit_code: None,
+                error: None,
+                command: None,
+                untrimmed: None,
+            });
+        };
+        read(&mut app, "t1");
+        read(&mut app, "t2");
+        edited(&mut app, "after", 1);
+        read(&mut app, "t3");
+
+        let theme = Theme::default();
+        let detail = Detail {
+            notable_only: true,
+            ..Detail::default()
+        };
+        let (entries, commands, drawn) = app.entries_to_draw();
+        drawn.update(
+            entries,
+            commands,
+            60,
+            detail,
+            Arrangement::default(),
+            &theme,
+        );
+        let rows: Vec<String> = drawn
+            .lines(0, 40)
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect()
+            })
+            .collect();
+        let text = rows.join("\n");
+        assert!(rows[0].starts_with("… 2 routine entries hidden"), "{text}");
+        assert!(
+            !text.contains("t1 does") && !text.contains("t3 does"),
+            "{text}"
+        );
+        assert!(text.contains("⚙ Write after.rs"), "{text}");
+        assert!(text.contains("wrote after"), "{text}");
+        assert!(
+            rows.iter()
+                .any(|row| row.starts_with("… 1 routine entry hidden")),
+            "the read after the reply is counted where it was: {text}"
+        );
+    }
+
+    /// Grouped by agent, each agent's rows in a turn are drawn together
+    /// under a heading where it first did something; the session's own row
+    /// stays where it was, and so does the next turn's prompt.
+    #[test]
+    fn grouped_by_agent_each_agents_rows_are_drawn_under_its_heading() {
+        use niobe_core::event::{AgentId, Event};
+        let mut app = App::new(crate::app::Repo::default());
+        app.apply(&Event::UserMessage {
+            text: "go".to_owned(),
+        });
+        for (id, kind) in [("toolu_a", "Explore"), ("toolu_b", "general-purpose")] {
+            app.apply(&Event::AgentSpawn {
+                id: AgentId::new(id),
+                parent: None,
+                kind: Some(kind.to_owned()),
+                label: format!("{kind}: look at {id}"),
+            });
+        }
+        let start = |id: &str, agent: Option<&str>| Event::ToolCallStart {
+            id: id.into(),
+            name: "Read".to_owned(),
+            input: String::new(),
+            summary: Some(format!("{id}.rs")),
+            agent: agent.map(AgentId::new),
+        };
+        app.apply(&start("a1", Some("toolu_a")));
+        app.apply(&start("b1", Some("toolu_b")));
+        app.apply(&start("m1", None));
+        app.apply(&start("a2", Some("toolu_a")));
+        app.apply(&start("b2", Some("toolu_b")));
+
+        let theme = Theme::default();
+        let drawn_as = |app: &mut App| -> Vec<String> {
+            let headings = app.grouped_by_agent().then(|| app.agent_headings());
+            let (entries, commands, drawn) = app.entries_to_draw();
+            drawn.update(
+                entries,
+                commands,
+                60,
+                Detail::default(),
+                Arrangement {
+                    headings: headings.as_deref(),
+                    only: None,
+                },
+                &theme,
+            );
+            drawn
+                .lines(0, 20)
+                .iter()
+                .map(|line| {
+                    line.spans
+                        .iter()
+                        .map(|span| span.content.as_ref())
+                        .collect()
+                })
+                .map(|row: String| row.trim_end().to_owned())
+                .filter(|row| !row.is_empty())
+                .collect()
+        };
+
+        let interleaved = drawn_as(&mut app);
+        assert!(interleaved[2].contains("explore a1.rs"), "{interleaved:?}");
+        assert!(interleaved[3].contains("general b1.rs"), "{interleaved:?}");
+
+        app.group_by_agent();
+        let grouped = drawn_as(&mut app);
+        let rows: Vec<&str> = grouped.iter().skip(2).map(String::as_str).collect();
+        assert!(
+            rows[0].starts_with("▾ explore") && rows[0].contains("look at toolu_a"),
+            "{grouped:?}"
+        );
+        assert!(rows[0].ends_with("2 calls"), "{grouped:?}");
+        assert!(
+            rows[1].contains("a1.rs") && rows[2].contains("a2.rs"),
+            "{grouped:?}"
+        );
+        assert!(
+            !rows[1].contains("explore"),
+            "the heading names the agent: {grouped:?}"
+        );
+        assert!(rows[3].starts_with("▾ general"), "{grouped:?}");
+        assert!(
+            rows[4].contains("b1.rs") && rows[5].contains("b2.rs"),
+            "{grouped:?}"
+        );
+        assert!(
+            rows[6].contains("m1.rs"),
+            "the session's own row stays: {grouped:?}"
+        );
+    }
+
+    /// A test run in progress says how long it has run, so the clock moving
+    /// lays it out again — once a second, and nothing else with it.
+    #[test]
+    fn the_clock_lays_out_again_only_a_test_run_still_going_and_once_a_second() {
+        let second = |millis: u64| {
+            crate::clock::Stamp::new(
+                std::time::UNIX_EPOCH + std::time::Duration::from_millis(millis),
+                None,
+            )
+        };
+        let start = |id: &str, command: &str| niobe_core::Event::ToolCallStart {
+            id: id.into(),
+            name: "Bash".to_owned(),
+            input: String::new(),
+            summary: Some(command.to_owned()),
+            agent: None,
+        };
+        let mut app = App::new(crate::app::Repo::default());
+        app.apply_at(&start("l1", "ls"), second(0));
+        app.apply_at(
+            &niobe_core::Event::UserMessage {
+                text: "and the tests".to_owned(),
+            },
+            second(0),
+        );
+        app.apply_at(&start("t1", "cargo test"), second(1_000));
+        let keys = |now: u64| -> Vec<u64> {
+            let detail = Detail {
+                now: Some(second(now)),
+                ..Detail::default()
+            };
+            app.entries()
+                .iter()
+                .map(|entry| drawn_from(entry, 120, detail, &Theme::default(), 0))
+                .collect()
+        };
+
+        let at = keys(5_000);
+        assert_eq!(at, keys(5_900), "the same whole second draws the same");
+        let later = keys(6_000);
+        let changed: Vec<usize> = (0..at.len()).filter(|&i| at[i] != later[i]).collect();
+        assert_eq!(changed, vec![at.len() - 1], "only the test run moved");
     }
 
     #[test]
@@ -5225,7 +8504,7 @@ mod tests {
         let keys = |detail: Detail| -> Vec<u64> {
             app.entries()
                 .iter()
-                .map(|entry| drawn_from(entry, 120, detail, &Theme::default()))
+                .map(|entry| drawn_from(entry, 120, detail, &Theme::default(), 0))
                 .collect()
         };
 
@@ -5269,6 +8548,123 @@ mod tests {
         app.apply_at(&priced(Some(cost)), at(0));
         app.apply_at(&Event::TurnEnded, at(seconds));
         app
+    }
+
+    /// A metered session whose message records were folded with `then`
+    /// after them: a turn's cost that does or does not say what it settles.
+    fn floored_by(settles: Option<bool>) -> Vec<String> {
+        use niobe_core::event::Event;
+        let mut app = App::new(crate::app::Repo::default());
+        app.apply(&Event::Billing {
+            billing: Billing::Metered,
+        });
+        app.apply(&priced(None));
+        let mut turn = priced(Some(0.5));
+        if let Event::Usage(usage) = &mut turn {
+            usage.settles_model = settles;
+        }
+        app.apply(&turn);
+        money_lines(&app, 40, &crate::theme::CLASSIC)
+            .iter()
+            .map(line_text)
+            .collect()
+    }
+
+    #[test]
+    fn a_floor_left_by_a_recording_older_than_settlement_says_so() {
+        let said = floored_by(None);
+        assert!(said[0].starts_with("session ≥$0.50"), "{said:?}");
+        assert!(said[0].contains(OLDER_RECORDING), "{said:?}");
+    }
+
+    #[test]
+    fn a_floor_the_backend_left_carries_no_mark_of_age() {
+        let said = floored_by(Some(false));
+        assert!(said[0].starts_with("session ≥$0.50"), "{said:?}");
+        assert!(!said[0].contains(OLDER_RECORDING), "{said:?}");
+    }
+
+    #[test]
+    fn a_session_billed_both_ways_draws_only_what_it_spent_by_use() {
+        use niobe_core::event::Event;
+        let mut app = metered_for(1_800, 0.5);
+        for billing in [Billing::Plan, Billing::Metered] {
+            app.apply(&Event::Billing { billing });
+        }
+
+        let said: Vec<String> = money_lines(&app, 40, &crate::theme::CLASSIC)
+            .iter()
+            .map(line_text)
+            .collect();
+        assert_eq!(said[0], "metered part $0.50");
+    }
+
+    /// The rows of the Usage pane, 38 columns wide, that draw a dollar sign.
+    fn dollar_rows(app: &App) -> Vec<String> {
+        pane_of(app, 38)
+            .into_iter()
+            .filter(|row| row.contains('$'))
+            .collect()
+    }
+
+    #[test]
+    fn every_dollar_figure_of_a_session_billed_both_ways_is_its_metered_part() {
+        use niobe_core::event::Event;
+        for ([first, then], spent) in [
+            ([Billing::Plan, Billing::Metered], "$2.00"),
+            ([Billing::Metered, Billing::Plan], "$1.00"),
+        ] {
+            let mut app = App::new(crate::app::Repo::default()).with_budget(5.0);
+            app.apply(&Event::Billing { billing: first });
+            app.apply(&priced(Some(1.0)));
+            app.apply(&Event::Billing { billing: then });
+            app.apply(&priced(Some(2.0)));
+
+            assert_eq!(
+                dollar_rows(&app),
+                [
+                    format!("metered part {spent}"),
+                    format!("metered part budget {spent}/$5.00")
+                ],
+                "{first:?} then {then:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_plan_session_draws_no_dollar_figure_anywhere_in_the_pane() {
+        use niobe_core::event::Event;
+        let mut app = App::new(crate::app::Repo::default()).with_budget(5.0);
+        app.apply(&Event::Billing {
+            billing: Billing::Plan,
+        });
+        app.apply(&Event::UsageWindows(UsageWindows {
+            five_hour: Some(UsageWindow {
+                utilization: 0.4,
+                resets_at: None,
+            }),
+            seven_day: None,
+            using_overage: false,
+            overage: niobe_core::event::Overage::Unreported,
+        }));
+        app.apply(&priced(Some(1.25)));
+
+        let pane = pane_of(&app, 38);
+        assert_eq!(dollar_rows(&app), Vec::<String>::new(), "{pane:?}");
+        assert!(!pane.iter().any(|row| row.contains("API")), "{pane:?}");
+        assert_eq!(
+            pane.last().map(String::as_str),
+            Some("budget —"),
+            "{pane:?}"
+        );
+    }
+
+    #[test]
+    fn a_session_nothing_said_the_billing_of_draws_no_dollar_spend_against_its_budget() {
+        let mut app = App::new(crate::app::Repo::default()).with_budget(5.0);
+        app.apply(&priced(Some(1.25)));
+
+        assert_eq!(dollar_rows(&app), ["budget —/$5.00"]);
     }
 
     #[test]
@@ -5328,12 +8724,12 @@ mod tests {
                 output: 0,
                 cache_read: 0,
                 cache_write: 0,
-                cache_write_1h: 0,
+                cache_write_1h: Some(0),
                 reasoning: 0,
                 model: "opus-5".to_owned(),
                 cost_usd: Some(cost),
-                cost_basis: None,
-                settles_model: false,
+                settles_model: Some(false),
+                fast: false,
             }));
             let rows = spend_of(&app, 66);
             let (count, cost_drawn) = rows[0]
@@ -5345,5 +8741,139 @@ mod tests {
             );
             assert_eq!(cost_drawn, format!("{cost:.2}"), "{cost}: {rows:?}");
         }
+    }
+
+    /// A metered session on `records` of a model, the input it sent and the
+    /// cost reported for it, whose last request sent 12,000 tokens into a
+    /// window of 200,000.
+    fn metered_on(records: &[(&str, u64, Option<f64>)]) -> App {
+        use niobe_core::event::Event;
+        let mut app = bare();
+        app.apply(&Event::Billing {
+            billing: Billing::Metered,
+        });
+        for (model, input, cost) in records {
+            app.apply(&Event::Usage(Usage {
+                input: *input,
+                output: 0,
+                cache_read: 0,
+                cache_write: 0,
+                cache_write_1h: Some(0),
+                reasoning: 0,
+                model: (*model).to_owned(),
+                cost_usd: *cost,
+                settles_model: Some(false),
+                fast: false,
+            }));
+        }
+        sent(&mut app, 12_000, "opus-5", Some(200_000));
+        app
+    }
+
+    fn pane_of(app: &App, width: usize) -> Vec<String> {
+        usage_lines(app, width, &Theme::default())
+            .iter()
+            .map(Line::to_string)
+            .collect()
+    }
+
+    /// Thirty-eight columns is the pane inside its border at 120. The two ids
+    /// differ only in their date, so their labels are cut at the front; the
+    /// meters go before any figure does.
+    #[test]
+    fn two_long_ids_that_collide_give_way_to_every_figure_beside_them() {
+        let app = metered_on(&[
+            ("claude-opus-5-20251001", 10_000, Some(12.34)),
+            ("claude-opus-5-20260101", 5_100, Some(3.21)),
+        ]);
+        assert_eq!(
+            pane_of(&app, 38),
+            [
+                "session $15.55",
+                "──────────────────────────────────────",
+                "…-opus-5-20251001  66%    10k   $12.34",
+                "…-opus-5-20260101  34%   5100    $3.21",
+                "cache hit           0%      0",
+                "──────────────────────────────────────",
+                "context             6% ▓░░░ 12k / 200k",
+            ]
+        );
+    }
+
+    /// A Bedrock inference profile's id is longer than the pane is wide; the
+    /// cache and the context keep their shares and their figures at 120
+    /// columns and at 160.
+    #[test]
+    fn an_inference_profile_id_leaves_the_cache_and_the_context_their_figures() {
+        let profile =
+            "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/a1b2c3d4e5f6";
+        let app = metered_on(&[
+            (
+                "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+                9_000,
+                Some(2.5),
+            ),
+            (profile, 1_000, Some(0.25)),
+        ]);
+        for width in [38, 52] {
+            let rows = pane_of(&app, width);
+            for row in &rows {
+                assert!(text::width(row) <= width, "{row:?} overflows {width}");
+            }
+            let cache = rows
+                .iter()
+                .find(|row| row.starts_with("cache hit"))
+                .unwrap_or_else(|| panic!("no cache row at {width}: {rows:?}"));
+            assert!(cache.contains("  0%"), "{rows:?}");
+            let context = rows.last().expect("the context row is the last");
+            assert!(context.starts_with("context"), "{rows:?}");
+            assert!(context.contains("  6%"), "{rows:?}");
+            assert!(context.ends_with(" 12k / 200k"), "{rows:?}");
+            assert!(rows[2].ends_with(" $2.50"), "{rows:?}");
+            assert!(rows[3].ends_with(" $0.25"), "{rows:?}");
+        }
+    }
+
+    /// `≥$1234.56` is a column wider than `≥~$12.34`, the widest the pane
+    /// sets aside by default; the cost column grows to it rather than cut it.
+    #[test]
+    fn a_cost_wider_than_its_column_is_drawn_whole() {
+        let app = metered_on(&[("opus-5", 2_000, Some(1_234.56)), ("opus-5", 200, None)]);
+        let rows = pane_of(&app, 38);
+        assert_eq!(rows[2], "opus-5    100% ▓▓▓▓▓▓▓  2200 ≥$1234.56");
+    }
+
+    /// Too narrow for the window's size beside the share, the row gives up
+    /// the bar and then the size whole, never a digit of it.
+    #[test]
+    fn a_context_row_too_narrow_for_its_window_drops_the_window_whole() {
+        let mut app = bare();
+        sent(&mut app, 76_000, "opus-5", Some(200_000));
+        assert_eq!(context_of(&app, 15), ["  38%  76k"]);
+    }
+
+    #[test]
+    fn a_plan_is_approved_or_planned_further_in_those_words() {
+        let ask = Ask {
+            id: "t1".into(),
+            tool: "ExitPlanMode".to_owned(),
+            input: r#"{"plan":"1. Guard it."}"#.to_owned(),
+            target: None,
+            proposed: Some(crate::proposed::Proposed::new(niobe_core::Proposal::new(
+                niobe_core::Action::Plan {
+                    plan: "1. Guard it.".to_owned(),
+                },
+                ["plan"],
+            ))),
+            reason: None,
+            turn: 1,
+            agent: None,
+        };
+
+        assert_eq!(
+            option_words(Answer::Once, &ask, false).0,
+            "Go ahead with the plan"
+        );
+        assert_eq!(option_words(Answer::No, &ask, false).0, "Keep planning");
     }
 }

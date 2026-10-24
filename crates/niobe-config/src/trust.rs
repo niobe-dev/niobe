@@ -28,6 +28,14 @@
 //! would carry a decision made about bytes that are no longer there. Editing
 //! the file — a pull, a rebase, a rewrite — asks again.
 //!
+//! What a config names is part of the same decision. A `settings` file or a
+//! file an `args` entry names is read by the CLI when it starts, and a pull
+//! can rewrite it without touching the config, so each is recorded in the same
+//! file beside the config, at the contents the operator was shown, and so are
+//! the names of the user's profiles it replaces: a profile added to the
+//! user's own config later, under a name the file defines, is a replacement
+//! nobody was asked about.
+//!
 //! The user's own config is not gated. It is the file the operator writes;
 //! asking them to trust their own text would teach them to say yes without
 //! reading, which is how a trust prompt stops being one.
@@ -53,10 +61,21 @@ pub const FILE_NAME: &str = "trusted.list";
 const HEADER: &str = "\
 # Written by niobe. Each line is a repository config this machine has been told
 # it may start a backend with — its profiles' env, args, settings and
-# auth_refresh — and the SHA-256 of that file's contents when it was told so.
-# Editing the config makes it untrusted again. `niobe untrust` removes a line;
+# auth_refresh — or a settings or argument file such a config names, and the
+# SHA-256 of that file's contents when it was told so. Editing the config, or
+# a file it names, makes it untrusted again. `niobe untrust` removes a line;
 # so does deleting it.
 ";
+
+/// What follows the reason a line of the record could not be read.
+///
+/// The whole record is refused, so every session in a repository with a config
+/// stops on it, and so does `niobe untrust`, which reads it before writing it
+/// back: the operator has to be told the way out, which is the line itself.
+/// Deleting a line only ever takes trust away, so it is the safe edit to name.
+const RECOVER: &str = "; niobe wrote this file and cannot read it while this line is in \
+     it, so neither a session nor `niobe untrust` can use it: delete the line, and any \
+     config it trusted is asked about again";
 
 /// The SHA-256 of a config file's contents, as lower-case hex.
 ///
@@ -112,7 +131,7 @@ impl Trusted {
                 path: path.to_path_buf(),
                 line: index + 1,
                 key: None,
-                message: message.to_owned(),
+                message: format!("{message}{RECOVER}"),
             };
             let (hex, file) = line
                 .split_once(' ')
@@ -128,6 +147,11 @@ impl Trusted {
         Ok(Self { entries })
     }
 
+    /// Whether `file` has an entry at all, for whatever contents.
+    pub fn holds(&self, file: &Path) -> bool {
+        self.entries.contains_key(file)
+    }
+
     /// Whether `file`, holding `text`, may start a backend with what it says.
     ///
     /// False for a file that was trusted at other contents: the decision was
@@ -140,9 +164,17 @@ impl Trusted {
     ///
     /// A path with a newline in it cannot be written down, because a line of
     /// the record is one entry; it is refused rather than written as two
-    /// entries that mean nothing.
+    /// entries that mean nothing. Nor can one that is not UTF-8, which would
+    /// read back as a different path.
     pub fn trust(&mut self, file: &Path, text: &str) -> Result<(), ConfigError> {
-        let name = file.to_string_lossy();
+        // Written down as text, a path that is not UTF-8 would read back as
+        // another path, and the file would be untrusted again next session.
+        let Some(name) = file.to_str() else {
+            return Err(ConfigError::Untrustable {
+                path: file.to_path_buf(),
+                message: "its path is not UTF-8, and the record is written as text".to_owned(),
+            });
+        };
         if name.contains('\n') || name.contains('\r') {
             return Err(ConfigError::Untrustable {
                 path: file.to_path_buf(),
@@ -165,6 +197,30 @@ impl Trusted {
             let _ = writeln!(text, "{hex} {}", file.display());
         }
         text
+    }
+
+    /// Reads the record at `path`, lets `change` change it, and writes it
+    /// back, holding the lock on its directory throughout, so that two
+    /// sessions changing it at once each change what the other wrote rather
+    /// than what both read. What `change` returns is handed back; an error
+    /// from it writes nothing.
+    pub fn update<T>(
+        path: &Path,
+        change: impl FnOnce(&mut Self) -> Result<T, ConfigError>,
+    ) -> Result<T, ConfigError> {
+        let failed = |error: std::io::Error| ConfigError::Write {
+            path: path.to_path_buf(),
+            error,
+        };
+        let target = crate::replace::resolved(path).map_err(failed)?;
+        let dir = crate::replace::parent(&target);
+        std::fs::create_dir_all(dir).map_err(failed)?;
+        let _lock = crate::replace::Lock::directory(dir).map_err(failed)?;
+
+        let mut record = Self::read(&target)?;
+        let changed = change(&mut record)?;
+        crate::replace::replace(&target, record.render().as_bytes()).map_err(failed)?;
+        Ok(changed)
     }
 
     /// Writes the record to `path`, creating its directory if this is the
@@ -241,14 +297,16 @@ mod tests {
 
         let text = trusted.render();
         assert_eq!(
-            Trusted::parse(&text, Path::new("/u/trusted.list")).expect("valid"),
+            Trusted::parse(&text, Path::new("/u/trusted.list"))
+                .expect("the text in this test is valid"),
             trusted
         );
 
         assert!(trusted.forget(&file()));
         assert!(!trusted.forget(&file()));
         let text = trusted.render();
-        let read = Trusted::parse(&text, Path::new("/u/trusted.list")).expect("valid");
+        let read = Trusted::parse(&text, Path::new("/u/trusted.list"))
+            .expect("the text in this test is valid");
         assert!(!read.trusts(&file(), "a"));
         assert!(read.trusts(Path::new("/other \"quoted\"/.niobe/config.toml"), "b"));
     }
@@ -267,15 +325,36 @@ mod tests {
         let second_entry = HEADER.lines().count() + 2;
         assert_eq!(
             said(&format!("{HEADER}{} /a\nnodigest\n", digest("a"))),
-            format!("/u/trusted.list:{second_entry}: expected a digest, a space and a path")
+            format!(
+                "/u/trusted.list:{second_entry}: expected a digest, a space and a path{RECOVER}"
+            )
         );
         assert_eq!(
             said("beef /a\n"),
-            "/u/trusted.list:1: expected a 64-character hexadecimal digest"
+            format!("/u/trusted.list:1: expected a 64-character hexadecimal digest{RECOVER}")
+        );
+        assert_eq!(
+            said(&format!("{} /a\n", "g".repeat(64))),
+            format!("/u/trusted.list:1: expected a 64-character hexadecimal digest{RECOVER}")
         );
         assert_eq!(
             said(&format!("{} \n", digest("a"))),
-            "/u/trusted.list:1: expected a path after the digest"
+            format!("/u/trusted.list:1: expected a path after the digest{RECOVER}")
+        );
+    }
+
+    #[test]
+    fn a_record_that_is_not_one_says_how_to_get_past_it() {
+        let said = Trusted::parse("nodigest\n", Path::new("/u/trusted.list"))
+            .expect_err("the line is not an entry")
+            .to_string();
+
+        assert_eq!(
+            said,
+            "/u/trusted.list:1: expected a digest, a space and a path; niobe wrote this file \
+             and cannot read it while this line is in it, so neither a session nor \
+             `niobe untrust` can use it: delete the line, and any config it trusted is asked \
+             about again"
         );
     }
 
@@ -308,6 +387,20 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_path_that_is_not_utf8_is_refused_rather_than_written_as_another() {
+        use std::os::unix::ffi::OsStrExt;
+        let path = Path::new(std::ffi::OsStr::from_bytes(b"/re\xffpo/.niobe/config.toml"));
+
+        let said = Trusted::default()
+            .trust(path, "a")
+            .expect_err("it would read back as another path")
+            .to_string();
+
+        assert!(said.contains("not UTF-8"), "{said}");
+    }
+
     #[test]
     fn a_path_a_line_cannot_hold_is_refused_rather_than_written_as_two() {
         let said = Trusted::default()
@@ -317,5 +410,48 @@ mod tests {
 
         assert!(said.starts_with("cannot record trust for "), "{said}");
         assert!(said.contains("line break"), "{said}");
+
+        let said = Trusted::default()
+            .trust(Path::new("/re\rpo/.niobe/config.toml"), "a")
+            .expect_err("a carriage return ends a line too")
+            .to_string();
+        assert!(said.contains("line break"), "{said}");
+    }
+
+    // Only where the directory can be locked: elsewhere a writer goes
+    // unlocked, as `replace::Lock` says.
+    #[cfg(unix)]
+    #[test]
+    fn two_updates_at_once_each_keep_what_the_other_added() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let record = dir.path().join("trusted.list");
+
+        let threads: Vec<_> = (0..8)
+            .map(|n| {
+                let record = record.clone();
+                std::thread::spawn(move || {
+                    Trusted::update(&record, |trusted| {
+                        let read = trusted.clone();
+                        // Long enough for another update to read the same
+                        // record, were nothing holding it off.
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                        *trusted = read;
+                        trusted.trust(&PathBuf::from(format!("/repo{n}/config.toml")), "text")
+                    })
+                    .expect("the record is updated")
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().expect("an update did not panic");
+        }
+
+        let kept = Trusted::read(&record).expect("the record reads");
+        for n in 0..8 {
+            assert!(
+                kept.trusts(&PathBuf::from(format!("/repo{n}/config.toml")), "text"),
+                "the entry of update {n} was lost to another"
+            );
+        }
     }
 }

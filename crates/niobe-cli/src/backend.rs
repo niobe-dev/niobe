@@ -9,12 +9,14 @@
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::SystemTime;
 
-use niobe_bridge_claude::transcript;
-use niobe_bridge_claude::{Options, Session, SpawnError};
+use niobe_bridge_claude::transcript::{self, TranscriptError};
+use niobe_bridge_claude::{Options, Session, SpawnError, Spent};
 use niobe_config::Selected;
 use niobe_core::event::{Backend, Event, Mode, PermissionDecision, ToolCallId};
+use niobe_core::image::Image;
 use niobe_tui::bridge::{Bridge, BridgeError, Detached};
 
 /// What a session is attached with, beyond the profile that names the backend.
@@ -31,6 +33,93 @@ pub struct Attach {
     pub mode: Option<Mode>,
     /// The most the session may spend, in USD.
     pub budget_usd: Option<f64>,
+    /// Whether the backend is asked to title the session from its first
+    /// prompt. Only a new session is: one carried on was titled, if it was,
+    /// when it began.
+    pub title: bool,
+    /// Whether a new conversation is asked for terse replies, with
+    /// [`TERSE`] appended to the backend's system prompt. A conversation
+    /// carried on keeps the prompt it began with.
+    pub terse: bool,
+    /// Whether a new conversation is asked to state its decisions, with
+    /// [`decisions_asked`] appended to the backend's system prompt. A
+    /// conversation carried on keeps the prompt it began with.
+    pub decisions: bool,
+    /// A directory to keep a copy of the backend's stream in, where one was
+    /// asked for with [`STREAM_DIR_VAR`] and found fit by [`stream_tap`].
+    pub tap: Option<PathBuf>,
+    /// Where the agent's cargo output is trimmed through the hook, where the
+    /// config says `trim = true`. Unlike [`Attach::terse`] it holds for a
+    /// conversation carried on too: the CLI reads its hooks at every start.
+    pub trim: Option<crate::trim::Trim>,
+}
+
+/// What a terse conversation appends to the backend's system prompt.
+///
+/// Prose is what it shortens. Code, commands, paths, errors and security
+/// warnings are where a shortened word costs correctness rather than tokens,
+/// so they are named as what stays whole.
+pub const TERSE: &str = "Keep your replies to the user terse: short sentences, no preamble, no \
+    restating the request, and no account of what you are about to do or have just done beyond \
+    what the user needs to act on. Keep code, commands, file paths, error messages and security \
+    warnings exact and whole; never shorten or paraphrase them.";
+
+/// What a conversation that states its decisions appends to the backend's
+/// system prompt, which names the marker [`niobe_core::decision`] reads them
+/// by.
+///
+/// It asks for the choices an engineer would want to know were made — scope
+/// above all, since work left out is what a reader of the diff cannot see —
+/// and for one line each, so a decision reads as a row of the pane rather
+/// than a paragraph of the reply.
+pub fn decisions_asked() -> String {
+    format!(
+        "When you make a choice the user would want to know about — leaving something out of \
+         scope, skipping or deferring work, picking one approach over another, or doing \
+         something other than what was asked — state it in your reply on a line of its own \
+         that begins with `{marker}` followed by one short sentence saying what you decided \
+         and why. Do not use `{marker}` for anything else, and do not state routine steps \
+         this way.",
+        marker = niobe_core::decision::MARKER,
+    )
+}
+
+/// The environment variable that names a directory to keep a copy of what
+/// crosses the `claude` CLI's pipes in, so that a recording is taken from the
+/// session as it ran, with no program put in front of the CLI on `PATH`.
+pub const STREAM_DIR_VAR: &str = "NIOBE_STREAM_DIR";
+
+/// The directory [`STREAM_DIR_VAR`] names, where it names one that may be
+/// written to.
+///
+/// The files hold the whole conversation, so they are never put where a
+/// `git add` could take them: a directory inside the repository at `root` is
+/// refused, as is one that is not given as a whole path. It is made where it
+/// is not there, and the path handed back is the real one.
+pub fn stream_tap(root: &Path, named: Option<OsString>) -> Result<Option<PathBuf>, String> {
+    let Some(named) = named.filter(|named| !named.is_empty()) else {
+        return Ok(None);
+    };
+    let path = PathBuf::from(named);
+    let shown = path.display();
+    if !path.is_absolute() {
+        return Err(format!(
+            "{STREAM_DIR_VAR} is {shown}, which is not a whole path; name a directory outside the \
+             repository"
+        ));
+    }
+    std::fs::create_dir_all(&path)
+        .map_err(|error| format!("{STREAM_DIR_VAR} is {shown}, which cannot be made: {error}"))?;
+    let real = std::fs::canonicalize(&path)
+        .map_err(|error| format!("{STREAM_DIR_VAR} is {shown}, which cannot be read: {error}"))?;
+    let repository = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    if real.starts_with(&repository) {
+        return Err(format!(
+            "{STREAM_DIR_VAR} is {shown}, which is inside the repository: the stream holds the \
+             whole conversation and must not be somewhere it can be committed"
+        ));
+    }
+    Ok(Some(real))
 }
 
 /// What a session is attached to.
@@ -38,7 +127,7 @@ pub struct Attach {
 pub struct Attachment {
     bridge: Box<dyn Bridge>,
     attached: bool,
-    process_group: Option<u32>,
+    process_groups: Option<Receiver<u32>>,
 }
 
 impl Attachment {
@@ -48,10 +137,12 @@ impl Attachment {
         self.attached
     }
 
-    /// The process group the backend's subprocess leads, where one was
-    /// started.
-    pub fn process_group(&self) -> Option<u32> {
-        self.process_group
+    /// Where the process group each backend subprocess leads is named, where
+    /// one was started: the first is there already, and one more comes each
+    /// time the backend is started again within the session. Taken once, by
+    /// whatever is to end those groups if the session cannot.
+    pub fn take_process_groups(&mut self) -> Option<Receiver<u32>> {
+        self.process_groups.take()
     }
 
     /// The backend, for the event loop.
@@ -72,10 +163,14 @@ impl Attachment {
 /// `with.resume` is the id the backend calls an earlier session by, where one
 /// was recorded: Niobe's session id names the recording, and only the CLI's own
 /// id can hand its transcript back.
+///
+/// `config_dir` and `home` are the values of `CLAUDE_CONFIG_DIR` and `HOME`,
+/// which say where a resumed session's transcript is.
 pub fn attach(
     root: &Path,
     profile: Option<&Selected<'_>>,
     with: &Attach,
+    config_dir: Option<OsString>,
     home: Option<OsString>,
 ) -> Result<Attachment, String> {
     let Some(selected) = profile else {
@@ -84,12 +179,20 @@ pub fn attach(
 
     match selected.profile.backend() {
         Backend::Claude => {
-            let options = claude_options(root, selected, with, home)?;
+            let transcripts = transcripts(Some(selected), root, config_dir.clone(), home.clone());
+            let options = resumed_options(root, selected, with, config_dir, home)?;
             let session = Session::spawn(&options).map_err(describe)?;
+            let (groups, process_groups) = channel();
+            // The receiver is in hand, so the send cannot fail.
+            let _ = groups.send(session.process_group());
             Ok(Attachment {
-                process_group: Some(session.process_group()),
-                bridge: Box::new(Claude(session)),
+                bridge: Box::new(Claude {
+                    session,
+                    transcripts,
+                    groups,
+                }),
                 attached: true,
+                process_groups: Some(process_groups),
             })
         }
         // Not implemented yet: neither the `codex` bridge nor the native agent
@@ -157,6 +260,105 @@ fn on(value: &serde_json::Value) -> bool {
     }
 }
 
+/// Every file the backend `profile` runs gives its agent as memory, for a
+/// session at `cwd`, in the order the agent is given them, as the shell lists
+/// them.
+///
+/// Only the `claude` CLI loads memory files Niobe knows the rules of; another
+/// backend, or a shell with no profile and so no backend, has none to list. The CLI's configuration directory is
+/// found as [`transcripts`] finds it, since its auto-memory is kept beside
+/// the transcripts.
+pub fn memory(
+    profile: Option<&niobe_config::Profile>,
+    cwd: &Path,
+    config_dir: Option<OsString>,
+    home: Option<OsString>,
+) -> Vec<niobe_tui::MemoryFile> {
+    let Some(profile) = profile.filter(|profile| profile.backend() == Backend::Claude) else {
+        return Vec::new();
+    };
+    let configured = profile
+        .env()
+        .get(transcript::CONFIG_DIR_VAR)
+        .map(OsString::from)
+        .or(config_dir);
+    let config = transcript::config_dir(configured.as_deref(), home.as_deref());
+    let home = home.map(PathBuf::from).filter(|home| home.is_absolute());
+    niobe_bridge_claude::memory::sources(&niobe_bridge_claude::memory::Lookup {
+        cwd,
+        config: config.as_deref(),
+        home: home.as_deref(),
+    })
+    .into_iter()
+    .map(|source| memory_file(source, cwd, home.as_deref()))
+    .collect()
+}
+
+/// One of the CLI's memory files, as the shell lists it.
+fn memory_file(
+    source: niobe_bridge_claude::memory::Source,
+    cwd: &Path,
+    home: Option<&Path>,
+) -> niobe_tui::MemoryFile {
+    use niobe_bridge_claude::memory::Scope as Found;
+    use niobe_tui::memory::Scope;
+
+    let scope = match source.scope {
+        Found::Managed => Scope::Managed,
+        Found::User => Scope::User,
+        Found::Parent => Scope::Parent,
+        Found::Project => Scope::Project,
+        Found::Local => Scope::Local,
+        Found::Imported => Scope::Imported,
+        Found::AutoMemory => Scope::AutoMemory,
+        Found::AutoEntry => Scope::AutoEntry,
+    };
+    let inside = source.path.strip_prefix(cwd).ok();
+    let under_home = home.and_then(|home| source.path.strip_prefix(home).ok());
+    let path = match (scope, inside, under_home) {
+        // Listed under the index that names it, beside which it is kept.
+        (Scope::AutoEntry, _, _) => source.path.file_name().map_or_else(
+            || source.path.display().to_string(),
+            |name| name.to_string_lossy().into_owned(),
+        ),
+        (_, Some(inside), _) => inside.display().to_string(),
+        (_, None, Some(under_home)) => format!("~/{}", under_home.display()),
+        (_, None, None) => source.path.display().to_string(),
+    };
+    // A change is named relative to where the session runs where the file
+    // is inside it, as the bridge names it, and absolute otherwise.
+    let named = inside.map_or_else(
+        || source.path.display().to_string(),
+        |inside| inside.display().to_string(),
+    );
+    // A file the bridge would not read is not handed to an editor either.
+    let editable = (source.withheld.is_none()
+        && std::fs::symlink_metadata(&source.path).is_ok_and(|meta| meta.file_type().is_file()))
+    .then(|| source.path.display().to_string());
+    let note = source.withheld.map(withheld_note).or(source.note);
+    niobe_tui::MemoryFile {
+        scope,
+        path,
+        named,
+        depth: source.depth,
+        bytes: source.bytes,
+        text: source.text,
+        note,
+        editable,
+    }
+}
+
+/// What the Memory view says beside a file the bridge listed and did not
+/// read.
+fn withheld_note(withheld: niobe_bridge_claude::memory::Withheld) -> String {
+    use niobe_bridge_claude::memory::Withheld;
+    match withheld {
+        Withheld::Private => "not read: where credentials are kept",
+        Withheld::Outside => "not read: outside the repository and the CLI's markdown",
+    }
+    .to_owned()
+}
+
 /// Where the `claude` CLI keeps the transcripts of the sessions it has run in
 /// `cwd`, from the values of `CLAUDE_CONFIG_DIR` and `HOME`.
 ///
@@ -205,7 +407,9 @@ pub fn recorded(
         .collect())
 }
 
-/// Everything one of those sessions says happened, as events.
+/// Everything one of those sessions says happened, as events, each beside the
+/// time the CLI recorded the record it was read from — `None` where that
+/// record carries none, or for what the reader says itself.
 ///
 /// The transcript is read and nothing is written back: the CLI's store stays
 /// the CLI's, and the id is handed to its own `--resume` to carry the
@@ -216,7 +420,7 @@ pub fn history(
     session: &str,
     config_dir: Option<OsString>,
     home: Option<OsString>,
-) -> Result<Vec<Event>, String> {
+) -> Result<Vec<(Event, Option<SystemTime>)>, String> {
     let dir = transcripts(profile, cwd, config_dir, home).ok_or_else(|| {
         format!(
             "cannot look for claude session {session}: neither {} nor HOME says where the \
@@ -235,7 +439,89 @@ pub fn history(
     // what goes on the session is the profile it is being continued under —
     // and nothing, where none was selected.
     let name = profile.map_or("", |selected| selected.name);
-    transcript::events(&path, name, cwd).map_err(|e| e.to_string())
+    let read = transcript::timed(&path, name, cwd).map_err(|e| e.to_string())?;
+    Ok(read
+        .into_iter()
+        .map(|timed| (timed.event, timed.at))
+        .collect())
+}
+
+/// What the `claude` CLI had recorded session `id` as spending when it last
+/// left it, which it restores on `--resume` and which the resumed process's
+/// first turn therefore reports on top of.
+///
+/// Nothing where the transcript cannot be found: the CLI then has nothing to
+/// restore from either, as far as anything here can tell, and the resume
+/// itself is what reports a session that is not there. A transcript that is
+/// there and cannot be read is a spend that is unknown, not nothing: the CLI
+/// may still restore it, and reading it as nothing would bill it again.
+fn spent(
+    profile: &Selected<'_>,
+    root: &Path,
+    id: &str,
+    config_dir: Option<OsString>,
+    home: Option<OsString>,
+) -> Spent {
+    spent_in(
+        transcripts(Some(profile), root, config_dir, home).as_deref(),
+        id,
+    )
+}
+
+/// [`spent`], from the directory `dir` the CLI keeps its transcripts in.
+fn spent_in(dir: Option<&Path>, id: &str) -> Spent {
+    let Some(dir) = dir else {
+        return Spent::default();
+    };
+    match transcript::spent(&dir.join(format!("{id}.jsonl"))) {
+        Ok(spent) => spent,
+        Err(TranscriptError::File { error, .. })
+            if error.kind() == std::io::ErrorKind::NotFound =>
+        {
+            Spent::default()
+        }
+        Err(error) => Spent::unknown(error.to_string()),
+    }
+}
+
+/// [`claude_options`], starting from what the CLI's own transcript last
+/// recorded the session spending where it resumes one: the CLI restores its
+/// running totals on `--resume`, and a translator that started from nothing
+/// would bill the first turn the whole earlier session again.
+fn resumed_options(
+    root: &Path,
+    profile: &Selected<'_>,
+    with: &Attach,
+    config_dir: Option<OsString>,
+    home: Option<OsString>,
+) -> Result<Options, String> {
+    let mut options = claude_options(root, profile, with, home.clone())?;
+    if let Some(id) = &with.resume {
+        options.spent = spent(profile, root, id, config_dir, home);
+    }
+    Ok(options)
+}
+
+/// What a new conversation appends to the backend's system prompt, as one
+/// text, so that what reaches the model does not turn on how the CLI treats
+/// the flag given twice.
+/// `None` for a conversation carried on, which keeps the prompt it began
+/// with, and for one asked for nothing.
+fn appended(with: &Attach) -> Option<String> {
+    if with.resume.is_some() {
+        return None;
+    }
+    let mut parts = Vec::new();
+    if with.terse {
+        parts.push(TERSE.to_owned());
+    }
+    if with.decisions {
+        parts.push(decisions_asked());
+    }
+    match parts.is_empty() {
+        true => None,
+        false => Some(parts.join("\n\n")),
+    }
 }
 
 /// What the `claude` bridge is spawned with under `profile`.
@@ -252,11 +538,24 @@ fn claude_options(
 ) -> Result<Options, String> {
     let mut options = Options::new(root, profile.name);
     options.env = profile.profile.env().clone();
-    options.args = profile.profile.args().to_vec();
+    // Before the profile's own arguments, so that a profile appending a
+    // system prompt of its own still has the last word.
+    options.args = appended(with)
+        .map(|prompt| vec!["--append-system-prompt".to_owned(), prompt])
+        .unwrap_or_default();
+    options.args.extend_from_slice(profile.profile.args());
     options.billing = profile.profile.billing();
-    options.settings = crate::config::settings_path(profile, home)?;
+    options.settings = crate::config::settings_path(profile, home, root)?;
+    if let Some(trim) = &with.trim {
+        options.settings = Some(crate::trim::settings(
+            trim,
+            profile.name,
+            options.settings.as_deref(),
+        )?);
+    }
     options.resume = with.resume.clone();
     options.budget_usd = with.budget_usd;
+    options.tap = with.tap.clone();
     // A resumed session starts the CLI in the mode it was left in; a new one
     // leaves it at the default, which is the mode the shell shows until
     // something says otherwise.
@@ -267,14 +566,37 @@ fn claude_options(
     // flag is not set for a backend with nothing answering: the CLI stops the
     // turn on every gated call and waits for an answer that would never come.
     options.ask_over_stdio = true;
+    // The shell's bridge starts the CLI again on its conversation when
+    // something stops it between turns: see `Claude::carry_on`.
+    options.carry_on = true;
+    options.ask_title = with.title && with.resume.is_none();
     Ok(options)
 }
 
-fn detached() -> Attachment {
+/// What a CLI started again is started with: `next`, as the session that
+/// stopped hands it on, from what the CLI's transcript in `transcripts` last
+/// recorded the conversation spending, for the reason [`resumed_options`]
+/// reads it.
+fn carried_on(mut next: Options, transcripts: Option<&Path>) -> Options {
+    if let Some(id) = &next.resume {
+        next.spent = spent_in(transcripts, id);
+    }
+    next
+}
+
+/// Whether `version` is a `claude` release the bridge's reading was recorded
+/// from.
+pub fn claude_release_recorded(version: &str) -> bool {
+    niobe_bridge_claude::conformance::recorded(version)
+}
+
+/// A backend that is not there: what a session under no profile, or under
+/// one whose backend could not be started, is attached to.
+pub fn detached() -> Attachment {
     Attachment {
         bridge: Box::new(Detached),
         attached: false,
-        process_group: None,
+        process_groups: None,
     }
 }
 
@@ -283,16 +605,53 @@ fn detached() -> Attachment {
 /// The error already says what to do; this only names the profile, because the
 /// operator picked a profile and not a binary.
 fn describe(error: SpawnError) -> String {
-    format!("cannot start this profile's backend: {error}")
+    format!("{CANNOT_START}{error}")
 }
+
+/// How [`describe`] opens, for a caller that says it in its own words.
+pub const CANNOT_START: &str = "cannot start this profile's backend: ";
 
 /// The `claude` bridge behind the trait the shell asked for.
 #[derive(Debug)]
-struct Claude(Session);
+struct Claude {
+    session: Session,
+    /// Where the CLI keeps its transcripts, which is where what a CLI started
+    /// again will restore as spent is read from.
+    transcripts: Option<PathBuf>,
+    /// Told the process group of each CLI started again.
+    groups: Sender<u32>,
+}
+
+impl Claude {
+    /// Starts the CLI again on its conversation where the one before was
+    /// stopped between turns, and does nothing otherwise.
+    ///
+    /// Done when the operator next asks the backend for something rather than
+    /// as soon as the stop is seen: whatever stopped the CLI — a shutdown, a
+    /// logout, the operator — may still be under way, and a CLI started into
+    /// it would only be stopped again. A start that fails leaves the session
+    /// as it was, to be tried again by the next request.
+    fn carry_on(&mut self) -> Result<(), BridgeError> {
+        let Some(next) = self.session.next() else {
+            return Ok(());
+        };
+        let next = carried_on(next, self.transcripts.as_deref());
+        let session = Session::spawn(&next).map_err(|error| {
+            BridgeError::from(format!(
+                "the `claude` CLI could not be started again: {error}"
+            ))
+        })?;
+        // Nothing may be listening: a session with no reaper.
+        let _ = self.groups.send(session.process_group());
+        self.session = session;
+        Ok(())
+    }
+}
 
 impl Bridge for Claude {
-    fn send(&mut self, prompt: &str) -> Result<(), BridgeError> {
-        self.0.send(prompt).map_err(BridgeError::from)
+    fn send(&mut self, prompt: &str, images: &[Image]) -> Result<(), BridgeError> {
+        self.carry_on()?;
+        self.session.send(prompt, images).map_err(BridgeError::from)
     }
 
     fn answer(
@@ -301,21 +660,39 @@ impl Bridge for Claude {
         decision: PermissionDecision,
         message: Option<&str>,
     ) -> Result<(), BridgeError> {
-        self.0
+        self.session
             .answer(id, decision, message)
             .map_err(BridgeError::from)
     }
 
     fn set_mode(&mut self, mode: Mode) -> Result<(), BridgeError> {
-        self.0.set_mode(mode).map_err(BridgeError::from)
+        self.carry_on()?;
+        self.session.set_mode(mode).map_err(BridgeError::from)
     }
 
     fn set_model(&mut self, model: &str) -> Result<(), BridgeError> {
-        self.0.set_model(model).map_err(BridgeError::from)
+        self.carry_on()?;
+        self.session.set_model(model).map_err(BridgeError::from)
+    }
+
+    fn interrupt(&mut self) -> Result<(), BridgeError> {
+        self.session.interrupt().map_err(BridgeError::from)
+    }
+
+    fn reconnect_mcp(&mut self, server: &str) -> Result<(), BridgeError> {
+        self.carry_on()?;
+        self.session
+            .reconnect_mcp(server)
+            .map_err(BridgeError::from)
+    }
+
+    fn rewind(&mut self, prompt: usize) -> Result<(), BridgeError> {
+        self.carry_on()?;
+        self.session.rewind(prompt).map_err(BridgeError::from)
     }
 
     fn drain(&mut self) -> Vec<Event> {
-        self.0.drain()
+        self.session.drain()
     }
 }
 
@@ -331,13 +708,238 @@ mod tests {
         Config::parse(text, &PathBuf::from("config.toml")).expect("the config parses")
     }
 
+    /// The memory a `claude` profile's agent is given is listed as the shell
+    /// shows it: inside the repository relative to it, under the home
+    /// directory from `~`, and an auto-memory note by its name under its
+    /// index. A codex profile's backend loads none of it.
+    #[test]
+    fn the_memory_listed_is_named_as_the_shell_shows_it_and_only_for_claude() {
+        use niobe_tui::memory::Scope;
+        let dir = tempfile::tempdir().expect("a temporary directory can be made");
+        let home = dir.path().join("home");
+        let repo = home.join("src").join("repo");
+        let notes = transcript::directory(&home.join(".claude"), &repo).join("memory");
+        for (path, text) in [
+            (repo.join("CLAUDE.md"), "@AGENTS.md\n"),
+            (repo.join("AGENTS.md"), "# Agents\n"),
+            (home.join(".claude").join("CLAUDE.md"), "be brief\n"),
+            (
+                notes.join("MEMORY.md"),
+                "- [Facts](facts.md) — verified facts\n",
+            ),
+            (notes.join("facts.md"), "init repeats\n"),
+        ] {
+            std::fs::create_dir_all(path.parent().expect("a file has a directory"))
+                .expect("the temporary directory is writable");
+            std::fs::write(&path, text).expect("the temporary directory is writable");
+        }
+        let claude = config("[profiles.max]\nbackend = \"claude\"\n");
+        let listed = memory(
+            claude.profiles().get("max"),
+            &repo,
+            None,
+            Some(home.clone().into_os_string()),
+        );
+        let shown: Vec<(Scope, &str, &str, usize)> = listed
+            .iter()
+            .filter(|file| file.scope != Scope::Managed)
+            .map(|file| {
+                (
+                    file.scope,
+                    file.path.as_str(),
+                    file.named.as_str(),
+                    file.depth,
+                )
+            })
+            .collect();
+        let index = format!(
+            "~/{}",
+            notes
+                .join("MEMORY.md")
+                .strip_prefix(&home)
+                .expect("under the home directory")
+                .display()
+        );
+        let absolute = |path: &Path| path.display().to_string();
+        assert_eq!(
+            shown,
+            [
+                (
+                    Scope::User,
+                    "~/.claude/CLAUDE.md",
+                    absolute(&home.join(".claude/CLAUDE.md")).as_str(),
+                    0
+                ),
+                (Scope::Project, "CLAUDE.md", "CLAUDE.md", 0),
+                (Scope::Imported, "AGENTS.md", "AGENTS.md", 1),
+                (
+                    Scope::AutoMemory,
+                    index.as_str(),
+                    absolute(&notes.join("MEMORY.md")).as_str(),
+                    0
+                ),
+                (
+                    Scope::AutoEntry,
+                    "facts.md",
+                    absolute(&notes.join("facts.md")).as_str(),
+                    1
+                ),
+            ]
+        );
+        assert!(listed.iter().all(|file| file.editable.is_some()));
+
+        let codex = config("[profiles.codex]\nbackend = \"codex\"\n");
+        assert!(
+            memory(
+                codex.profiles().get("codex"),
+                &repo,
+                None,
+                Some(home.into_os_string())
+            )
+            .is_empty()
+        );
+    }
+
+    /// A file the bridge listed without reading is shown as not read, with
+    /// why, and is not handed to the editor either.
+    #[test]
+    fn a_memory_file_the_bridge_withheld_says_why_and_cannot_be_edited() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be made");
+        let home = dir.path().join("home");
+        let repo = home.join("src").join("repo");
+        let outside = home.join("outside.md");
+        for (path, text) in [
+            (repo.join("CLAUDE.md"), "@../../outside.md @~/.ssh/key\n"),
+            (outside.clone(), "outside\n"),
+            (home.join(".ssh").join("key"), "PRIVATE\n"),
+        ] {
+            std::fs::create_dir_all(path.parent().expect("a file has a directory"))
+                .expect("the temporary directory is writable");
+            std::fs::write(&path, text).expect("the temporary directory is writable");
+        }
+        let claude = config("[profiles.max]\nbackend = \"claude\"\n");
+        let listed = memory(
+            claude.profiles().get("max"),
+            &repo,
+            None,
+            Some(home.into_os_string()),
+        );
+        let imported: Vec<(Option<&str>, Option<&str>, bool)> = listed
+            .iter()
+            .filter(|file| file.depth == 1)
+            .map(|file| {
+                (
+                    file.text.as_deref(),
+                    file.note.as_deref(),
+                    file.editable.is_some(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            imported,
+            [
+                (
+                    None,
+                    Some("not read: outside the repository and the CLI's markdown"),
+                    false
+                ),
+                (None, Some("not read: where credentials are kept"), false),
+            ]
+        );
+    }
+
     /// The `claude` CLI's own settings on a machine that has none, which is
     /// every machine these tests run on.
     const NO_HOME: Option<OsString> = None;
 
     #[test]
+    fn a_resumed_session_starts_from_what_its_transcript_last_recorded_it_spending() {
+        let config = config("[profiles.max]\nbackend = \"claude\"\n");
+        let selected = config
+            .select(Some("max"))
+            .expect("the profile is defined")
+            .expect("a profile was selected");
+        let claude = tempfile::tempdir().expect("a temporary directory");
+        let root = Path::new("/repo");
+        let dir = transcript::directory(claude.path(), root);
+        std::fs::create_dir_all(&dir).expect("the project directory is made");
+        std::fs::write(
+            dir.join("s-1.jsonl"),
+            r#"{"type":"cost-state","totalCostUSD":0.25,"modelUsage":{"opus-5":{"inputTokens":1,"outputTokens":2,"cacheReadInputTokens":3,"cacheCreationInputTokens":4,"costUSD":0.25}}}"#,
+        )
+        .expect("the transcript is written");
+
+        let found = spent(
+            &selected,
+            root,
+            "s-1",
+            Some(claude.path().as_os_str().to_owned()),
+            NO_HOME,
+        );
+        assert_eq!(found.cost_usd("opus-5"), Some(0.25));
+        let options = resumed_options(
+            root,
+            &selected,
+            &Attach {
+                resume: Some("s-1".to_owned()),
+                mode: Some(niobe_core::event::Mode::Plan),
+                budget_usd: None,
+                title: false,
+                terse: false,
+                decisions: false,
+                tap: None,
+                trim: None,
+            },
+            Some(claude.path().as_os_str().to_owned()),
+            NO_HOME,
+        )
+        .expect("the options are made");
+        assert_eq!(options.spent.cost_usd("opus-5"), Some(0.25));
+        assert_eq!(options.resume.as_deref(), Some("s-1"));
+        assert_eq!(options.mode, niobe_core::event::Mode::Plan);
+
+        let missing = spent(
+            &selected,
+            root,
+            "s-2",
+            Some(claude.path().as_os_str().to_owned()),
+            NO_HOME,
+        );
+        assert!(missing.is_empty());
+    }
+
+    #[test]
+    fn a_transcript_that_cannot_be_read_leaves_the_earlier_spend_unknown_and_says_why() {
+        let config = config("[profiles.max]\nbackend = \"claude\"\n");
+        let selected = config
+            .select(Some("max"))
+            .expect("the profile is defined")
+            .expect("a profile was selected");
+        let claude = tempfile::tempdir().expect("a temporary directory");
+        let root = Path::new("/repo");
+        let dir = transcript::directory(claude.path(), root);
+        std::fs::create_dir_all(dir.join("s-1.jsonl")).expect("a directory where the file is");
+
+        let found = spent(
+            &selected,
+            root,
+            "s-1",
+            Some(claude.path().as_os_str().to_owned()),
+            NO_HOME,
+        );
+        assert!(!found.is_known());
+        let first = niobe_bridge_claude::Translator::new("max")
+            .resuming(&found)
+            .line(r#"{"type":"system","subtype":"init","session_id":"s-1","model":"opus-5"}"#);
+        let Some(Event::Notice { message }) = first.first() else {
+            panic!("the first event says the spend is unknown: {first:?}");
+        };
+        assert!(message.contains("s-1.jsonl"), "{message}");
+    }
+
+    #[test]
     fn a_session_under_no_profile_is_attached_to_nothing() {
-        let attachment = attach(Path::new("/repo"), None, &Attach::default(), NO_HOME)
+        let attachment = attach(Path::new("/repo"), None, &Attach::default(), None, NO_HOME)
             .expect("nothing to start");
 
         assert!(!attachment.attached());
@@ -355,6 +957,7 @@ mod tests {
             Path::new("/repo"),
             Some(&selected),
             &Attach::default(),
+            None,
             NO_HOME,
         )
         .expect("nothing to start");
@@ -412,6 +1015,138 @@ mod tests {
             .expect("the profile names no settings file to be missing");
 
         assert_eq!(options.billing, Some(niobe_core::Billing::Metered));
+    }
+
+    #[test]
+    fn a_decision_stated_the_way_the_prompt_asks_is_one_the_shell_reads() {
+        let asked = decisions_asked();
+        assert!(asked.contains("`DECISION:`"), "{asked}");
+        let reply = "Fixed it.\nDECISION: left the exporter alone; it is out of scope.";
+        assert_eq!(
+            niobe_core::decision::decisions(reply),
+            ["left the exporter alone; it is out of scope."]
+        );
+    }
+
+    #[test]
+    fn a_terse_new_conversation_appends_the_prompt_before_the_profiles_own_arguments() {
+        let config =
+            config("[profiles.max]\nbackend = \"claude\"\nargs = [\"--add-dir\", \"/other\"]\n");
+        let selected = config
+            .select(Some("max"))
+            .expect("the profile is defined")
+            .expect("a profile was selected");
+        let args = |with: &Attach| {
+            claude_options(Path::new("/repo"), &selected, with, NO_HOME)
+                .expect("the profile names no settings file to be missing")
+                .args
+        };
+
+        let terse = Attach {
+            terse: true,
+            ..Attach::default()
+        };
+        assert_eq!(
+            args(&terse),
+            ["--append-system-prompt", TERSE, "--add-dir", "/other"]
+        );
+        assert_eq!(args(&Attach::default()), ["--add-dir", "/other"]);
+        let both = Attach {
+            decisions: true,
+            ..terse.clone()
+        };
+        assert_eq!(
+            args(&both),
+            [
+                "--append-system-prompt",
+                &format!("{TERSE}\n\n{}", decisions_asked()),
+                "--add-dir",
+                "/other"
+            ],
+            "one prompt, holding both"
+        );
+        let carried_on = Attach {
+            resume: Some("abc".to_owned()),
+            ..terse
+        };
+        assert_eq!(
+            args(&carried_on),
+            ["--add-dir", "/other"],
+            "a conversation keeps the prompt it began with"
+        );
+    }
+
+    #[test]
+    fn a_trimmed_session_starts_the_cli_under_its_settings_with_the_hook_added() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let own = dir.path().join("own.json");
+        std::fs::write(&own, r#"{"env":{"A":"1"}}"#).expect("the settings are written");
+        let config = config(&format!(
+            "[profiles.max]\nbackend = \"claude\"\nsettings = \"{}\"\n",
+            own.display()
+        ));
+        let selected = config
+            .select(Some("max"))
+            .expect("the profile is defined")
+            .expect("a profile was selected");
+        let trim = crate::trim::Trim {
+            exe: PathBuf::from("/bin/niobe"),
+            dir: dir.path().join(".niobe").join(crate::trim::DIR),
+        };
+        let with = Attach {
+            resume: Some("abc".to_owned()),
+            trim: Some(trim.clone()),
+            ..Attach::default()
+        };
+
+        let options = claude_options(dir.path(), &selected, &with, NO_HOME)
+            .expect("the settings are found and copied");
+
+        let settings = options.settings.expect("the CLI is handed settings");
+        assert_eq!(
+            settings,
+            trim.dir
+                .join("claude-settings-max.json")
+                .display()
+                .to_string(),
+            "a conversation carried on is trimmed too"
+        );
+        let written = std::fs::read_to_string(&settings).expect("the copy is there");
+        assert!(written.contains(r#""A": "1""#), "{written}");
+        assert!(written.contains("hook trim --raw"), "{written}");
+        assert_eq!(
+            std::fs::read_to_string(&own).expect("the profile's file is there"),
+            r#"{"env":{"A":"1"}}"#,
+            "the profile's own file is left as it was"
+        );
+    }
+
+    #[test]
+    fn a_new_session_asks_the_cli_for_its_title_only_where_titles_are_on() {
+        let config = config("[profiles.max]\nbackend = \"claude\"\n");
+        let selected = config
+            .select(Some("max"))
+            .expect("the profile is defined")
+            .expect("a profile was selected");
+        let asks = |with: &Attach| {
+            claude_options(Path::new("/repo"), &selected, with, NO_HOME)
+                .expect("the profile names no settings file to be missing")
+                .ask_title
+        };
+
+        assert!(asks(&Attach {
+            title: true,
+            ..Attach::default()
+        }));
+        assert!(!asks(&Attach::default()), "with titles off no call is made");
+        assert!(
+            !asks(&Attach {
+                title: true,
+                resume: Some("s-1".to_owned()),
+                ..Attach::default()
+            }),
+            "a session carried on was titled, if at all, when it began"
+        );
     }
 
     #[test]
@@ -551,6 +1286,11 @@ mod tests {
                 resume: None,
                 mode: Some(Mode::Plan),
                 budget_usd: Some(0.5),
+                title: false,
+                terse: false,
+                decisions: false,
+                tap: None,
+                trim: None,
             },
             NO_HOME,
         )
@@ -687,5 +1427,149 @@ mod tests {
             "{said}"
         );
         assert!(said.contains("is not on PATH"), "{said}");
+    }
+    /// The opening and the end of one turn of conversation `s-9`, gated in
+    /// plan mode, as the CLI writes them.
+    const ONE_TURN: &str = r#"printf '%s\n' '{"type":"system","subtype":"init","session_id":"s-9","model":"claude-sonnet-5","permissionMode":"plan"}' '{"type":"result","subtype":"success","is_error":false,"session_id":"s-9"}'"#;
+
+    /// Drains `bridge` until `wanted` arrives, and hands back what it drained.
+    fn drained_until(bridge: &mut dyn Bridge, wanted: impl Fn(&Event) -> bool) -> Vec<Event> {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let mut events = Vec::new();
+        while !events.iter().any(&wanted) {
+            assert!(
+                std::time::Instant::now() < until,
+                "it never came: {events:#?}"
+            );
+            events.extend(bridge.drain());
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        events
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_cli_stopped_between_turns_is_started_again_on_its_conversation_by_the_next_prompt() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let bin = dir.path().join("bin");
+        std::fs::create_dir(&bin).expect("the stand-in's directory is made");
+        let seen = dir.path().join("seen");
+        std::fs::create_dir(&seen).expect("the record's directory is made");
+        // Started once, it answers a turn and then leaves the way Node does on
+        // a SIGTERM; started again, it answers and stays. Each start records
+        // the arguments it was given. Only this directory and the system's
+        // own are on its PATH, so no real `claude` can be reached.
+        let script = bin.join("claude");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nn=$(ls {seen} | wc -l | tr -d ' ')\necho \"$@\" > {seen}/$n\nread -r initialize\nread -r turn\n{ONE_TURN}\n[ \"$n\" = 0 ] && exit 143\nexec sleep 30\n",
+                seen = seen.display()
+            ),
+        )
+        .expect("the stand-in is written");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+            .expect("the stand-in is made executable");
+        let config = config(&format!(
+            "[profiles.max]\nbackend = \"claude\"\nenv = {{ PATH = \"{}:/usr/bin:/bin\" }}\n",
+            bin.display()
+        ));
+        let selected = config
+            .select(Some("max"))
+            .expect("the profile is defined")
+            .expect("a profile was selected");
+
+        let mut attachment = attach(
+            dir.path(),
+            Some(&selected),
+            &Attach::default(),
+            Some(dir.path().join("cli").into_os_string()),
+            NO_HOME,
+        )
+        .expect("the stand-in starts");
+        let groups = attachment.take_process_groups().expect("a CLI was started");
+        let first = groups.try_recv().expect("the first group is named");
+        let bridge = attachment.bridge();
+        bridge.send("one", &[]).expect("the turn is sent");
+        let events = drained_until(bridge, |event| matches!(event, Event::Notice { .. }));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Event::Error { fatal: true, .. })),
+            "{events:#?}"
+        );
+
+        bridge
+            .send("two", &[])
+            .expect("the CLI is started again and sent the turn");
+        drained_until(bridge, |event| matches!(event, Event::TurnEnded));
+
+        let again = groups.try_recv().expect("the new group is named");
+        assert_ne!(again, first);
+        let argv = std::fs::read_to_string(seen.join("1")).expect("the second start recorded");
+        assert!(argv.contains("--resume s-9"), "{argv}");
+        assert!(argv.contains("--permission-mode plan"), "{argv}");
+    }
+
+    #[test]
+    fn a_cli_started_again_starts_from_what_its_transcript_last_recorded_it_spending() {
+        let claude = tempfile::tempdir().expect("a temporary directory");
+        let root = Path::new("/repo");
+        let dir = transcript::directory(claude.path(), root);
+        std::fs::create_dir_all(&dir).expect("the project directory is made");
+        std::fs::write(
+            dir.join("s-9.jsonl"),
+            r#"{"type":"cost-state","totalCostUSD":0.25,"modelUsage":{"opus-5":{"inputTokens":1,"outputTokens":2,"cacheReadInputTokens":3,"cacheCreationInputTokens":4,"costUSD":0.25}}}"#,
+        )
+        .expect("the transcript is written");
+        let mut next = Options::new(root, "max");
+        next.resume = Some("s-9".to_owned());
+
+        let carried = carried_on(next, Some(&dir));
+
+        assert_eq!(carried.spent.cost_usd("opus-5"), Some(0.25));
+        assert_eq!(carried.resume.as_deref(), Some("s-9"));
+    }
+
+    #[test]
+    fn a_stream_directory_outside_the_repository_is_made_and_one_inside_it_is_refused() {
+        let outside = tempfile::tempdir().expect("a scratch directory");
+        let repository = tempfile::tempdir().expect("a scratch directory");
+        let os = |path: &Path| Some(OsString::from(path));
+
+        let made = stream_tap(repository.path(), os(&outside.path().join("taps")))
+            .expect("a directory outside the repository is fine")
+            .expect("one was named");
+        assert!(made.is_dir(), "{made:?}");
+
+        let inside = stream_tap(repository.path(), os(&repository.path().join("taps")))
+            .expect_err("the repository is where it could be committed");
+        assert!(inside.contains("inside the repository"), "{inside}");
+        assert!(
+            !repository.path().join("taps").exists() || inside.contains("inside"),
+            "{inside}"
+        );
+
+        // A link out of the repository to a place inside it is inside it.
+        let link = outside.path().join("link");
+        std::os::unix::fs::symlink(repository.path(), &link).expect("a link is made");
+        let through = stream_tap(repository.path(), os(&link.join("taps")))
+            .expect_err("the real path is what is compared");
+        assert!(through.contains("inside the repository"), "{through}");
+    }
+
+    #[test]
+    fn a_stream_directory_that_is_not_a_whole_path_or_is_unset_is_not_taken() {
+        let repository = tempfile::tempdir().expect("a scratch directory");
+
+        assert_eq!(stream_tap(repository.path(), None), Ok(None));
+        assert_eq!(
+            stream_tap(repository.path(), Some(OsString::new())),
+            Ok(None)
+        );
+        let relative = stream_tap(repository.path(), Some(OsString::from("taps")))
+            .expect_err("a relative path depends on where niobe was started");
+        assert!(relative.contains("not a whole path"), "{relative}");
     }
 }

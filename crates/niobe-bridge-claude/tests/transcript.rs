@@ -13,9 +13,12 @@
 )]
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use niobe_bridge_claude::transcript;
-use niobe_core::event::{AgentOutcome, Backend, CostBasis, Event, Mode, SessionMeta, ToolOutcome};
+use niobe_core::event::{
+    AgentOutcome, Backend, CompactTrigger, Event, Mode, SessionMeta, ToolOutcome,
+};
 use niobe_core::session::SessionState;
 use niobe_core::test_run::{FailedTests, TestCounts};
 
@@ -25,6 +28,15 @@ const SESSION: &str = "2f6c1e10-8f4b-4d2a-9c3e-7a5b0d1e6f42";
 /// The session in the fixture that spawned three sub-agents, whose own
 /// transcripts are kept beside it.
 const WITH_AGENTS: &str = "7b3e9d20-4c1a-4f5e-9b8d-2e6a1c0f5d73";
+
+/// The session in the fixture that ran two shell commands in the background,
+/// recorded live as `background-commands.jsonl` beside it.
+const BACKGROUND: &str = "df5b30bf-d767-43d8-b7dd-7b101f69c268";
+
+/// The session in the fixture that the CLI closed while a background agent
+/// was still writing: the agent's last response is stamped after the
+/// session's last stamped record, and before the `cost-state` that bills it.
+const CLOSED_UNDER_AN_AGENT: &str = "4d9e2b71-6a3c-4f08-8e15-c2b7a0d94f36";
 
 /// A directory of transcripts in the shape the CLI writes one.
 fn transcripts() -> PathBuf {
@@ -44,6 +56,23 @@ fn folded_session(id: &str) -> Vec<Event> {
         Path::new("/repo"),
     )
     .expect("the transcript reads")
+}
+
+/// Every event the fixture folds to, in order, with the time each was
+/// recorded at.
+fn timed() -> Vec<transcript::Timed> {
+    transcript::timed(
+        &transcripts().join(format!("{SESSION}.jsonl")),
+        "max",
+        Path::new("/repo"),
+    )
+    .expect("the transcript reads")
+}
+
+/// The moment the fixture's records write as `2026-09-18T09:00:<secs>.000Z`:
+/// `date -u -d 2026-09-18T09:00:00Z +%s` is 1789722000.
+fn at_second(secs: u64) -> Option<SystemTime> {
+    Some(UNIX_EPOCH + Duration::from_secs(1_789_722_000 + secs))
 }
 
 /// What was reported about sub-agent `id`, in order: each report's model,
@@ -107,6 +136,38 @@ fn warnings(events: &[Event]) -> Vec<&str> {
         .collect()
 }
 
+/// The summary a compacted session carries on from is the CLI's, and the
+/// history says the context was compacted rather than putting the summary in
+/// the operator's mouth.
+#[test]
+fn a_compaction_is_reported_as_one_and_not_as_something_the_operator_said() {
+    let events = folded();
+
+    let said: Vec<&str> = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::UserMessage { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        said.iter().all(|text| !text.contains("being continued")),
+        "{said:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .filter(|event| matches!(event, Event::Compacted { .. }))
+            .collect::<Vec<_>>()
+            == [&Event::Compacted {
+                trigger: CompactTrigger::Manual,
+                before: Some(48_210),
+                after: Some(3_120),
+            }],
+        "{events:?}"
+    );
+}
+
 #[test]
 fn a_transcript_is_listed_by_the_id_that_continues_it_and_by_what_was_asked() {
     let listed = transcript::list(&transcripts()).expect("the directory lists");
@@ -115,7 +176,11 @@ fn a_transcript_is_listed_by_the_id_that_continues_it_and_by_what_was_asked() {
     // of its own.
     let mut ids: Vec<&str> = listed.iter().map(|found| found.id.as_str()).collect();
     ids.sort_unstable();
-    assert_eq!(ids, [SESSION, WITH_AGENTS], "{listed:?}");
+    assert_eq!(
+        ids,
+        [SESSION, CLOSED_UNDER_AN_AGENT, WITH_AGENTS, BACKGROUND],
+        "{listed:?}"
+    );
     let only = listed
         .iter()
         .find(|found| found.id == SESSION)
@@ -148,8 +213,12 @@ fn a_transcript_folds_into_what_the_session_said_and_did() {
     };
     // A turn the CLI wrote for itself is still a turn the model was given, so
     // the history carries it; only the session list passes over it.
-    assert!(
-        matches!(first, Event::UserMessage { text } if text.starts_with("<command-name>/clear")),
+    // Read as the command line that was typed, as a live session sees it.
+    assert_eq!(
+        *first,
+        &Event::UserMessage {
+            text: "/clear".to_owned()
+        }
     );
     assert_eq!(
         *second,
@@ -178,6 +247,7 @@ fn a_transcript_folds_into_what_the_session_said_and_did() {
             added: Some(3),
             removed: Some(1),
             hunks: Vec::new(),
+            scope: niobe_core::event::ChangeScope::Project,
         }
     );
     assert!(matches!(closing, Event::AssistantMessage { .. }));
@@ -267,26 +337,6 @@ fn an_imported_session_folds_into_the_totals_the_cli_recorded() {
         "the session cost {} rather than the 0.051 the CLI recorded",
         totals.reported_cost_usd
     );
-}
-
-#[test]
-fn an_imported_cost_is_api_equivalent_and_never_measured() {
-    let events = folded();
-    let priced: Vec<_> = usage_records(&events)
-        .into_iter()
-        .filter(|usage| usage.cost_usd.is_some())
-        .collect();
-
-    assert_eq!(priced.len(), 2, "one per model the session spent on");
-    for usage in &priced {
-        assert_eq!(
-            usage.cost_basis,
-            Some(CostBasis::ApiEquivalent),
-            "{} was priced as {:?}",
-            usage.model,
-            usage.cost_basis
-        );
-    }
 }
 
 #[test]
@@ -385,6 +435,7 @@ fn a_read_back_sub_agent_ends_where_the_transcript_says_it_did() {
             ),
             "{id}"
         );
+        assert!(!reports.is_empty(), "{id} reported nothing");
         assert!(
             reports.iter().all(|at| *at < exit),
             "{id} reported after its end"
@@ -688,6 +739,33 @@ fn a_priced_read_back_sessions_totals_are_unchanged_by_its_agents_side_files() {
     assert_eq!(totals.records_unsettled, 0);
 }
 
+/// An agent that wrote after the session's last stamped record is still
+/// billed by the `cost-state` the CLI wrote as it left, so its response is
+/// folded before that record rather than counted again after it. The totals
+/// are the README's for this session.
+#[test]
+fn an_agent_that_wrote_after_the_sessions_last_stamp_is_billed_once_by_the_closing_cost_state() {
+    let events = folded_session(CLOSED_UNDER_AN_AGENT);
+
+    let totals = SessionState::replay(&events).totals().clone();
+    assert_eq!(
+        (
+            totals.input,
+            totals.output,
+            totals.cache_read,
+            totals.cache_write
+        ),
+        (9, 170, 27_000, 2_800)
+    );
+    assert!((totals.reported_cost_usd - 0.25).abs() < 1e-9);
+    assert_eq!(totals.records_unsettled, 0);
+    let (spawn, reports, _) = positions(&events, "toolu_late");
+    assert!(
+        spawn.is_some() && !reports.is_empty(),
+        "the agent's response is still in the timeline: {events:#?}"
+    );
+}
+
 /// An agent that edits a file changes the repository as much as the session
 /// does. The counts are `git diff --numstat` on the same edit, as the README
 /// records it.
@@ -898,4 +976,469 @@ fn a_saved_test_run_whose_file_is_gone_or_changed_is_not_read() {
         [(None, Some(0))],
         "the file holds more than the CLI wrote"
     );
+}
+
+/// A session closed, resumed and closed again, then resumed once more and
+/// still open, as the README records it: two `cost-state` records and a turn
+/// after the second.
+fn resumed_and_open() -> Vec<Event> {
+    transcript::events(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/resumed-open-transcript.jsonl"),
+        "max",
+        Path::new("/repo"),
+    )
+    .expect("the transcript reads")
+}
+
+/// Each `cost-state` is the session's running total when a process left,
+/// and the CLI carries that total on into the process that resumes it. What
+/// each covers is counted from it, as the difference from the one before;
+/// the turn after the last is covered by none, and is counted from its own
+/// message.
+#[test]
+fn a_turn_after_the_last_accounting_is_counted_from_its_message_and_the_rest_from_the_accounting() {
+    let events = resumed_and_open();
+
+    let counted: Vec<(&str, [u64; 4], Option<f64>)> = usage_records(&events)
+        .iter()
+        .map(|usage| {
+            (
+                usage.model.as_str(),
+                [
+                    usage.input,
+                    usage.output,
+                    usage.cache_read,
+                    usage.cache_write,
+                ],
+                usage.cost_usd,
+            )
+        })
+        .collect();
+    assert_eq!(counted.len(), 3, "{counted:?}");
+    assert_eq!(
+        (counted[0].0, counted[0].1),
+        ("claude-sonnet-5-5", [2, 3, 10_341, 9_370])
+    );
+    assert_eq!(
+        (counted[1].0, counted[1].1),
+        ("claude-sonnet-5-5", [2, 3, 12_071, 11_518])
+    );
+    assert_eq!(
+        counted[2],
+        ("claude-sonnet-5-5", [2, 3, 12_071, 12_221], None),
+        "the open turn is priced by nothing the CLI wrote"
+    );
+    let cost = |at: usize| counted[at].2.expect("an accounting carries what it cost");
+    assert!((cost(0) - 0.039_582_2).abs() < 1e-9, "{}", cost(0));
+    assert!((cost(1) - 0.048_520_2).abs() < 1e-9, "{}", cost(1));
+}
+
+/// The open turn's tokens are measured, so they are in the totals; what it
+/// cost was never written down, so the bill is a floor. The totals come to
+/// what the CLI recorded once that process left, as the README shows.
+#[test]
+fn a_resumed_session_still_open_is_counted_whole_and_its_bill_reads_as_a_floor() {
+    let totals = SessionState::replay(&resumed_and_open()).totals().clone();
+
+    assert_eq!(
+        (
+            totals.input,
+            totals.output,
+            totals.cache_read,
+            totals.cache_write
+        ),
+        (6, 9, 34_483, 33_109)
+    );
+    assert!(
+        (totals.reported_cost_usd - 0.088_102_4).abs() < 1e-9,
+        "{}",
+        totals.reported_cost_usd
+    );
+    assert_eq!(totals.records_unsettled, 1);
+    assert!(!totals.cost_fully_reported());
+}
+
+/// The CLI's own transcript of the session `api-errors.jsonl` recorded; see
+/// `tests/fixtures/README.md`.
+fn api_errors() -> Vec<Event> {
+    transcript::events(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/api-errors-transcript.jsonl"),
+        "max",
+        Path::new("/repo"),
+    )
+    .expect("the transcript reads")
+}
+
+fn notices(events: &[Event]) -> Vec<&str> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Notice { message } => Some(message.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn every_retry_in_a_read_back_session_is_an_error_saying_what_the_cli_said_and_which_attempt() {
+    let events = api_errors();
+
+    let retries: Vec<&str> = warnings(&events)
+        .into_iter()
+        .filter(|warning| warning.contains("retrying"))
+        .collect();
+    assert_eq!(
+        retries,
+        [
+            "a request failed (529 Overloaded), and the CLI is retrying it: attempt 1 of 2, in 0.5 s",
+            "a request failed (529 Overloaded), and the CLI is retrying it: attempt 2 of 2, in 1.2 s",
+            "a request failed (529 Overloaded), and the CLI is retrying it: attempt 1 of 2, in 0.6 s",
+            "a request failed (529 Overloaded), and the CLI is retrying it: attempt 2 of 2, in 1.1 s",
+        ]
+    );
+}
+
+#[test]
+fn a_read_back_refusal_and_banner_are_shown_at_the_level_the_cli_gave_them() {
+    let events = api_errors();
+
+    assert!(
+        warnings(&events).contains(
+            &"`claude-sonnet-5` declined to answer, and the CLI has no other model to give the \
+              request to"
+        ),
+        "{events:#?}"
+    );
+    assert!(
+        notices(&events).contains(
+            &"Sonnet 5's safeguards stopped the response above · continuing once with that noted"
+        ),
+        "{events:#?}"
+    );
+}
+
+#[test]
+fn a_read_back_local_commands_output_is_its_answer_and_a_stop_hook_says_nothing() {
+    let events = api_errors();
+
+    let said = notices(&events);
+    assert!(
+        said.iter()
+            .any(|notice| notice.starts_with("## Context Usage")),
+        "{said:?}"
+    );
+    // Its two stop hooks ran and say nothing; the only notices are the
+    // banner and the output of `/context`.
+    assert_eq!(said.len(), 2, "{said:?}");
+}
+
+#[test]
+fn an_imported_prompt_is_at_the_time_its_record_was_written() {
+    // The record holding the prompt is stamped `2026-09-18T09:00:02.000Z`.
+    let prompt = timed()
+        .into_iter()
+        .find(|timed| {
+            matches!(&timed.event, Event::UserMessage { text } if text == "add an etag to the catalog response")
+        })
+        .expect("the fixture's prompt is read");
+    assert_eq!(prompt.at, at_second(2));
+}
+
+#[test]
+fn every_event_one_record_folds_to_has_that_records_time() {
+    // The assistant record stamped `09:00:06.000Z` says a line and starts the
+    // call `toolu_1`, both in one message.
+    let timed = timed();
+    let said = timed
+        .iter()
+        .find(|timed| matches!(&timed.event, Event::AssistantMessage { text, .. } if text == "I will add the header."))
+        .expect("the line before the call is read");
+    let call = timed
+        .iter()
+        .find(|timed| matches!(&timed.event, Event::ToolCallStart { id, .. } if id.as_str() == "toolu_1"))
+        .expect("the call is read");
+    assert_eq!(said.at, at_second(6));
+    assert_eq!(call.at, at_second(6));
+}
+
+#[test]
+fn no_imported_event_is_given_a_time_its_records_do_not_hold() {
+    // `jq -r 'select(.timestamp) | .timestamp'` over the fixture, less the
+    // line that is not JSON: every stamp it holds is a whole second but two.
+    let recorded: Vec<Option<SystemTime>> = [0, 1, 2, 5, 6, 7, 12, 13]
+        .into_iter()
+        .map(at_second)
+        .chain([
+            at_second(1).map(|at| at + Duration::from_millis(200)),
+            at_second(1).map(|at| at + Duration::from_millis(400)),
+        ])
+        .collect();
+    for timed in timed() {
+        assert!(
+            timed.at.is_none() || recorded.contains(&timed.at),
+            "{:?} at {:?}",
+            timed.event,
+            timed.at
+        );
+    }
+}
+
+#[test]
+fn a_record_with_no_stamp_leaves_its_events_with_no_time() {
+    // The `permission-mode` record that puts the session in plan mode carries
+    // no `timestamp`, and the line that is not JSON has none to read.
+    let timed = timed();
+    let mode = timed
+        .iter()
+        .find(|timed| matches!(timed.event, Event::ModeSelected { mode: Mode::Plan }))
+        .expect("the mode is read");
+    assert_eq!(mode.at, None);
+    let unreadable = timed
+        .iter()
+        .find(|timed| matches!(&timed.event, Event::Notice { .. }))
+        .expect("the line that is not JSON is reported");
+    assert_eq!(unreadable.at, None);
+}
+
+#[test]
+fn a_record_whose_stamp_does_not_parse_still_reads_with_no_time() {
+    let dir = tempfile::tempdir().expect("a scratch directory");
+    let path = dir
+        .path()
+        .join("0d1f6e2a-1b3c-4d5e-8f70-112233445566.jsonl");
+    std::fs::write(
+        &path,
+        concat!(
+            r#"{"type":"user","message":{"role":"user","content":"first"},"timestamp":"the eighteenth of September","cwd":"/repo"}"#,
+            "\n",
+            r#"{"type":"user","message":{"role":"user","content":"second"},"timestamp":"2026-09-18T09:00:02.000Z","cwd":"/repo"}"#,
+            "\n",
+        ),
+    )
+    .expect("the transcript is written");
+    let prompts: Vec<(String, Option<SystemTime>)> =
+        transcript::timed(&path, "max", Path::new("/repo"))
+            .expect("a stamp that does not parse does not fail the read")
+            .into_iter()
+            .filter_map(|timed| match timed.event {
+                Event::UserMessage { text } => Some((text, timed.at)),
+                _ => None,
+            })
+            .collect();
+    assert_eq!(
+        prompts,
+        vec![
+            ("first".to_owned(), None),
+            ("second".to_owned(), at_second(2))
+        ]
+    );
+}
+
+/// A transcript written by the test, under the name the CLI gives one, with
+/// each of `sides` as the file of the sub-agent spawned by the call named.
+fn constructed(session: &[String], sides: &[(&str, Vec<String>)]) -> (tempfile::TempDir, PathBuf) {
+    let id = "5c1e7a42-9d3b-4f60-8a17-3b2d9e0c4f58";
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let path = dir.path().join(format!("{id}.jsonl"));
+    std::fs::write(&path, session.join("\n") + "\n").expect("the session is written");
+    if !sides.is_empty() {
+        let agents = dir.path().join(id).join("subagents");
+        std::fs::create_dir_all(&agents).expect("the side files' directory is made");
+        for (at, (call, lines)) in sides.iter().enumerate() {
+            std::fs::write(
+                agents.join(format!("agent-a{at}.meta.json")),
+                format!(r#"{{"toolUseId":"{call}"}}"#),
+            )
+            .expect("the meta file is written");
+            std::fs::write(
+                agents.join(format!("agent-a{at}.jsonl")),
+                lines.join("\n") + "\n",
+            )
+            .expect("the side file is written");
+        }
+    }
+    (dir, path)
+}
+
+/// An assistant record saying `text`, stamped `at`.
+fn said(text: &str, at: &str) -> String {
+    format!(
+        r#"{{"type":"assistant","message":{{"id":"m-{at}","model":"claude-opus-5","role":"assistant","content":[{{"type":"text","text":"{text}"}}],"usage":{{"input_tokens":1,"output_tokens":1}}}},"uuid":"u-{at}","timestamp":"{at}","version":"2.1.277"}}"#
+    )
+}
+
+/// An assistant record spawning the sub-agent `call`, stamped `at`.
+fn spawning(call: &str, at: &str) -> String {
+    format!(
+        r#"{{"type":"assistant","message":{{"id":"s-{call}","model":"claude-opus-5","role":"assistant","content":[{{"type":"tool_use","id":"{call}","name":"Agent","input":{{"subagent_type":"quick-lookup","description":"Look","prompt":"Look."}}}}],"usage":{{"input_tokens":1,"output_tokens":1}}}},"uuid":"u-{call}","timestamp":"{at}","version":"2.1.277"}}"#
+    )
+}
+
+fn said_in_order(events: &[Event]) -> Vec<(String, bool)> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            Event::AssistantMessage { text, agent } => Some((text.clone(), agent.is_some())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// An agent's record stamped at the same moment as a record of the session's
+/// is not before it: the session's goes first, where the file puts it, and the
+/// agent's after.
+#[test]
+fn an_agents_record_stamped_the_same_moment_as_the_sessions_follows_it() {
+    let at = "2026-09-18T09:00:03.000Z";
+    let (_dir, path) = constructed(
+        &[
+            spawning("toolu_a", "2026-09-18T09:00:01.000Z"),
+            said("main says", at),
+        ],
+        &[("toolu_a", vec![said("agent says", at)])],
+    );
+
+    let events = transcript::events(&path, "max", Path::new("/repo")).expect("it reads");
+
+    assert_eq!(
+        said_in_order(&events),
+        [
+            ("main says".to_owned(), false),
+            ("agent says".to_owned(), true)
+        ],
+        "{events:#?}"
+    );
+}
+
+/// The caption and the release warning are the reader's own words, said
+/// before any record was read, and no record's time is theirs.
+#[test]
+fn what_the_reader_says_itself_has_no_time_and_a_record_keeps_its_own() {
+    let (_dir, path) = constructed(
+        &[
+            r#"{"type":"user","message":{"role":"user","content":"add etag support"},"uuid":"u1","timestamp":"2026-09-18T09:00:01.000Z","version":"9.9.999","sessionId":"s"}"#.to_owned(),
+        ],
+        &[],
+    );
+
+    let timed = transcript::timed(&path, "max", Path::new("/repo")).expect("it reads");
+
+    let at = |wanted: fn(&Event) -> bool| {
+        timed
+            .iter()
+            .find(|entry| wanted(&entry.event))
+            .map(|entry| entry.at)
+    };
+    assert_eq!(at(|e| matches!(e, Event::Titled { .. })), Some(None));
+    assert_eq!(
+        at(|e| matches!(e, Event::Error { .. })),
+        Some(None),
+        "the release warning: {timed:#?}"
+    );
+    let stamp = at(|e| matches!(e, Event::UserMessage { .. })).flatten();
+    assert_eq!(
+        stamp,
+        Some(UNIX_EPOCH + Duration::from_secs(1_789_722_001)),
+        "{timed:#?}"
+    );
+}
+
+/// What the CLI's `informational` record says at the level of an error is
+/// shown as one, and a `scheduled_task_fire` that says nothing says nothing.
+#[test]
+fn an_informational_record_keeps_its_level_and_an_empty_fire_is_no_notice() {
+    let record = |extra: &str| {
+        format!(
+            r#"{{"type":"system",{extra},"uuid":"x","timestamp":"2026-09-18T09:00:02.000Z","version":"2.1.277"}}"#
+        )
+    };
+    let (_dir, path) = constructed(
+        &[
+            record(
+                r#""subtype":"informational","content":"the disk is nearly full","level":"error""#,
+            ),
+            record(r#""subtype":"scheduled_task_fire","content":"   ""#),
+            record(r#""subtype":"informational","content":"fine","level":"info""#),
+        ],
+        &[],
+    );
+
+    let events = transcript::events(&path, "max", Path::new("/repo")).expect("it reads");
+
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Error { message, fatal: false } if message == "the disk is nearly full"
+        )),
+        "an error level is a warning: {events:#?}"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Notice { message } if message == "fine"
+        )),
+        "{events:#?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::Notice { message } if message.trim().is_empty())),
+        "an empty fire says nothing: {events:#?}"
+    );
+}
+
+/// Two files of agent records that name one call are two files for one agent,
+/// which a map would let replace each other by the directory's order: the first
+/// by name is read, deterministically, and the other is said to be passed over.
+#[test]
+fn two_side_files_naming_one_call_say_which_was_not_read() {
+    let at = "2026-09-18T09:00:03.000Z";
+    let (_dir, path) = constructed(
+        &[spawning("toolu_a", "2026-09-18T09:00:01.000Z")],
+        &[
+            ("toolu_a", vec![said("first file", at)]),
+            ("toolu_a", vec![said("second file", at)]),
+        ],
+    );
+
+    let events = transcript::events(&path, "max", Path::new("/repo")).expect("it reads");
+
+    assert_eq!(
+        said_in_order(&events),
+        [("first file".to_owned(), true)],
+        "{events:#?}"
+    );
+    let warned: Vec<&str> = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Error { message, .. } => Some(message.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(warned.len(), 1, "{warned:?}");
+    assert!(
+        warned[0].contains("toolu_a") && warned[0].contains("agent-a1"),
+        "{warned:?}"
+    );
+}
+
+#[test]
+fn a_read_back_background_commands_end_is_the_notice_the_live_stream_gave() {
+    let read_back = folded_session(BACKGROUND);
+    let mut translator = niobe_bridge_claude::Translator::new("max").in_dir("/repo");
+    let live: Vec<Event> = include_str!("fixtures/background-commands.jsonl")
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .flat_map(|line| translator.line(line))
+        .collect();
+
+    assert_eq!(
+        notices(&read_back),
+        [
+            "the background command `sleep 2; echo finished-in-background` finished with exit \
+             code 0",
+            "the background command `sleep 3; echo about-to-fail; exit 3` failed with exit code 3",
+        ]
+    );
+    assert_eq!(notices(&read_back), notices(&live));
 }

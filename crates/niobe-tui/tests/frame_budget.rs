@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) Viacheslav Shynkarenko
 
-//! How long the shell takes to redraw, and to take a long line into the
-//! composer.
+//! How long the shell takes to redraw, to take a long line into the
+//! composer, and to show a file written from scratch.
 //!
 //! This is a test binary of its own. Cargo runs test binaries one after
 //! another, so no other test draws while these frames are timed; inside one
@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use common::{MARKDOWN_REPLY, at_work, hunk, running_session, screen};
 use niobe_core::event::Event;
-use niobe_tui::app::{App, Arrival, WorkingFile};
+use niobe_tui::app::{App, Arrival, COMPOSER_CAP, WorkingFile};
 use niobe_tui::theme::{Depth, THEMES};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -102,6 +102,110 @@ fn a_long_session_of_markdown_redraws_inside_a_frame_budget() {
     );
 }
 
+/// Replies in the transcript a search is held open over, each
+/// [`MARKDOWN_REPLY`].
+const SEARCHED_REPLIES: usize = 600;
+
+/// The redraw every tick makes with a search open over a long session, a
+/// phrase of every reply found: the bar counts the matches before anything is
+/// drawn, so the frame has to know them all, and an entry is searched when
+/// it is drawn again rather than on every frame.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "a frame is timed in an optimised build")]
+fn a_search_open_over_a_long_session_redraws_inside_a_frame_budget() {
+    let _alone = ALONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut app = running_session();
+    for _ in 0..SEARCHED_REPLIES {
+        app.apply(&Event::UserMessage {
+            text: "What changed?".to_owned(),
+        });
+        app.apply(&Event::AssistantMessage {
+            text: MARKDOWN_REPLY.to_owned(),
+            agent: None,
+        });
+    }
+    app.on_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+    for c in "answered from the lru".chars() {
+        app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+    }
+    let frame = screen(&mut app, 200, 60);
+    // The session the replies are added to says the phrase once itself.
+    let found = SEARCHED_REPLIES + 1;
+    assert!(
+        frame.contains(&format!(" of {found} ")),
+        "every reply's matches are counted, or the frame times nothing: {frame}"
+    );
+
+    let median = median_frame(&mut app, &[(200, 60)]);
+
+    assert!(
+        median <= FRAME_BUDGET,
+        "the median frame with a search open over {SEARCHED_REPLIES} markdown replies at \
+         200x60 took {median:?}, over the {FRAME_BUDGET:?} budget"
+    );
+}
+
+/// The size of the one reply an idle session holds: an agent that printed a
+/// generated file, or a log, back into the conversation.
+const HUGE_REPLY_BYTES: usize = 20 * 1024 * 1024;
+
+/// What holding a reply of [`HUGE_REPLY_BYTES`] may add to the redraw an idle
+/// shell makes every tick, ten a second: 1% of one core. A fresh idle shell
+/// spends about as much again, and the two together stay under 2%, which is
+/// what a shell left open beside the editor may cost.
+const IDLE_ALLOWANCE: Duration = Duration::from_millis(1);
+
+/// The redraw every tick makes while nothing happens, with one reply of
+/// [`HUGE_REPLY_BYTES`] in the transcript, against the same session's redraw
+/// without it. The reply was laid out once when it arrived; a frame that asks
+/// again whether it changed must not cost what reading all of it costs.
+///
+/// The two sessions' frames are timed in turn, so that what else the machine
+/// is doing slows both alike.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "a frame is timed in an optimised build")]
+fn an_idle_session_holding_a_twenty_megabyte_reply_redraws_as_fast_as_one_without() {
+    let _alone = ALONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let idle = |reply: String| {
+        let mut app = running_session();
+        app.apply(&Event::UserMessage {
+            text: "Print the generated catalog.".to_owned(),
+        });
+        app.apply(&Event::AssistantMessage {
+            text: reply,
+            agent: None,
+        });
+        app.apply(&Event::TurnEnded);
+        let _ = screen(&mut app, 200, 60);
+        app
+    };
+    let mut holding = idle(MARKDOWN_REPLY.repeat(HUGE_REPLY_BYTES / MARKDOWN_REPLY.len()));
+    let mut without = idle(MARKDOWN_REPLY.to_owned());
+
+    let mut times: Vec<(Duration, Duration)> = (0..FRAMES)
+        .map(|_| (frame_time(&mut holding), frame_time(&mut without)))
+        .collect();
+    times.sort_unstable_by_key(|(holding, without)| holding.saturating_sub(*without));
+    let (holding, without) = times[FRAMES / 2];
+
+    assert!(
+        holding.saturating_sub(without) <= IDLE_ALLOWANCE,
+        "the median idle frame holding a {HUGE_REPLY_BYTES}-byte reply at 200x60 took \
+         {holding:?} against {without:?} without it, over the {IDLE_ALLOWANCE:?} allowance"
+    );
+}
+
+/// How long one frame of `app` takes to draw at 200x60.
+fn frame_time(app: &mut App) -> Duration {
+    let started = Instant::now();
+    let _ = screen(app, 200, 60);
+    started.elapsed()
+}
+
 /// File changes in a long session's transcript, each drawn as its diff.
 const LONG_SESSION_DIFFS: usize = 50;
 
@@ -174,12 +278,15 @@ fn session_of_diffs() -> App {
             summary: Some(path.clone()),
             exit_code: None,
             error: None,
+            command: None,
+            untrimmed: None,
         });
         app.apply(&Event::FileChange {
             path,
             added: Some(8),
             removed: Some(4),
             hunks: vec![edit_hunk(40), edit_hunk(210)],
+            scope: niobe_core::event::ChangeScope::Project,
         });
     }
     app
@@ -208,11 +315,179 @@ fn edit_hunk(start: u64) -> niobe_core::diff::Hunk {
     )
 }
 
+/// Lines in a file written from scratch, as an agent writes a generated file
+/// or a lock file: a diff of every line in it, which the transcript cuts at
+/// twenty rows.
+const WRITTEN_LINES: usize = 100_000;
+
+/// How long a file of [`WRITTEN_LINES`] may take to reach the transcript and
+/// be drawn there. Longer than a frame, because the change is hashed and
+/// laid out once when it arrives; short enough that the shell does not stop.
+const WRITE_BUDGET: Duration = Duration::from_millis(50);
+
+/// How many times the write is applied and drawn. Odd, so the median is one
+/// of them; few, because each needs a session and a file of its own.
+const WRITES: usize = 7;
+
+/// A file written from scratch reaches the transcript and is drawn there
+/// without a pause the operator would notice, however many lines it has:
+/// the transcript draws twenty of them, and what that costs grows with the
+/// file no faster than its length.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "a write is timed in an optimised build")]
+fn a_hundred_thousand_line_write_lands_and_draws_inside_the_write_budget() {
+    let _alone = ALONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let written = written_file();
+
+    let mut times: Vec<Duration> = (0..WRITES)
+        .map(|_| {
+            let mut app = running_session();
+            let _ = screen(&mut app, 200, 60);
+            let write = write_of(&written);
+            let started = Instant::now();
+            for event in &write {
+                app.apply(event);
+            }
+            let frame = screen(&mut app, 200, 60);
+            let took = started.elapsed();
+            assert!(
+                frame.contains("… 99980 more rows"),
+                "the write is drawn cut, or its time says nothing: {frame}"
+            );
+            took
+        })
+        .collect();
+    times.sort_unstable();
+    let median = times[WRITES / 2];
+
+    assert!(
+        median <= WRITE_BUDGET,
+        "a {WRITTEN_LINES}-line write took {median:?} to apply and draw, over the \
+         {WRITE_BUDGET:?} budget"
+    );
+}
+
+/// A permission question for a write of [`WRITTEN_LINES`] lines is drawn with
+/// every tick while it waits, and the file is in the call it draws from: the
+/// frame has to cost what the twenty rows it shows do, not the file. Timed
+/// cut, as it comes up, and under Ctrl+T, which lays the whole change out.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "a frame is timed in an optimised build")]
+fn a_question_for_a_hundred_thousand_line_write_redraws_inside_the_write_budget() {
+    let _alone = ALONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let content = written_file();
+    let path = "catalog/generated.ts";
+    let mut app = running_session();
+    app.apply(&Event::PermissionRequest {
+        id: "huge".into(),
+        tool: "Write".to_owned(),
+        input: serde_json::json!({ "file_path": path, "content": content }).to_string(),
+        target: Some(path.to_owned()),
+        proposal: Some(niobe_core::Proposal::new(
+            niobe_core::Action::Write {
+                path: path.to_owned(),
+                content: content.clone(),
+                existed: Some(false),
+            },
+            ["file_path", "content"],
+        )),
+        reason: None,
+        agent: None,
+    });
+    let first = screen(&mut app, 200, 60);
+    assert!(
+        first.contains("more rows"),
+        "the change is drawn cut, or its time says nothing: {first}"
+    );
+
+    let cut = median_frame(&mut app, &[(200, 60)]);
+    assert!(
+        cut <= WRITE_BUDGET,
+        "the median frame of a {WRITTEN_LINES}-line write's question took {cut:?}, over \
+         {WRITE_BUDGET:?}"
+    );
+
+    app.on_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
+    let _ = screen(&mut app, 200, 60);
+    let open = median_frame(&mut app, &[(200, 60)]);
+    assert!(
+        open <= WRITE_BUDGET,
+        "the median frame of the same question under Ctrl+T took {open:?}, over \
+         {WRITE_BUDGET:?}"
+    );
+}
+
+/// A resize with a file of [`WRITTEN_LINES`] in the transcript lays its diff
+/// out again at every width, and still redraws inside a frame.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "a frame is timed in an optimised build")]
+fn a_resize_redraws_a_hundred_thousand_line_write_inside_a_frame_budget() {
+    let _alone = ALONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut app = running_session();
+    for event in &write_of(&written_file()) {
+        app.apply(event);
+    }
+    let _ = screen(&mut app, 200, 60);
+
+    let median = median_frame(&mut app, &[(200, 60), (180, 60)]);
+
+    assert!(
+        median <= FRAME_BUDGET,
+        "the median resized frame with a {WRITTEN_LINES}-line write at 200x60 took \
+         {median:?}, over the {FRAME_BUDGET:?} budget"
+    );
+}
+
+/// A file of [`WRITTEN_LINES`] lines, each different.
+fn written_file() -> String {
+    (1..=WRITTEN_LINES)
+        .map(|n| format!("export const entry{n:06} = \"W/{n:06}\";\n"))
+        .collect()
+}
+
+/// The events of a `Write` that created a file holding `written`: the call,
+/// and the change it made, as the backend reports a file it created.
+fn write_of(written: &str) -> Vec<Event> {
+    let path = "catalog/generated.ts".to_owned();
+    vec![
+        Event::ToolCallStart {
+            id: "write".into(),
+            name: "Write".to_owned(),
+            input: path.clone(),
+            summary: Some(path.clone()),
+            agent: None,
+        },
+        Event::ToolCallEnd {
+            id: "write".into(),
+            name: "Write".to_owned(),
+            input: path.clone(),
+            output: String::new(),
+            bytes: written.len() as u64,
+            outcome: niobe_core::event::ToolOutcome::Ok,
+            summary: Some(path.clone()),
+            exit_code: None,
+            error: None,
+            command: None,
+            untrimmed: None,
+        },
+        Event::FileChange {
+            path,
+            added: Some(WRITTEN_LINES as u64),
+            removed: Some(0),
+            hunks: vec![niobe_core::diff::Hunk::created(written).expect("lines written")],
+            scope: niobe_core::event::ChangeScope::Project,
+        },
+    ]
+}
+
 /// The redraw every tick makes while a turn is running, in every theme: the
-/// long session of markdown replies with the desktop moving behind it. The
-/// motion is worked out for the cells the panes leave uncovered and no more,
-/// so it costs the frame next to nothing; if it ever costs more, it is the
-/// motion that gives way, not this budget.
+/// long session of markdown replies, with the spinner under it moving.
 #[test]
 #[cfg_attr(debug_assertions, ignore = "a frame is timed in an optimised build")]
 fn a_running_turn_redraws_inside_a_frame_budget_in_every_theme() {
@@ -243,6 +518,82 @@ fn a_running_turn_redraws_inside_a_frame_budget_in_every_theme() {
                 theme.name
             );
         }
+    }
+}
+
+/// Records owed for in a session that never settles — a transcript read in
+/// with no money in it, a backend that never reports any — which the shell
+/// values one record at a time, as the request each was, on every frame.
+const OWED_RECORDS: usize = 10_000;
+
+/// A metered session owing for [`OWED_RECORDS`] requests over two models,
+/// with the Usage pane drawing each model's valued cost and the session's.
+///
+/// The price sheet here stands in for the ledger's, which this crate cannot
+/// name: each record is looked up by its model and priced by its own prompt
+/// against a long-context threshold, which is the work the ledger does per
+/// record. Timed against the bundled table itself on the machine this was
+/// written on (M2 Pro, release): one valuation of all 10,000 took 365 µs and
+/// the frame 1.5 ms.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "a frame is timed in an optimised build")]
+fn a_session_owing_for_many_requests_redraws_inside_a_frame_budget() {
+    let _alone = ALONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut app = running_session().with_prices(Box::new(Tiered));
+    app.apply(&Event::Billing {
+        billing: niobe_core::event::Billing::Metered,
+    });
+    for n in 0..OWED_RECORDS as u64 {
+        app.apply(&Event::Usage(niobe_core::event::Usage {
+            input: 100 + n,
+            output: 50,
+            cache_read: 1_000 * (n % 300),
+            cache_write: 0,
+            cache_write_1h: Some(0),
+            reasoning: 0,
+            model: TIERED_MODELS[(n % 2) as usize].to_owned(),
+            cost_usd: None,
+            settles_model: Some(false),
+            fast: false,
+        }));
+    }
+    let frame = screen(&mut app, 200, 60);
+    assert!(frame.contains("~$"), "the owed tokens are valued: {frame}");
+
+    let median = median_frame(&mut app, &[(200, 60)]);
+
+    assert!(
+        median <= FRAME_BUDGET,
+        "the median frame owing for {OWED_RECORDS} requests at 200x60 took {median:?}, over \
+         the {FRAME_BUDGET:?} budget"
+    );
+}
+
+/// The models [`Tiered`] prices.
+const TIERED_MODELS: [&str; 2] = ["claude-sonnet-4-5", "claude-opus-5"];
+
+/// Prices a request as the ledger does: its model's rates, dearer past a
+/// 200K prompt.
+#[derive(Debug)]
+struct Tiered;
+
+impl niobe_tui::Prices for Tiered {
+    fn estimate(&self, usage: &niobe_core::event::Usage) -> Option<f64> {
+        let (input, output, read) = match TIERED_MODELS.iter().position(|m| *m == usage.model)? {
+            0 => (3.0, 15.0, 0.3),
+            _ => (5.0, 25.0, 0.5),
+        };
+        let prompt = usage.input + usage.cache_read + usage.cache_write;
+        let dearer = if prompt > 200_000 { 2.0 } else { 1.0 };
+        Some(
+            dearer
+                * (usage.input as f64 * input
+                    + usage.output as f64 * output
+                    + usage.cache_read as f64 * read)
+                / 1e6,
+        )
     }
 }
 
@@ -285,6 +636,7 @@ fn a_large_working_tree_redraws_inside_a_frame_budget() {
             path: format!("crates/niobe-{}/src/module_{n:03}.rs", n % 7),
             added: Some(n as u64),
             removed: Some(n as u64 / 3),
+            new: false,
         })
         .collect();
     app.set_repo(repo);
@@ -300,13 +652,12 @@ fn a_large_working_tree_redraws_inside_a_frame_budget() {
 }
 
 /// A session busy enough that the Activity pane has to build every row it
-/// holds: four sub-agents, ten decisions and a dozen tools.
+/// holds: four sub-agents and a dozen tools.
 ///
 /// The pane builds them all on every frame for the same reason the Changes
 /// pane does — that is what tells it how far it can be scrolled — so what it
 /// costs is timed rather than assumed.
 const BUSY_AGENTS: usize = 4;
-const BUSY_DECISIONS: usize = 10;
 const BUSY_TOOLS: usize = 12;
 
 #[test]
@@ -321,17 +672,8 @@ fn a_busy_activity_pane_redraws_inside_a_frame_budget() {
         app.apply(&Event::AgentSpawn {
             id: format!("busy-{n}").into(),
             parent: None,
+            kind: None,
             label: format!("explorer-{n} → crates/niobe-core/src/session.rs"),
-        });
-    }
-    for n in 0..BUSY_DECISIONS {
-        app.apply(&Event::Decision {
-            summary: format!(
-                "Decision {n}: keep the fold the one place a number comes from, so two \
-                 consumers cannot disagree about what the session spent."
-            ),
-            rationale: None,
-            rejected: vec![],
         });
     }
     for n in 0..BUSY_TOOLS {
@@ -345,6 +687,8 @@ fn a_busy_activity_pane_redraws_inside_a_frame_budget() {
             summary: None,
             exit_code: None,
             error: None,
+            command: None,
+            untrimmed: None,
         });
     }
     let _ = screen(&mut app, 200, 60);
@@ -353,8 +697,7 @@ fn a_busy_activity_pane_redraws_inside_a_frame_budget() {
 
     assert!(
         median <= FRAME_BUDGET,
-        "the median frame with {BUSY_AGENTS} agents, {BUSY_DECISIONS} decisions and \
-         {BUSY_TOOLS} tools at 200x60 took {median:?}, over the {FRAME_BUDGET:?} budget"
+        "the median frame with {BUSY_AGENTS} agents and {BUSY_TOOLS} tools at 200x60 took {median:?}, over the {FRAME_BUDGET:?} budget"
     );
 }
 
@@ -404,13 +747,14 @@ fn keys_read_together_type_a_long_line_in_time_linear_in_its_length() {
 const PASTE_BUDGET: Duration = Duration::from_millis(50);
 
 /// A line pasted whole reaches the composer without a pause the operator
-/// would notice, however long.
+/// would notice, as long as the composer holds.
 #[test]
-fn a_hundred_kilobyte_line_pasted_lands_inside_the_paste_budget() {
+#[cfg_attr(debug_assertions, ignore = "a paste is timed in an optimised build")]
+fn a_line_as_long_as_the_composer_holds_pasted_lands_inside_the_paste_budget() {
     let _alone = ALONE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let text = typed_line(100_000);
+    let text = typed_line(COMPOSER_CAP);
 
     let mut times: Vec<Duration> = (0..FRAMES)
         .map(|_| {
@@ -418,7 +762,13 @@ fn a_hundred_kilobyte_line_pasted_lands_inside_the_paste_budget() {
             let _ = screen(&mut app, 200, 60);
             let started = Instant::now();
             app.on_paste(&text);
-            started.elapsed()
+            let took = started.elapsed();
+            assert_eq!(
+                app.composer().lines()[0].len(),
+                COMPOSER_CAP,
+                "the paste did not land whole, so its time says nothing"
+            );
+            took
         })
         .collect();
     times.sort_unstable();
@@ -426,7 +776,45 @@ fn a_hundred_kilobyte_line_pasted_lands_inside_the_paste_budget() {
 
     assert!(
         median <= PASTE_BUDGET,
-        "a 100 KB one-line paste took {median:?} to land, over the {PASTE_BUDGET:?} budget"
+        "a {COMPOSER_CAP}-byte one-line paste took {median:?} to land, over the \
+         {PASTE_BUDGET:?} budget"
+    );
+}
+
+/// A key typed into a prompt as long as the composer holds lands, and the
+/// frame after it is drawn, inside a frame. The composer's editor lays out
+/// the whole of what it holds again after every edit, which is what
+/// [`COMPOSER_CAP`] is set by: a megabyte on one line took 90 ms a key.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "a key is timed in an optimised build")]
+fn a_key_typed_into_a_prompt_at_the_composer_cap_lands_and_draws_inside_a_frame_budget() {
+    let _alone = ALONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut app = running_session();
+    app.on_paste(&typed_line(COMPOSER_CAP - FRAMES));
+    let _ = screen(&mut app, 200, 60);
+
+    let mut times: Vec<Duration> = (0..FRAMES)
+        .map(|_| {
+            let started = Instant::now();
+            app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+            let _ = screen(&mut app, 200, 60);
+            started.elapsed()
+        })
+        .collect();
+    assert_eq!(
+        app.composer().lines()[0].len(),
+        COMPOSER_CAP,
+        "every key landed, or their times say nothing"
+    );
+    times.sort_unstable();
+    let median = times[FRAMES / 2];
+
+    assert!(
+        median <= FRAME_BUDGET,
+        "a key typed into a {COMPOSER_CAP}-byte line took {median:?} to land and draw, over \
+         the {FRAME_BUDGET:?} budget"
     );
 }
 
@@ -466,4 +854,220 @@ fn typed_line(length: usize) -> String {
     (0..length)
         .map(|n| if n % 7 == 6 { ' ' } else { 'a' })
         .collect()
+}
+
+/// A repository as large as any the list under an `@` word has to rank.
+const LISTED_FILES: usize = 200_000;
+
+/// The list under an `@` word, open over a very large repository: every
+/// frame draws it, so what ranking the listed files costs is what a frame
+/// costs, and it is ranked once for the text typed rather than on every one.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "a frame is timed in an optimised build")]
+fn the_file_list_under_an_at_redraws_inside_a_frame_budget_over_a_large_repository() {
+    let _alone = ALONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut app = running_session();
+    let mut repo = app.repo().clone();
+    repo.files = (0..LISTED_FILES)
+        .map(|n| format!("crates/part_{}/src/file{n}.rs", n % 97))
+        .collect();
+    app.set_repo(repo);
+    app.on_paste("look @file12");
+    assert!(
+        !app.mention_files().0.is_empty(),
+        "the list is open, or its frame would time nothing"
+    );
+    let _ = screen(&mut app, 200, 60);
+
+    let median = median_frame(&mut app, &[(200, 60)]);
+
+    assert!(
+        median <= FRAME_BUDGET,
+        "the median frame with the @ list open over {LISTED_FILES} files at 200x60 took \
+         {median:?}, over the {FRAME_BUDGET:?} budget"
+    );
+}
+
+/// Prompts in a repository's history that has been used for a long while.
+const REMEMBERED_PROMPTS: usize = 20_000;
+
+/// Sessions those prompts were sent in.
+const REMEMBERED_SESSIONS: usize = 400;
+
+/// A repository's history as long as [`REMEMBERED_PROMPTS`], each prompt about
+/// two kilobytes and no two alike, with the history dialog open on `view`.
+fn session_remembering_many_prompts(sessions_view: bool) -> App {
+    use niobe_tui::history::{Past, PastPrompt, PastSession, Target};
+
+    let mut app = running_session().remembers();
+    let target = |n: usize| Target::Recorded(format!("{}", n % REMEMBERED_SESSIONS + 1));
+    let body = "Refactor the catalog fetcher so a 304 answers from the cache. ".repeat(32);
+    app.set_past(Past {
+        prompts: (0..REMEMBERED_PROMPTS)
+            .map(|n| PastPrompt {
+                text: format!("Prompt {n}: {body}"),
+                at: None,
+                session: target(n),
+            })
+            .collect(),
+        sessions: (0..REMEMBERED_SESSIONS)
+            .map(|n| PastSession {
+                target: target(n),
+                last: None,
+                first_prompt: None,
+                title: None,
+                open_elsewhere: false,
+            })
+            .collect(),
+        unread: None,
+    });
+    app.on_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+    if sessions_view {
+        app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    }
+    let _ = screen(&mut app, 120, 30);
+    app
+}
+
+/// The median time a key in the history dialog takes to land and the frame
+/// after it to draw, over keys that filter it, unfilter it and move its
+/// cursor. The filter is a letter no prompt holds, so every prompt is read
+/// to the end to find that.
+fn median_history_key(app: &mut App) -> Duration {
+    let keys = [
+        KeyCode::Char('x'),
+        KeyCode::Backspace,
+        KeyCode::Down,
+        KeyCode::Down,
+    ];
+    let mut times: Vec<Duration> = (0..FRAMES)
+        .map(|n| {
+            let started = Instant::now();
+            app.on_key(KeyEvent::new(keys[n % keys.len()], KeyModifiers::NONE));
+            let _ = screen(app, 120, 30);
+            started.elapsed()
+        })
+        .collect();
+    times.sort_unstable();
+    times[FRAMES / 2]
+}
+
+/// The history dialog over a history of [`REMEMBERED_PROMPTS`]: each key
+/// filters or moves through every prompt there is, and has to land and be
+/// drawn inside a frame.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "a key is timed in an optimised build")]
+fn a_key_in_the_history_dialog_over_twenty_thousand_prompts_lands_and_draws_inside_a_frame_budget()
+{
+    let _alone = ALONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut app = session_remembering_many_prompts(false);
+    let frame = screen(&mut app, 120, 30);
+    assert!(
+        frame.contains("Prompt 0: Refactor"),
+        "the history is listed, or the keys time nothing:\n{frame}"
+    );
+
+    let median = median_history_key(&mut app);
+
+    assert!(
+        median <= FRAME_BUDGET,
+        "a key in the history dialog over {REMEMBERED_PROMPTS} prompts took {median:?} to \
+         land and draw, over the {FRAME_BUDGET:?} budget"
+    );
+}
+
+/// The same history listed by session: each session's prompts are searched
+/// by the filter, so a key has the same prompts to go through.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "a key is timed in an optimised build")]
+fn a_key_in_the_history_dialogs_sessions_over_twenty_thousand_prompts_lands_and_draws_inside_a_frame_budget()
+ {
+    let _alone = ALONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut app = session_remembering_many_prompts(true);
+    let frame = screen(&mut app, 120, 30);
+    assert!(
+        frame.contains("#1 "),
+        "the sessions are listed, or the keys time nothing:\n{frame}"
+    );
+
+    let median = median_history_key(&mut app);
+
+    assert!(
+        median <= FRAME_BUDGET,
+        "a key in the history dialog's sessions over {REMEMBERED_PROMPTS} prompts took \
+         {median:?} to land and draw, over the {FRAME_BUDGET:?} budget"
+    );
+}
+
+/// How large an output the view of one call is timed reading: a megabyte.
+const LARGE_OUTPUT: usize = 1 << 20;
+
+/// A call whose output is a megabyte is opened from the list of calls and
+/// paged through: what is wrapped is what is on screen, so the frame costs a
+/// screenful whether the megabyte is short lines or one line of minified
+/// JSON. Each frame is a key and the draw after it: opening the call, or a
+/// page down through it.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "a frame is timed in an optimised build")]
+fn a_call_with_a_megabyte_of_output_opens_and_pages_inside_a_frame_budget() {
+    let _alone = ALONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let lines = "x".repeat(99) + "\n";
+    for (shape, output) in [
+        ("short lines", lines.repeat(LARGE_OUTPUT / lines.len())),
+        ("one line", "{\"k\":1},".repeat(LARGE_OUTPUT / 8)),
+    ] {
+        let mut app = running_session();
+        app.apply(&Event::ToolCallEnd {
+            id: "large".into(),
+            name: "Bash".to_owned(),
+            input: "{\"command\":\"cat big.json\"}".to_owned(),
+            bytes: output.len() as u64,
+            output,
+            outcome: niobe_core::event::ToolOutcome::Ok,
+            summary: Some("cat big.json".to_owned()),
+            exit_code: Some(0),
+            error: None,
+            command: None,
+            untrimmed: None,
+        });
+        let _ = screen(&mut app, 200, 60);
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+
+        let mut frames: Vec<Duration> = (0..FRAMES)
+            .map(|frame| {
+                let started = Instant::now();
+                if frame % 8 == 0 {
+                    app.on_key(key(KeyCode::Esc));
+                    app.perform(niobe_tui::menu::Action::Calls);
+                    app.on_key(key(KeyCode::Enter));
+                } else {
+                    app.on_key(key(KeyCode::PageDown));
+                }
+                let _ = screen(&mut app, 200, 60);
+                started.elapsed()
+            })
+            .collect();
+        assert!(app.detail().is_some(), "the call is open");
+        frames.sort_unstable();
+        let median = frames[FRAMES / 2];
+        let slowest = frames[FRAMES - 1];
+
+        assert!(
+            median <= FRAME_BUDGET,
+            "{shape}: the median frame reading a {LARGE_OUTPUT}-byte output took {median:?}, \
+             over the {FRAME_BUDGET:?} budget"
+        );
+        assert!(
+            slowest <= FRAME_BUDGET * 2,
+            "{shape}: the slowest frame, opening the call, took {slowest:?}"
+        );
+    }
 }

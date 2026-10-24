@@ -1,0 +1,16 @@
+   Compiling broken v0.1.0 (/work/broken)
+error[E0277]: cannot add `&str` to `u64`
+ --> src/lib.rs:3:11
+  |
+3 |     a + b + "x"
+  |           ^ no implementation for `u64 + &str`
+  |
+  = help: the trait `Add<&str>` is not implemented for `u64`
+  = help: the following other types implement trait `Add<Rhs>`:
+            `&u64` implements `Add<u64>`
+            `&u64` implements `Add`
+            `u64` implements `Add<&u64>`
+            `u64` implements `Add`
+
+For more information about this error, try `rustc --explain E0277`.
+error: could not compile `broken` (lib) due to 1 previous error

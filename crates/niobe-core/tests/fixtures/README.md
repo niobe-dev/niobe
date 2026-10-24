@@ -17,8 +17,9 @@ alongside it — the prompt the operator typed, the answer they gave a
 permission prompt, the model they moved the session to. None of it was written
 by hand.
 
-The CLI's raw stream was kept beside it, and this file is that stream folded
-again through the bridge as it stands, with the shell's events where they were:
+The CLI's raw stream was kept beside it, outside this repository, and this
+file is that stream folded again through the bridge as it stood then, with the
+shell's events where they were:
 616 of the bridge's events compared equal to the ones produced live, and 14
 per-message usage records gained the one-hour share of their cache writes,
 which the live run read as none. Folded once more after the bridge learned to
@@ -26,6 +27,13 @@ pass over the CLI's background-task bookkeeping, 588 compared equal again and
 the 28 entries that had called that bookkeeping unreadable were gone. The last two prompted turns of that stream,
 and the two the CLI started after them, are `niobe-bridge-claude`'s
 `tests/fixtures/sub-agents.jsonl`.
+
+It has not been folded since, so it predates the bridge's `turn_ended`,
+`context`, `billing` and `titled` events and carries none of them: the fold of
+it records no turn, measures no context, knows no billing, and leaves the turn
+the recording was cut in running. `tests/replay.rs` asserts exactly that. The
+fold's handling of those events is held by the Claude bridge's recordings,
+whose tests fold them through the bridge as it stands.
 
 The session works on a small Python catalog client, in a repository scrubbed to
 `/repo`: a `Read` and a `grep`, two `Edit`s that add etag support to
@@ -83,7 +91,7 @@ It carries the cases a real session has and a written one tends not to:
 
 ## `producer-gaps.jsonl`
 
-Nine events, and **synthetic on purpose**. They are what the shared event
+Seven events, and **synthetic on purpose**. They are what the shared event
 model defines and a recording of a healthy, current session cannot contain, so
 that the fold is still held to handling them:
 
@@ -93,7 +101,6 @@ that the fold is still held to handling them:
   error that ends the log arrives, which the fold records as interrupted. The
   Claude bridge reads a sub-agent the CLI stopped as cancelled, and every
   sub-agent in the recorded session completed;
-- a `Decision` and a `Checkpoint`. Nothing produces either yet;
 - an error the session **carried on past** — the one the bridge gives for a
   tool result whose call it never saw announced — and a **fatal** one. Nothing
   failed in the recorded session, so it carries neither; the driver produces
@@ -140,10 +147,10 @@ jq -s '{
   files_changed: (map(select(.type=="file_change").path) | unique | length),
   lines_added: (map(select(.type=="file_change" and .added!=null).added) | add),
   lines_removed: (map(select(.type=="file_change" and .removed!=null).removed) | add),
-  decisions: (map(select(.type=="decision")) | length),
-  checkpoints: (map(select(.type=="checkpoint")) | length),
   agents_spawned: (map(select(.type=="agent_spawn")) | length),
+  agents_completed: (map(select(.type=="agent_exit" and .outcome=="completed")) | length),
   agents_cancelled: (map(select(.type=="agent_exit" and .outcome=="cancelled")) | length),
+  turns_ended: (map(select(.type=="turn_ended")) | length),
   errors: (map(select(.type=="error")) | length),
   fatal_errors: (map(select(.type=="error" and .fatal==true)) | length),
   usage_windows: (map(select(.type=="usage_windows")) | length),
@@ -163,11 +170,48 @@ jq -s '{
 why the test compares it against that figure with a tolerance rather than for
 equality.
 
+### The tools and paths `niobe overview` lists
+
+`niobe-cli`'s `tests/overview.rs` records both logs as two sessions and holds
+the page's tool and path rows against these, read off the logs rather than
+the fold:
+
+```sh
+jq -s -r '[.[] | select(.type == "tool_call_end")] | group_by(.name)
+  | map("\(.[0].name) \(length) \(map(select(.outcome == "failed")) | length)")
+  | .[]' claude-session.jsonl producer-gaps.jsonl
+jq -r 'select(.type == "file_change") | [.path, .added, .removed] | @tsv' claude-session.jsonl
+```
+
+which print `Agent 3 0`, `Bash 12 3`, `Edit 2 0`, `Read 9 0` and `Write 1 0` —
+the calls that ended per tool and those that failed, the `Read` whose start
+the producer dropped among them — and `catalog/fetch.py` at +20 −4 and +1 −0.
+
+### The turns `niobe cost --by-turn` lists
+
+The log predates the event that says a turn ended, so `niobe-cli`'s
+`tests/cost.rs` ends each turn where the next prompt begins and at the end of
+the log, and holds each turn's tokens against the usage records between one
+prompt and the next:
+
+```sh
+jq -s -c 'reduce .[] as $e ({turns: [], cur: null};
+    if $e.type == "user_message" then
+      (if .cur == null then . else .turns += [.cur] end) | .cur = 0
+    elif $e.type == "usage" then
+      .cur += $e.input + $e.output + $e.cache_read + $e.cache_write
+    else . end)
+  | .turns + [.cur]' claude-session.jsonl
+```
+
+which prints `[44767,48532,49940,50810,40791,328148]`, summing to the
+session's 562,988 tokens: nothing is spent before the first prompt.
+
 ### Recording a new one
 
 The recording was made by driving `niobe_bridge_claude::Session` with
 `ask_over_stdio` on, answering each permission prompt the way the shell does
-and writing every event out as it arrived. Three things have to be true of the
+and writing every event out as it arrived. Four things have to be true of the
 machine it runs on, or the recording is of that machine rather than of the CLI:
 
 - **no `PreToolUse` hook that rewrites commands.** One that does will put its

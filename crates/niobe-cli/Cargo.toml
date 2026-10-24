@@ -27,24 +27,29 @@ niobe-bridge-codex.workspace = true
 # The `claude` CLI's own settings file, read to say what a profile that names
 # none is running under. One key of it; nothing is written.
 serde_json.workspace = true
+# A user's theme file, walked for the line each colour is on.
+toml.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 # Stopping a command the operator ran with `!`, and everything it started, as
 # the session ends: its process group is signalled, which std cannot do.
-rustix = { workspace = true, features = ["process"] }
+rustix = { workspace = true, features = ["process", "termios"] }
 
 [dev-dependencies]
 # The shell's key events are ratatui's; the tests drive the shell with them.
 ratatui.workspace = true
 tempfile.workspace = true
+# A second connection to the session store, holding the lock another process
+# would, for the tests that prove recording never waits on it.
+rusqlite.workspace = true
 # The checksum a fake release is published with, computed apart from the
 # `shasum` / `sha256sum` the installer verifies it with.
 sha2.workspace = true
 
 [target.'cfg(unix)'.dev-dependencies]
 # A pty to run the binary on, for the tests that take its terminal away, and
-# `kill` for the one that asks it to stop.
-rustix = { workspace = true, features = ["event", "process", "pty", "termios"] }
+# `kill` for the one that asks it to stop, and a pipe whose reader is gone.
+rustix = { workspace = true, features = ["event", "pipe", "process", "pty", "termios"] }
 
 [lints]
 workspace = true

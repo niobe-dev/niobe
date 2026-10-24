@@ -58,6 +58,10 @@ impl fmt::Display for LocalTime {
 
 /// A day of the week, so a moment further off than today can be named by one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[allow(
+    missing_docs,
+    reason = "the variants are the days of the week, which their names say whole"
+)]
 pub enum Weekday {
     Monday,
     Tuesday,
@@ -305,11 +309,16 @@ pub fn took(duration: Duration) -> String {
 /// One unit, and coarser the older it gets: an age sits in a narrow column
 /// beside the thing it dates, and `12m` there says everything `12m 04s` would.
 /// Under ten seconds it keeps its tenths, because that is the range where the
-/// operator is asking whether something *just* happened.
+/// operator is asking whether something *just* happened, and cuts them down
+/// as [`took`] does, so 9.96 s ago reads `9.9s` and never a `10.0s` the next
+/// unit would have drawn `10s`.
 pub fn ago(duration: Duration) -> String {
     let seconds = duration.as_secs_f64();
     match seconds {
-        ..10.0 => format!("{seconds:.1}s"),
+        ..10.0 => {
+            let tenths = duration.as_millis() / 100;
+            format!("{}.{}s", tenths / 10, tenths % 10)
+        }
         ..60.0 => format!("{}s", duration.as_secs()),
         ..3600.0 => format!("{}m", duration.as_secs() / 60),
         ..86_400.0 => format!("{}h", duration.as_secs() / 3600),
@@ -337,6 +346,25 @@ pub fn upcoming(now: Stamp, at: Stamp) -> Option<String> {
     Some(match at.day() == now.day() {
         true => at.time().to_string(),
         false => format!("{} {}", at.weekday().short(), at.time()),
+    })
+}
+
+/// `14:02`, `Tue 14:02`, `12d ago`: when something that has happened did.
+///
+/// The mirror of [`upcoming`]: earlier today is a clock time, earlier this
+/// week carries its weekday, and anything older, or on a machine that named
+/// no timezone, is how long ago it was, since a weekday more than a week back
+/// names the wrong week. `None` for a moment that has not happened yet.
+pub fn past(now: Stamp, at: Stamp) -> Option<String> {
+    let gone = now.since(at)?;
+    let days = match (now.moment(), at.moment()) {
+        (Some(now), Some(at)) => Some((now.day() - at.day(), at)),
+        _ => None,
+    };
+    Some(match days {
+        Some((0, at)) => at.time().to_string(),
+        Some((1..=6, at)) => format!("{} {}", at.weekday().short(), at.time()),
+        _ => format!("{} ago", ago(gone)),
     })
 }
 
@@ -370,9 +398,20 @@ mod tests {
     /// not land on a boundary, and far from any daylight-saving change.
     const A_MOMENT: Duration = Duration::from_secs(1_789_000_020);
 
+    /// A machine with no timezone makes the two tests below prove nothing;
+    /// a CI runner always has one, so there it is a failure rather than a
+    /// quiet pass.
+    fn a_zone_where_ci_runs(clock: &Clock) {
+        assert!(
+            clock.knows_the_zone() || std::env::var_os("CI").is_none(),
+            "this machine names no timezone, so a time of day cannot be tested"
+        );
+    }
+
     #[test]
     fn a_stamp_has_a_time_of_day_exactly_when_the_machine_named_a_timezone() {
         let clock = Clock::system();
+        a_zone_where_ci_runs(&clock);
         let stamp = clock.at(SystemTime::UNIX_EPOCH + A_MOMENT);
 
         assert_eq!(stamp.local().is_some(), clock.knows_the_zone());
@@ -381,6 +420,7 @@ mod tests {
     #[test]
     fn a_stamp_a_minute_later_reads_a_minute_later_on_the_clock() {
         let clock = Clock::system();
+        a_zone_where_ci_runs(&clock);
         let at = SystemTime::UNIX_EPOCH + A_MOMENT;
         let (Some(first), Some(later)) = (
             clock.at(at).local(),
@@ -453,19 +493,27 @@ mod tests {
         let said = said.trim_start_matches('<');
         if let Some((h, m)) = said.split_once("h ") {
             let (h, m): (f64, f64) = (
-                h.parse().expect("hours"),
-                m.trim_end_matches('m').parse().expect("minutes"),
+                h.parse()
+                    .expect("the drawn duration holds a number of hours"),
+                m.trim_end_matches('m')
+                    .parse()
+                    .expect("the drawn duration holds a number of minutes"),
             );
             return h * 3_600.0 + m * 60.0;
         }
         if let Some((m, s)) = said.split_once("m ") {
             let (m, s): (f64, f64) = (
-                m.parse().expect("minutes"),
-                s.trim_end_matches('s').parse().expect("seconds"),
+                m.parse()
+                    .expect("the drawn duration holds a number of minutes"),
+                s.trim_end_matches('s')
+                    .parse()
+                    .expect("the drawn duration holds a number of seconds"),
             );
             return m * 60.0 + s;
         }
-        said.trim_end_matches('s').parse().expect("seconds")
+        said.trim_end_matches('s')
+            .parse()
+            .expect("the drawn duration holds a number of seconds")
     }
 
     #[test]
@@ -491,6 +539,13 @@ mod tests {
     fn an_age_under_ten_seconds_keeps_its_tenths_and_one_over_it_does_not() {
         assert_eq!(ago(Duration::from_millis(9900)), "9.9s");
         assert_eq!(ago(Duration::from_millis(10_100)), "10s");
+    }
+
+    #[test]
+    fn an_age_is_cut_down_to_its_tenth_as_a_span_is() {
+        assert_eq!(ago(Duration::from_millis(9_960)), "9.9s");
+        assert_eq!(ago(Duration::from_millis(999)), "0.9s");
+        assert_eq!(ago(Duration::from_millis(40)), "0.0s");
     }
     /// A stamp in a timezone the test names, so the rendering can be asserted
     /// without the machine's own zone reaching it.
@@ -533,6 +588,31 @@ mod tests {
     #[test]
     fn something_that_has_already_come_around_is_not_upcoming() {
         assert_eq!(upcoming(moment(20_000, 13, 41), moment(20_000, 9, 0)), None);
+    }
+
+    #[test]
+    fn something_earlier_today_reads_as_a_clock_time_and_earlier_this_week_with_its_weekday() {
+        assert_eq!(
+            past(moment(20_000, 13, 41), moment(20_000, 13, 2)).as_deref(),
+            Some("13:02")
+        );
+        // Day 20_004 is a Tuesday.
+        assert_eq!(
+            past(moment(20_006, 8, 0), moment(20_004, 9, 0)).as_deref(),
+            Some("Tue 09:00")
+        );
+    }
+
+    #[test]
+    fn something_more_than_a_week_back_or_on_no_clock_reads_as_how_long_ago() {
+        assert_eq!(
+            past(moment(20_012, 9, 0), moment(20_000, 9, 0)).as_deref(),
+            Some("12d ago")
+        );
+        let then = Stamp::new(SystemTime::UNIX_EPOCH + Duration::from_secs(100), None);
+        let now = Stamp::new(SystemTime::UNIX_EPOCH + Duration::from_secs(400), None);
+        assert_eq!(past(now, then).as_deref(), Some("5m ago"));
+        assert_eq!(past(then, now), None, "a moment to come is not past");
     }
 
     #[test]

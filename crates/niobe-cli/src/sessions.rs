@@ -93,7 +93,7 @@ fn prompt_line(prompt: &str) -> String {
 ///
 /// UTC because the local zone needs the system time-zone database, which is a
 /// dependency for one column; the header says which zone it is.
-fn utc_minute(at: SystemTime) -> String {
+pub(crate) fn utc_minute(at: SystemTime) -> String {
     let secs = at
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
@@ -108,7 +108,7 @@ fn utc_minute(at: SystemTime) -> String {
 
 /// The proleptic Gregorian date of a day count from 1970-01-01, after Howard
 /// Hinnant's `civil_from_days`.
-fn civil_from_days(days: i64) -> (i64, i64, i64) {
+pub(crate) fn civil_from_days(days: i64) -> (i64, i64, i64) {
     let z = days + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z.rem_euclid(146_097);
@@ -187,6 +187,7 @@ mod tests {
                 last_at: Some(at(1_789_000_060)),
                 events: 200,
                 first_prompt: Some("add etag support".to_owned()),
+                title: None,
             },
             SessionSummary {
                 id: "3".parse().expect("a number is a session id"),
@@ -194,6 +195,7 @@ mod tests {
                 last_at: None,
                 events: 0,
                 first_prompt: None,
+                title: None,
             },
         ];
 

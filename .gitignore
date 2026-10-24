@@ -5,8 +5,9 @@
 /target/
 **/*.rs.bk
 
-# Niobe's own session store and checkpoints
+# Niobe's own session store
 .niobe/
 
 # macOS
 .DS_Store
+.env

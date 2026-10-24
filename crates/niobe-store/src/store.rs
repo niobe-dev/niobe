@@ -15,8 +15,9 @@
 use std::path::Path;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use niobe_core::event::Event;
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use niobe_core::event::{Event, UsageWindows};
+use rusqlite::types::ValueRef;
+use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 
 /// The schema this build creates and reads. Stored in SQLite's `user_version`
 /// so that a store written by a newer build is refused instead of misread.
@@ -26,7 +27,7 @@ pub const SCHEMA_VERSION: i64 = 1;
 /// its own before failing.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// The whole schema at [`SCHEMA_VERSION`].
+/// The whole schema at [`SCHEMA_VERSION`], less [`REPLACE_GUARDS`].
 ///
 /// The triggers are the append-only rule. They make an `UPDATE` or `DELETE`
 /// fail in the database itself, so the rule holds for the `sqlite3` shell and
@@ -59,6 +60,65 @@ CREATE TRIGGER sessions_are_append_only_on_delete BEFORE DELETE ON sessions
 BEGIN SELECT RAISE(ABORT, 'sessions are append-only'); END;
 ";
 
+/// The rest of the append-only rule: a row inserted over one already there.
+///
+/// `REPLACE` and `INSERT OR REPLACE` delete the row in the way and insert the
+/// new one, and SQLite fires no delete trigger for that unless recursive
+/// triggers are on, so without these a stored event could be rewritten in
+/// place from the `sqlite3` shell. Created where missing on every open that
+/// can write, rather than by a new schema version, so that a store an
+/// earlier build made gains them and an earlier build can still read it.
+const REPLACE_GUARDS: &str = "
+CREATE TRIGGER IF NOT EXISTS events_are_append_only_on_replace BEFORE INSERT ON events
+WHEN EXISTS (SELECT 1 FROM events WHERE session_id = NEW.session_id AND seq = NEW.seq)
+BEGIN SELECT RAISE(ABORT, 'events are append-only'); END;
+
+CREATE TRIGGER IF NOT EXISTS sessions_are_append_only_on_replace BEFORE INSERT ON sessions
+WHEN NEW.id IS NOT NULL AND EXISTS (SELECT 1 FROM sessions WHERE id = NEW.id)
+BEGIN SELECT RAISE(ABORT, 'sessions are append-only'); END;
+";
+
+/// The usage windows recorded under the profile `?1`, newest first.
+///
+/// Each condition is written as [`KIND_INDEXES`] writes it, word for word,
+/// because SQLite reads a row from a partial index only for a query whose
+/// condition is the index's own; the `+` before `session_id` keeps it from
+/// walking every event of the profile's sessions by the primary key instead.
+const LAST_USAGE_WINDOWS: &str = "
+SELECT windows.at, windows.event
+  FROM events AS windows
+ WHERE CASE WHEN json_valid(windows.event) THEN json_extract(windows.event, '$.type') END = 'usage_windows'
+   AND (SELECT CASE WHEN json_valid(meta.event) THEN json_extract(meta.event, '$.profile') END
+          FROM events AS meta
+         WHERE meta.session_id = windows.session_id
+           AND meta.seq < windows.seq
+           AND CASE WHEN json_valid(meta.event) THEN json_extract(meta.event, '$.type') END = 'session_meta'
+         ORDER BY meta.seq DESC
+         LIMIT 1) = ?1
+ ORDER BY windows.at DESC, windows.session_id DESC, windows.seq DESC";
+
+/// The events found by their kind rather than by reading every row: the
+/// usage windows, by when they were recorded — what [`LAST_USAGE_WINDOWS`]
+/// reads through before the shell draws its first frame — and the session
+/// headers that name each session's profile, by session.
+///
+/// The second is not the one that query's subquery plans on: that is a search
+/// of the session's own rows by the primary key, `session_id` and `seq`, which
+/// is as narrow. It is for a lookup of the headers alone.
+///
+/// Partial, so each holds only the few rows of its kind, not one entry per
+/// streamed fragment of a reply. Created where missing on every open that
+/// can write, as [`REPLACE_GUARDS`] are, so a store an earlier build made
+/// gains them and an earlier build still reads it; a store opened only to
+/// read, from an earlier build, is read without them, row by row.
+const KIND_INDEXES: &str = "
+CREATE INDEX IF NOT EXISTS events_usage_windows ON events (at)
+WHERE CASE WHEN json_valid(event) THEN json_extract(event, '$.type') END = 'usage_windows';
+
+CREATE INDEX IF NOT EXISTS events_session_meta ON events (session_id)
+WHERE CASE WHEN json_valid(event) THEN json_extract(event, '$.type') END = 'session_meta';
+";
+
 /// Identifies a session within one store.
 ///
 /// Allocated by the database and never reused, so the number an operator reads
@@ -71,6 +131,13 @@ impl std::fmt::Display for SessionId {
     /// lines up in a table.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         std::fmt::Display::fmt(&self.0, f)
+    }
+}
+
+impl SessionId {
+    /// The number the database allocated, as `niobe cost --json` writes it.
+    pub fn get(self) -> i64 {
+        self.0
     }
 }
 
@@ -89,7 +156,8 @@ impl std::str::FromStr for SessionId {
 pub struct StoredEvent {
     /// Position in the session, from 1, without gaps.
     pub seq: u64,
-    /// The wall clock when the event was stored.
+    /// The wall clock the event is dated by: when it was stored, or when
+    /// the writer said it happened.
     pub at: SystemTime,
     /// What happened.
     pub event: Event,
@@ -108,6 +176,19 @@ pub struct SessionSummary {
     pub events: u64,
     /// The text of its first user message, if it has one.
     pub first_prompt: Option<String>,
+    /// The last title its backend gave it, if one did.
+    pub title: Option<String>,
+}
+
+/// A prompt as it was stored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredPrompt {
+    /// The session it was sent in.
+    pub session: SessionId,
+    /// The wall clock when it was stored.
+    pub at: SystemTime,
+    /// What was sent.
+    pub text: String,
 }
 
 /// Why the store could not do what was asked.
@@ -136,6 +217,11 @@ pub enum StoreError {
     },
     /// No session has this id.
     NoSuchSession(SessionId),
+    /// Another niobe is recording this session: two recording it at once
+    /// would interleave two conversations in one record.
+    SessionOpen(SessionId),
+    /// The file that marks a session as being recorded could not be opened.
+    Hold(std::io::Error),
 }
 
 impl std::fmt::Display for StoreError {
@@ -157,6 +243,12 @@ impl std::fmt::Display for StoreError {
                  version {supported}; it was written by a different niobe"
             ),
             Self::NoSuchSession(id) => write!(f, "no session {id} in this store"),
+            Self::SessionOpen(id) => write!(
+                f,
+                "session {id} is open in another niobe; `niobe --resume {id} | cat` prints \
+                 it without taking it over"
+            ),
+            Self::Hold(e) => write!(f, "cannot mark the session as open: {e}"),
         }
     }
 }
@@ -166,7 +258,8 @@ impl std::error::Error for StoreError {
         match self {
             Self::Sqlite(e) => Some(e),
             Self::Encode(e) | Self::Decode { source: e, .. } => Some(e),
-            Self::UnsupportedSchema { .. } | Self::NoSuchSession(_) => None,
+            Self::Hold(e) => Some(e),
+            Self::UnsupportedSchema { .. } | Self::NoSuchSession(_) | Self::SessionOpen(_) => None,
         }
     }
 }
@@ -174,6 +267,14 @@ impl std::error::Error for StoreError {
 impl From<rusqlite::Error> for StoreError {
     fn from(e: rusqlite::Error) -> Self {
         Self::Sqlite(e)
+    }
+}
+
+/// What stands in a session's events for a row that could not be read.
+fn unreadable(error: &StoreError) -> Event {
+    Event::Error {
+        message: format!("{error}; it is left out of what this session shows"),
+        fatal: false,
     }
 }
 
@@ -188,6 +289,91 @@ impl Store {
     /// exists. The parent directory must exist.
     pub fn open(path: &Path) -> Result<Self, StoreError> {
         Self::prepare(Connection::open(path)?)
+    }
+
+    /// The file the store is kept in, or `None` for one kept in memory.
+    #[cfg(unix)]
+    pub(crate) fn path(&self) -> Option<std::path::PathBuf> {
+        self.conn
+            .path()
+            .filter(|path| !path.is_empty())
+            .map(std::path::PathBuf::from)
+    }
+
+    /// Opens the store at `path` to read it, as [`Store::open`] does where the
+    /// file can be written, and as it is where it cannot.
+    ///
+    /// A store on a read-only mount, or whose file and directory were made
+    /// read-only, is still one the operator can list. [`Store::open`] refuses
+    /// it: putting the file in WAL mode is a write. Where that is the refusal,
+    /// the file is opened read-only, and where SQLite cannot read a WAL file
+    /// that way either — a clean close leaves no `-shm` beside it, and one
+    /// cannot be made in a directory that is not writable — it is read as
+    /// immutable: as it is on disk, with no locking, which is right because
+    /// nothing can be writing to it. A store opened this way refuses writes.
+    ///
+    /// A file that is there is looked at before anything is written to it:
+    /// one holding the schema this build reads is opened to read, and a file
+    /// that is some other program's, with tables and no `user_version`, is
+    /// refused as it is rather than given niobe's tables, triggers and WAL
+    /// mode. Only a file this build is to make or bring up to date is opened
+    /// to write.
+    pub fn open_to_read(path: &Path) -> Result<Self, StoreError> {
+        if path.is_file() {
+            let looking = OpenFlags::SQLITE_OPEN_READ_ONLY
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                | OpenFlags::SQLITE_OPEN_URI;
+            if let Ok(conn) = Connection::open_with_flags(path, looking) {
+                let found: Result<i64, _> =
+                    conn.pragma_query_value(None, "user_version", |row| row.get(0));
+                match found {
+                    Ok(found) if found == SCHEMA_VERSION => {
+                        if let Ok(store) = Self::readable(conn) {
+                            return Ok(store);
+                        }
+                    }
+                    Ok(0) => {
+                        let tables: Result<i64, _> =
+                            conn.query_row("SELECT count(*) FROM sqlite_master", [], |row| {
+                                row.get(0)
+                            });
+                        if tables.is_ok_and(|tables| tables > 0) {
+                            return Err(StoreError::UnsupportedSchema {
+                                found: 0,
+                                supported: SCHEMA_VERSION,
+                            });
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        match Self::open(path) {
+            Err(StoreError::Sqlite(error)) if refused_a_write(&error) => {}
+            opened => return opened,
+        }
+        let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_URI;
+        match Self::readable(Connection::open_with_flags(path, flags)?) {
+            Err(StoreError::Sqlite(error)) if refused_a_write(&error) => {}
+            opened => return opened,
+        }
+        Self::readable(Connection::open_with_flags(immutable_uri(path), flags)?)
+    }
+
+    /// A read-only connection, once it has shown it can read the store and
+    /// that the store is one this build reads.
+    fn readable(conn: Connection) -> Result<Self, StoreError> {
+        conn.busy_timeout(BUSY_TIMEOUT)?;
+        let found: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if found != SCHEMA_VERSION {
+            return Err(StoreError::UnsupportedSchema {
+                found,
+                supported: SCHEMA_VERSION,
+            });
+        }
+        Ok(Self { conn })
     }
 
     /// A store that lives only as long as the value, for tests and for a
@@ -220,6 +406,17 @@ impl Store {
         Ok(SessionId(self.conn.last_insert_rowid()))
     }
 
+    /// Whether a recorder — in this process or another — holds `session` now,
+    /// so that [`Recorder::resume`](crate::Recorder::resume) would refuse it.
+    ///
+    /// Looked at without taking the hold: a session nobody holds is left as
+    /// it was found, with no file made for it. What it says can be out of date
+    /// by the time it is acted on, so a resume is refused all the same where
+    /// the session was taken meanwhile.
+    pub fn is_held(&self, session: SessionId) -> Result<bool, StoreError> {
+        crate::recorder::is_held(self, session)
+    }
+
     /// Whether a session with this id exists.
     pub fn has_session(&self, session: SessionId) -> Result<bool, StoreError> {
         Ok(self
@@ -233,18 +430,32 @@ impl Store {
             .is_some())
     }
 
-    /// Appends one event to a session and returns its sequence number.
+    /// Appends one event to a session, dated now, and returns its sequence
+    /// number.
     ///
     /// The sequence number is computed and inserted in one statement, and the
     /// `(session, seq)` key is unique, so two writers to the same session get an
     /// error rather than two events at the same position.
     pub fn append(&self, session: SessionId, event: &Event) -> Result<u64, StoreError> {
+        self.append_at(session, event, SystemTime::now())
+    }
+
+    /// Appends one event to a session, dated `at`, and returns its sequence
+    /// number: for an event written some time after it happened, as one queued
+    /// behind a lock another process held is, which dated by its write would
+    /// stretch the call it belongs to by however long the lock was held.
+    pub fn append_at(
+        &self,
+        session: SessionId,
+        event: &Event,
+        at: SystemTime,
+    ) -> Result<u64, StoreError> {
         let json = serde_json::to_string(event).map_err(StoreError::Encode)?;
         let inserted = self.conn.query_row(
             "INSERT INTO events (session_id, seq, at, event)
              SELECT ?1, COALESCE(MAX(seq), 0) + 1, ?2, ?3 FROM events WHERE session_id = ?1
              RETURNING seq",
-            params![session.0, unix_millis(SystemTime::now()), json],
+            params![session.0, unix_millis(at), json],
             |row| row.get::<_, i64>(0),
         );
 
@@ -259,7 +470,8 @@ impl Store {
         }
     }
 
-    /// Every event of a session, in the order it was appended.
+    /// Every event of a session, in the order it was appended. A row this
+    /// build cannot read is a non-fatal [`Event::Error`] in its place.
     pub fn events(&self, session: SessionId) -> Result<Vec<StoredEvent>, StoreError> {
         if !self.has_session(session)? {
             return Err(StoreError::NoSuchSession(session));
@@ -272,18 +484,23 @@ impl Store {
             Ok((
                 row.get::<_, i64>(0)?,
                 row.get::<_, i64>(1)?,
-                row.get::<_, String>(2)?,
+                stored_bytes(row.get_ref(2)?),
             ))
         })?;
 
         rows.map(|row| {
             let (seq, at, json) = row?;
             let seq = seq.unsigned_abs();
-            let event = serde_json::from_str(&json).map_err(|source| StoreError::Decode {
-                session,
-                seq,
-                source,
-            })?;
+            // One row this build cannot read — written by a newer niobe,
+            // torn, or not text at all — stands as a warning in its place
+            // rather than keeping the rest of the session from being opened.
+            let event = serde_json::from_slice(&json).unwrap_or_else(|source| {
+                unreadable(&StoreError::Decode {
+                    session,
+                    seq,
+                    source,
+                })
+            });
             Ok(StoredEvent {
                 seq,
                 at: from_unix_millis(at),
@@ -295,11 +512,19 @@ impl Store {
 
     /// Every session in the store, newest first.
     ///
+    /// A slash command is passed over when looking for the first prompt: it
+    /// is an instruction to the CLI, such as `/clear`, and not what the
+    /// session was asked to do. A prompt that reached no backend is not one
+    /// of the session's prompts at all: it is stored as
+    /// [`Event::PromptNotSent`], which neither listing reads.
+    ///
     /// A row that is not JSON is passed over when looking for the first
     /// prompt, because `json_extract` fails the whole statement on one: a torn
     /// row in one session would otherwise hide every session from the list.
     /// The `CASE` is what guarantees `json_extract` never sees it; SQLite may
-    /// evaluate the terms of an `AND` in either order.
+    /// evaluate the terms of an `AND` in either order. A prompt or a title
+    /// that is not text is passed over the same way, and text that is not
+    /// UTF-8 reads with U+FFFD in place of what is not, for the same reason.
     pub fn sessions(&self) -> Result<Vec<SessionSummary>, StoreError> {
         let mut statement = self.conn.prepare(
             "SELECT s.id, s.started_at, COUNT(e.seq), MAX(e.at),
@@ -308,8 +533,19 @@ impl Store {
                       WHERE f.session_id = s.id
                         AND CASE WHEN json_valid(f.event)
                                  THEN json_extract(f.event, '$.type') = 'user_message'
+                                      AND json_type(f.event, '$.text') = 'text'
+                                      AND substr(json_extract(f.event, '$.text'), 1, 1) <> '/'
                             END
                       ORDER BY f.seq
+                      LIMIT 1),
+                    (SELECT json_extract(t.event, '$.title')
+                       FROM events t
+                      WHERE t.session_id = s.id
+                        AND CASE WHEN json_valid(t.event)
+                                 THEN json_extract(t.event, '$.type') = 'titled'
+                                      AND json_type(t.event, '$.title') = 'text'
+                            END
+                      ORDER BY t.seq DESC
                       LIMIT 1)
                FROM sessions s
                LEFT JOIN events e ON e.session_id = s.id
@@ -323,12 +559,146 @@ impl Store {
                 started_at: from_unix_millis(row.get(1)?),
                 events: row.get::<_, i64>(2)?.unsigned_abs(),
                 last_at: row.get::<_, Option<i64>>(3)?.map(from_unix_millis),
-                first_prompt: row.get(4)?,
+                first_prompt: stored_text(row.get_ref(4)?),
+                title: stored_text(row.get_ref(5)?),
             })
         })?;
 
         Ok(rows.collect::<Result<_, _>>()?)
     }
+
+    /// Every prompt of every session, newest first: what Up recalls and the
+    /// history dialog lists.
+    ///
+    /// Read in one statement rather than session by session, which would
+    /// decode every event of every session to find a few lines of text. A row
+    /// that is not JSON, or whose prompt is not text, is passed over, as
+    /// [`Store::sessions`] passes it over.
+    pub fn prompts(&self) -> Result<Vec<StoredPrompt>, StoreError> {
+        let mut statement = self.conn.prepare(
+            "SELECT session_id, at, json_extract(event, '$.text')
+               FROM events
+              WHERE CASE WHEN json_valid(event)
+                         THEN json_extract(event, '$.type') = 'user_message'
+                              AND json_type(event, '$.text') = 'text'
+                    END
+              ORDER BY at DESC, session_id DESC, seq DESC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(StoredPrompt {
+                session: SessionId(row.get(0)?),
+                at: from_unix_millis(row.get(1)?),
+                text: stored_text(row.get_ref(2)?).unwrap_or_default(),
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// The newest usage windows any session run under `profile` recorded, and
+    /// when they were recorded: what a new session shows of the plan before
+    /// its own backend has reported anything.
+    ///
+    /// A plan's windows are the account's, not a session's, so the last level
+    /// one session saw is the best figure the next one has until its backend
+    /// reports; the caller dates it, because it is not a measurement of now.
+    /// The profile is what names the account, and a report belongs to the
+    /// profile in force when it was recorded — the one its session's newest
+    /// `session_meta` before it named — since a session resumed under another
+    /// profile runs on another account from then on. A report that names no
+    /// window says nothing of the levels and is passed over, as is a row that
+    /// is not JSON or not an event this build reads.
+    pub fn last_usage_windows(
+        &self,
+        profile: &str,
+    ) -> Result<Option<(SystemTime, UsageWindows)>, StoreError> {
+        let mut statement = self.conn.prepare(LAST_USAGE_WINDOWS)?;
+        let mut rows = statement.query(params![profile])?;
+        while let Some(row) = rows.next()? {
+            let at = from_unix_millis(row.get(0)?);
+            let json = stored_bytes(row.get_ref(1)?);
+            if let Ok(Event::UsageWindows(windows)) = serde_json::from_slice(&json)
+                && !windows.is_empty()
+            {
+                return Ok(Some((at, windows)));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Every conversation a session carried on, by the id its backend calls
+    /// it: a session the backend restarted under a new id names each.
+    ///
+    /// The `claude` CLI keeps a transcript of every conversation Niobe drives,
+    /// and this is what tells those from the ones it ran on its own.
+    pub fn conversations(&self) -> Result<Vec<(SessionId, String)>, StoreError> {
+        let mut statement = self.conn.prepare(
+            "SELECT DISTINCT session_id, json_extract(event, '$.backend_session')
+               FROM events
+              WHERE CASE WHEN json_valid(event)
+                         THEN json_extract(event, '$.type') = 'session_meta'
+                              AND json_type(event, '$.backend_session') = 'text'
+                    END",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((SessionId(row.get(0)?), stored_text(row.get_ref(1)?)))
+        })?;
+        let mut carried = Vec::new();
+        for row in rows {
+            if let (session, Some(id)) = row? {
+                carried.push((session, id));
+            }
+        }
+        Ok(carried)
+    }
+}
+
+/// The bytes of a stored event, whatever SQLite stored them as: text that is
+/// not UTF-8 and a blob are handed to the parser as they are, which refuses
+/// what is not an event, and a number or a null as nothing, which it refuses
+/// too.
+fn stored_bytes(cell: ValueRef<'_>) -> Vec<u8> {
+    match cell {
+        ValueRef::Text(bytes) | ValueRef::Blob(bytes) => bytes.to_vec(),
+        ValueRef::Null | ValueRef::Integer(_) | ValueRef::Real(_) => Vec::new(),
+    }
+}
+
+/// A piece of text taken out of a stored event, with any byte that is not
+/// UTF-8 drawn as U+FFFD; `None` where the event held no text there.
+///
+/// Read this way rather than as a `String`, which fails the whole statement
+/// on one damaged row and so hides every session along with it.
+fn stored_text(cell: ValueRef<'_>) -> Option<String> {
+    match cell {
+        ValueRef::Text(bytes) => Some(String::from_utf8_lossy(bytes).into_owned()),
+        ValueRef::Null | ValueRef::Integer(_) | ValueRef::Real(_) | ValueRef::Blob(_) => None,
+    }
+}
+
+/// Whether SQLite refused because something had to be written — a read-only
+/// file, or a directory it could not make its `-shm` file in.
+fn refused_a_write(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(failure, _)
+            if matches!(failure.code, rusqlite::ErrorCode::ReadOnly | rusqlite::ErrorCode::CannotOpen)
+    )
+}
+
+/// The `file:` URI that opens `path` as immutable, with every byte a URI
+/// gives a meaning to written as `%XX`.
+fn immutable_uri(path: &Path) -> String {
+    let mut uri = String::from("file:");
+    for byte in path.as_os_str().as_encoded_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b'-' | b'_' | b'.' | b'~' => {
+                uri.push(char::from(*byte));
+            }
+            _ => uri.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    uri.push_str("?immutable=1");
+    uri
 }
 
 /// Creates the schema in a new file and checks the version of an existing one.
@@ -373,6 +743,8 @@ fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
             });
         }
     }
+    tx.execute_batch(REPLACE_GUARDS)?;
+    tx.execute_batch(KIND_INDEXES)?;
 
     tx.commit()?;
     Ok(())
@@ -393,6 +765,23 @@ fn from_unix_millis(millis: i64) -> SystemTime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_database_itself_refuses_an_event_for_a_session_it_does_not_hold() {
+        let store = Store::open_in_memory().expect("an in-memory store opens");
+
+        let refused = store.conn.execute(
+            "INSERT INTO events (session_id, seq, at, event) VALUES (999, 0, 0, '{}')",
+            [],
+        );
+
+        assert!(
+            refused
+                .as_ref()
+                .is_err_and(|error| error.to_string().contains("FOREIGN KEY")),
+            "{refused:?}"
+        );
+    }
 
     #[test]
     fn a_session_id_is_the_number_the_list_prints() {
@@ -421,7 +810,9 @@ mod tests {
         let text = |i: usize| Event::UserMessage {
             text: format!("{i} {}", "x".repeat(2_000)),
         };
-        store.append(session, &text(0)).expect("append");
+        store
+            .append(session, &text(0))
+            .expect("a session in a temporary store takes an event");
 
         let pages: i64 = store
             .conn
@@ -444,7 +835,9 @@ mod tests {
             .pragma_update(None, "max_page_count", 1_000_000)
             .expect("the page limit is lifted");
         let kept = store.events(session).expect("the session loads");
-        let next = store.append(session, &text(999)).expect("append");
+        let next = store
+            .append(session, &text(999))
+            .expect("a session in a temporary store takes an event");
         assert_eq!(next, kept.len() as u64 + 1);
         let seqs: Vec<u64> = store
             .events(session)
@@ -453,6 +846,49 @@ mod tests {
             .map(|stored| stored.seq)
             .collect();
         assert_eq!(seqs, (1..=next).collect::<Vec<_>>());
+    }
+
+    /// Every step of how SQLite plans `sql`, as `EXPLAIN QUERY PLAN` words it.
+    fn plan(store: &Store, sql: &str) -> Vec<String> {
+        let mut statement = store
+            .conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .expect("the statement is one SQLite plans");
+        let steps = statement
+            .query_map(params!["max"], |row| row.get::<_, String>(3))
+            .expect("the plan is read");
+        steps
+            .collect::<Result<_, _>>()
+            .expect("every step of the plan reads")
+    }
+
+    /// The carried windows are read before the shell draws its first frame,
+    /// so finding them must not read every event of every session: a store
+    /// of half a million events took a third of a second that way. A step
+    /// that walks the whole table is planned as a bare `SCAN events`.
+    #[test]
+    fn the_carried_windows_are_found_without_reading_every_event() {
+        let store = Store::open_in_memory().expect("an in-memory store opens");
+
+        let steps = plan(&store, LAST_USAGE_WINDOWS);
+
+        // The table is read under its alias, so a full scan is `SCAN windows`
+        // and not `SCAN events`: what is asked is that the windows are found
+        // by the partial index made for them, and that no step of the plan
+        // walks a table with no index.
+        assert!(
+            steps
+                .iter()
+                .any(|step| step.starts_with("SCAN windows")
+                    && step.contains("events_usage_windows")),
+            "the windows are not read through their index: {steps:#?}"
+        );
+        assert!(
+            steps
+                .iter()
+                .all(|step| !step.starts_with("SCAN ") || step.contains("USING")),
+            "a step walks a whole table: {steps:#?}"
+        );
     }
 
     #[test]

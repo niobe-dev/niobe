@@ -99,9 +99,33 @@ fn a_recorded_log_replays_into_the_derived_totals() {
     assert_eq!(tools.by_name["Write"], 1);
     assert!(state.in_flight_tools().is_empty());
 
+    // The three models the records name: the two the session ran on, and the
+    // one the closing `modelUsage` billed for the reviewers.
+    assert_eq!(
+        totals.tokens_by_model.keys().collect::<Vec<_>>(),
+        [
+            "claude-haiku-4-5-20251001",
+            "claude-opus-5[1m]",
+            "claude-sonnet-5"
+        ]
+    );
+
+    // One file, changed by the two `Edit`s: 21 lines added and 4 removed,
+    // each stated by the call that made it.
+    let files = state.files();
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].path, "catalog/fetch.py");
+    assert_eq!((files[0].added, files[0].removed), (21, 4));
+    assert_eq!(files[0].changes, 2);
+    assert!(files[0].added_stated() && files[0].removed_stated());
+
+    // Three `rate_limit_event`s; the fold keeps the last of them.
+    assert!(state.usage_windows().is_some());
+
     // Three sub-agents, each launched in the background and each ended by the
     // CLI's word that it stopped; the two asked for in parallel ran together.
     assert_eq!(state.agents_spawned(), 3);
+    assert_eq!(state.agents_completed(), 3);
     assert_eq!(state.agents_cancelled(), 0);
     assert_eq!(state.peak_running_agents(), 2);
     assert!(state.running_agents().is_empty());
@@ -111,30 +135,41 @@ fn a_recorded_log_replays_into_the_derived_totals() {
     assert_eq!(state.permissions_denied(), 1);
     assert!(state.pending_permissions().is_empty());
 
-    // Nothing produces a decision or a checkpoint yet, so an ordinary session
-    // carries none. `producer-gaps.jsonl` is where the fold's handling of them
-    // is held.
-    assert!(state.decisions().is_empty());
-    assert!(state.checkpoints().is_empty());
-
     // Messages, and no error: the CLI's background-task bookkeeping is
     // passed over, and nothing in the session failed.
     assert_eq!(state.user_messages(), 6);
     assert_eq!(state.assistant_messages(), 15);
     assert_eq!(state.errors(), 0);
     assert_eq!(state.fatal_error(), None);
+
+    // The recording predates the bridge's turn ends, context reports, billing
+    // and titles, and carries none of them: no turn is recorded, the turn it
+    // was cut in is still running, and nothing measured the context.
+    assert!(state.turns().is_empty());
+    assert!(state.turn_running());
+    assert_eq!(state.context(), None);
+    assert_eq!(state.billing(), None);
 }
 
+/// What a session folds to when each event reaches it the way the store
+/// hands it back — as the JSON line it was written as, one at a time — must be
+/// what the log folds to read whole. The two paths share no code with each
+/// other: one is the events as parsed from the fixture, the other each of
+/// them written out and read back, which is what a resumed session does.
 #[test]
-fn replaying_event_by_event_matches_replaying_the_whole_log() {
+fn an_event_stream_written_out_and_read_back_folds_to_what_the_log_folds_to() {
     let events = recorded_events();
+    let whole = SessionState::replay(&events);
 
-    let mut incremental = SessionState::new();
+    let mut stored = SessionState::new();
     for event in &events {
-        incremental.apply(event);
+        let line = serde_json::to_string(event).expect("an Event serializes");
+        let back: Event = serde_json::from_str(&line).expect("an Event deserializes");
+        stored.apply(&back);
     }
 
-    assert_eq!(incremental, SessionState::replay(&events));
+    assert_eq!(stored, whole);
+    assert_eq!(whole.totals().records, 25);
 }
 
 #[test]
@@ -204,9 +239,6 @@ fn the_gaps_log_exercises_what_no_producer_emits() {
     assert_eq!(state.tools().unmatched_ends, 1);
     assert_eq!(state.tools().finished, 1);
     assert_eq!(state.tools().started, 0);
-
-    assert_eq!(state.decisions().len(), 1);
-    assert_eq!(state.checkpoints().len(), 1);
 
     // Two agents, one killed and one still running when the fatal error
     // ended the session under it: interrupted, and running no longer.

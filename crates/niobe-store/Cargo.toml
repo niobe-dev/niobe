@@ -20,6 +20,12 @@ rusqlite.workspace = true
 # would total a different number than the one that ran.
 serde_json = { workspace = true, features = ["float_roundtrip"] }
 
+[target.'cfg(unix)'.dependencies]
+# `flock(2)` on a file beside the store for each session a recorder holds, so
+# two shells cannot record one session at once; the kernel lets go of it with
+# the process, however that ends.
+rustix = { workspace = true, features = ["fs"] }
+
 [dev-dependencies]
 tempfile.workspace = true
 

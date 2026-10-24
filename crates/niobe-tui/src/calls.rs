@@ -2,24 +2,39 @@
 // Copyright (c) Viacheslav Shynkarenko
 
 //! A tool call in the transcript, drawn as a row of a table: its glyph, the
-//! tool's name in a column of fixed width, what it does, and on the right what
-//! it cost.
+//! tool's name, the tag of the sub-agent that made it, what it does, and on
+//! the right what it cost. A sub-agent's words are drawn as the session's own
+//! reply is, under a head that names the agent.
 //!
-//! The name column is fixed so that the rows line up and the eye can run down
-//! the costs; what the call does is the column that gives way first, because
-//! it is the one the operator can find again in the diff or the Changes pane.
-//! The cost is never cut short of its figure.
+//! The whole row is dim but for a failure: the agents' words, in the body
+//! colour, are what the transcript is read for, and a call is an aside to
+//! them. A shell call's row names the programs it ran — `cargo test · tail`
+//! — rather than the command, which is long, mostly paths, and read in full
+//! only now and then; Ctrl+T draws the whole command under the row, every
+//! line of it, for when it is.
+//!
+//! The name and tag columns are as wide as the transcript's widest, so the
+//! rows line up and the eye can run down what each call does and what it
+//! cost; rows with nothing under them are drawn on consecutive lines. What
+//! the call does is the column that gives way first, because it is the one
+//! the operator can find again in the diff or the Changes pane. The cost is
+//! never cut short of its figure.
 //!
 //! What the cost column says depends on what the backend reported about the
 //! call, not on which tool it was: the lines a change added and removed, the
 //! status a command exited with, and otherwise the bytes it returned — which
 //! every finished call has. Each carries how long it ran where this shell's
 //! clock saw both ends. A call that did not succeed says so instead, and draws
-//! the backend's reason for it under the row, or that it gave none.
+//! the backend's reason for it under the row, or that it gave none. A call a
+//! standing rule let through says `rule` after its cost, where it has no diff
+//! to say it under.
 //!
 //! A call that ran the tests says under its row what the run reported: its
-//! counts where its output held the whole run, and otherwise that the result
-//! was not read — never a number the output did not give.
+//! counts where its output held the whole run, beside a bar of them, and
+//! otherwise that the result was not read — never a number the output did
+//! not give. While it runs it says how long it has run, against the last
+//! whole run of the same command where there was one — timed from when it was
+//! allowed, and not drawn at all while a question about it waits.
 //!
 //! A run of calls to the same tool is one group: a row with the run's summed
 //! figures, and a row for each call under it unless the operator has folded
@@ -30,8 +45,8 @@ use std::time::Duration;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 
-use crate::app::{Call, Entry, human_bytes};
-use crate::clock;
+use crate::app::{Call, Entry, EntryKind, Gate, human_bytes};
+use crate::clock::{self, Stamp};
 use crate::text;
 use crate::theme::Theme;
 use crate::ui::count;
@@ -39,8 +54,8 @@ use niobe_core::event::ToolOutcome;
 use niobe_core::session::TestRunRecord;
 use niobe_core::test_run::FailedTests;
 
-/// How much of a tool-call entry the operator has asked to see: the two
-/// switches that hold for the whole transcript.
+/// How much of a tool-call entry the operator has asked to see, and the
+/// columns every row is drawn in: what holds for the whole transcript.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub(crate) struct Detail {
     /// Every run of calls is drawn as its group row alone.
@@ -48,16 +63,78 @@ pub(crate) struct Detail {
     /// Every diff is drawn whole rather than cut at
     /// [`crate::hunks::MAX_ROWS`].
     pub(crate) diffs_open: bool,
+    /// How wide the name and agent columns are drawn.
+    pub(crate) columns: Columns,
+    /// Whether the sub-agents' rows are drawn under a heading per agent,
+    /// which names the agent in place of every row's tag.
+    pub(crate) grouped: bool,
+    /// Whether the transcript leaves out its routine entries, each run of
+    /// them drawn as one row that says how many it left out.
+    pub(crate) notable_only: bool,
+    /// The moment being drawn, which a test run in progress is timed
+    /// against. `None` where the shell has not read its clock.
+    pub(crate) now: Option<Stamp>,
+}
+
+/// How wide the tool's name and the sub-agent's tag are drawn, so that what
+/// the calls do starts in one column down the whole transcript.
+///
+/// Each is as wide as the widest it holds, rather than as wide as the widest
+/// it could: a session that only reads and runs commands draws its names in
+/// four cells, and one no sub-agent worked in has no agent column at all.
+/// A new, wider name lays the transcript out again, which is rare — the set
+/// of tools a session calls settles early.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub(crate) struct Columns {
+    pub(crate) name: usize,
+    pub(crate) agent: usize,
+}
+
+impl Columns {
+    /// The columns `entries` need.
+    pub(crate) fn of(entries: &[Entry]) -> Self {
+        let name = entries
+            .iter()
+            .filter(|entry| !entry.calls.is_empty())
+            .map(|entry| text::width(&head(entry)))
+            .max()
+            .unwrap_or(0)
+            .clamp(NAME_LEAST, NAME_MOST);
+        let agent = entries
+            .iter()
+            .filter(|entry| !entry.calls.is_empty() || entry.kind == EntryKind::SubAgent)
+            .filter_map(|entry| entry.agent.as_deref())
+            .map(text::width)
+            .max()
+            .unwrap_or(0)
+            .min(crate::tags::TAG_MAX);
+        Columns { name, agent }
+    }
+}
+
+/// A static buffer of spaces used to slice padding gaps without heap allocation.
+const SPACES: &str = "                                                                                                                                ";
+
+/// Slices up to `n` spaces from `SPACES`, falling back to heap allocation only if `n` exceeds the buffer size.
+fn spaces(n: usize) -> std::borrow::Cow<'static, str> {
+    if n <= SPACES.len() {
+        std::borrow::Cow::Borrowed(&SPACES[..n])
+    } else {
+        std::borrow::Cow::Owned(" ".repeat(n))
+    }
 }
 
 /// The glyph and the space after it, which every row of the transcript starts
 /// with.
 const GUTTER: usize = 2;
 
-/// How wide the tool's name is drawn, so that the columns after it line up
-/// down the transcript: wide enough for `Notion·query-data-sources`, the
-/// longest name a common MCP server gives a tool.
-const NAME_COLUMN: usize = 26;
+/// The narrowest the name column is drawn: `Bash`, `Read` and `Edit` fit.
+const NAME_LEAST: usize = 4;
+
+/// The widest the name column is drawn. A longer name — an MCP tool's, with
+/// its server in front — is cut rather than pushing what every other row
+/// does out of sight.
+const NAME_MOST: usize = 14;
 
 /// The space between one column and the next.
 const GAP: usize = 2;
@@ -75,8 +152,17 @@ pub(crate) fn lines(
     detail: Detail,
     theme: &Theme,
 ) -> Vec<Line<'static>> {
-    let colour = entry.kind.colour(theme);
+    // A call is machinery beside the agents' words, so its whole row recedes:
+    // the reasoning, in the body colour, is what the eye finds. A failure is
+    // never the thing that recedes, and keeps its colour.
+    let colour = match entry.kind {
+        EntryKind::Failure => theme.del,
+        _ => theme.dim,
+    };
     let mut lines = match entry.calls.as_slice() {
+        calls if !detail.diffs_open && all_memory(calls) => {
+            remembered(entry, calls, width, detail, colour, theme)
+        }
         [call] => single(entry, call, width, detail, colour, theme),
         calls => group(entry, calls, width, detail, colour, theme),
     };
@@ -94,24 +180,100 @@ fn single(
     colour: Color,
     theme: &Theme,
 ) -> Vec<Line<'static>> {
-    let glyph = match call.failed() {
-        true => "✗",
-        false => "⚙",
+    let (glyph, glyph_colour) = match (call.failed(), call.running()) {
+        (true, _) => ("✗", colour),
+        (false, true) => (RUNNING, theme.hot),
+        (false, false) => ("⚙", colour),
     };
     let mut lines = vec![row(
-        glyph,
+        (glyph, glyph_colour),
         entry.head.clone(),
         Doing {
-            agent: entry.agent.as_deref(),
-            what: &call.what,
+            agent: entry.agent.as_deref().filter(|_| !detail.grouped),
+            what: &doing(call, detail),
         },
         result(call, theme),
         width,
+        detail.columns,
         colour,
         theme,
     )];
     lines.extend(under(call, " ".repeat(GUTTER), width, detail, theme));
     lines
+}
+
+/// Whether every call of an entry changed one of the agent's own notes, and
+/// nothing else.
+fn all_memory(calls: &[Call]) -> bool {
+    !calls.is_empty() && calls.iter().all(|call| call.memory)
+}
+
+/// What the agent's own notes changed by a call are drawn as, in place of
+/// what the call does: that it updated its memory, and which note.
+const MEMORY: &str = "updated memory";
+
+/// Calls that changed nothing but the agent's own notes, as one row:
+/// `◆ Edit ×2  updated memory · notes.md, MEMORY.md  +2 −2`.
+///
+/// The notes are how the agent works, not what is being built, so their
+/// lines are not drawn in the transcript; Ctrl+T draws them as any other
+/// change, for whoever wants to read what the agent wrote down.
+fn remembered(
+    entry: &Entry,
+    calls: &[Call],
+    width: usize,
+    detail: Detail,
+    colour: Color,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let mut names: Vec<&str> = Vec::new();
+    for call in calls {
+        let name = file_name(&call.what);
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    let what = format!("{MEMORY} · {}", names.join(", "));
+    let result = match calls {
+        [call] => result(call, theme),
+        calls => group_result(calls, theme),
+    };
+    vec![row(
+        ("◆", colour),
+        head(entry),
+        Doing {
+            agent: entry.agent.as_deref().filter(|_| !detail.grouped),
+            what: &what,
+        },
+        result,
+        width,
+        detail.columns,
+        colour,
+        theme,
+    )]
+}
+
+/// The last part of a path, which is all a note's row names: the agent's
+/// notes live outside the repository, and the directory they share says
+/// nothing the row does not.
+fn file_name(path: &str) -> &str {
+    path.rsplit(['/', '\\'])
+        .find(|part| !part.is_empty())
+        .unwrap_or(path)
+}
+
+/// What a call's row says it does: the programs an agent's shell command
+/// ran, whose whole command Ctrl+T draws under the row; for one that changed
+/// the agent's own notes while the diffs are shut, that it updated its
+/// memory and which note; and otherwise what the backend read it as.
+fn doing(call: &Call, detail: Detail) -> String {
+    if let Some(programs) = &call.programs {
+        return programs.clone();
+    }
+    match call.memory && !detail.diffs_open {
+        true => format!("{MEMORY} · {}", file_name(&call.what)),
+        false => call.what.clone(),
+    }
 }
 
 /// A run of calls: the group's row, then the calls under it unless the runs
@@ -130,19 +292,19 @@ fn group(
     };
     let what = calls
         .iter()
-        .map(|call| call.what.as_str())
+        .map(|call| doing(call, detail))
         .collect::<Vec<_>>()
         .join(", ");
-    let name = format!("{} ×{}", entry.head, calls.len());
     let mut lines = vec![row(
-        glyph,
-        name,
+        (glyph, colour),
+        head(entry),
         Doing {
-            agent: entry.agent.as_deref(),
+            agent: entry.agent.as_deref().filter(|_| !detail.grouped),
             what: &what,
         },
         group_result(calls, theme),
         width,
+        detail.columns,
         colour,
         theme,
     )];
@@ -155,7 +317,7 @@ fn group(
         let last = at + 1 == calls.len();
         let branch = if last { LAST_BRANCH } else { BRANCH };
         let stem = if last { "  " } else { STEM };
-        lines.push(child(branch, call, width, theme));
+        lines.push(child(branch, call, width, detail, theme));
         lines.extend(under(call, format!("{indent}{stem}"), width, detail, theme));
     }
     lines
@@ -163,17 +325,19 @@ fn group(
 
 /// One call of a group: hung from the group's row, what it does, and its own
 /// cost on the right.
-fn child(branch: &str, call: &Call, width: usize, theme: &Theme) -> Line<'static> {
+fn child(branch: &str, call: &Call, width: usize, detail: Detail, theme: &Theme) -> Line<'static> {
+    // What a call does is machinery, drawn dim beside the replies, unless
+    // it failed: a failure is never the thing that recedes.
     let colour = match call.failed() {
         true => theme.del,
-        false => theme.fg,
+        false => theme.dim,
     };
     let lead = " ".repeat(GUTTER);
     let result = result(call, theme);
     let room = width
         .saturating_sub(GUTTER + text::width(branch) + GAP)
         .saturating_sub(spans_width(&result));
-    let what = text::truncate(&call.what, room);
+    let what = text::truncate(&doing(call, detail), room);
     let gap = room.saturating_sub(text::width(&what)) + GAP;
 
     let mut spans = vec![
@@ -205,6 +369,17 @@ fn under(
         .tested
         .as_ref()
         .filter(|run| !call.failed() || run.counts.is_some() || run.failed);
+    let progress = call
+        .running()
+        .then_some(call)
+        .filter(|call| call.testing && !call.asked)
+        .map(|call| progress_line(call, detail.now, room, theme));
+    let command = call
+        .programs
+        .as_ref()
+        .filter(|_| detail.diffs_open)
+        .map(|_| command_lines(call, room, theme))
+        .unwrap_or_default();
     let body = match (&call.printed, tested, call.failed(), &call.change) {
         (Some(printed), _, _, _) => {
             let mut lines: Vec<_> = tested
@@ -215,13 +390,21 @@ fn under(
             lines
         }
         (None, Some(run), _, _) => vec![test_line(run, room, theme)],
-        (None, None, true, _) => vec![reason(call, room, theme)],
+        (None, None, true, _) => match &call.answer {
+            Some(said) => answer_lines(said, room, theme),
+            None => vec![reason(call, room, theme)],
+        },
+        // The agent's own notes keep their lines behind Ctrl+T.
+        (None, None, false, Some(_)) if call.memory && !detail.diffs_open => Vec::new(),
         (None, None, false, Some(change)) => {
             crate::hunks::lines(change, room, detail.diffs_open, theme)
         }
         (None, None, false, None) => Vec::new(),
     };
-    body.into_iter()
+    command
+        .into_iter()
+        .chain(progress)
+        .chain(body)
         .map(|line| {
             let mut spans = vec![Span::raw(lead.clone())];
             spans.extend(line.spans);
@@ -229,6 +412,37 @@ fn under(
         })
         .collect()
 }
+
+/// The whole command an agent's shell call ran, as Ctrl+T draws it under the
+/// row: `$ ` before its first line, every line of it, and each wrapped rather
+/// than cut, since this is where the operator reads the exact text. Where the
+/// backend did not report the whole command, the one line the call was read
+/// by stands for it.
+fn command_lines(call: &Call, room: usize, theme: &Theme) -> Vec<Line<'static>> {
+    let dim = Style::new().fg(theme.dim);
+    let command = call.command.as_deref().unwrap_or(&call.what);
+    let inner = room.saturating_sub(PROMPT.len()).max(1);
+    command
+        .lines()
+        .enumerate()
+        .flat_map(|(at, line)| {
+            let mut parts = text::wrap(line, inner);
+            if parts.is_empty() {
+                parts.push(String::new());
+            }
+            parts.into_iter().enumerate().map(move |(part, wrapped)| {
+                let lead = match (at, part) {
+                    (0, 0) => PROMPT,
+                    _ => "  ",
+                };
+                Line::from(Span::styled(format!("{lead}{wrapped}"), dim))
+            })
+        })
+        .collect()
+}
+
+/// What stands before a shell call's command where Ctrl+T draws it.
+const PROMPT: &str = "$ ";
 
 /// What a command the operator ran printed, the last lines of it, under its
 /// row; and above them why it ended without an exit of its own, where it did.
@@ -246,17 +460,28 @@ fn printed_lines(
     if call.error.is_some() {
         lines.push(reason(call, room, theme));
     }
-    if printed.above > 0 {
-        lines.push(Line::from(Span::styled(
-            format!("… {} lines above", printed.above),
-            dim.italic(),
-        )));
+    let above = match (printed.cut, printed.above) {
+        (false, 0) => None,
+        (false, above) => Some(format!("… {above} lines above")),
+        // What was not kept was not counted, so the count is a floor.
+        (true, 0) => Some("… more above".to_owned()),
+        (true, above) => Some(format!("… at least {above} lines above")),
+    };
+    if let Some(above) = above {
+        lines.push(Line::from(Span::styled(above, dim.italic())));
     }
-    lines.extend(printed.tail.iter().map(|line| {
-        Line::from(Span::styled(
-            text::truncate(line, room),
-            Style::new().fg(theme.fg),
-        ))
+    // Wrapped rather than cut at the edge: what a command printed is read
+    // here and nowhere else in the shell, and a path cut at the pane's edge
+    // has nothing that opens it.
+    lines.extend(printed.tail.iter().flat_map(|line| {
+        let mut parts = text::wrap(line, room.max(1));
+        if parts.is_empty() {
+            // A blank line is a line of what was printed too.
+            parts.push(String::new());
+        }
+        parts
+            .into_iter()
+            .map(|part| Line::from(Span::styled(part, Style::new().fg(theme.dim))))
     }));
     if lines.is_empty() && !call.running() {
         lines.push(Line::from(Span::styled("printed nothing", dim.italic())));
@@ -301,6 +526,15 @@ fn test_line(run: &TestRunRecord, room: usize, theme: &Theme) -> Line<'static> {
         None => vec![(0, Span::styled("test result not read", dim.italic()))],
     };
     let room = room.saturating_sub(text::width(LAST_BRANCH));
+    let cells = bar_cells(room, figures_width(&figures));
+    let bar = run
+        .counts
+        .filter(|_| cells > 0)
+        .map(|counts| result_bar(counts, cells, theme));
+    let room = match bar {
+        Some(_) => room.saturating_sub(cells + text::width(BAR_GAP)),
+        None => room,
+    };
     while figures.len() > 1 && figures_width(&figures) > room {
         let Some(least) = (0..figures.len()).max_by_key(|&at| figures[at].0) else {
             break;
@@ -325,12 +559,125 @@ fn test_line(run: &TestRunRecord, room: usize, theme: &Theme) -> Line<'static> {
         }
     }
     let mut spans = vec![Span::styled(LAST_BRANCH, dim)];
+    if let Some(bar) = bar {
+        spans.extend(bar);
+        spans.push(Span::raw(BAR_GAP));
+    }
     for (at, (_, figure)) in figures.into_iter().enumerate() {
         if at > 0 {
             spans.push(Span::styled(" · ", dim));
         }
         spans.push(figure);
     }
+    Line::from(spans)
+}
+
+/// How many cells a test run's bar takes in `room` beside `said` columns of
+/// text: the whole bar where both fit, half of it where only that does, and
+/// none where the bar would cost the text a single column. The bar draws what
+/// the words already say, so it is the first thing a narrow line gives up.
+fn bar_cells(room: usize, said: usize) -> usize {
+    [TEST_BAR, TEST_BAR / 2]
+        .into_iter()
+        .find(|cells| cells + text::width(BAR_GAP) + said <= room)
+        .unwrap_or(0)
+}
+
+/// How wide a test run's bar is drawn where there is room for all of it.
+const TEST_BAR: usize = 20;
+
+/// What stands between a test run's bar and what is written beside it.
+const BAR_GAP: &str = "  ";
+
+/// A bar's cell, filled.
+const BAR_FILLED: &str = "━";
+
+/// A bar's cell, not filled yet.
+const BAR_EMPTY: &str = "─";
+
+/// The run's tests as `cells` cells: passed in the colour of an addition,
+/// failed in the failure colour and ignored dim, each in proportion.
+///
+/// A failure is never rounded away: however many tests passed, one that
+/// failed keeps a cell, because a bar all of one colour reads as a run that
+/// all passed. A run of no tests has no bar to draw.
+fn result_bar(counts: niobe_core::TestCounts, cells: usize, theme: &Theme) -> Vec<Span<'static>> {
+    let total = counts
+        .passed
+        .saturating_add(counts.failed)
+        .saturating_add(counts.ignored);
+    if total == 0 {
+        return Vec::new();
+    }
+    let share = |count: u64| -> usize {
+        let exact = u128::from(count) * cells as u128 / u128::from(total);
+        let at_least = usize::from(count > 0);
+        usize::try_from(exact).unwrap_or(cells).max(at_least)
+    };
+    let failed = share(counts.failed).min(cells);
+    let ignored = share(counts.ignored).min(cells - failed);
+    let passed = cells - failed - ignored;
+    [
+        (passed, theme.add),
+        (failed, theme.del),
+        (ignored, theme.dim),
+    ]
+    .into_iter()
+    .filter(|(cells, _)| *cells > 0)
+    .map(|(cells, colour)| Span::styled(BAR_FILLED.repeat(cells), Style::new().fg(colour)))
+    .collect()
+}
+
+/// `testing · 18s` under a test run still going, or, where the same command
+/// ran to the end earlier in the session, a bar of this run's time against
+/// that one's: `━━━━━━──── testing · 20s of the last run's 40s`.
+///
+/// The backend says nothing about a run until it ends, so the bar is not the
+/// run's progress and does not claim to be: it is the clock against the last
+/// run, named as such, and full where this run has gone on past it. Where the
+/// shell has not read its clock there is no time to give, and it says only
+/// that the tests are running.
+fn progress_line(call: &Call, now: Option<Stamp>, room: usize, theme: &Theme) -> Line<'static> {
+    let dim = Style::new().fg(theme.dim);
+    let mut spans = vec![Span::styled(LAST_BRANCH, dim)];
+    let Some(ran) = now
+        .zip(call.began())
+        .and_then(|(now, began)| now.since(began))
+    else {
+        spans.push(Span::styled("testing", dim));
+        return Line::from(spans);
+    };
+    let room = room.saturating_sub(text::width(LAST_BRANCH));
+    let said = match call.last_run {
+        Some(last) if ran > last => format!(
+            "testing · {}, past the last run's {}",
+            clock::spent(ran),
+            clock::took(last)
+        ),
+        Some(last) => format!(
+            "testing · {} of the last run's {}",
+            clock::spent(ran),
+            clock::took(last)
+        ),
+        None => format!("testing · {}", clock::spent(ran)),
+    };
+    let cells = bar_cells(room, text::width(&said));
+    if let Some(last) = call.last_run.filter(|_| cells > 0) {
+        let filled = match last.as_millis() {
+            0 => cells,
+            last => usize::try_from(ran.as_millis().saturating_mul(cells as u128) / last)
+                .unwrap_or(cells)
+                .min(cells),
+        };
+        spans.push(Span::styled(
+            BAR_FILLED.repeat(filled),
+            Style::new().fg(theme.hot),
+        ));
+        spans.push(Span::styled(BAR_EMPTY.repeat(cells - filled), dim));
+        spans.push(Span::raw(BAR_GAP));
+    }
+    let left = room.saturating_sub(spans_width(&spans[1..]));
+    spans.push(Span::styled(text::truncate(&said, left), dim));
     Line::from(spans)
 }
 
@@ -384,7 +731,10 @@ fn reason(call: &Call, room: usize, theme: &Theme) -> Line<'static> {
         None => (
             match call.outcome {
                 Some(ToolOutcome::Denied) => "not allowed to run; no reason was given",
-                _ => "the call failed and the backend said nothing about why",
+                Some(ToolOutcome::Interrupted) => "stopped by the operator",
+                Some(ToolOutcome::Failed | ToolOutcome::Ok) | None => {
+                    "the call failed and the backend said nothing about why"
+                }
             }
             .to_owned(),
             Style::new().fg(theme.dim).italic(),
@@ -397,58 +747,189 @@ fn reason(call: &Call, room: usize, theme: &Theme) -> Line<'static> {
     ])
 }
 
+/// What the operator wrote in place of letting a refused call run, every
+/// line of it wrapped rather than cut: it is what the agent was told to do
+/// instead, and it is read here and nowhere else in the transcript.
+fn answer_lines(said: &str, room: usize, theme: &Theme) -> Vec<Line<'static>> {
+    let indent = text::width(LAST_BRANCH);
+    let room = room.saturating_sub(indent).max(1);
+    let style = Style::new().fg(theme.fg);
+    format!("You answered instead: {said}")
+        .lines()
+        .flat_map(|line| text::wrap(line, room))
+        .enumerate()
+        .map(|(at, part)| {
+            let lead = match at {
+                0 => Span::styled(LAST_BRANCH, Style::new().fg(theme.dim)),
+                _ => Span::raw(" ".repeat(indent)),
+            };
+            Line::from(vec![lead, Span::styled(part, style)])
+        })
+        .collect()
+}
+
 fn first_line(text: &str) -> Option<&str> {
     text.lines().map(str::trim).find(|line| !line.is_empty())
 }
 
-/// The row itself: the glyph, the name in its column, what the call does in
-/// whatever is left, and the cost on the right.
+/// The row itself: the glyph, the name in its column, the sub-agent's tag in
+/// its own, what the call does in whatever is left, and the cost on the
+/// right.
 ///
-/// What the call does gives way first. Only on a pane too narrow for the name
-/// column and the cost together does the name give way, and the cost never
-/// does.
+/// What the call does gives way first. On a pane too narrow for the columns
+/// and the cost together the agent column goes, then the name gives way, and
+/// the cost never does. A row the session's own agent made leaves the agent
+/// column blank, so what every call does still starts in one column.
+#[allow(clippy::too_many_arguments)] // Each is one column of the row; a struct would only name them again.
 fn row(
-    glyph: &str,
+    (glyph, glyph_colour): (&str, Color),
     name: String,
     doing: Doing<'_>,
     result: Vec<Span<'static>>,
     width: usize,
+    columns: Columns,
     colour: Color,
     theme: &Theme,
 ) -> Line<'static> {
     let cost = spans_width(&result);
     let room = width.saturating_sub(GUTTER + cost + GAP);
-    let name_column = NAME_COLUMN.min(room);
+    let name_column = columns.name.max(NAME_LEAST).min(room);
     let name = text::truncate(&name, name_column);
-    let what_room = room.saturating_sub(name_column + 1);
-    let (agent, what_room) = match doing.agent {
-        Some(agent) => {
-            let tag = agent_tag(agent, doing.what, what_room);
-            let left = what_room.saturating_sub(text::width(&tag));
-            (Some(tag), left)
-        }
-        None => (None, what_room),
+    let left = room.saturating_sub(name_column + 1);
+    let agent_column = match columns.agent > 0 && left >= columns.agent + 1 + WHAT_LEAST {
+        true => columns.agent,
+        false => 0,
+    };
+    let what_room = match agent_column {
+        0 => left,
+        _ => left.saturating_sub(agent_column + 1),
     };
     let what = text::truncate(doing.what, what_room);
     let gap = what_room
         .saturating_sub(text::width(&what))
         .saturating_add(GAP);
 
+    // Optimization: Borrow static glyph strings and slice `SPACES` instead of allocating
+    // owned `String`s via `format!` and `" ".repeat(gap)` on every tool call row during frame redraws.
+    let glyph_padded: std::borrow::Cow<'static, str> = match glyph {
+        "⚙" => std::borrow::Cow::Borrowed("⚙ "),
+        "✗" => std::borrow::Cow::Borrowed("✗ "),
+        "⠋" => std::borrow::Cow::Borrowed("⠋ "),
+        "◆" => std::borrow::Cow::Borrowed("◆ "),
+        "▸" => std::borrow::Cow::Borrowed("▸ "),
+        "▾" => std::borrow::Cow::Borrowed("▾ "),
+        _ => std::borrow::Cow::Owned(format!("{glyph} ")),
+    };
+
     let mut spans = vec![
-        Span::styled(format!("{glyph} "), Style::new().fg(colour).bold()),
-        Span::styled(
-            format!("{name:<name_column$}"),
-            Style::new().fg(colour).bold(),
-        ),
+        Span::styled(glyph_padded, Style::new().fg(glyph_colour).bold()),
+        Span::styled(text::pad(&name, name_column), Style::new().fg(colour)),
         Span::raw(" "),
     ];
-    if let Some(tag) = agent {
-        spans.push(Span::styled(tag, Style::new().fg(theme.agent)));
+    if agent_column > 0 {
+        let tag = text::truncate(doing.agent.unwrap_or_default(), agent_column);
+        spans.push(Span::styled(
+            text::pad(&tag, agent_column + 1),
+            Style::new().fg(theme.dim),
+        ));
     }
     spans.push(Span::styled(what, Style::new().fg(theme.dim)));
-    spans.push(Span::raw(" ".repeat(gap)));
+    spans.push(Span::raw(spaces(gap)));
     spans.extend(result);
     Line::from(spans)
+}
+
+/// The least of what a call does the agent column is kept beside: fewer
+/// cells than this and the column goes, because a row that names who made
+/// the call and not what it was says nothing about the call.
+const WHAT_LEAST: usize = 8;
+
+/// The glyph a call still running is drawn with.
+const RUNNING: &str = "⠋";
+
+/// What a tool-call entry is called in the name column: the tool, and how
+/// many calls a run of them holds.
+fn head(entry: &Entry) -> String {
+    match entry.calls.len() {
+        0 | 1 => entry.head.clone(),
+        calls => format!("{} ×{calls}", entry.head),
+    }
+}
+
+/// A sub-agent's words, as the session's own reply is drawn: `↳`, its tag
+/// and, dim, what it was spawned to do, then what it said in the body
+/// colour across the pane. A sub-agent's words are how it reasons through
+/// its task, which is what the operator reads the transcript for; its calls
+/// are the rows that recede.
+pub(crate) fn said(
+    entry: &Entry,
+    width: usize,
+    detail: Detail,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let tag = entry.agent.as_deref().unwrap_or(&entry.head);
+    let room = width.saturating_sub(GUTTER);
+    let tag = text::truncate(tag, room);
+    let mut head = vec![
+        Span::styled(
+            format!("{} ", EntryKind::SubAgent.glyph()),
+            Style::new().fg(theme.agent).bold(),
+        ),
+        Span::styled(tag.clone(), Style::new().fg(theme.agent).bold()),
+    ];
+    // Grouped by agent, the heading above already says what it was spawned
+    // to do.
+    let task = room.saturating_sub(text::width(&tag) + GAP);
+    if !detail.grouped && entry.agent.is_some() && task > 0 {
+        head.push(Span::raw(" ".repeat(GAP)));
+        head.push(Span::styled(
+            text::truncate(&entry.head, task),
+            Style::new().fg(theme.dim),
+        ));
+    }
+    let mut lines = vec![Line::from(head)];
+    lines.extend(
+        crate::markdown::render(entry.body.trim_end(), room.max(1), theme)
+            .into_iter()
+            .map(|line| {
+                let mut spans = vec![Span::raw(" ".repeat(GUTTER))];
+                spans.extend(line.spans);
+                Line::from(spans)
+            }),
+    );
+    lines.push(Line::from(""));
+    lines
+}
+
+/// The heading a sub-agent's rows are grouped under: `▾`, its tag across
+/// the name and agent columns, its task where what a call does is drawn, and
+/// how many calls the rows under it hold where a call's cost is.
+pub(crate) fn heading(
+    tag: &str,
+    task: &str,
+    calls: usize,
+    width: usize,
+    detail: Detail,
+    theme: &Theme,
+) -> Line<'static> {
+    let columns = detail.columns;
+    let span = columns.name.max(NAME_LEAST) + 1 + columns.agent;
+    let lead = (span.max(text::width(tag)) + 1).min(width / 2);
+    let count = match calls {
+        1 => "1 call".to_owned(),
+        calls => format!("{calls} calls"),
+    };
+    let room = width.saturating_sub(GUTTER + lead + GAP + text::width(&count));
+    let task = text::truncate(task, room);
+    let gap = room.saturating_sub(text::width(&task)) + GAP;
+    let tag = text::truncate(tag, lead.saturating_sub(1));
+    Line::from(vec![
+        Span::styled("▾ ", Style::new().fg(theme.title).bold()),
+        Span::styled(text::pad(&tag, lead), Style::new().fg(theme.title).bold()),
+        Span::styled(task, Style::new().fg(theme.dim)),
+        Span::raw(" ".repeat(gap)),
+        Span::styled(count, Style::new().fg(theme.dim)),
+    ])
 }
 
 /// What a row says the call does, and which sub-agent made it, where one did.
@@ -486,24 +967,22 @@ fn spans_width(spans: &[Span<'_>]) -> usize {
     spans.iter().map(|span| text::width(&span.content)).sum()
 }
 
-/// What a call the session ended under says in place of its cost: it has
-/// none, and it did not fail.
+/// What a call the session or its turn ended under says in place of its
+/// cost: it has none, and it did not fail.
 const CUT_SHORT: &str = "cut short";
 
 /// What one call cost, as the backend and the clock reported it.
 fn result(call: &Call, theme: &Theme) -> Vec<Span<'static>> {
     let dim = Style::new().fg(theme.dim);
     let Some(outcome) = call.outcome else {
-        return vec![Span::styled(
-            match call.interrupted {
-                true => CUT_SHORT,
-                false => "running",
-            },
-            dim,
-        )];
+        return vec![match call.interrupted {
+            true => Span::styled(CUT_SHORT, dim),
+            false => Span::styled("running", Style::new().fg(theme.hot)),
+        }];
     };
     let mut spans = match (outcome, call.exit_code, call.lines) {
         (ToolOutcome::Denied, _, _) => return vec![Span::styled("denied", theme_del(theme))],
+        (ToolOutcome::Interrupted, _, _) => vec![Span::styled("stopped", dim)],
         (ToolOutcome::Failed, Some(status), _) => {
             vec![Span::styled(format!("exit {status}"), theme_del(theme))]
         }
@@ -521,28 +1000,41 @@ fn result(call: &Call, theme: &Theme) -> Vec<Span<'static>> {
     if let Some(took) = call.took {
         spans.push(Span::styled(format!(" · {}", clock::took(took)), dim));
     }
+    if call.gate == Some(Gate::Rule) && call.change.is_none() {
+        spans.push(Span::styled(format!(" · {RULE_MARK}"), dim));
+    }
     spans
 }
 
+/// What a call a standing rule let through says after its cost. A call with
+/// a diff says who let it through under the diff instead; one without has
+/// only its row, and a command run by a rule reads the same there as one the
+/// operator allowed by hand.
+const RULE_MARK: &str = "rule";
+
 /// What a run of calls cost, summed: the lines its changes added and removed
 /// where every call that succeeded changed a file, and otherwise the bytes
-/// every call returned; how many failed, and how many the session ended
-/// under; and how long they ran.
+/// every call returned; how many failed, how many were refused, and how many
+/// the session ended under; and how long they ran.
 ///
-/// A sum is marked `≥` where one of the calls in it had no figure to add, the
-/// same way the Changes pane marks a file some call did not count — and a
-/// call that has not finished has none yet.
+/// A sum is marked `≥` where one of the calls in it had no figure to add, by
+/// [`count`]'s rule — and a call that has not finished has none yet.
 fn group_result(calls: &[Call], theme: &Theme) -> Vec<Span<'static>> {
     let dim = Style::new().fg(theme.dim);
     if calls.iter().any(Call::running) {
-        return vec![Span::styled("running", dim)];
+        return vec![Span::styled("running", Style::new().fg(theme.hot))];
     }
     let succeeded: Vec<&Call> = calls
         .iter()
         .filter(|call| !call.failed() && !call.interrupted)
         .collect();
+    let ended = |outcome: ToolOutcome| {
+        calls
+            .iter()
+            .filter(|call| call.outcome == Some(outcome))
+            .count()
+    };
     let cut = calls.iter().filter(|call| call.interrupted).count();
-    let failed = calls.len() - succeeded.len() - cut;
 
     let mut spans = match succeeded
         .iter()
@@ -561,25 +1053,26 @@ fn group_result(calls: &[Call], theme: &Theme) -> Vec<Span<'static>> {
             vec![Span::styled(human_bytes(bytes), dim)]
         }
     };
-    if cut > 0 {
-        let said = match cut == calls.len() {
-            true => format!("{CUT_SHORT} ×{cut}"),
-            false => format!("{cut} {CUT_SHORT}"),
-        };
-        match succeeded.is_empty() && failed == 0 {
-            true => spans = vec![Span::styled(said, dim)],
-            false => spans.push(Span::styled(format!(" · {said}"), dim)),
+    // Where nothing in the run succeeded, what became of its calls is the
+    // whole of what it says: it returned nothing worth a figure.
+    let mut follows = !succeeded.is_empty();
+    for (count, said, style) in [
+        (cut, CUT_SHORT, dim),
+        (ended(ToolOutcome::Failed), "failed", theme_del(theme)),
+        (ended(ToolOutcome::Denied), "denied", theme_del(theme)),
+    ] {
+        if count == 0 {
+            continue;
         }
-    }
-    if failed > 0 {
-        let said = match failed == calls.len() {
-            true => format!("failed ×{failed}"),
-            false => format!("{failed} failed"),
+        let said = match count == calls.len() {
+            true => format!("{said} ×{count}"),
+            false => format!("{count} {said}"),
         };
-        match succeeded.is_empty() {
-            true => spans = vec![Span::styled(said, theme_del(theme))],
-            false => spans.push(Span::styled(format!(" · {said}"), theme_del(theme))),
+        match follows {
+            true => spans.push(Span::styled(format!(" · {said}"), style)),
+            false => spans = vec![Span::styled(said, style)],
         }
+        follows = true;
     }
     if let Some(took) = summed_time(calls) {
         spans.push(Span::styled(format!(" · {took}"), dim));
@@ -612,8 +1105,8 @@ fn summed_time(calls: &[Call]) -> Option<String> {
     })
 }
 
-/// `+8 −6`, each side in its colour, with the Changes pane's marks for a side
-/// some call did not state.
+/// `+8 −6`, each side in its colour, with [`count`]'s marks for a side some
+/// call did not state.
 fn diffstat(added: (u64, bool), removed: (u64, bool), theme: &Theme) -> Vec<Span<'static>> {
     vec![
         Span::styled(count('+', added.0, added.1), Style::new().fg(theme.add)),
@@ -659,6 +1152,8 @@ mod tests {
             summary: Some(id.to_owned()),
             exit_code: None,
             error: error.map(str::to_owned),
+            command: None,
+            untrimmed: None,
         }
     }
 
@@ -667,6 +1162,10 @@ mod tests {
         let detail = Detail {
             folded,
             diffs_open: false,
+            columns: Columns::of(app.entries()),
+            grouped: false,
+            notable_only: false,
+            now: None,
         };
         lines(&app.entries()[0], 80, detail, &Theme::default())
             .into_iter()
@@ -683,6 +1182,38 @@ mod tests {
         App::new(Repo::default())
     }
 
+    /// A command a standing rule let through says so on its row, which is
+    /// the only place a call with no diff can: the operator did not see it
+    /// asked. One the operator allowed carries no mark.
+    #[test]
+    fn a_command_a_standing_rule_let_through_is_marked_on_its_row() {
+        for (decision, marked) in [
+            (niobe_core::event::PermissionDecision::AllowByRule, true),
+            (niobe_core::event::PermissionDecision::Allow, false),
+        ] {
+            let mut app = app();
+            app.apply(&start("t1", "Bash"));
+            app.apply(&Event::PermissionResponse {
+                id: "t1".into(),
+                decision,
+                message: None,
+            });
+            let mut ended = end("t1", "Bash", ToolOutcome::Ok, None);
+            if let Event::ToolCallEnd { exit_code, .. } = &mut ended {
+                *exit_code = Some(0);
+            }
+            app.apply(&ended);
+
+            let rows = drawn(&app, false);
+            assert_eq!(
+                rows[0].ends_with("exit 0 · rule"),
+                marked,
+                "{decision:?}: {rows:?}"
+            );
+            assert!(rows[0].contains("exit 0"), "{rows:?}");
+        }
+    }
+
     #[test]
     fn a_failure_with_no_reason_says_the_backend_gave_none() {
         let mut app = app();
@@ -696,6 +1227,70 @@ mod tests {
             rows[1].trim(),
             "└ the call failed and the backend said nothing about why"
         );
+    }
+
+    /// The operator's own words are what they refused the call with, so they
+    /// are kept whole under it, in place of the backend's reading of them.
+    #[test]
+    fn a_refused_call_shows_the_operators_written_answer_whole_under_its_row() {
+        let mut app = app();
+        app.apply(&start("t1", "Bash"));
+        app.apply(&Event::PermissionResponse {
+            id: "t1".into(),
+            decision: niobe_core::event::PermissionDecision::Deny,
+            message: Some("Do not create b.txt.\nUse the scratch directory instead.".to_owned()),
+        });
+        app.apply(&end(
+            "t1",
+            "Bash",
+            ToolOutcome::Denied,
+            Some("The user doesn't want to proceed with this tool use."),
+        ));
+
+        let rows = drawn(&app, false);
+        assert_eq!(app.entries().len(), 1, "{:?}", app.entries());
+        assert!(rows[0].ends_with("denied"), "{rows:?}");
+        assert_eq!(
+            rows[1..3].iter().map(|row| row.trim()).collect::<Vec<_>>(),
+            [
+                "└ You answered instead: Do not create b.txt.",
+                "Use the scratch directory instead.",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_written_answer_wraps_inside_the_room_left_after_its_branch() {
+        let said = "alpha bravo charlie delta echo foxtrot golf hotel india juliet";
+        let room = 24;
+
+        let lines = answer_lines(said, room, &Theme::default());
+
+        assert!(lines.len() > 1, "the answer did not wrap");
+        for line in &lines {
+            let row: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert!(text::width(&row) <= room, "{row:?} is wider than {room}");
+        }
+    }
+
+    #[test]
+    fn a_refusal_with_no_written_answer_shows_the_backends_reason() {
+        let mut app = app();
+        app.apply(&start("t1", "Bash"));
+        app.apply(&Event::PermissionResponse {
+            id: "t1".into(),
+            decision: niobe_core::event::PermissionDecision::Deny,
+            message: None,
+        });
+        app.apply(&end(
+            "t1",
+            "Bash",
+            ToolOutcome::Denied,
+            Some("The operator denied this call in Niobe."),
+        ));
+
+        let rows = drawn(&app, false);
+        assert_eq!(rows[1].trim(), "└ The operator denied this call in Niobe.");
     }
 
     #[test]
@@ -734,6 +1329,124 @@ mod tests {
         assert_eq!(drawn(&app, true).len(), 2, "folded, the group row alone");
     }
 
+    /// In a run of edits where only some were to the agent's own notes, the
+    /// note's row says so and keeps its lines behind Ctrl+T, and the
+    /// project's edit is drawn as ever.
+    #[test]
+    fn a_note_among_the_projects_edits_is_named_as_memory_and_drawn_without_its_lines() {
+        use niobe_core::event::ChangeScope;
+
+        let mut app = app();
+        for (id, path, scope) in [
+            ("t1", "src/lib.rs", ChangeScope::Project),
+            ("t2", "/notes/memory/MEMORY.md", ChangeScope::AgentMemory),
+        ] {
+            app.apply(&start(id, "Edit"));
+            app.apply(&end(id, "Edit", ToolOutcome::Ok, None));
+            app.apply(&Event::FileChange {
+                path: path.to_owned(),
+                added: Some(1),
+                removed: Some(1),
+                hunks: vec![
+                    niobe_core::diff::Hunk::checked(
+                        1,
+                        1,
+                        1,
+                        1,
+                        vec![
+                            niobe_core::diff::Line::Removed(format!("old {id}")),
+                            niobe_core::diff::Line::Added(format!("new {id}")),
+                        ],
+                    )
+                    .expect("one line each side"),
+                ],
+                scope,
+            });
+        }
+
+        let rows = drawn(&app, false);
+        let said = rows.join("\n");
+        assert!(rows[0].starts_with("▾ Edit ×2"), "{said}");
+        assert!(
+            said.contains("new t1"),
+            "the project's edit lost its lines:\n{said}"
+        );
+        assert!(
+            !said.contains("new t2"),
+            "the note's lines are drawn:\n{said}"
+        );
+        let note = rows
+            .iter()
+            .find(|row| row.contains("└ "))
+            .expect("the note hangs last");
+        // The test's calls are read as their ids, as a backend's summary.
+        assert!(note.contains("updated memory · t2"), "{said}");
+        assert!(rows[0].contains("t1, updated memory · t2"), "{said}");
+    }
+
+    /// Two edits to one note name it once.
+    #[test]
+    fn two_edits_to_one_note_name_it_once() {
+        use niobe_core::event::ChangeScope;
+
+        let mut app = app();
+        for id in ["t1", "t2"] {
+            let note = |event: Event| match event {
+                Event::ToolCallStart {
+                    id,
+                    name,
+                    input,
+                    agent,
+                    ..
+                } => Event::ToolCallStart {
+                    id,
+                    name,
+                    input,
+                    summary: Some("/notes/memory/notes.md".to_owned()),
+                    agent,
+                },
+                Event::ToolCallEnd {
+                    id,
+                    name,
+                    input,
+                    output,
+                    bytes,
+                    outcome,
+                    exit_code,
+                    error,
+                    command,
+                    ..
+                } => Event::ToolCallEnd {
+                    id,
+                    name,
+                    input,
+                    output,
+                    bytes,
+                    outcome,
+                    summary: Some("/notes/memory/notes.md".to_owned()),
+                    exit_code,
+                    error,
+                    command,
+                    untrimmed: None,
+                },
+                other => other,
+            };
+            app.apply(&note(start(id, "Edit")));
+            app.apply(&note(end(id, "Edit", ToolOutcome::Ok, None)));
+            app.apply(&Event::FileChange {
+                path: "/notes/memory/notes.md".to_owned(),
+                added: Some(1),
+                removed: Some(1),
+                hunks: Vec::new(),
+                scope: ChangeScope::AgentMemory,
+            });
+        }
+
+        let said = drawn(&app, false).join("\n");
+        assert!(said.contains("updated memory · notes.md"), "{said}");
+        assert!(!said.contains("notes.md, notes.md"), "{said}");
+    }
+
     #[test]
     fn a_change_whose_removal_went_unstated_reads_as_a_dash_and_its_sum_as_a_floor() {
         let mut app = app();
@@ -745,6 +1458,7 @@ mod tests {
                 added: Some(4),
                 removed,
                 hunks: Vec::new(),
+                scope: niobe_core::event::ChangeScope::Project,
             });
         }
 
@@ -758,6 +1472,7 @@ mod tests {
         app.apply(&Event::AgentSpawn {
             id: niobe_core::event::AgentId::new(id),
             parent: None,
+            kind: None,
             label: label.to_owned(),
         });
     }
@@ -773,19 +1488,315 @@ mod tests {
     }
 
     #[test]
-    fn a_sub_agents_call_names_the_agent_before_what_it_does() {
+    fn a_sub_agents_call_names_the_agent_by_its_tag_in_a_column_of_its_own() {
         let mut app = app();
         spawn(&mut app, "toolu_a", "quick-lookup: Summarize");
         app.apply(&start_by("t1", "Read", "toolu_a"));
 
         let rows = drawn(&app, false);
         assert!(
-            rows[0].contains("Read ")
-                && rows[0].contains("quick-lookup: Summarize › catalog/t1.py"),
+            rows[0].starts_with("⠋ Read quick catalog/t1.py "),
             "{rows:?}"
         );
         assert!(rows[0].ends_with("running"), "{rows:?}");
         assert_eq!(rows[0].chars().count(), 80, "{rows:?}");
+    }
+
+    /// Each row of `app`'s transcript at 80 columns, one string a row.
+    fn every_row(app: &App) -> Vec<String> {
+        let detail = Detail {
+            columns: Columns::of(app.entries()),
+            ..Detail::default()
+        };
+        app.entries()
+            .iter()
+            .flat_map(|entry| lines(entry, 80, detail, &Theme::default()))
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// The cell `needle` starts at in `row`.
+    fn cell_of(row: &str, needle: &str) -> Option<usize> {
+        row.find(needle).map(|at| text::width(&row[..at]))
+    }
+
+    #[test]
+    fn what_a_call_does_starts_in_one_column_for_a_wide_tool_name_and_agent_tag() {
+        let mut app = app();
+        app.apply(&Event::AgentSpawn {
+            id: niobe_core::event::AgentId::new("toolu_a"),
+            parent: None,
+            kind: Some("漢字漢字-writer".to_owned()),
+            label: "漢字漢字-writer: 書く".to_owned(),
+        });
+        app.apply(&start_by("t1", "mcp__漢字サーバー__ツール", "toolu_a"));
+        app.apply(&Event::ToolCallStart {
+            id: "t2".into(),
+            name: "Read".to_owned(),
+            input: String::new(),
+            summary: Some("catalog/t2.py".to_owned()),
+            agent: None,
+        });
+
+        let rows = every_row(&app);
+        let rows: Vec<&String> = rows.iter().filter(|row| !row.is_empty()).collect();
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert_eq!(cell_of(rows[0], "catalog/t1.py"), Some(26), "{rows:?}");
+        assert_eq!(cell_of(rows[1], "catalog/t2.py"), Some(26), "{rows:?}");
+        assert_eq!(cell_of(rows[0], "漢字漢字"), Some(17), "{rows:?}");
+        for row in rows {
+            assert_eq!(text::width(row), 80, "{row:?}");
+            assert!(row.ends_with("running"), "{row:?}");
+        }
+    }
+
+    #[test]
+    fn a_wide_agent_tag_heads_its_words_and_keeps_its_heading_in_its_columns() {
+        let mut app = app();
+        app.apply(&Event::AgentSpawn {
+            id: niobe_core::event::AgentId::new("toolu_a"),
+            parent: None,
+            kind: Some("漢字漢字-writer".to_owned()),
+            label: "漢字漢字-writer: 書く".to_owned(),
+        });
+        app.apply(&start_by("t1", "Read", "toolu_a"));
+        app.apply(&Event::AssistantMessage {
+            text: "Done.".into(),
+            agent: Some(niobe_core::event::AgentId::new("toolu_a")),
+        });
+
+        let detail = Detail {
+            columns: Columns::of(app.entries()),
+            ..Detail::default()
+        };
+        let theme = Theme::default();
+        let words: Vec<String> = said(&app.entries()[1], 60, detail, &theme)
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect()
+            })
+            .collect();
+        assert!(words[0].starts_with("↳ 漢字漢字"), "{words:?}");
+        assert!(text::width(&words[0]) <= 60, "{words:?}");
+        assert_eq!(words[1], "  Done.", "{words:?}");
+        let head: String = heading("漢字漢字", "書く", 1, 60, detail, &theme)
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert_eq!(cell_of(&head, "書く"), Some(16), "{head:?}");
+        assert_eq!(text::width(&head), 60, "{head:?}");
+    }
+
+    #[test]
+    fn the_columns_are_as_wide_as_the_widest_name_and_tag_the_transcript_holds() {
+        let mut app = app();
+        app.apply(&start("t1", "Read"));
+        assert_eq!(
+            Columns::of(app.entries()),
+            Columns {
+                name: NAME_LEAST,
+                agent: 0
+            },
+            "no agent made a call, so there is no agent column"
+        );
+
+        spawn(&mut app, "toolu_a", "quick-lookup: Summarize");
+        app.apply(&start_by("t2", "TodoWrite", "toolu_a"));
+        app.apply(&start(
+            "t3",
+            "mcp__claude_ai_Notion__notion-query-data-sources",
+        ));
+        assert_eq!(
+            Columns::of(app.entries()),
+            Columns {
+                name: NAME_MOST,
+                agent: text::width("quick")
+            }
+        );
+    }
+
+    #[test]
+    fn a_sub_agents_words_are_drawn_in_the_body_colour_under_its_tag() {
+        let mut app = app();
+        spawn(&mut app, "toolu_a", "quick-lookup: Summarize");
+        app.apply(&start_by("t1", "Read", "toolu_a"));
+        app.apply(&Event::AssistantMessage {
+            text: "The stub is in down mode still, and the probe reads it as an outage.".into(),
+            agent: Some(niobe_core::event::AgentId::new("toolu_a")),
+        });
+
+        let detail = Detail {
+            columns: Columns::of(app.entries()),
+            ..Detail::default()
+        };
+        let theme = Theme::default();
+        let lines = said(&app.entries()[1], 40, detail, &theme);
+        let rows: Vec<String> = lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect()
+            })
+            .collect();
+        assert!(
+            rows[0].starts_with("↳ quick  quick-lookup: Summarize"),
+            "{rows:?}"
+        );
+        assert!(
+            rows[1].starts_with("  The stub is in down mode"),
+            "{rows:?}"
+        );
+        assert!(
+            rows[2].starts_with("  ") && !rows[2][2..].starts_with(' '),
+            "{rows:?}"
+        );
+        assert!(rows.iter().all(|row| text::width(row) <= 40), "{rows:?}");
+        assert!(rows.last().is_some_and(String::is_empty), "{rows:?}");
+        for line in &lines[1..lines.len() - 1] {
+            for span in line
+                .spans
+                .iter()
+                .filter(|span| !span.content.trim().is_empty())
+            {
+                assert_eq!(span.style.fg, Some(theme.fg), "{span:?}");
+            }
+        }
+    }
+
+    /// A shell call of the agent's, started with the first line of `command`
+    /// as its summary and ended with the whole of it.
+    fn shell_call(app: &mut App, command: &str) {
+        let first = command.lines().next().unwrap_or_default();
+        app.apply(&Event::ToolCallStart {
+            id: "t1".into(),
+            name: "Bash".to_owned(),
+            input: String::new(),
+            summary: Some(first.to_owned()),
+            agent: None,
+        });
+        app.apply(&Event::ToolCallEnd {
+            id: "t1".into(),
+            name: "Bash".to_owned(),
+            input: String::new(),
+            output: String::new(),
+            bytes: 2_048,
+            outcome: ToolOutcome::Ok,
+            summary: Some(first.to_owned()),
+            exit_code: Some(0),
+            error: None,
+            command: Some(command.to_owned()),
+            untrimmed: None,
+        });
+    }
+
+    const LONG_COMMAND: &str = "cd /Users/someone/projects/catalog && cargo test -p catalog-fetch 2>&1 | tail -50\necho done";
+
+    #[test]
+    fn an_agents_shell_call_names_the_programs_it_ran_rather_than_the_command() {
+        let mut app = app();
+        shell_call(&mut app, LONG_COMMAND);
+
+        let rows = drawn(&app, false);
+        assert_eq!(
+            rows.iter().filter(|row| !row.is_empty()).count(),
+            1,
+            "{rows:?}"
+        );
+        assert!(rows[0].starts_with("⚙ Bash cargo test · tail "), "{rows:?}");
+        assert!(!rows[0].contains("/Users"), "{rows:?}");
+        assert!(rows[0].ends_with("exit 0"), "{rows:?}");
+    }
+
+    #[test]
+    fn ctrl_t_draws_a_shell_calls_whole_command_under_its_row() {
+        let mut app = app();
+        shell_call(&mut app, LONG_COMMAND);
+
+        let detail = Detail {
+            diffs_open: true,
+            columns: Columns::of(app.entries()),
+            ..Detail::default()
+        };
+        let rows: Vec<String> = lines(&app.entries()[0], 60, detail, &Theme::default())
+            .into_iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect()
+            })
+            .collect();
+        assert!(rows[0].starts_with("⚙ Bash cargo test · tail "), "{rows:?}");
+        let under = rows[1..].join("\n");
+        assert!(
+            under.starts_with("  $ cd /Users/someone/projects/catalog"),
+            "{rows:?}"
+        );
+        assert!(
+            under.contains("tail -50"),
+            "the command is wrapped, not cut: {rows:?}"
+        );
+        assert!(
+            under.contains("  echo done"),
+            "every line of it is drawn: {rows:?}"
+        );
+        assert!(rows.iter().all(|row| text::width(row) <= 60), "{rows:?}");
+    }
+
+    #[test]
+    fn a_command_the_operator_ran_keeps_its_command_on_its_row() {
+        let mut app = app();
+        app.apply(&Event::ToolCallStart {
+            id: "t1".into(),
+            name: crate::shell::OPERATOR_SHELL.to_owned(),
+            input: "cargo fmt --all".to_owned(),
+            summary: None,
+            agent: None,
+        });
+        let rows = drawn(&app, false);
+        assert!(rows[0].contains("cargo fmt --all"), "{rows:?}");
+    }
+
+    #[test]
+    fn a_calls_row_is_drawn_dim_and_a_failed_one_names_its_tool_in_the_failure_colour() {
+        let theme = Theme::default();
+        let detail = |app: &App| Detail {
+            columns: Columns::of(app.entries()),
+            ..Detail::default()
+        };
+        let mut app = app();
+        app.apply(&start("t1", "Read"));
+        app.apply(&end("t1", "Read", ToolOutcome::Ok, None));
+        let row = lines(&app.entries()[0], 80, detail(&app), &theme).remove(0);
+        for span in row
+            .spans
+            .iter()
+            .filter(|span| !span.content.trim().is_empty())
+        {
+            assert_eq!(span.style.fg, Some(theme.dim), "{span:?}");
+        }
+
+        let mut app = self::app();
+        app.apply(&start("t1", "Read"));
+        app.apply(&end("t1", "Read", ToolOutcome::Failed, Some("gone")));
+        let row = lines(&app.entries()[0], 80, detail(&app), &theme).remove(0);
+        let name = row
+            .spans
+            .iter()
+            .find(|span| span.content.contains("Read"))
+            .expect("the row names its tool");
+        assert_eq!(name.style.fg, Some(theme.del), "{row:?}");
     }
 
     #[test]
@@ -810,7 +1821,7 @@ mod tests {
             .collect();
         assert_eq!(
             heads,
-            [("Read", Some("…fetch"), 1), ("Read", Some("…cache"), 2),]
+            [("Read", Some("fetch"), 1), ("Read", Some("cache"), 2)]
         );
     }
 
@@ -863,6 +1874,46 @@ mod tests {
         assert!(!rows[0].contains("failed"), "{rows:?}");
     }
 
+    #[test]
+    fn a_call_its_turn_ended_without_says_it_was_cut_short() {
+        let mut app = app();
+        app.apply(&start("t1", "Bash"));
+        app.apply(&Event::TurnEnded);
+
+        let rows = drawn(&app, false);
+        assert!(rows[0].ends_with("cut short"), "{rows:?}");
+    }
+
+    #[test]
+    fn a_run_counts_a_refused_call_as_denied_rather_than_failed() {
+        let mut app = app();
+        app.apply(&start("t1", "Bash"));
+        app.apply(&end("t1", "Bash", ToolOutcome::Ok, None));
+        app.apply(&start("t2", "Bash"));
+        app.apply(&end("t2", "Bash", ToolOutcome::Denied, None));
+
+        let rows = drawn(&app, true);
+        assert!(rows[0].ends_with("2.0 kB · 1 denied"), "{rows:?}");
+        assert!(!rows[0].contains("failed"), "{rows:?}");
+    }
+
+    #[test]
+    fn a_run_of_refused_calls_reads_as_denied_and_a_failure_beside_them_as_failed() {
+        let mut refused = app();
+        for id in ["t1", "t2"] {
+            refused.apply(&start(id, "Bash"));
+            refused.apply(&end(id, "Bash", ToolOutcome::Denied, None));
+        }
+        assert!(drawn(&refused, true)[0].ends_with("denied ×2"));
+
+        let mut mixed = app();
+        mixed.apply(&start("t1", "Bash"));
+        mixed.apply(&end("t1", "Bash", ToolOutcome::Failed, Some("gone")));
+        mixed.apply(&start("t2", "Bash"));
+        mixed.apply(&end("t2", "Bash", ToolOutcome::Denied, None));
+        assert!(drawn(&mixed, true)[0].ends_with("1 failed · 1 denied"));
+    }
+
     /// A `cargo test` call that ended with `status`, and the run it reported.
     fn tested(app: &mut App, status: i32, counts: Option<niobe_core::TestCounts>, failed: bool) {
         tested_naming(app, status, counts, failed, Vec::new());
@@ -891,6 +1942,8 @@ mod tests {
             summary: Some("cargo test".to_owned()),
             exit_code: Some(status),
             error: (status != 0).then(|| format!("Exit code {status}")),
+            command: None,
+            untrimmed: None,
         });
         app.apply(&Event::TestRun {
             id: "t1".into(),
@@ -917,7 +1970,10 @@ mod tests {
 
         let rows = drawn(&app, false);
         assert!(rows[0].starts_with("⚙ Bash"), "{rows:?}");
-        assert_eq!(rows[1].trim(), "└ 637 passed · 0 failed · 2 ignored");
+        assert_eq!(
+            rows[1].trim(),
+            "└ ━━━━━━━━━━━━━━━━━━━━  637 passed · 0 failed · 2 ignored"
+        );
     }
 
     #[test]
@@ -929,7 +1985,10 @@ mod tests {
         let detail = Detail::default();
         let lines = lines(&app.entries()[0], 80, detail, &theme);
         let under: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(under.trim(), "└ 630 passed · 7 failed");
+        assert_eq!(
+            under.trim(),
+            "└ ━━━━━━━━━━━━━━━━━━━━  630 passed · 7 failed"
+        );
         let failed = lines[1]
             .spans
             .iter()
@@ -1046,7 +2105,7 @@ mod tests {
 
         assert_eq!(
             drawn(&app, false)[1].trim(),
-            "└ 3 passed · 1 failed · tests::wrong in --lib · 1 ignored"
+            "└ ━━━━━━━━━━  3 passed · 1 failed · tests::wrong in --lib · 1 ignored"
         );
         let line =
             lines(&app.entries()[0], 36, Detail::default(), &Theme::default()).swap_remove(1);
@@ -1063,7 +2122,7 @@ mod tests {
 
         assert_eq!(
             drawn(&app, false)[1].trim(),
-            "└ 4 passed · 3 failed · tests::wrong +2 in 2 binaries"
+            "└ ━━━━━━━━━━━━━━━━━━━━  4 passed · 3 failed · tests::wrong +2 in 2 binaries"
         );
     }
 
@@ -1093,5 +2152,297 @@ mod tests {
             .find(|span| span.content.starts_with("tests::wrong"))
             .expect("the name is a span of its own");
         assert_eq!(name.style.fg, Some(theme.del));
+    }
+
+    #[test]
+    fn a_line_a_command_printed_wider_than_the_pane_is_drawn_whole() {
+        let long = format!("/private/tmp/{}/deep", "segment".repeat(12));
+        let mut call = Call::started("pwd".to_owned(), None);
+        call.outcome = Some(ToolOutcome::Ok);
+        call.printed = Some(crate::app::Printed {
+            above: 0,
+            cut: false,
+            tail: vec![long.clone(), String::new(), "after".to_owned()],
+        });
+
+        let drawn: Vec<String> = printed_lines(
+            &call,
+            call.printed
+                .as_ref()
+                .expect("the call has a printed output set"),
+            30,
+            &Theme::default(),
+        )
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect()
+        })
+        .collect();
+
+        assert_eq!(drawn.concat().replace("after", ""), long, "{drawn:?}");
+        assert!(
+            drawn.iter().all(|line| text::width(line) <= 30),
+            "{drawn:?}"
+        );
+        assert!(
+            drawn.iter().any(String::is_empty),
+            "the blank line was lost"
+        );
+    }
+
+    /// The rows of a command the operator ran that printed `output`, of
+    /// `bytes` in all.
+    fn printed_rows(output: &str, bytes: u64) -> Vec<String> {
+        let mut app = app();
+        app.apply(&start("op1", crate::shell::OPERATOR_SHELL));
+        app.apply(&Event::ToolCallEnd {
+            id: "op1".into(),
+            name: crate::shell::OPERATOR_SHELL.to_owned(),
+            input: "yes | head -c 50000000".to_owned(),
+            output: output.to_owned(),
+            bytes,
+            outcome: ToolOutcome::Ok,
+            summary: None,
+            exit_code: Some(0),
+            error: None,
+            command: None,
+            untrimmed: None,
+        });
+        drawn(&app, false)
+    }
+
+    #[test]
+    fn the_lines_above_a_commands_whole_output_are_counted() {
+        let output = "y\n".repeat(20);
+
+        let rows = printed_rows(&output, output.len() as u64);
+
+        assert_eq!(rows[1].trim(), "… 8 lines above", "{rows:?}");
+    }
+
+    #[test]
+    fn the_lines_above_the_kept_end_of_a_longer_output_are_a_floor() {
+        let kept = "y\n".repeat(20);
+
+        assert_eq!(
+            printed_rows(&kept, 50_000_000)[1].trim(),
+            "… at least 8 lines above"
+        );
+        assert_eq!(
+            printed_rows(&"y\n".repeat(12), 50_000_000)[1].trim(),
+            "… more above"
+        );
+    }
+
+    fn second(seconds: u64) -> Stamp {
+        Stamp::new(SystemTime::UNIX_EPOCH + Duration::from_secs(seconds), None)
+    }
+
+    /// `cargo test` started at `from` seconds, ending at `to` with every test
+    /// passed where it ends.
+    fn cargo_test(app: &mut App, id: &str, from: u64, to: Option<u64>) {
+        app.apply_at(
+            &Event::ToolCallStart {
+                id: id.into(),
+                name: "Bash".to_owned(),
+                input: r#"{"command":"cargo test"}"#.to_owned(),
+                summary: Some("cargo test".to_owned()),
+                agent: None,
+            },
+            second(from),
+        );
+        let Some(to) = to else {
+            return;
+        };
+        app.apply_at(
+            &Event::ToolCallEnd {
+                id: id.into(),
+                name: "Bash".to_owned(),
+                input: String::new(),
+                output: String::new(),
+                bytes: 1_024,
+                outcome: ToolOutcome::Ok,
+                summary: Some("cargo test".to_owned()),
+                exit_code: Some(0),
+                error: None,
+                command: None,
+                untrimmed: None,
+            },
+            second(to),
+        );
+        app.apply_at(
+            &Event::TestRun {
+                id: id.into(),
+                counts: counts(12, 0, 0),
+                exit_code: Some(0),
+                failed: false,
+                failures: Vec::new(),
+            },
+            second(to),
+        );
+    }
+
+    /// The last entry of `app` as the transcript draws it at `now`.
+    fn drawn_at(app: &App, now: u64) -> Vec<Line<'static>> {
+        let detail = Detail {
+            columns: Columns::of(app.entries()),
+            now: Some(second(now)),
+            ..Detail::default()
+        };
+        let entry = app.entries().last().expect("there is an entry");
+        lines(entry, 80, detail, &Theme::default())
+    }
+
+    fn text_of(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
+    #[test]
+    fn a_test_run_in_progress_says_how_long_it_has_run() {
+        let mut app = app();
+        cargo_test(&mut app, "t1", 100, None);
+
+        let rows = drawn_at(&app, 118);
+        assert!(
+            text_of(&rows[0]).ends_with("running"),
+            "{:?}",
+            text_of(&rows[0])
+        );
+        assert_eq!(text_of(&rows[1]).trim(), "└ testing · 18s");
+        assert_eq!(
+            text_of(&drawn_at(&app, 119)[1]).trim(),
+            "└ testing · 19s",
+            "the time moves with the clock"
+        );
+    }
+
+    /// The backend reports no progress through a run, so the bar is this run's
+    /// time against the last whole run of the same command, and says so.
+    #[test]
+    fn a_test_run_in_progress_is_drawn_against_the_last_run_of_its_command() {
+        let mut app = app();
+        cargo_test(&mut app, "t1", 0, Some(40));
+        cargo_test(&mut app, "t2", 100, None);
+
+        // The two calls are one run of Bash calls, and the line hangs under
+        // the second.
+        let testing = |now| -> Line<'static> {
+            drawn_at(&app, now)
+                .into_iter()
+                .find(|line| text_of(line).contains("testing"))
+                .expect("the run in progress says so")
+        };
+        let half = testing(120);
+        assert_eq!(
+            text_of(&half).trim(),
+            "└ ━━━━━━━━━━──────────  testing · 20s of the last run's 40s"
+        );
+        let theme = Theme::default();
+        let filled = half
+            .spans
+            .iter()
+            .find(|span| span.content.contains('━'))
+            .expect("half the bar is filled");
+        assert_eq!(filled.style.fg, Some(theme.hot));
+
+        assert_eq!(
+            text_of(&testing(150)).trim(),
+            "└ ━━━━━━━━━━━━━━━━━━━━  testing · 50s, past the last run's 40s"
+        );
+    }
+
+    /// A run waiting on a question has not started its tests: the time it
+    /// waits is the operator's, and a bar of it against the last run would
+    /// claim a run nobody measured.
+    #[test]
+    fn a_test_run_waiting_on_a_question_is_not_drawn_as_testing() {
+        let mut app = app();
+        cargo_test(&mut app, "t1", 0, Some(40));
+        cargo_test(&mut app, "t2", 100, None);
+        app.apply_at(
+            &Event::PermissionRequest {
+                id: "t2".into(),
+                tool: "Bash".to_owned(),
+                input: r#"{"command":"cargo test"}"#.to_owned(),
+                target: Some("cargo test".to_owned()),
+                proposal: None,
+                reason: None,
+                agent: None,
+            },
+            second(100),
+        );
+
+        let waiting = drawn_at(&app, 130);
+        assert!(
+            !waiting.iter().any(|line| text_of(line).contains("testing")),
+            "{:?}",
+            waiting.iter().map(text_of).collect::<Vec<_>>()
+        );
+
+        app.apply_at(
+            &Event::PermissionResponse {
+                id: "t2".into(),
+                decision: niobe_core::event::PermissionDecision::Allow,
+                message: None,
+            },
+            second(130),
+        );
+        let running = drawn_at(&app, 140)
+            .into_iter()
+            .find(|line| text_of(line).contains("testing"))
+            .expect("the run says so once it is allowed");
+        assert_eq!(
+            text_of(&running).trim(),
+            "└ ━━━━━───────────────  testing · 10s of the last run's 40s"
+        );
+    }
+
+    #[test]
+    fn a_finished_test_run_draws_its_counts_as_a_bar_beside_them() {
+        let mut app = app();
+        tested(&mut app, 101, counts(15, 4, 1), false);
+
+        let theme = Theme::default();
+        let rows = lines(&app.entries()[0], 80, Detail::default(), &theme);
+        assert_eq!(
+            text_of(&rows[1]).trim(),
+            "└ ━━━━━━━━━━━━━━━━━━━━  15 passed · 4 failed · 1 ignored"
+        );
+        let cells = |colour| -> usize {
+            rows[1]
+                .spans
+                .iter()
+                .filter(|span| span.content.contains('━') && span.style.fg == Some(colour))
+                .map(|span| span.content.chars().count())
+                .sum()
+        };
+        assert_eq!(
+            (cells(theme.add), cells(theme.del), cells(theme.dim)),
+            (15, 4, 1),
+            "a cell for every test of twenty"
+        );
+    }
+
+    #[test]
+    fn a_failure_keeps_a_cell_of_the_bar_however_many_passed() {
+        let mut app = app();
+        tested(&mut app, 101, counts(5_000, 1, 0), false);
+
+        let theme = Theme::default();
+        let rows = lines(&app.entries()[0], 80, Detail::default(), &theme);
+        assert!(
+            rows[1]
+                .spans
+                .iter()
+                .any(|span| span.content.contains('━') && span.style.fg == Some(theme.del)),
+            "{:?}",
+            rows[1]
+        );
     }
 }

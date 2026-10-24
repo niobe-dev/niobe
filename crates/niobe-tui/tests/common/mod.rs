@@ -19,15 +19,15 @@
     reason = "shared by two test binaries, neither of which uses all of it"
 )]
 
+use niobe_core::TestRunRecord;
 use niobe_core::diff::{Hunk, Line as DiffLine};
 use niobe_core::event::{
     AgentId, AgentOutcome, Backend, Billing, Context, Event, Mode, PermissionDecision, SessionMeta,
-    ToolOutcome, Usage, UsageWindow, UsageWindows,
+    TokenCounts, ToolOutcome, Usage, UsageWindow, UsageWindows,
 };
-use niobe_core::{TestCounts, TestRunRecord};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
-use niobe_tui::app::{App, Commit, Repo, WorkingFile};
+use niobe_tui::app::{App, Repo, WorkingFile};
 use niobe_tui::clock::Clock;
 use niobe_tui::ui;
 use ratatui::Terminal;
@@ -48,6 +48,8 @@ fn mcp_call(name: &str, bytes: u64, outcome: ToolOutcome) -> Event {
         summary: None,
         exit_code: None,
         error: None,
+        command: None,
+        untrimmed: None,
     }
 }
 
@@ -74,6 +76,8 @@ fn read_ended(id: &str, path: &str, bytes: u64) -> Event {
         summary: Some(path.to_owned()),
         exit_code: None,
         error: None,
+        command: None,
+        untrimmed: None,
     }
 }
 
@@ -115,12 +119,12 @@ fn session_events() -> Vec<Event> {
             output: 180,
             cache_read: 18_400,
             cache_write: 900,
-            cache_write_1h: 0,
+            cache_write_1h: Some(0),
             reasoning: 0,
             model: "opus-5".to_owned(),
             cost_usd: Some(0.04),
-            cost_basis: None,
-            settles_model: false,
+            settles_model: Some(false),
+            fast: false,
         }),
         // The prompt that request sent: its input, reads and writes.
         Event::Context(Context {
@@ -143,23 +147,19 @@ fn session_events() -> Vec<Event> {
                 resets_at: Some(READ_AT + 4 * 86_400 + 79 * 60),
             }),
             using_overage: false,
+            overage: niobe_core::event::Overage::Unreported,
         }),
-        Event::Decision {
-            summary: "Reuse the existing LRU instead of a new Map — avoids a second \
-                      eviction policy."
-                .to_owned(),
-            rationale: None,
-            rejected: vec!["A second Map keyed by URL".to_owned()],
-        },
         Event::AgentSpawn {
             id: "a1".into(),
             parent: None,
-            label: "test-writer → tests/fetch.test.ts".to_owned(),
+            kind: Some("test-writer".to_owned()),
+            label: "test-writer: Cover tests/fetch.test.ts".to_owned(),
         },
         Event::AgentSpawn {
             id: "a2".into(),
             parent: None,
-            label: "reviewer → catalog/cache.ts".to_owned(),
+            kind: Some("reviewer".to_owned()),
+            label: "reviewer: Review catalog/cache.ts".to_owned(),
         },
         // What each agent reported about itself, each leaving something out,
         // so the pictures carry an agent with no step and one with no model
@@ -185,7 +185,8 @@ fn session_events() -> Vec<Event> {
         Event::AgentSpawn {
             id: "a3".into(),
             parent: None,
-            label: "doc-writer → docs/etags.md".to_owned(),
+            kind: Some("doc-writer".to_owned()),
+            label: "doc-writer: Write docs/etags.md".to_owned(),
         },
         Event::AgentProgress {
             id: "a3".into(),
@@ -196,13 +197,6 @@ fn session_events() -> Vec<Event> {
         Event::AgentExit {
             id: "a3".into(),
             outcome: AgentOutcome::Failed,
-        },
-        Event::Decision {
-            summary: "Key the cache on the request URL, not the manifest id — two \
-                      manifests can share an id across catalogs."
-                .to_owned(),
-            rationale: None,
-            rejected: vec![],
         },
         // Three calls to one MCP server, one of which failed: what the tools
         // section has to collapse into a single family row carrying its own
@@ -229,6 +223,8 @@ fn session_events() -> Vec<Event> {
             error: Some(
                 "404 object_not_found — the page is not shared with the integration".to_owned(),
             ),
+            command: None,
+            untrimmed: None,
         },
         Event::AssistantMessage {
             text: "Caching the etag beside the body so a 304 can be answered from the LRU."
@@ -247,6 +243,8 @@ fn session_events() -> Vec<Event> {
             tool: "Edit".to_owned(),
             input: r#"{"file_path":"catalog/fetch.ts"}"#.to_owned(),
             target: Some("catalog/fetch.ts".to_owned()),
+            proposal: None,
+            reason: None,
             agent: None,
         },
         Event::PermissionResponse {
@@ -264,6 +262,8 @@ fn session_events() -> Vec<Event> {
             summary: None,
             exit_code: None,
             error: None,
+            command: None,
+            untrimmed: None,
         },
         // Two hunks, as the backend reports a change: what the transcript
         // draws under the call, numbered on each side, with the lines between
@@ -300,6 +300,7 @@ fn session_events() -> Vec<Event> {
                     ],
                 ),
             ],
+            scope: niobe_core::event::ChangeScope::Project,
         },
         // The two readings a count can have besides a figure: a rewrite whose
         // previous contents the backend never showed, and a change it stated
@@ -313,6 +314,7 @@ fn session_events() -> Vec<Event> {
             added: Some(24),
             removed: None,
             hunks: Vec::new(),
+            scope: niobe_core::event::ChangeScope::Project,
         },
         Event::AssistantMessage {
             text: "The notebook that demonstrates the fetcher needs the new call shape.".to_owned(),
@@ -323,6 +325,7 @@ fn session_events() -> Vec<Event> {
             added: None,
             removed: None,
             hunks: Vec::new(),
+            scope: niobe_core::event::ChangeScope::Project,
         },
         Event::ToolCallStart {
             id: "t3".into(),
@@ -341,18 +344,20 @@ fn session_events() -> Vec<Event> {
             summary: None,
             exit_code: Some(1),
             error: Some("1 failing: fetch returns the cached body on a 304".to_owned()),
+            command: Some("npm test -- fetch".to_owned()),
+            untrimmed: None,
         },
         Event::Usage(Usage {
             input: 3_400,
             output: 620,
             cache_read: 22_000,
             cache_write: 0,
-            cache_write_1h: 0,
+            cache_write_1h: Some(0),
             reasoning: 1_200,
             model: "opus-5".to_owned(),
             cost_usd: None,
-            cost_basis: None,
-            settles_model: false,
+            settles_model: Some(false),
+            fast: false,
         }),
         // The later, larger prompt is the one the pane shows: 25,400 of
         // 200,000 is 12.7%, drawn as 13%.
@@ -392,12 +397,14 @@ fn working_tree() -> Vec<WorkingFile> {
         path: path.to_owned(),
         added: Some(added),
         removed: Some(removed),
+        new: false,
     };
     vec![
         WorkingFile {
             path: "CHANGELOG.md".to_owned(),
             added: Some(0),
             removed: Some(0),
+            new: false,
         },
         counted("catalog/fetch.ts", 149, 12),
         counted("catalog/etag.ts", 88, 41),
@@ -409,6 +416,7 @@ fn working_tree() -> Vec<WorkingFile> {
             path: "docs/diagrams/cache.png".to_owned(),
             added: None,
             removed: None,
+            new: false,
         },
         counted("server/handlers/manifest.ts", 97, 4),
         counted("server/handlers/health.ts", 3, 19),
@@ -438,8 +446,7 @@ fn working_tree() -> Vec<WorkingFile> {
 
 /// What a read of the repository hands the shell part-way through a task: a
 /// branch that is ahead of its upstream, a working tree with more files in it
-/// than the pane can show, and commits this session made, one of them still
-/// unpushed.
+/// than the pane can show.
 fn read_repository() -> Repo {
     Repo {
         name: "example-app".to_owned(),
@@ -448,22 +455,6 @@ fn read_repository() -> Repo {
         ahead: Some(3),
         behind: Some(0),
         working: working_tree(),
-        commits: vec![
-            Commit {
-                hash: "9f2c1ab".to_owned(),
-                subject: "feat: keep the etag beside the body".to_owned(),
-                // Dated against the same fixed moment the session is read at,
-                // so the ages in the pictures do not move with the clock.
-                at: Some(UNIX_EPOCH + Duration::from_secs(READ_AT - 12 * 60)),
-                pushed: Some(false),
-            },
-            Commit {
-                hash: "41de07c".to_owned(),
-                subject: "test: a 304 is answered from the cache".to_owned(),
-                at: Some(UNIX_EPOCH + Duration::from_secs(READ_AT - 2 * 3_600)),
-                pushed: Some(true),
-            },
-        ],
         // The files a read lists for `@` include every one the working tree
         // changed, which is all a picture of the screen needs of them.
         files: working_tree()
@@ -471,11 +462,10 @@ fn read_repository() -> Repo {
             .map(|file| file.path)
             .filter(|path| !path.contains(" => "))
             .collect(),
+        began: None,
     }
 }
 
-/// A session part-way through a task: tool calls, usage with and without a
-/// cost, a decision and two sub-agents.
 /// A hunk written the way a unified diff prints one, each line behind its
 /// ` `, `-` or `+`.
 pub fn hunk(old_start: u64, new_start: u64, lines: &[&str]) -> Hunk {
@@ -500,19 +490,6 @@ pub fn hunk(old_start: u64, new_start: u64, lines: &[&str]) -> Hunk {
 
 pub fn running_session() -> App {
     session_read_at_a_fixed_moment(&session_events())
-}
-
-/// The same session with `cargo test` run once more at its end for each of
-/// `runs`, each reporting the counts, the exit status and whether it is known
-/// to have failed as it is given.
-pub fn session_with_test_runs(runs: &[(Option<TestCounts>, Option<i32>, bool)]) -> App {
-    let runs: Vec<_> = runs
-        .iter()
-        .map(|&(counts, exit_code, failed)| {
-            TestRunRecord::new(counts, exit_code, failed, Vec::new())
-        })
-        .collect();
-    session_with_test_records(&runs)
 }
 
 /// The same session with `cargo test` run once more at its end for each of
@@ -549,6 +526,8 @@ pub fn session_with_test_records(runs: &[TestRunRecord]) -> App {
                 summary: Some("cargo test".to_owned()),
                 exit_code: *exit_code,
                 error: None,
+                command: None,
+                untrimmed: None,
             },
             Event::TestRun {
                 id: id.as_str().into(),
@@ -571,8 +550,7 @@ const CALL_STEP_MS: u64 = 400;
 /// The session folded at a fixed moment and read at a fixed moment.
 ///
 /// The events land a hundred and two seconds before the shell reads them, so
-/// the figures measured between the two — the time a decision was recorded at,
-/// how long the agent still running has been running — are real durations in
+/// the figures measured between the two — how long the agent still running has been running — are real durations in
 /// the pictures rather than zeroes. A tool call's start and end, and the
 /// question between them, are the exception: each lands [`CALL_STEP_MS`]
 /// later for every event folded in before it, so how long a call ran is a
@@ -634,12 +612,12 @@ pub fn metered_session() -> App {
         output: 200,
         cache_read: 0,
         cache_write: 0,
-        cache_write_1h: 0,
+        cache_write_1h: Some(0),
         reasoning: 0,
         model: "haiku-4-5".to_owned(),
         cost_usd: None,
-        cost_basis: None,
-        settles_model: false,
+        settles_model: Some(false),
+        fast: false,
     }));
     let mut app = session_read_at_a_fixed_moment(&events);
     app.apply(&Event::TurnEnded);
@@ -689,6 +667,8 @@ pub fn session_with_a_long_write() -> App {
         summary: Some(path.clone()),
         exit_code: None,
         error: None,
+        command: None,
+        untrimmed: None,
     });
     let written: String = (1..=30)
         .map(|n| format!("export const etag{n:02} = \"W/\\\"{n:04}\\\"\";\n"))
@@ -698,6 +678,7 @@ pub fn session_with_a_long_write() -> App {
         added: Some(30),
         removed: Some(0),
         hunks: vec![Hunk::created(&written).expect("thirty lines")],
+        scope: niobe_core::event::ChangeScope::Project,
     });
     app
 }
@@ -770,6 +751,8 @@ pub fn session_with_two_agents_at_work() -> App {
         summary: Some(what.to_owned()),
         exit_code: None,
         error: None,
+        command: None,
+        untrimmed: None,
     };
     let mut events = vec![Event::UserMessage {
         text: "Review fetch.py and cache.py in parallel.".to_owned(),
@@ -781,6 +764,7 @@ pub fn session_with_two_agents_at_work() -> App {
         events.push(Event::AgentSpawn {
             id: AgentId::new(id),
             parent: None,
+            kind: Some("deep-reasoner".to_owned()),
             label: label.to_owned(),
         });
         events.push(call(id, "Agent", label, None));
@@ -794,6 +778,10 @@ pub fn session_with_two_agents_at_work() -> App {
         },
         call("c1", "Read", "catalog/cache.py", agent("toolu_cache")),
         done("f1", "Read", "catalog/fetch.py", 4_100),
+        Event::AssistantMessage {
+            text: "The etag is stored but never compared on the 304 path.".to_owned(),
+            agent: agent("toolu_fetch"),
+        },
         call("f2", "Read", "catalog/etag.py", agent("toolu_fetch")),
         done("c1", "Read", "catalog/cache.py", 2_900),
         done("f2", "Read", "catalog/etag.py", 1_300),
@@ -826,6 +814,7 @@ pub fn session_with_finished_turns() -> App {
             }),
             seven_day: None,
             using_overage: false,
+            overage: niobe_core::event::Overage::Unreported,
         })
     };
     let spent = |input, output, cache_read, cache_write| {
@@ -834,12 +823,12 @@ pub fn session_with_finished_turns() -> App {
             output,
             cache_read,
             cache_write,
-            cache_write_1h: 0,
+            cache_write_1h: Some(0),
             reasoning: 0,
             model: "opus-5".to_owned(),
             cost_usd: None,
-            cost_basis: None,
-            settles_model: false,
+            settles_model: Some(false),
+            fast: false,
         })
     };
     let turns = [
@@ -895,6 +884,119 @@ pub fn session_with_finished_turns() -> App {
         app.apply_at(event, moment(began + after));
     }
     app.tick(Instant::now(), Some(moment(READ_AT)));
+    app
+}
+
+/// A turn whose CLI total came to more than its messages reported, as the
+/// Claude bridge says so: a reply whose stream was cut off with no count the
+/// CLI recorded, the notice saying so, and the turn's total beside what its
+/// messages added up to, naming the conversation and the reply.
+pub fn session_whose_turn_total_differs() -> App {
+    let clock = Clock::fixed(0).expect("UTC is an offset");
+    let mut app = App::new(read_repository()).with_clock(clock.clone());
+    let moment = |seconds| clock.at(UNIX_EPOCH + Duration::from_secs(seconds));
+    let began = READ_AT - 5 * 60;
+    let counts = |input, output, cache_read, cache_write| TokenCounts {
+        input,
+        output,
+        cache_read,
+        cache_write,
+        cache_write_1h: None,
+    };
+    let events = [
+        (
+            0,
+            Event::SessionMeta(SessionMeta {
+                backend: Backend::Claude,
+                profile: "default".to_owned(),
+                model: "opus-5".to_owned(),
+                backend_session: Some("506fa4fd-8719-4564-8c62-5c6ae4b1a471".to_owned()),
+            }),
+        ),
+        (
+            0,
+            Event::Billing {
+                billing: Billing::Plan,
+            },
+        ),
+        (
+            0,
+            Event::UserMessage {
+                text: "write the six pages".to_owned(),
+            },
+        ),
+        (
+            20,
+            Event::AssistantMessage {
+                text: "Writing the six tasks now.".to_owned(),
+                agent: None,
+            },
+        ),
+        (
+            760,
+            Event::Notice {
+                message: "The reply above was cut off before the CLI said it was finished, and \
+                          the CLI is carrying the turn on from where it stopped. The CLI \
+                          recorded no count for it, so its tokens are not counted. Message \
+                          msg_011Cfh9DZarQmXXnvywwTKDD (request req_011Cfh9DZCJ19ME3Je89LBSJ)."
+                    .to_owned(),
+            },
+        ),
+        (
+            790,
+            Event::AssistantMessage {
+                text: "The six pages are written.".to_owned(),
+                agent: None,
+            },
+        ),
+        (
+            790,
+            Event::Usage(Usage {
+                input: 6,
+                output: 9_167,
+                cache_read: 234_375,
+                cache_write: 4_685,
+                cache_write_1h: Some(0),
+                reasoning: 0,
+                model: "opus-5".to_owned(),
+                cost_usd: None,
+                settles_model: Some(false),
+                fast: false,
+            }),
+        ),
+        (
+            792,
+            Event::TurnTotalDiffers {
+                per_message: counts(6, 9_167, 234_375, 4_685),
+                reported: counts(8, 9_175, 352_445, 7_496),
+                backend_session: Some("506fa4fd-8719-4564-8c62-5c6ae4b1a471".to_owned()),
+                unfinished: vec![
+                    "msg_011Cfh9DZarQmXXnvywwTKDD (request req_011Cfh9DZCJ19ME3Je89LBSJ)"
+                        .to_owned(),
+                ],
+            },
+        ),
+        (
+            792,
+            Event::Usage(Usage {
+                input: 2,
+                output: 8,
+                cache_read: 118_070,
+                cache_write: 2_811,
+                cache_write_1h: Some(0),
+                reasoning: 0,
+                model: "opus-5".to_owned(),
+                cost_usd: Some(0.31),
+                settles_model: Some(true),
+                fast: false,
+            }),
+        ),
+        (792, Event::TurnEnded),
+    ];
+    for (after, event) in &events {
+        app.apply_at(event, moment(began + after));
+    }
+    app.tick(Instant::now(), Some(moment(READ_AT + 600)));
     app
 }
 
@@ -998,6 +1100,26 @@ pub fn style_at(app: &mut App, width: u16, height: u16, text: &str) -> Option<St
     })
 }
 
+/// Draws one frame and returns the style of the first cell of every place
+/// `text` appears on it, reading row by row: where [`style_at`] finds a
+/// pane's title, this also finds the line under it that says the same.
+pub fn styles_at(app: &mut App, width: u16, height: u16, text: &str) -> Vec<Style> {
+    let terminal = drawn(app, width, height);
+    let buffer = terminal.backend().buffer();
+    (0..buffer.area.height)
+        .flat_map(|y| {
+            let row: Vec<&Cell> = (0..buffer.area.width)
+                .filter_map(|x| buffer.cell((x, y)))
+                .collect();
+            let symbols: Vec<&str> = row.iter().map(|cell| cell.symbol()).collect();
+            (0..row.len())
+                .filter(|&x| symbols[x..].concat().starts_with(text))
+                .map(|x| row[x].style())
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
 fn drawn(app: &mut App, width: u16, height: u16) -> Terminal<TestBackend> {
     let mut terminal =
         Terminal::new(TestBackend::new(width, height)).expect("a test backend cannot fail");
@@ -1035,4 +1157,160 @@ pub fn at_work(app: App, elapsed: Duration) -> App {
     app.tick(started, None);
     app.tick(started + elapsed, None);
     app
+}
+
+/// The width of a cell in a picture, in its own units.
+const CELL_WIDTH: u16 = 9;
+
+/// The height of a cell in a picture: about twice its width, as a terminal
+/// font's cell is.
+const CELL_HEIGHT: u16 = 18;
+
+/// What a cell with no colour of its own is drawn in: the terminal's own
+/// foreground and background, which a picture has to pick for it.
+const PICTURE_FG: &str = "#d0d0d0";
+const PICTURE_BG: &str = "#121212";
+
+/// The sixteen ANSI names, in the values xterm gives them. A terminal draws
+/// them in its own scheme, so a picture of a theme that uses them is one
+/// terminal's reading of it, and these are the values that reading is in.
+fn ansi(colour: Color) -> Option<&'static str> {
+    Some(match colour {
+        Color::Black => "#000000",
+        Color::Red => "#cd0000",
+        Color::Green => "#00cd00",
+        Color::Yellow => "#cdcd00",
+        Color::Blue => "#4682ee",
+        Color::Magenta => "#cd00cd",
+        Color::Cyan => "#00cdcd",
+        Color::Gray => "#e5e5e5",
+        Color::DarkGray => "#7f7f7f",
+        Color::LightRed => "#ff0000",
+        Color::LightGreen => "#00ff00",
+        Color::LightYellow => "#ffff00",
+        Color::LightBlue => "#5c5cff",
+        Color::LightMagenta => "#ff00ff",
+        Color::LightCyan => "#00ffff",
+        Color::White => "#ffffff",
+        _ => return None,
+    })
+}
+
+/// A colour as a picture writes it, or `None` for the terminal's own.
+fn hex(colour: Option<Color>) -> Option<String> {
+    match colour? {
+        Color::Reset => None,
+        Color::Rgb(r, g, b) => Some(format!("#{r:02x}{g:02x}{b:02x}")),
+        named => ansi(named).map(str::to_owned),
+    }
+}
+
+/// A cell's text escaped for SVG.
+fn escaped(text: &str) -> String {
+    text.chars()
+        .map(|c| match c {
+            '&' => "&amp;".to_owned(),
+            '<' => "&lt;".to_owned(),
+            '>' => "&gt;".to_owned(),
+            '"' => "&quot;".to_owned(),
+            c => c.to_string(),
+        })
+        .collect()
+}
+
+/// How one run of cells is drawn: its colours, after reversal, and its weight.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Look {
+    fg: String,
+    bg: Option<String>,
+    bold: bool,
+    dim: bool,
+    italic: bool,
+    underlined: bool,
+}
+
+fn look(style: Style) -> Look {
+    use ratatui::style::Modifier;
+    let fg = hex(style.fg);
+    let bg = hex(style.bg);
+    let (fg, bg) = match style.add_modifier.contains(Modifier::REVERSED) {
+        true => (
+            bg.or_else(|| Some(PICTURE_BG.to_owned())),
+            fg.or_else(|| Some(PICTURE_FG.to_owned())),
+        ),
+        false => (fg, bg),
+    };
+    Look {
+        fg: fg.unwrap_or_else(|| PICTURE_FG.to_owned()),
+        bg,
+        bold: style.add_modifier.contains(Modifier::BOLD),
+        dim: style.add_modifier.contains(Modifier::DIM),
+        italic: style.add_modifier.contains(Modifier::ITALIC),
+        underlined: style.add_modifier.contains(Modifier::UNDERLINED),
+    }
+}
+
+/// Draws one frame and returns it as an SVG picture: every cell's character
+/// in its colours, the sixteen names in xterm's values.
+///
+/// For the README, and drawn by the snapshot harness so that the pictures a
+/// stranger is shown are the shell as it draws today, not a screenshot that
+/// drifted from it.
+pub fn svg(app: &mut App, width: u16, height: u16) -> String {
+    let terminal = drawn(app, width, height);
+    let buffer = terminal.backend().buffer();
+    let (w, h) = (width * CELL_WIDTH, height * CELL_HEIGHT);
+    let mut out = format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w}\" height=\"{h}\" \
+         viewBox=\"0 0 {w} {h}\" font-family=\"Menlo, 'DejaVu Sans Mono', Consolas, monospace\" \
+         font-size=\"15\">\n<rect width=\"{w}\" height=\"{h}\" fill=\"{PICTURE_BG}\"/>\n"
+    );
+    for y in 0..height {
+        let mut x = 0;
+        while x < width {
+            let start = x;
+            let first = look(buffer.cell((x, y)).map_or_else(Style::new, Cell::style));
+            let mut text = String::new();
+            while x < width {
+                let cell = buffer.cell((x, y));
+                let style = cell.map_or_else(Style::new, Cell::style);
+                if look(style) != first {
+                    break;
+                }
+                text.push_str(cell.map_or(" ", Cell::symbol));
+                x += 1;
+            }
+            let cells = x - start;
+            let (left, top) = (start * CELL_WIDTH, y * CELL_HEIGHT);
+            if let Some(bg) = &first.bg {
+                out.push_str(&format!(
+                    "<rect x=\"{left}\" y=\"{top}\" width=\"{}\" height=\"{CELL_HEIGHT}\" fill=\"{bg}\"/>\n",
+                    cells * CELL_WIDTH
+                ));
+            }
+            if text.trim().is_empty() {
+                continue;
+            }
+            let mut attributes = format!("fill=\"{}\"", first.fg);
+            for (on, attribute) in [
+                (first.bold, " font-weight=\"bold\""),
+                (first.dim, " opacity=\"0.6\""),
+                (first.italic, " font-style=\"italic\""),
+                (first.underlined, " text-decoration=\"underline\""),
+            ] {
+                if on {
+                    attributes.push_str(attribute);
+                }
+            }
+            out.push_str(&format!(
+                "<text x=\"{left}\" y=\"{}\" textLength=\"{}\" lengthAdjust=\"spacingAndGlyphs\" \
+                 xml:space=\"preserve\" {attributes}>{}</text>\n",
+                top + CELL_HEIGHT - 5,
+                cells * CELL_WIDTH,
+                escaped(&text)
+            ));
+        }
+    }
+    out.push_str("</svg>\n");
+    out
 }

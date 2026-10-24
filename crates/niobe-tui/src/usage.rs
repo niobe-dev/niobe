@@ -9,12 +9,15 @@
 //!
 //! * **Whose tokens are these?** [`shares`] apportions whole percent.
 //! * **What is this model called?** [`labels`] shortens ids without letting
-//!   two of them read as one.
+//!   two of them read as one, and [`fitted`] cuts them to a narrow pane
+//!   without letting two of them read as one there either.
 //! * **What did the cache save?** [`cache_hit_rate`].
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use niobe_core::session::Totals;
+
+use crate::text;
 
 /// Each count as whole percent of their sum, apportioned so that the figures
 /// add up to exactly 100.
@@ -32,9 +35,13 @@ pub fn shares(counts: &[u64]) -> Vec<u64> {
         return vec![0; counts.len()];
     }
 
+    // In 128 bits: a count past a hundredth of what 64 hold would overflow
+    // when it is multiplied by a hundred.
+    let wide = |count: u64| u128::from(count) * 100;
+    let total_wide = u128::from(total.max(1));
     let mut apportioned: Vec<u64> = counts
         .iter()
-        .map(|count| count * 100 / total.max(1))
+        .map(|&count| u64::try_from(wide(count) / total_wide).unwrap_or(100))
         .collect();
     let assigned: u64 = apportioned.iter().copied().fold(0, u64::saturating_add);
 
@@ -42,7 +49,7 @@ pub fn shares(counts: &[u64]) -> Vec<u64> {
     // denominator, so the comparison is exact rather than in floating point.
     let mut by_remainder: Vec<usize> = (0..counts.len()).collect();
     by_remainder.sort_by(|&a, &b| {
-        let remainder = |at: usize| counts[at] * 100 % total.max(1);
+        let remainder = |at: usize| wide(counts[at]) % total_wide;
         remainder(b)
             .cmp(&remainder(a))
             .then_with(|| counts[b].cmp(&counts[a]))
@@ -89,6 +96,65 @@ pub fn labels<'a>(ids: impl IntoIterator<Item = &'a str>) -> Vec<String> {
         .collect()
 }
 
+/// `labels` cut to `columns` cells each, for a pane too narrow for them.
+///
+/// Cut at the end, where an id's vendor and family are kept — unless two cut
+/// labels would read alike, as two ids that differ only in their date do;
+/// then every one is cut at the front, where the date is.
+pub fn fitted(labels: &[String], columns: usize) -> Vec<String> {
+    let ends: Vec<String> = labels
+        .iter()
+        .map(|label| text::truncate(label, columns))
+        .collect();
+    let distinct = ends.iter().collect::<BTreeSet<_>>().len() == ends.len();
+    match distinct {
+        true => ends,
+        false => labels
+            .iter()
+            .map(|label| text::truncate_start(label, columns))
+            .collect(),
+    }
+}
+
+/// What each model id is called where only a word fits, in the order they
+/// were given: its family — `opus`, `sonnet` — where no other id in the list
+/// is of the same family, and its [`labels`] name where one is.
+///
+/// Every id that is the same id is one model and takes one name: two agents
+/// answered by `claude-opus-5-5` are both `opus`.
+pub fn families<'a>(ids: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    let ids: Vec<&str> = ids.into_iter().collect();
+    let family = |id: &str| -> String {
+        let short = shorten(id);
+        match short.split_once('-') {
+            Some((family, _)) if !family.is_empty() => family.to_owned(),
+            _ => short,
+        }
+    };
+    let labels = labels(ids.iter().copied().collect::<BTreeSet<_>>());
+    let distinct: Vec<&str> = ids
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    ids.iter()
+        .map(|id| {
+            let shared = distinct
+                .iter()
+                .any(|other| other != id && family(other) == family(id));
+            match shared {
+                false => family(id),
+                true => distinct
+                    .iter()
+                    .position(|other| other == id)
+                    .and_then(|at| labels.get(at).cloned())
+                    .unwrap_or_else(|| (*id).to_owned()),
+            }
+        })
+        .collect()
+}
+
 /// One id with its vendor prefix and release date taken off.
 fn shorten(id: &str) -> String {
     let trimmed = id.strip_prefix("claude-").unwrap_or(id);
@@ -131,6 +197,30 @@ mod tests {
     use niobe_core::session::SessionState;
 
     #[test]
+    fn a_model_is_named_by_its_family_unless_another_model_is_of_it_too() {
+        assert_eq!(
+            families([
+                "claude-opus-5-5",
+                "claude-sonnet-5-5",
+                "claude-opus-5-5",
+                "claude-haiku-4-5-20251001",
+            ]),
+            ["opus", "sonnet", "opus", "haiku"]
+        );
+        assert_eq!(
+            families(["claude-opus-5-5", "claude-opus-4-1", "claude-sonnet-5-5"]),
+            ["opus-5-5", "opus-4-1", "sonnet"]
+        );
+        assert_eq!(families(["gpt5"]), ["gpt5"]);
+    }
+
+    #[test]
+    fn counts_past_a_hundredth_of_what_64_bits_hold_are_shared_without_overflow() {
+        assert_eq!(shares(&[u64::MAX, 1]), [100, 0]);
+        assert_eq!(shares(&[u64::MAX / 100 * 98, u64::MAX / 100 * 2]), [98, 2]);
+    }
+
+    #[test]
     fn one_count_takes_the_whole_hundred() {
         assert_eq!(shares(&[62_000]), vec![100]);
     }
@@ -155,14 +245,22 @@ mod tests {
         assert_eq!(shares(&[5, 4, 4]).iter().sum::<u64>(), 100);
     }
 
-    /// A model that spent under half a percent is not rounded to nothing while
-    /// the column still adds up: the leftovers are handed out by remainder, so
-    /// the smallest row can be the one that gets one.
+    /// The column always adds up to 100, so a model that spent under half a
+    /// percent can round to nothing when the others take every point.
     #[test]
-    fn a_tiny_share_is_still_a_share() {
+    fn a_share_under_half_a_percent_can_round_to_zero() {
         let apportioned = shares(&[99_600, 200, 200]);
         assert_eq!(apportioned.iter().sum::<u64>(), 100);
         assert_eq!(apportioned, vec![100, 0, 0]);
+    }
+
+    /// The points left over after rounding down go by remainder, so a smaller
+    /// row can be the one that gets one.
+    #[test]
+    fn the_points_left_over_go_to_the_largest_remainders() {
+        let apportioned = shares(&[5, 4, 4]);
+        assert_eq!(apportioned.iter().sum::<u64>(), 100);
+        assert_eq!(apportioned, vec![38, 31, 31]);
     }
 
     #[test]
@@ -207,6 +305,33 @@ mod tests {
         assert_eq!(labels(["claude-opus-5-2025"]), ["opus-5-2025"]);
     }
 
+    #[test]
+    fn a_label_wider_than_its_column_loses_its_end() {
+        assert_eq!(
+            fitted(&["us.anthropic.claude-sonnet-4-5".to_owned()], 12),
+            ["us.anthropi…"]
+        );
+        assert_eq!(fitted(&["opus-5".to_owned()], 12), ["opus-5"]);
+    }
+
+    /// Two ids that differ only in their date read alike with their ends cut,
+    /// which is the pane that cannot be read that [`labels`] keeps them whole
+    /// to avoid.
+    #[test]
+    fn labels_that_would_cut_alike_lose_their_fronts_instead() {
+        assert_eq!(
+            fitted(
+                &[
+                    "claude-opus-5-20251001".to_owned(),
+                    "claude-opus-5-20260101".to_owned(),
+                    "sonnet-5".to_owned(),
+                ],
+                12
+            ),
+            ["…-5-20251001", "…-5-20260101", "sonnet-5"]
+        );
+    }
+
     fn folded(records: &[Usage]) -> Totals {
         let events: Vec<Event> = records.iter().cloned().map(Event::Usage).collect();
         SessionState::replay(&events).totals().clone()
@@ -218,12 +343,12 @@ mod tests {
             output: 500,
             cache_read,
             cache_write,
-            cache_write_1h: 0,
+            cache_write_1h: Some(0),
             reasoning: 0,
             model: "opus-5".to_owned(),
             cost_usd: Some(0.01),
-            cost_basis: None,
-            settles_model: false,
+            settles_model: Some(false),
+            fast: false,
         }
     }
 
@@ -266,5 +391,18 @@ mod tests {
         let output_only = folded(&[prompt(0, 0, 0)]);
         assert_eq!(output_only.output, 500);
         assert_eq!(cache_hit_rate(&output_only), None);
+    }
+
+    #[test]
+    fn a_leftover_percent_between_equal_remainders_goes_to_the_larger_count() {
+        // 100·1 and 100·3 both leave 4 over 8, and one percent is unassigned.
+        assert_eq!(shares(&[1, 3, 4]), [12, 38, 50]);
+    }
+
+    #[test]
+    fn only_an_eight_digit_tail_is_a_release_date() {
+        assert_eq!(labels(["claude-opus-5-20250929"]), ["opus-5"]);
+        assert_eq!(labels(["claude-opus-5-123456"]), ["opus-5-123456"]);
+        assert_eq!(labels(["claude-opus-5-1234567"]), ["opus-5-1234567"]);
     }
 }

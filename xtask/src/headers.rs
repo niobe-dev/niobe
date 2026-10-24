@@ -15,9 +15,11 @@ pub const LICENSE_LINE: &str = "SPDX-License-Identifier: Apache-2.0";
 /// The second line of every header.
 pub const COPYRIGHT_LINE: &str = "Copyright (c) Viacheslav Shynkarenko";
 
-/// Files that cannot carry a header: the license text itself, a file that must
-/// hold nothing but an import, and a lockfile cargo rewrites.
-const EXEMPT_NAMES: &[&str] = &["LICENSE", "CLAUDE.md", "Cargo.lock"];
+/// Files at the workspace root that cannot carry a header: the license text
+/// itself, a file that must hold nothing but an import, and the lockfile cargo
+/// rewrites. Exempt there only: a `CLAUDE.md` anywhere else is markdown like
+/// any other.
+const EXEMPT_AT_ROOT: &[&str] = &["LICENSE", "CLAUDE.md", "Cargo.lock"];
 
 /// How a file carries the header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,6 +28,10 @@ pub enum Rule {
     LineComment(&'static str),
     /// The two lines inside a leading `<!--` … `-->` block.
     HtmlComment,
+    /// The `<!--` … `-->` block directly under a YAML frontmatter, which the
+    /// tool that reads a skill or agent definition under `.claude/` takes
+    /// from the file's first line, so nothing may come before it.
+    Frontmatter,
     /// The two lines behind `# `, under the `#!` line, which the kernel only
     /// honours as the very first line of the file.
     Script,
@@ -38,27 +44,33 @@ pub enum Rule {
 pub fn rule_for(path: &str) -> Option<Rule> {
     let name = path.rsplit('/').next().unwrap_or(path);
 
-    // A snapshot is a picture compared cell for cell, and a recorded output
+    // A snapshot is a picture compared cell for cell — as text, or as the SVG
+    // the README shows — and a recorded output
     // under `fixtures/` is read against the byte count recorded beside it. A
-    // JSON file under `fixtures/` is one a CLI wrote, and JSON has no comments.
-    let is_recorded_text = (path.contains("/tests/snapshots/")
-        || path.contains("/tests/fixtures/"))
-        && name.ends_with(".txt");
-    let is_recorded_json = path.contains("/tests/fixtures/") && name.ends_with(".json");
-    if EXEMPT_NAMES.contains(&name)
+    // JSON or JSON Lines file under `fixtures/` is one a CLI wrote, and JSON
+    // has no comments, which is also why a published JSON Schema carries
+    // none.
+    let is_fixture = path.contains("/tests/fixtures/");
+    let is_recorded_text = (path.contains("/tests/snapshots/") || is_fixture)
+        && (name.ends_with(".txt") || name.ends_with(".svg"));
+    let is_recorded_json = is_fixture && (name.ends_with(".json") || name.ends_with(".jsonl"));
+    let is_schema = path.starts_with("schema/") && name.ends_with(".schema.json");
+    if (path == name && EXEMPT_AT_ROOT.contains(&name))
         || is_recorded_text
         || is_recorded_json
-        || name.ends_with(".jsonl")
+        || is_schema
     {
         return Some(Rule::Exempt);
     }
-    if name == ".gitignore" {
+    if name == ".gitignore" || name == ".gitattributes" {
         return Some(Rule::LineComment("# "));
     }
 
+    let is_agent_definition = path.starts_with(".claude/");
     match Path::new(name).extension().and_then(|e| e.to_str()) {
         Some("rs") => Some(Rule::LineComment("// ")),
-        Some("toml" | "yml" | "yaml") => Some(Rule::LineComment("# ")),
+        Some("toml" | "yml" | "yaml" | "py") => Some(Rule::LineComment("# ")),
+        Some("md") if is_agent_definition => Some(Rule::Frontmatter),
         Some("md") => Some(Rule::HtmlComment),
         Some("sh") => Some(Rule::Script),
         _ => None,
@@ -81,18 +93,34 @@ pub fn has_header(rule: Rule, contents: &str) -> bool {
             format!("{prefix}{LICENSE_LINE}"),
             format!("{prefix}{COPYRIGHT_LINE}"),
         ],
-        Rule::HtmlComment => vec![
-            "<!--".to_owned(),
-            LICENSE_LINE.to_owned(),
-            COPYRIGHT_LINE.to_owned(),
-            "-->".to_owned(),
-        ],
+        Rule::HtmlComment => html_comment_header(),
+        Rule::Frontmatter => {
+            if !skip_frontmatter(&mut lines) || lines.next() != Some("") {
+                return false;
+            }
+            html_comment_header()
+        }
     };
 
     expected
         .iter()
         .all(|line| lines.next() == Some(line.as_str()))
         && lines.next() == Some("")
+}
+
+fn html_comment_header() -> Vec<String> {
+    vec![
+        "<!--".to_owned(),
+        LICENSE_LINE.to_owned(),
+        COPYRIGHT_LINE.to_owned(),
+        "-->".to_owned(),
+    ]
+}
+
+/// Consumes a YAML frontmatter — a `---` line, then everything up to and
+/// including the next — and says whether there was one to consume.
+fn skip_frontmatter<'a>(lines: &mut impl Iterator<Item = &'a str>) -> bool {
+    lines.next() == Some("---") && lines.any(|line| line == "---")
 }
 
 #[cfg(test)]
@@ -114,6 +142,11 @@ mod tests {
             Some(Rule::LineComment("# "))
         );
         assert_eq!(rule_for(".gitignore"), Some(Rule::LineComment("# ")));
+        assert_eq!(rule_for(".gitattributes"), Some(Rule::LineComment("# ")));
+        assert_eq!(
+            rule_for("bench/01-last-n/files/items.py"),
+            Some(Rule::LineComment("# "))
+        );
         assert_eq!(rule_for("AGENTS.md"), Some(Rule::HtmlComment));
     }
 
@@ -131,6 +164,12 @@ mod tests {
             Some(Rule::Exempt)
         );
         assert_eq!(
+            rule_for("crates/niobe-tui/tests/snapshots/cyber-120x30.svg"),
+            Some(Rule::Exempt)
+        );
+        assert_eq!(rule_for("schema/cost.schema.json"), Some(Rule::Exempt));
+        assert_eq!(rule_for("crates/niobe-cli/src/cost.schema.json"), None);
+        assert_eq!(
             rule_for("crates/niobe-bridge-claude/tests/fixtures/tool-results/run.txt"),
             Some(Rule::Exempt)
         );
@@ -145,6 +184,17 @@ mod tests {
     }
 
     #[test]
+    fn an_exempt_name_is_exempt_only_where_the_exemption_is_for() {
+        assert_eq!(
+            rule_for("crates/niobe-core/CLAUDE.md"),
+            Some(Rule::HtmlComment)
+        );
+        assert_eq!(rule_for("crates/niobe-core/src/data.jsonl"), None);
+        assert_eq!(rule_for("crates/niobe-core/LICENSE"), None);
+        assert_eq!(rule_for("xtask/Cargo.lock"), None);
+    }
+
+    #[test]
     fn a_shell_script_carries_the_header_under_its_shebang() {
         assert_eq!(rule_for("install.sh"), Some(Rule::Script));
         let file = "#!/bin/sh\n# SPDX-License-Identifier: Apache-2.0\n\
@@ -156,6 +206,37 @@ mod tests {
             "# SPDX-License-Identifier: Apache-2.0\n\
              # Copyright (c) Viacheslav Shynkarenko\n\nset -eu\n"
         ));
+    }
+
+    #[test]
+    fn a_skill_or_agent_definition_carries_the_header_under_its_frontmatter() {
+        assert_eq!(
+            rule_for(".claude/skills/niobe-task/SKILL.md"),
+            Some(Rule::Frontmatter)
+        );
+        assert_eq!(
+            rule_for(".claude/agents/lead-rust-engineer.md"),
+            Some(Rule::Frontmatter)
+        );
+        // Markdown anywhere else still opens with the header.
+        assert_eq!(rule_for("PRINCIPLES.md"), Some(Rule::HtmlComment));
+        assert_eq!(rule_for("docs/.claude/notes.md"), Some(Rule::HtmlComment));
+
+        let file = "---\nname: niobe-task\ndescription: one line\n---\n\n<!--\n\
+                    SPDX-License-Identifier: Apache-2.0\n\
+                    Copyright (c) Viacheslav Shynkarenko\n-->\n\n# Niobe task\n";
+        assert!(has_header(Rule::Frontmatter, file));
+        // The header goes directly under the frontmatter, with a blank line
+        // between, and may not come first: the tool reads the frontmatter
+        // from the first line.
+        let header_first = "<!--\nSPDX-License-Identifier: Apache-2.0\n\
+                            Copyright (c) Viacheslav Shynkarenko\n-->\n\n---\nname: x\n---\n";
+        assert!(!has_header(Rule::Frontmatter, header_first));
+        assert!(!has_header(
+            Rule::Frontmatter,
+            "---\nname: x\n---\n\n# No header\n"
+        ));
+        assert!(!has_header(Rule::Frontmatter, "---\nname: x\n"));
     }
 
     #[test]

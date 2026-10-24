@@ -32,6 +32,17 @@ use ratatui::crossterm::event::{
 /// to be bracketed. The marker before one, `CSI 200 ~`, is read as a sequence.
 const PASTE_END: &[u8] = b"\x1b[201~";
 
+/// The marker before a paste, as bytes, for telling one paste's end from the
+/// next one's start.
+const PASTE_START: &[u8] = b"\x1b[200~";
+
+/// How long an open paste waits for more of itself before it is taken to be
+/// all there is. A terminal writes a paste in one burst, so a pause this long
+/// inside one means the closing marker is not coming — a multiplexer dropped
+/// it, or a slow link lost it — and every key after would otherwise be taken
+/// as more of the paste, the one that quits included.
+const PASTE_QUIET: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// The longest sequence waited out before the bytes are taken to be none the
 /// shell reads. Every sequence a terminal sends for a key or a click is far
 /// shorter; this only bounds what a stream of garbage can hold back.
@@ -61,6 +72,11 @@ pub(crate) struct Decoder {
     /// not bounded by [`LONGEST_SEQUENCE`]: a paste is as long as what the
     /// operator copied, and cutting it would type the rest as keys.
     pasting: Option<Vec<u8>>,
+    /// When the open paste last had bytes added to it.
+    pasted_at: Option<std::time::Instant>,
+    /// Whether the bytes are the rest of a sequence too long to wait out,
+    /// which are passed over up to the byte that ends it.
+    discarding: bool,
 }
 
 impl Decoder {
@@ -70,16 +86,43 @@ impl Decoder {
     /// Esc at the very end of a read is the Esc key only when nothing else is
     /// on its way.
     pub(crate) fn feed(&mut self, bytes: &[u8], more: bool, events: &mut Vec<Event>) {
+        self.feed_at(bytes, more, std::time::Instant::now(), events);
+    }
+
+    /// [`Decoder::feed`], of bytes read at `now`.
+    fn feed_at(
+        &mut self,
+        bytes: &[u8],
+        more: bool,
+        now: std::time::Instant,
+        events: &mut Vec<Event>,
+    ) {
+        self.end_a_stalled_paste(now, events);
         for (index, byte) in bytes.iter().enumerate() {
             if let Some(pasted) = self.pasting.as_mut() {
+                self.pasted_at = Some(now);
                 pasted.push(*byte);
-                if pasted.ends_with(PASTE_END) {
+                if pasted.ends_with(PASTE_END) && !closes_later(&bytes[index + 1..]) {
                     pasted.truncate(pasted.len() - PASTE_END.len());
                     let text = String::from_utf8_lossy(pasted).into_owned();
                     events.push(Event::Paste(text));
                     self.pasting = None;
+                    self.pasted_at = None;
                 }
                 continue;
+            }
+            if self.discarding {
+                self.discarding = false;
+                match byte {
+                    // Parameters and intermediates, then the byte that ends a
+                    // control sequence.
+                    0x20..=0x3f => {
+                        self.discarding = true;
+                        continue;
+                    }
+                    0x40..=0x7e => continue,
+                    _ => {}
+                }
             }
             self.pending.push(*byte);
             let more = more || index + 1 < bytes.len();
@@ -92,10 +135,77 @@ impl Decoder {
                 Step::Paste => {
                     self.pending.clear();
                     self.pasting = Some(Vec::new());
+                    self.pasted_at = Some(now);
                 }
-                Step::Wait if self.pending.len() > LONGEST_SEQUENCE => self.pending.clear(),
+                Step::Wait if self.pending.len() > LONGEST_SEQUENCE => {
+                    self.pending.clear();
+                    self.discarding = true;
+                }
                 Step::Wait => {}
             }
+        }
+    }
+}
+
+impl Decoder {
+    /// Hands over an open paste nothing has been added to for
+    /// [`PASTE_QUIET`], as the text it holds, so that what comes next is read
+    /// as keys again.
+    fn end_a_stalled_paste(&mut self, now: std::time::Instant, events: &mut Vec<Event>) {
+        let stalled = self
+            .pasted_at
+            .is_some_and(|at| now.saturating_duration_since(at) >= PASTE_QUIET);
+        if !stalled {
+            return;
+        }
+        if let Some(pasted) = self.pasting.take() {
+            events.push(Event::Paste(String::from_utf8_lossy(&pasted).into_owned()));
+        }
+        self.pasted_at = None;
+    }
+}
+
+/// Whether the rest of the read closes the paste again, with no paste opened
+/// in between: then the end marker just read was in the pasted text itself,
+/// and a terminal that does not take it out of what it pastes has sent it on.
+///
+/// Read as the end, it would cut the paste short and type everything after
+/// it as keys — `\r` as Enter included, which runs a command or sends a
+/// prompt nobody pressed Enter on. The terminal writes a paste in one go, so
+/// its own closing marker is in the same read as the text's.
+fn closes_later(rest: &[u8]) -> bool {
+    let Some(end) = find(rest, PASTE_END) else {
+        return false;
+    };
+    find(&rest[..end], PASTE_START).is_none()
+}
+
+/// Where `needle` first starts in `haystack`.
+fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+impl Decoder {
+    /// Says the terminal has nothing more to read for now.
+    ///
+    /// An Esc a read ended on was held in case the rest of a sequence was on
+    /// its way; with nothing come, it was the Esc key. Held any longer, it
+    /// would make the next key that key with Alt. A sequence cut part-way is
+    /// still waited on: only its own end says what it was.
+    ///
+    /// A paste left open for [`PASTE_QUIET`] is handed over as it stands.
+    pub(crate) fn settle(&mut self, events: &mut Vec<Event>) {
+        self.settle_at(std::time::Instant::now(), events);
+    }
+
+    /// [`Decoder::settle`], at `now`.
+    fn settle_at(&mut self, now: std::time::Instant, events: &mut Vec<Event>) {
+        self.end_a_stalled_paste(now, events);
+        if self.pasting.is_none() && self.pending == [0x1b] {
+            self.pending.clear();
+            events.push(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
         }
     }
 }
@@ -143,6 +253,7 @@ fn alt(inner: Step) -> Step {
             key.modifiers |= KeyModifiers::ALT;
             Step::Event(Event::Key(key))
         }
+        // Alt is held on a key only; any other step is what it was.
         other => other,
     }
 }
@@ -636,6 +747,25 @@ mod tests {
     }
 
     #[test]
+    fn a_paste_holding_its_own_end_marker_is_pasted_whole_and_types_nothing() {
+        assert_eq!(
+            read(b"\x1b[200~safe\x1b[201~\rrm -rf\r\x1b[201~"),
+            [Event::Paste("safe\x1b[201~\rrm -rf\r".to_owned())]
+        );
+    }
+
+    #[test]
+    fn two_pastes_in_one_read_are_two_pastes() {
+        assert_eq!(
+            read(b"\x1b[200~one\x1b[201~\x1b[200~two\x1b[201~"),
+            [
+                Event::Paste("one".to_owned()),
+                Event::Paste("two".to_owned())
+            ]
+        );
+    }
+
+    #[test]
     fn a_paste_cut_between_reads_anywhere_is_read_whole() {
         let bytes = "\x1b[200~é one\rtwo\x1b[201~".as_bytes();
         for cut in 1..bytes.len() {
@@ -710,12 +840,102 @@ mod tests {
 
     #[test]
     fn garbage_that_never_ends_a_sequence_is_not_held_for_ever() {
+        let mut decoder = Decoder::default();
+        let mut events = Vec::new();
         let mut long = b"\x1b[".to_vec();
-        long.extend(std::iter::repeat_n(b'1', LONGEST_SEQUENCE));
-        long.push(b'x');
+        long.extend(std::iter::repeat_n(b'1', LONGEST_SEQUENCE * 4));
+        decoder.feed(&long, false, &mut events);
+        assert!(decoder.pending.len() <= LONGEST_SEQUENCE + 1);
+        decoder.feed(b"\r", false, &mut events);
+        assert_eq!(events, [pressed(KeyCode::Enter, KeyModifiers::NONE)]);
+    }
+
+    /// A sequence too long to wait out is still a sequence: its tail is not
+    /// typed into the prompt as though the operator had written it.
+    #[test]
+    fn a_sequence_too_long_to_wait_out_is_passed_over_to_its_end() {
+        let mut long = b"\x1b[".to_vec();
+        long.extend(std::iter::repeat_n(b'1', 100));
+        long.extend(b"~x");
         assert_eq!(
-            read(&long).last(),
-            Some(&pressed(KeyCode::Char('x'), KeyModifiers::NONE))
+            read(&long),
+            [pressed(KeyCode::Char('x'), KeyModifiers::NONE)]
+        );
+    }
+
+    /// An Esc a read ended on while saying more was coming is the Esc key
+    /// once the terminal has nothing more to give: held, the next key would
+    /// be read as that key with Alt.
+    #[test]
+    fn an_esc_held_for_what_never_came_is_the_esc_key_once_the_terminal_is_quiet() {
+        let mut decoder = Decoder::default();
+        let mut events = Vec::new();
+        decoder.feed(b"a\x1b", true, &mut events);
+        decoder.settle(&mut events);
+        decoder.feed(b"b", false, &mut events);
+        assert_eq!(
+            events,
+            [
+                pressed(KeyCode::Char('a'), KeyModifiers::NONE),
+                pressed(KeyCode::Esc, KeyModifiers::NONE),
+                pressed(KeyCode::Char('b'), KeyModifiers::NONE),
+            ]
+        );
+    }
+
+    #[test]
+    fn settling_leaves_a_sequence_cut_mid_way_alone() {
+        let mut decoder = Decoder::default();
+        let mut events = Vec::new();
+        decoder.feed(b"\x1b[1;5", true, &mut events);
+        decoder.settle(&mut events);
+        decoder.feed(b"A", false, &mut events);
+        assert_eq!(events, [pressed(KeyCode::Up, KeyModifiers::CONTROL)]);
+    }
+
+    #[test]
+    fn a_paste_still_arriving_is_waited_on() {
+        let mut decoder = Decoder::default();
+        let mut events = Vec::new();
+        let at = std::time::Instant::now();
+
+        decoder.feed_at(b"\x1b[200~abc", true, at, &mut events);
+        decoder.settle_at(at + PASTE_QUIET / 2, &mut events);
+        decoder.feed_at(b"def\x1b[201~", false, at + PASTE_QUIET / 2, &mut events);
+
+        assert_eq!(events, [Event::Paste("abcdef".to_owned())]);
+    }
+
+    #[test]
+    fn a_paste_that_never_closes_is_handed_over_and_keys_are_read_again() {
+        let mut decoder = Decoder::default();
+        let mut events = Vec::new();
+        let at = std::time::Instant::now();
+
+        decoder.feed_at(b"\x1b[200~abc", false, at, &mut events);
+        decoder.settle_at(at + PASTE_QUIET, &mut events);
+        assert_eq!(events, [Event::Paste("abc".to_owned())]);
+
+        events.clear();
+        decoder.feed_at(b"\x1b[21~", false, at + PASTE_QUIET, &mut events);
+        assert_eq!(events, [pressed(KeyCode::F(10), KeyModifiers::NONE)]);
+    }
+
+    #[test]
+    fn a_key_after_a_stalled_paste_is_a_key() {
+        let mut decoder = Decoder::default();
+        let mut events = Vec::new();
+        let at = std::time::Instant::now();
+
+        decoder.feed_at(b"\x1b[200~abc", false, at, &mut events);
+        decoder.feed_at(b"\x1b[21~", false, at + PASTE_QUIET * 2, &mut events);
+
+        assert_eq!(
+            events,
+            [
+                Event::Paste("abc".to_owned()),
+                pressed(KeyCode::F(10), KeyModifiers::NONE)
+            ]
         );
     }
 }

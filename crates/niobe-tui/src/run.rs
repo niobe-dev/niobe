@@ -18,14 +18,20 @@ use ratatui::prelude::CrosstermBackend;
 use niobe_core::event::Event as SessionEvent;
 
 use crate::app::{App, Arrival};
-use crate::bridge::Bridge;
+use crate::bridge::{Bridge, Detached};
+use crate::desktop::{Desktop, Handoff, NoDesktop};
+use crate::history::{History, NoHistory, Target};
+use crate::images::{Images, NoImages};
 use crate::input::{Input, Wait};
-use crate::journal::Journal;
-use crate::rules::Rules;
-use crate::shell::Shell;
+use crate::journal::{Journal, Unrecorded};
+use crate::memory::{Memory, NoMemory};
+use crate::overview::{NoOverview, Overview};
+use crate::rules::{Forgotten, Reach, Rules};
+use crate::shell::{NoShell, Shell};
 use crate::terminal::{Shutdown, Stop, TerminalGuard, install_panic_hook, stop_until_continued};
+use crate::trust;
 use crate::ui;
-use crate::watch::Watch;
+use crate::watch::{Unwatched, Watch};
 
 /// How long the loop waits for a key before looking at the shutdown flag.
 ///
@@ -55,19 +61,68 @@ struct Machine<'a> {
     wait: &'a mut Wait,
     clock: &'a crate::clock::Clock,
     /// Hands the terminal back, stops the process, and takes the terminal
-    /// again once the process is continued.
-    suspend: &'a mut dyn FnMut() -> io::Result<()>,
+    /// again once the process is continued; or, for a stop the process could
+    /// not catch, takes the terminal again as it finds it.
+    suspend: &'a mut dyn FnMut(Hold) -> io::Result<()>,
+    /// Writes the bytes that call the operator back — a bell, a desktop
+    /// notification — to the terminal the shell draws on.
+    ring: &'a mut dyn FnMut(&str) -> io::Result<()>,
+}
+
+/// What the loop asks of the terminal around a stop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Hold {
+    /// Hand it back, stop, and take it again when continued.
+    Suspend,
+    /// Take it again after a stop nothing caught.
+    Reassert,
+    /// Hand it back for a program that runs on it, without stopping.
+    Lend,
+    /// Take it again once that program has ended.
+    Retake,
 }
 
 /// Everything the loop hands what the operator does to, and takes what
 /// happens elsewhere from: one value, because the loop hands every tick's work
 /// to all of them.
-struct Around<'a> {
-    journal: &'a mut dyn Journal,
-    backend: &'a mut dyn Bridge,
-    rules: &'a mut dyn Rules,
-    watch: &'a mut dyn Watch,
-    shell: &'a mut dyn Shell,
+pub struct Around<'a> {
+    /// Where every event the operator produces is recorded.
+    pub journal: &'a mut dyn Journal,
+    /// The session's backend: what the operator produces goes to it, and
+    /// what it produces is folded in.
+    pub backend: &'a mut dyn Bridge,
+    /// Where the standing answers the operator makes are kept.
+    pub rules: &'a mut dyn Rules,
+    /// Where the state of the repository comes from. Asked once a tick and
+    /// never waited on, so a read that is slow, that failed, or that has
+    /// nothing new to say costs the frame nothing and leaves the last one on
+    /// screen.
+    pub watch: &'a mut dyn Watch,
+    /// What runs the commands the operator types after `!`, asked how they
+    /// ended the same way.
+    pub shell: &'a mut dyn Shell,
+    /// What fetches the images the operator attaches, asked for them the
+    /// same way too.
+    pub images: &'a mut dyn Images,
+    /// What copies the text the operator selects and opens the links they
+    /// click.
+    pub desktop: &'a mut dyn Desktop,
+    /// What reads the repository's earlier sessions, for the prompts Up
+    /// recalls and the history dialog lists, asked the same way.
+    pub history: &'a mut dyn History,
+    /// What reads the files the agent is given as its memory, for the Memory
+    /// view, asked once each time the view opens and never waited on.
+    pub memory: &'a mut dyn Memory,
+    /// What writes the project overview, asked once each time it opens and
+    /// never waited on.
+    pub overview: &'a mut dyn Overview,
+}
+
+// By hand, because not every one of them can say what it holds.
+impl std::fmt::Debug for Around<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Around").finish_non_exhaustive()
+    }
 }
 
 /// How a session ended.
@@ -75,24 +130,23 @@ struct Around<'a> {
 /// The caller needs the difference to know whether there is still a terminal
 /// to write to: a line printed after the shell closes goes to whatever the
 /// shell was drawing on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Ended {
     /// The operator quit, or the process was asked to stop.
     Quit,
     /// The terminal the shell drew on went away.
     TerminalGone,
+    /// The operator chose another session to open in place of this one,
+    /// which has ended as a quit does. Opening it is the caller's: the shell
+    /// cannot start a backend.
+    Open(Target),
 }
 
 /// Runs the shell on `app` until the operator quits, the process is asked to
 /// stop or the terminal goes away, handing every event the operator produces to
-/// `backend` and to `journal`, the standing answers they make to `rules`, and
-/// folding in everything `backend` produces.
-///
-/// `watch` is where the state of the repository comes from. It is asked once a
-/// tick and never waited on, so a read that is slow, that failed, or that has
-/// nothing new to say costs the frame nothing and leaves the last one on
-/// screen. `shell` runs the commands the operator types after `!`, and is
-/// asked how they ended the same way.
+/// the backend and to the journal `around` holds, the standing answers they
+/// make to its rules, and folding in everything the backend produces. What
+/// each of the others in `around` is for is said on [`Around`].
 ///
 /// `app` may already hold a session: a resumed one is folded in by the caller
 /// before the shell opens.
@@ -100,16 +154,48 @@ pub enum Ended {
 /// Installs the panic hook and the signal handlers first, so that every way out
 /// of the function — including the ways that do not return from it — puts the
 /// terminal back.
-pub fn run(
-    app: App,
-    journal: &mut dyn Journal,
-    backend: &mut dyn Bridge,
-    rules: &mut dyn Rules,
-    watch: &mut dyn Watch,
-    shell: &mut dyn Shell,
-) -> io::Result<Ended> {
+pub fn run(app: App, around: Around<'_>) -> io::Result<Ended> {
+    open(app, around).map(|(ended, _)| ended)
+}
+
+/// Asks whether to trust the repository's config, on `app` drawn behind the
+/// question, and returns the answer; `None` where the operator quit instead,
+/// the process was asked to stop or the terminal went away.
+///
+/// The same loop as [`run`], with nothing attached and nothing recorded, so
+/// that the question hands the terminal back on every way out that a session
+/// does. It is a run of its own rather than a dialog inside the session's
+/// because the answer decides what the backend is started with, and the
+/// backend is started before the session's shell opens.
+pub fn ask_trust(app: App, question: trust::Question) -> io::Result<Option<trust::Answer>> {
+    let (ended, app) = open(
+        app.asking_trust(question),
+        Around {
+            journal: &mut Unrecorded,
+            backend: &mut Detached,
+            rules: &mut Forgotten,
+            watch: &mut Unwatched,
+            shell: &mut NoShell,
+            images: &mut NoImages::default(),
+            desktop: &mut NoDesktop,
+            history: &mut NoHistory::default(),
+            memory: &mut NoMemory::default(),
+            overview: &mut NoOverview::default(),
+        },
+    )?;
+    Ok(match ended {
+        Ended::Quit | Ended::Open(_) => app.trust_answer(),
+        Ended::TerminalGone => None,
+    })
+}
+
+/// [`run`], handing back the app as the loop left it.
+fn open(app: App, around: Around<'_>) -> io::Result<(Ended, App)> {
     install_panic_hook();
-    let shutdown = Shutdown::install()?;
+    // Declared before the terminal guard so it is dropped after it: dropping
+    // it hands the stopping signals back their own behaviour, which is safe
+    // only once the terminal has been handed back.
+    let shutdown = Shutdown::install()?.hands_back_signals_when_dropped()?;
     let mut wait = Wait::on_the_terminal();
 
     // Read once: the timezone is a file on disk and the loop asks for the time
@@ -129,6 +215,11 @@ pub fn run(
     } else {
         app
     };
+    // Keys typed while the terminal was asked about its keyboard were read
+    // with its answer; they are the session's first keys, not lost ones.
+    let mut typed = Vec::new();
+    wait.prime(&guard.take_typed(), &mut typed);
+    hand_over(&mut app, typed);
     // No `Terminal::clear` here: the alternate screen starts blank and the
     // first draw covers it. `clear` also asks the terminal where its cursor is
     // and waits for the reply, which never comes when stdin is a pipe.
@@ -136,32 +227,56 @@ pub fn run(
     // What the session started — the CLI and the `!` commands, each in a
     // process group of its own — is not stopped with it: a turn goes on while
     // the operator is at their shell, and is on screen when they come back.
-    let mut suspend = || -> io::Result<()> {
-        guard.suspend()?;
-        stop_until_continued()?;
-        guard.resume()
+    let mut suspend = |hold: Hold| -> io::Result<()> {
+        match hold {
+            Hold::Suspend => {
+                guard.suspend()?;
+                stop_until_continued()?;
+                guard.resume()
+            }
+            Hold::Reassert => guard.reassert(),
+            Hold::Lend => guard.suspend(),
+            // A stop an editor asked of its whole process group, which the shell
+            // is in, reached the shell while the terminal was lent. The editor
+            // was stopped and continued by whoever runs the operator's jobs and
+            // has ended; stopping the shell now would leave nothing to continue
+            // it, and under a wrapper that waits on it the session hangs.
+            Hold::Retake => {
+                guard.resume()?;
+                shutdown.take_suspend();
+                shutdown.take_continued();
+                Ok(())
+            }
+        }
     };
+
+    // Written beside the frames rather than through them: a bell is no cell
+    // of the screen, and the draw before it has been flushed.
+    let mut ring = |bytes: &str| -> io::Result<()> {
+        use std::io::Write;
+        let mut out = io::stdout();
+        out.write_all(bytes.as_bytes())?;
+        out.flush()
+    };
+    // What a resumed session left waiting was waiting before this shell
+    // opened, and is on its first frame for the operator to see.
+    app.alerts_seen();
 
     let ended = event_loop(
         &mut terminal,
         &mut app,
-        Around {
-            journal,
-            backend,
-            rules,
-            watch,
-            shell,
-        },
+        around,
         &mut Machine {
             shutdown: &shutdown,
             wait: &mut wait,
             clock: &clock,
             suspend: &mut suspend,
+            ring: &mut ring,
         },
     );
 
     match &ended {
-        Ok(Ended::Quit) => {}
+        Ok(Ended::Quit | Ended::Open(_)) => {}
         // The drawing surface is abandoned rather than dropped: ratatui's
         // `Terminal` shows the cursor again as it drops and, when it cannot,
         // prints that failure to standard error. Standard error is the terminal
@@ -175,7 +290,7 @@ pub fn run(
 
     // Explicit, so that a restore failure is reported rather than swallowed by
     // `Drop`. Dropping the guard afterwards is a no-op.
-    outcome(ended, guard.restore())
+    outcome(ended, guard.restore()).map(|ended| (ended, app))
 }
 
 /// What the session ended as, from how the loop ended and whether the terminal
@@ -199,7 +314,7 @@ pub fn run(
 /// operator is owed that error.
 fn outcome(ended: io::Result<Ended>, restored: io::Result<()>) -> io::Result<Ended> {
     match ended {
-        Ok(Ended::Quit) => restored.map(|()| Ended::Quit),
+        Ok(ended @ (Ended::Quit | Ended::Open(_))) => restored.map(|()| ended),
         Ok(Ended::TerminalGone) => Ok(Ended::TerminalGone),
         Err(_) if restored.is_err() => Ok(Ended::TerminalGone),
         Err(error) => Err(error),
@@ -220,93 +335,232 @@ fn event_loop<B: Backend<Error = io::Error>>(
         rules,
         watch,
         shell,
+        images,
+        desktop,
+        history,
+        memory,
+        overview,
     } = around;
     let mut ended = Ended::Quit;
+    // Whether a program that ran on the terminal since the last draw left
+    // the screen as it drew it.
+    let mut owed_frame = false;
 
-    while !app.should_quit() {
-        // First, so that everything this pass folds in — what the backend
-        // produced and what the operator answered — is stamped with a clock
-        // read this pass, rather than with the one before it.
-        app.tick(std::time::Instant::now(), Some(machine.clock.now()));
-        let producing = fold_backend(app, journal, backend, watch);
-        fold_commands(app, shell);
-        // Whatever a read of the repository has finished with since the last
-        // tick. Nothing is waited on here: an unfinished or failed read says
-        // nothing and the pane keeps what it had.
-        if let Some(repo) = watch.look() {
-            app.set_repo(repo);
-        }
-        // Before the draw, so that a prompt a standing rule already answers is
-        // never on screen for the frame it takes to answer it.
-        app.settle_rules();
-        // After the fold and never inside it: the warning is about what this
-        // session has spent under the budget this run was given, not about
-        // what a recording being read back spent under one it knew nothing of.
-        app.settle_budget();
-        run_commands(app, shell);
-        send_produced(app, journal, backend, rules);
-        terminal.draw(|frame| ui::draw(frame, app))?;
-
-        let tick = if producing { BUSY_TICK } else { TICK };
-        match machine.wait.input(tick)? {
-            Input::Ready => {
-                read_input(app, machine.wait)?;
-                run_commands(app, shell);
-                send_produced(app, journal, backend, rules);
+    // A closure, so that a loop that fails — the terminal it draws on closing
+    // under it — is still followed by what ends a session: the commands it
+    // ran are ended in the record, and a turn left running is closed.
+    let looped = (|| -> io::Result<()> {
+        while !app.should_quit() {
+            // First, so that everything this pass folds in — what the backend
+            // produced and what the operator answered — is stamped with a clock
+            // read this pass, rather than with the one before it.
+            app.tick(std::time::Instant::now(), Some(machine.clock.now()));
+            let producing = fold_backend(app, journal, backend, watch);
+            fold_journal(app, journal);
+            fold_commands(app, shell, watch);
+            fold_images(app, images);
+            fold_history(app, journal, history);
+            fold_memory(app, memory);
+            fold_overview(app, overview);
+            // Whatever a read of the repository has finished with since the last
+            // tick. Nothing is waited on here: an unfinished or failed read says
+            // nothing and the pane keeps what it had.
+            if let Some(repo) = watch.look() {
+                app.set_repo(repo);
             }
-            Input::Idle => {}
-            // The terminal is gone: there is no one left to type and nothing
-            // left to draw on, so the session ends the way a quit does and the
-            // guard hands back what there is to hand back.
-            Input::HungUp => {
-                ended = Ended::TerminalGone;
-                app.quit();
+            // Before the draw, so that a prompt a standing rule already answers is
+            // never on screen for the frame it takes to answer it.
+            app.settle_rules();
+            // After the fold and never inside it: the warning is about what this
+            // session has spent under the budget this run was given, not about
+            // what a recording being read back spent under one it knew nothing of.
+            app.settle_budget();
+            app.settle_spikes();
+            // A turn that began or ended wants the working tree read as of
+            // now, to name what it changed that no edit call reported.
+            if app.settle_tree(std::time::Instant::now()) {
+                watch.changed();
+            }
+            run_commands(app, shell);
+            fetch_images(app, images);
+            let lent = hand_off(app, desktop, machine.suspend)?;
+            send_produced(app, journal, backend, rules);
+            // An editor drew on the screen while it had the terminal, and a draw
+            // sends only what changed since the last frame: a resize to the same
+            // size forgets that frame, as after a stop.
+            if whole_frame_owed(lent, &mut owed_frame) {
+                let area = terminal.size()?;
+                terminal.resize(area.into())?;
+            }
+            terminal.draw(|frame| ui::draw(frame, app))?;
+            // After the draw, so that the question the operator is called back
+            // for is on screen by the time the bell reaches them.
+            ring_for(app, machine.ring)?;
+
+            // An image asked for is looked for again soon, as a reply is: the
+            // operator is waiting to see it land in the prompt.
+            let tick = if producing || app.fetching_image() {
+                BUSY_TICK
+            } else {
+                TICK
+            };
+            match machine.wait.input(tick)? {
+                Input::Ready => {
+                    read_input(app, machine.wait)?;
+                    run_commands(app, shell);
+                    fetch_images(app, images);
+                    owed_frame |= hand_off(app, desktop, machine.suspend)?;
+                    send_produced(app, journal, backend, rules);
+                }
+                Input::Idle => {
+                    let mut events = Vec::new();
+                    machine.wait.settle(&mut events);
+                    if !events.is_empty() {
+                        hand_over(app, events);
+                        run_commands(app, shell);
+                        fetch_images(app, images);
+                        owed_frame |= hand_off(app, desktop, machine.suspend)?;
+                        send_produced(app, journal, backend, rules);
+                    }
+                }
+                // The terminal is gone: there is no one left to type and nothing
+                // left to draw on, so the session ends the way a quit does and the
+                // guard hands back what there is to hand back.
+                Input::HungUp => {
+                    ended = Ended::TerminalGone;
+                    app.quit();
+                }
+            }
+
+            match machine.shutdown.requested() {
+                None => {}
+                Some(Stop::Requested) => app.quit(),
+                // SIGHUP is the terminal going away, reported by the kernel rather
+                // than by the wait: a session in the session that owns the terminal
+                // is told twice, and whichever telling arrives first is the one that
+                // says what this session ended as.
+                Some(Stop::TerminalGone) => {
+                    ended = Ended::TerminalGone;
+                    app.quit();
+                }
+            }
+
+            // Both are read, so that a Ctrl+Z and a SIGTSTP arriving in one tick
+            // are one stop rather than a second waiting for the continue.
+            let suspend = app.take_suspend() | machine.shutdown.take_suspend();
+            let suspended = suspend && !app.should_quit();
+            if suspended {
+                (machine.suspend)(Hold::Suspend)?;
+            }
+            // After a stop the screen holds whatever was drawn on it meanwhile, and
+            // a draw sends only what changed since the last frame. A resize to the
+            // same size clears the screen and forgets that frame, without asking
+            // the terminal where its cursor is the way `Terminal::clear` does.
+            if machine.shutdown.take_continued() && !app.should_quit() {
+                // A continue that did not follow a stop of the shell's own was
+                // one nothing caught, and the terminal is as the operator's shell
+                // left it.
+                if !suspended {
+                    (machine.suspend)(Hold::Reassert)?;
+                }
+                let area = terminal.size()?;
+                terminal.resize(area.into())?;
             }
         }
+        Ok(())
+    })();
 
-        match machine.shutdown.requested() {
-            None => {}
-            Some(Stop::Requested) => app.quit(),
-            // SIGHUP is the terminal going away, reported by the kernel rather
-            // than by the wait: a session in the session that owns the terminal
-            // is told twice, and whichever telling arrives first is the one that
-            // says what this session ended as.
-            Some(Stop::TerminalGone) => {
-                ended = Ended::TerminalGone;
-                app.quit();
-            }
-        }
+    close_out(app, shell, watch, journal, backend, rules);
+    looped?;
 
-        // Both are read, so that a Ctrl+Z and a SIGTSTP arriving in one tick
-        // are one stop rather than a second waiting for the continue.
-        let suspend = app.take_suspend() | machine.shutdown.take_suspend();
-        if suspend && !app.should_quit() {
-            (machine.suspend)()?;
-        }
-        // After a stop the screen holds whatever was drawn on it meanwhile, and
-        // a draw sends only what changed since the last frame. A resize to the
-        // same size clears the screen and forgets that frame, without asking
-        // the terminal where its cursor is the way `Terminal::clear` does.
-        if machine.shutdown.take_continued() && !app.should_quit() {
-            let area = terminal.size()?;
-            terminal.resize(area.into())?;
-        }
+    // Asked for by the operator, and ended as a quit is: what the shell held
+    // is recorded and the backend told, and the caller opens the other.
+    if let (Ended::Quit, Some(target)) = (&ended, app.take_opening()) {
+        ended = Ended::Open(target);
     }
-
-    // A command still running is stopped as the session ends, when whatever
-    // runs it is dropped; its call is ended here, so a session read back does
-    // not show it running for ever.
-    fold_commands(app, shell);
-    app.abandon_commands();
-    send_produced(app, journal, backend, rules);
-
     Ok(ended)
+}
+
+/// Calls the operator back, where something since the last pass calls for
+/// it and the shell was asked to.
+fn ring_for(app: &mut App, ring: &mut dyn FnMut(&str) -> io::Result<()>) -> io::Result<()> {
+    let Some(alert) = app.take_alert() else {
+        return Ok(());
+    };
+    let bytes = app.alerts().sequence(alert, &app.repo().name);
+    match bytes.is_empty() {
+        true => Ok(()),
+        false => ring(&bytes),
+    }
+}
+
+/// What ends a session, whether its loop ended or failed: a command still
+/// running is stopped as the session ends, when whatever runs it is dropped,
+/// and its call is ended here so that a session read back does not show it
+/// running for ever; a turn still running ends with the session, and the
+/// record says so rather than leaving the next session to join it.
+fn close_out(
+    app: &mut App,
+    shell: &mut dyn Shell,
+    watch: &mut dyn Watch,
+    journal: &mut dyn Journal,
+    backend: &mut dyn Bridge,
+    rules: &mut dyn Rules,
+) {
+    fold_commands(app, shell, watch);
+    app.abandon_commands();
+    if app.is_attached() {
+        app.leave();
+    }
+    send_produced(app, journal, backend, rules);
+}
+
+/// Passes on a load of the earlier sessions the shell asked for, and hands it
+/// what one found, with the number this session is recorded under so that
+/// its own record is not listed as another.
+fn fold_history(app: &mut App, journal: &dyn Journal, history: &mut dyn History) {
+    app.set_recorded_as(journal.recorded_as());
+    if app.take_history_request() {
+        history.load();
+    }
+    if let Some(past) = history.drain() {
+        app.set_past(past);
+    }
+}
+
+/// Passes on the overview the dialog asked for, and hands it the page once
+/// written, as [`fold_memory`] does the agent's files.
+fn fold_overview(app: &mut App, overview: &mut dyn Overview) {
+    if app.take_overview_request() {
+        overview.load();
+    }
+    if let Some(page) = overview.drain() {
+        app.set_overview(&page);
+    }
+}
+
+/// Passes on a read of the agent's memory the Memory view asked for, and
+/// hands the view what one found. Neither waits: the view says it is reading
+/// until the files land, and the frames go on being drawn meanwhile.
+fn fold_memory(app: &mut App, memory: &mut dyn Memory) {
+    if app.take_memory_request() {
+        memory.load();
+    }
+    if let Some(files) = memory.drain() {
+        app.set_memory(files);
+    }
 }
 
 /// Hands the app everything the terminal has for it.
 fn read_input(app: &mut App, wait: &mut Wait) -> io::Result<()> {
     let mut events = Vec::new();
     wait.read(&mut events)?;
+    hand_over(app, events);
+    Ok(())
+}
+
+/// Hands the app `events`, all of them read from the terminal together.
+fn hand_over(app: &mut App, events: Vec<Event>) {
     let arrival = arrival(&events, std::time::Instant::now());
     // The keys between two other events are handed over together, so that a
     // paste the terminal did not bracket is typed as one insert.
@@ -330,7 +584,6 @@ fn read_input(app: &mut App, wait: &mut Wait) -> io::Result<()> {
         }
     }
     app.on_keys_read(&keys, arrival);
-    Ok(())
 }
 
 /// How the keys among `events`, one read of the terminal made at `at`,
@@ -366,10 +619,17 @@ fn send_produced(
     rules: &mut dyn Rules,
 ) {
     for event in app.take_produced() {
-        match journal.append(&event) {
-            Ok(()) => app.kept(),
-            Err(error) => app.not_kept(&error.to_string()),
-        }
+        journal.append(&event);
+        // Taken for every prompt, sent or not, so the next prompt's images
+        // are never handed out with this one.
+        let images = if matches!(
+            event,
+            SessionEvent::UserMessage { .. } | SessionEvent::PromptNotSent { .. }
+        ) {
+            app.take_turn_images()
+        } else {
+            Vec::new()
+        };
         if !app.is_attached() {
             continue;
         }
@@ -378,11 +638,10 @@ fn send_produced(
         // produces is a record of what happened here, and the backend has no
         // use for what it did not ask for.
         match &event {
-            SessionEvent::UserMessage { text } => {
-                if let Err(error) = backend.send(text) {
-                    app.not_sent(&error.to_string());
-                }
-            }
+            SessionEvent::UserMessage { text } => match backend.send(text, &images) {
+                Ok(()) => app.sent_to_backend(text),
+                Err(error) => app.not_sent(&error.to_string()),
+            },
             SessionEvent::PermissionResponse {
                 id,
                 decision,
@@ -392,25 +651,89 @@ fn send_produced(
                     app.not_answered(&error.to_string());
                 }
             }
-            SessionEvent::ModeSelected { mode } => {
-                if let Err(error) = backend.set_mode(*mode) {
-                    app.not_changed("mode", &error.to_string());
+            SessionEvent::ModeSelected { mode } => match backend.set_mode(*mode) {
+                Ok(()) => app.mode_taken(),
+                Err(error) => {
+                    if let Some(back) = app.mode_not_taken(&error.to_string()) {
+                        journal.append(&back);
+                    }
                 }
-            }
+            },
             SessionEvent::ModelSelected { model } => {
                 if let Err(error) = backend.set_model(model) {
-                    app.not_changed("model", &error.to_string());
+                    journal.append(&app.model_not_taken(&error.to_string()));
                 }
             }
-            _ => {}
+            // Listed rather than left to a wildcard: an event the shell comes
+            // to produce for the backend must be sent from here, and a new
+            // variant fails to compile until someone decides whether it is.
+            SessionEvent::SessionMeta(_)
+            | SessionEvent::PromptNotSent { .. }
+            | SessionEvent::Looked
+            | SessionEvent::Titled { .. }
+            | SessionEvent::AssistantDelta { .. }
+            | SessionEvent::AssistantMessage { .. }
+            | SessionEvent::ToolCallStart { .. }
+            | SessionEvent::ToolCallEnd { .. }
+            | SessionEvent::TurnEnded
+            | SessionEvent::Usage(_)
+            | SessionEvent::UsageWindows(_)
+            | SessionEvent::Billing { .. }
+            | SessionEvent::Context(_)
+            | SessionEvent::Cleared
+            | SessionEvent::CompactionStarted
+            | SessionEvent::CompactionEnded
+            | SessionEvent::Compacted { .. }
+            | SessionEvent::McpServers { .. }
+            | SessionEvent::SessionLeft
+            | SessionEvent::PermissionRequest { .. }
+            | SessionEvent::PermissionWithdrawn { .. }
+            | SessionEvent::ModelRefused { .. }
+            | SessionEvent::FileChange { .. }
+            | SessionEvent::TestRun { .. }
+            | SessionEvent::AgentSpawn { .. }
+            | SessionEvent::AgentProgress { .. }
+            | SessionEvent::AgentExit { .. }
+            | SessionEvent::Commands { .. }
+            | SessionEvent::Models { .. }
+            | SessionEvent::TurnTotalDiffers { .. }
+            | SessionEvent::Notice { .. }
+            | SessionEvent::Error { .. } => {}
+        }
+    }
+    fold_journal(app, journal);
+
+    // After the turn it is about has been sent, and before anything is
+    // drawn, so a stop is on its way while the bar says it is.
+    if app.take_interrupt()
+        && app.is_attached()
+        && let Err(error) = backend.interrupt()
+    {
+        app.not_stopped(&error.to_string());
+    }
+
+    // Asked for by a key in the MCP view, which costs no turn and is said in
+    // the view: the server's new standing arrives through the drain.
+    for server in app.take_mcp_reconnects() {
+        if let Err(error) = backend.reconnect_mcp(&server) {
+            app.not_reconnected(&server, &error.to_string());
+        }
+    }
+
+    // Asked for from the F6 list; what went back arrives through the drain.
+    for prompt in app.take_rewinds() {
+        if let Err(error) = backend.rewind(prompt) {
+            app.not_rewound(&error.to_string());
         }
     }
 
     // After the answers, because a rule is made by answering: a rule that
     // could not be kept is reported under the decision it came from.
     for rule in app.take_rules() {
-        if let Err(error) = rules.remember(&rule) {
-            app.not_remembered(&rule, &error.to_string());
+        match rules.remember(&rule) {
+            Ok(Reach::NextSession) => {}
+            Ok(Reach::UntilTrusted) => app.kept_until_trusted(&rule),
+            Err(error) => app.not_remembered(&rule, &error.to_string()),
         }
     }
 }
@@ -435,12 +758,71 @@ fn run_commands(app: &mut App, shell: &mut dyn Shell) {
     }
 }
 
+/// Whether the next draw must send the whole frame: a program ran on the
+/// terminal this pass (`lent`), or one ran in an earlier pass whose draw has
+/// not happened yet (`owed`). Clears what was owed, since this draw pays it.
+fn whole_frame_owed(lent: bool, owed: &mut bool) -> bool {
+    std::mem::take(owed) | lent
+}
+
+/// Hands where the operator asked for an image to `images`.
+fn fetch_images(app: &mut App, images: &mut dyn Images) {
+    for source in app.take_image_requests() {
+        images.fetch(&source);
+    }
+}
+
+/// Hands what the operator asked of the desktop to `desktop`, and says on
+/// the bar how it went.
+///
+/// A file to edit goes to an editor that runs on the terminal, so the
+/// terminal is lent to it through `hold` and taken again once it ends; what
+/// the editor drew is then on the screen, which is why the loop is told, by
+/// `true`, that it owes a whole frame.
+fn hand_off(
+    app: &mut App,
+    desktop: &mut dyn Desktop,
+    hold: &mut dyn FnMut(Hold) -> io::Result<()>,
+) -> io::Result<bool> {
+    let mut lent = false;
+    for handoff in app.take_handoffs() {
+        if handoff.lends_the_terminal() {
+            hold(Hold::Lend)?;
+            lent = true;
+        }
+        let outcome = match &handoff {
+            Handoff::Copy(text) => desktop.copy(text),
+            Handoff::Open(link) => desktop.open(link),
+            Handoff::Edit(path) => desktop.edit(path),
+            Handoff::Report(link) => desktop.report(link),
+        };
+        if handoff.lends_the_terminal() {
+            hold(Hold::Retake)?;
+        }
+        app.handed_off(&handoff, outcome);
+    }
+    Ok(lent)
+}
+
+/// Attaches each image fetched since the last tick, or says why it could not
+/// be.
+fn fold_images(app: &mut App, images: &mut dyn Images) {
+    for fetched in images.drain() {
+        app.fetched(fetched);
+    }
+}
+
 /// Records how each command that has ended since the last tick ended. What
 /// that produces is kept with everything else the operator produced, by the
 /// next [`send_produced`].
-fn fold_commands(app: &mut App, shell: &mut dyn Shell) {
+///
+/// Each one that ended tells `watch` the tree may have changed: a command can
+/// write, move or delete any file, and nothing else reports what it did, so
+/// waiting out the watch's own cadence would leave the pane behind it.
+fn fold_commands(app: &mut App, shell: &mut dyn Shell, watch: &mut dyn Watch) {
     for ran in shell.drain() {
         app.ran(ran);
+        watch.changed();
     }
 }
 
@@ -452,8 +834,9 @@ fn fold_commands(app: &mut App, shell: &mut dyn Shell) {
 /// through `take_produced`, which is the queue of what was done *here* and is
 /// what gets sent back to the backend.
 ///
-/// It is also where `watch` is told a file changed, because this is the one
-/// place a file change is seen arriving.
+/// It is also where `watch` is told the backend changed a file, because this
+/// is the one place such a change is seen arriving; the operator's own
+/// commands tell it in [`fold_commands`].
 fn fold_backend(
     app: &mut App,
     journal: &mut dyn Journal,
@@ -472,12 +855,27 @@ fn fold_backend(
         if matches!(event, SessionEvent::FileChange { .. }) {
             watch.changed();
         }
-        match journal.append(event) {
+        journal.append(event);
+    }
+    fold_journal(app, journal);
+    true
+}
+
+/// Puts on screen how the journal kept what it was handed, as far as it has
+/// said: a failure for each event it could not keep, and a note when it keeps
+/// one again after refusing.
+///
+/// Called every pass as well as after each hand-over, because a journal that
+/// writes off the loop answers on a later pass than the one that handed the
+/// event on, and a refusal nobody looked for would be a loss nobody was told
+/// of.
+fn fold_journal(app: &mut App, journal: &mut dyn Journal) {
+    for outcome in journal.settled() {
+        match outcome {
             Ok(()) => app.kept(),
             Err(error) => app.not_kept(&error.to_string()),
         }
     }
-    true
 }
 
 #[cfg(test)]
@@ -485,28 +883,41 @@ mod tests {
     use super::*;
     use crate::app::{Answer, Repo};
     use crate::bridge::{BridgeError, Detached};
+    use crate::images::{Fetched, Source};
     use crate::journal::JournalError;
     use crate::rules::{Forgotten, RulesError};
     use crate::watch::{Unwatched, Watch};
     use niobe_core::event::{Mode, PermissionDecision, ToolCallId, ToolOutcome};
+    use niobe_core::image::Image;
     use niobe_core::permission::Rule;
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use std::collections::VecDeque;
 
-    /// Keeps everything, or refuses everything.
+    /// Keeps everything, or refuses everything, and says so at once unless
+    /// it is told to hold its answers back.
     #[derive(Default)]
     struct Kept {
         events: Vec<SessionEvent>,
         refuse: bool,
+        holding: bool,
+        answers: Vec<Result<(), JournalError>>,
     }
 
     impl Journal for Kept {
-        fn append(&mut self, event: &SessionEvent) -> Result<(), JournalError> {
+        fn append(&mut self, event: &SessionEvent) {
             if self.refuse {
-                return Err("the store is read-only".into());
+                self.answers.push(Err("the store is read-only".into()));
+                return;
             }
             self.events.push(event.clone());
-            Ok(())
+            self.answers.push(Ok(()));
+        }
+
+        fn settled(&mut self) -> Vec<Result<(), JournalError>> {
+            if self.holding {
+                return Vec::new();
+            }
+            std::mem::take(&mut self.answers)
         }
     }
 
@@ -515,20 +926,24 @@ mod tests {
     #[derive(Debug, Default)]
     struct Attached {
         sent: Vec<String>,
+        images: Vec<Vec<Image>>,
         answered: Vec<(ToolCallId, PermissionDecision)>,
         said: Vec<Option<String>>,
         modes: Vec<Mode>,
         models: Vec<String>,
+        interrupts: usize,
+        reconnects: Vec<String>,
         produces: Vec<SessionEvent>,
         refuse: bool,
     }
 
     impl Bridge for Attached {
-        fn send(&mut self, prompt: &str) -> Result<(), BridgeError> {
+        fn send(&mut self, prompt: &str, images: &[Image]) -> Result<(), BridgeError> {
             if self.refuse {
                 return Err("the subprocess has gone".into());
             }
             self.sent.push(prompt.to_owned());
+            self.images.push(images.to_vec());
             Ok(())
         }
 
@@ -562,25 +977,46 @@ mod tests {
             Ok(())
         }
 
+        fn interrupt(&mut self) -> Result<(), BridgeError> {
+            if self.refuse {
+                return Err("the subprocess has gone".into());
+            }
+            self.interrupts += 1;
+            Ok(())
+        }
+
+        fn reconnect_mcp(&mut self, server: &str) -> Result<(), BridgeError> {
+            if self.refuse {
+                return Err("the subprocess has gone".into());
+            }
+            self.reconnects.push(server.to_owned());
+            Ok(())
+        }
+
         fn drain(&mut self) -> Vec<SessionEvent> {
             std::mem::take(&mut self.produces)
         }
     }
 
-    /// Keeps every rule, or refuses every rule.
+    /// Keeps every rule, keeps every rule only until the config is trusted,
+    /// or refuses every rule.
     #[derive(Debug, Default)]
     struct Remembered {
         rules: Vec<Rule>,
         refuse: bool,
+        until_trusted: bool,
     }
 
     impl Rules for Remembered {
-        fn remember(&mut self, rule: &Rule) -> Result<(), RulesError> {
+        fn remember(&mut self, rule: &Rule) -> Result<Reach, RulesError> {
             if self.refuse {
                 return Err("the config is read-only".into());
             }
             self.rules.push(rule.clone());
-            Ok(())
+            Ok(match self.until_trusted {
+                true => Reach::UntilTrusted,
+                false => Reach::NextSession,
+            })
         }
     }
 
@@ -675,10 +1111,40 @@ mod tests {
             exit_code: Some(0),
             error: None,
         });
-        fold_commands(&mut app, &mut shell);
+        fold_commands(&mut app, &mut shell, &mut Unwatched);
         send_produced(&mut app, &mut kept, &mut Detached, &mut Forgotten);
 
         assert_eq!(ended_calls(&kept), [(ToolOutcome::Ok, None)]);
+    }
+
+    /// The loop can fail on its terminal with a command running, and the
+    /// record is what is read back: it ends the call.
+    #[test]
+    fn what_ends_a_session_ends_the_commands_it_ran_in_the_record() {
+        let mut app = app_that_ran("sleep 100");
+        let mut kept = Kept::default();
+        let mut shell = Running::default();
+        run_commands(&mut app, &mut shell);
+        send_produced(&mut app, &mut kept, &mut Detached, &mut Forgotten);
+
+        close_out(
+            &mut app,
+            &mut shell,
+            &mut Unwatched,
+            &mut kept,
+            &mut Detached,
+            &mut Forgotten,
+        );
+
+        let ended = ended_calls(&kept);
+        assert_eq!(ended.len(), 1, "{ended:?}");
+        assert!(
+            ended[0]
+                .1
+                .as_deref()
+                .is_some_and(|error| error.contains("stopped")),
+            "{ended:?}"
+        );
     }
 
     #[test]
@@ -720,6 +1186,44 @@ mod tests {
     }
 
     #[test]
+    fn a_command_that_ends_has_the_repository_read_again() {
+        let mut app = app_that_ran("touch new.txt");
+        let mut shell = Running::default();
+        run_commands(&mut app, &mut shell);
+        let [(id, _)] = shell.started.as_slice() else {
+            panic!("the command did not reach the shell: {:?}", shell.started);
+        };
+        shell.ends.push(crate::shell::Ran {
+            id: id.clone(),
+            output: String::new(),
+            bytes: 0,
+            whole: true,
+            exit_code: Some(0),
+            error: None,
+        });
+        let mut watch = Watching::default();
+
+        fold_commands(&mut app, &mut shell, &mut watch);
+
+        assert_eq!(
+            watch.nudges, 1,
+            "what the operator's command did to the tree waited out the watch's cadence"
+        );
+    }
+
+    #[test]
+    fn a_command_still_running_leaves_the_repository_unread() {
+        let mut app = app_that_ran("sleep 60");
+        let mut shell = Running::default();
+        run_commands(&mut app, &mut shell);
+        let mut watch = Watching::default();
+
+        fold_commands(&mut app, &mut shell, &mut watch);
+
+        assert_eq!(watch.nudges, 0);
+    }
+
+    #[test]
     fn a_command_still_running_as_the_session_ends_is_kept_as_stopped() {
         let mut app = app_that_ran("sleep 60");
         let mut kept = Kept::default();
@@ -746,6 +1250,8 @@ mod tests {
             tool: "Bash".to_owned(),
             input: r#"{"command":"cargo test"}"#.to_owned(),
             target: target.map(str::to_owned),
+            proposal: None,
+            reason: None,
             agent: None,
         });
         app
@@ -809,6 +1315,184 @@ mod tests {
         assert_eq!(error.to_string(), "the draw was refused");
     }
 
+    /// A desktop that writes down, in `said`, what it was asked to do,
+    /// beside what was done to the terminal.
+    #[derive(Debug, Default)]
+    struct Written {
+        said: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+    }
+
+    impl Desktop for Written {
+        fn copy(&mut self, text: &str) -> Result<(), String> {
+            self.said.borrow_mut().push(format!("copy {text}"));
+            Ok(())
+        }
+
+        fn open(&mut self, link: &str) -> Result<(), String> {
+            self.said.borrow_mut().push(format!("open {link}"));
+            Ok(())
+        }
+
+        fn edit(&mut self, path: &str) -> Result<(), String> {
+            self.said.borrow_mut().push(format!("edit {path}"));
+            Ok(())
+        }
+    }
+
+    /// A memory lookup that takes as long as the test says: what a load
+    /// asked for is found only once `landed` is set, as a slow disk or a long
+    /// chain of imports would hand it over.
+    #[derive(Debug, Default)]
+    struct Slow {
+        loads: usize,
+        under_way: bool,
+        landed: bool,
+    }
+
+    impl Memory for Slow {
+        fn load(&mut self) {
+            if !self.under_way {
+                self.loads += 1;
+                self.under_way = true;
+            }
+        }
+
+        fn drain(&mut self) -> Option<Vec<crate::memory::MemoryFile>> {
+            if !(self.under_way && self.landed) {
+                return None;
+            }
+            self.under_way = false;
+            Some(vec![crate::memory::MemoryFile {
+                scope: crate::memory::Scope::Imported,
+                path: "CLAUDE.md".to_owned(),
+                named: "CLAUDE.md".to_owned(),
+                depth: 0,
+                text: Some("be brief\n".to_owned()),
+                bytes: Some(9),
+                note: None,
+                editable: None,
+            }])
+        }
+    }
+
+    fn drawn(app: &mut App) -> String {
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30))
+            .expect("a test backend always opens");
+        terminal
+            .draw(|frame| crate::ui::draw(frame, app))
+            .expect("a test backend always draws");
+        let buffer = terminal.backend().buffer();
+        buffer
+            .content()
+            .chunks(usize::from(buffer.area.width))
+            .map(|row| {
+                row.iter()
+                    .map(ratatui::buffer::Cell::symbol)
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn a_program_that_ran_this_pass_or_an_earlier_one_owes_the_whole_frame_once() {
+        let mut owed = false;
+        assert!(!whole_frame_owed(false, &mut owed));
+        assert!(whole_frame_owed(true, &mut owed), "an editor ran this pass");
+        assert!(!owed);
+
+        let mut owed = true;
+        assert!(
+            whole_frame_owed(false, &mut owed),
+            "an editor ran last pass"
+        );
+        assert!(!owed, "the draw pays what was owed");
+        assert!(!whole_frame_owed(false, &mut owed));
+    }
+
+    #[test]
+    fn the_loop_goes_on_drawing_the_memory_view_while_a_slow_lookup_runs() {
+        let mut app = App::new(Repo::default());
+        let mut memory = Slow::default();
+        app.on_key(KeyEvent::new(KeyCode::F(8), KeyModifiers::NONE));
+
+        for _ in 0..5 {
+            let started = std::time::Instant::now();
+            fold_memory(&mut app, &mut memory);
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "a tick waited on the lookup"
+            );
+            assert!(
+                drawn(&mut app).contains("reading…"),
+                "no frame said it was reading"
+            );
+        }
+        assert_eq!(memory.loads, 1, "each tick asked for the lookup again");
+
+        memory.landed = true;
+        fold_memory(&mut app, &mut memory);
+
+        let frame = drawn(&mut app);
+        assert!(
+            frame.contains("CLAUDE.md"),
+            "what was found is not drawn:\n{frame}"
+        );
+        assert!(
+            !frame.contains("reading…"),
+            "the view still says it is reading"
+        );
+    }
+
+    #[test]
+    fn e_in_the_memory_view_lends_the_terminal_to_the_editor_and_never_opens_the_file() {
+        let mut app = App::new(Repo::default());
+        app.on_key(KeyEvent::new(KeyCode::F(8), KeyModifiers::NONE));
+        app.set_memory(vec![crate::memory::MemoryFile {
+            scope: crate::memory::Scope::Imported,
+            path: "tools/setup.command".to_owned(),
+            named: "tools/setup.command".to_owned(),
+            depth: 1,
+            text: Some("#!/bin/sh\n".to_owned()),
+            bytes: Some(10),
+            note: None,
+            editable: Some("/work/repo/tools/setup.command".to_owned()),
+        }]);
+        app.on_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        let mut desktop = Written::default();
+        let said = std::rc::Rc::clone(&desktop.said);
+        let mut hold = |hold: Hold| -> io::Result<()> {
+            said.borrow_mut().push(format!("{hold:?}"));
+            Ok(())
+        };
+
+        let lent = hand_off(&mut app, &mut desktop, &mut hold).expect("the terminal is lent");
+
+        assert!(lent, "the loop was not told it owes a whole frame");
+        assert_eq!(
+            *desktop.said.borrow(),
+            ["Lend", "edit /work/repo/tools/setup.command", "Retake"]
+        );
+        assert_eq!(app.hint(), Some("Edited /work/repo/tools/setup.command"));
+    }
+
+    #[test]
+    fn a_link_opened_keeps_the_terminal() {
+        let mut app = App::new(Repo::default());
+        app.perform(crate::menu::Action::ReleaseNotes);
+        let mut desktop = Written::default();
+        let said = std::rc::Rc::clone(&desktop.said);
+        let mut hold = |hold: Hold| -> io::Result<()> {
+            said.borrow_mut().push(format!("{hold:?}"));
+            Ok(())
+        };
+        let lent = hand_off(&mut app, &mut desktop, &mut hold).expect("nothing is lent");
+        assert!(!lent);
+        let said = desktop.said.borrow();
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(said[0].starts_with("open "), "{said:?}");
+    }
+
     #[test]
     fn a_sent_prompt_reaches_the_journal_and_the_backend() {
         let mut app = app_with_a_sent_prompt();
@@ -824,6 +1508,106 @@ mod tests {
             }]
         );
         assert_eq!(backend.sent, ["x"]);
+    }
+
+    /// A clipboard that holds `image`, where it holds one, and hands it back
+    /// on the tick after it was asked for.
+    #[derive(Debug, Default)]
+    struct Clipboard {
+        image: Option<Image>,
+        asked: Vec<Source>,
+        waiting: Vec<Source>,
+    }
+
+    impl Images for Clipboard {
+        fn fetch(&mut self, source: &Source) {
+            self.asked.push(source.clone());
+            self.waiting.push(source.clone());
+        }
+
+        fn drain(&mut self) -> Vec<Fetched> {
+            std::mem::take(&mut self.waiting)
+                .into_iter()
+                .map(|source| Fetched {
+                    source,
+                    image: self
+                        .image
+                        .clone()
+                        .ok_or_else(|| "there is no image on the clipboard".to_owned()),
+                })
+                .collect()
+        }
+    }
+
+    fn screenshot() -> Image {
+        Image::from_bytes(b"\x89PNG\r\n\x1a\nscreenshot".to_vec()).expect("a PNG signature")
+    }
+
+    fn key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+        KeyEvent::new(code, modifiers)
+    }
+
+    #[test]
+    fn an_image_pasted_with_ctrl_v_goes_to_the_backend_with_the_prompt_that_names_it() {
+        let mut app = App::new(Repo::default()).attached();
+        let mut clipboard = Clipboard {
+            image: Some(screenshot()),
+            ..Clipboard::default()
+        };
+        let mut backend = Attached::default();
+
+        app.on_key(key(KeyCode::Char('v'), KeyModifiers::CONTROL));
+        fetch_images(&mut app, &mut clipboard);
+        fold_images(&mut app, &mut clipboard);
+        for c in "look".chars() {
+            app.on_key(key(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        app.on_key(key(KeyCode::Enter, KeyModifiers::NONE));
+        send_produced(&mut app, &mut Kept::default(), &mut backend, &mut Forgotten);
+
+        assert_eq!(clipboard.asked, [Source::Clipboard]);
+        assert_eq!(backend.sent, ["[Image #1] look"]);
+        assert_eq!(backend.images, [vec![screenshot()]]);
+    }
+
+    #[test]
+    fn a_clipboard_with_no_image_attaches_nothing_and_says_why() {
+        let mut app = App::new(Repo::default()).attached();
+        let mut clipboard = Clipboard::default();
+
+        app.on_key(key(KeyCode::Char('v'), KeyModifiers::CONTROL));
+        fetch_images(&mut app, &mut clipboard);
+        assert!(app.fetching_image());
+        fold_images(&mut app, &mut clipboard);
+
+        assert!(!app.fetching_image());
+        assert_eq!(app.composed(), "");
+        assert_eq!(
+            app.hint(),
+            Some("No image attached: there is no image on the clipboard")
+        );
+    }
+
+    #[test]
+    fn a_prompt_that_went_nowhere_does_not_hand_its_images_to_the_next() {
+        let mut app = App::new(Repo::default());
+        let mut clipboard = Clipboard {
+            image: Some(screenshot()),
+            ..Clipboard::default()
+        };
+
+        app.on_key(key(KeyCode::Char('v'), KeyModifiers::CONTROL));
+        fetch_images(&mut app, &mut clipboard);
+        fold_images(&mut app, &mut clipboard);
+        app.on_key(key(KeyCode::Enter, KeyModifiers::NONE));
+        send_produced(
+            &mut app,
+            &mut Kept::default(),
+            &mut Detached,
+            &mut Forgotten,
+        );
+
+        assert_eq!(app.take_turn_images(), Vec::new());
     }
 
     #[test]
@@ -842,6 +1626,32 @@ mod tests {
             .find(|entry| entry.head == "not saved")
             .expect("the failure is on screen");
         assert!(saved.body.ends_with("the store is read-only"));
+    }
+
+    #[test]
+    fn a_refusal_the_journal_reports_after_the_event_was_handed_on_is_shown_when_it_arrives() {
+        let mut app = app_with_a_sent_prompt();
+        let mut journal = Kept {
+            refuse: true,
+            holding: true,
+            ..Kept::default()
+        };
+        let not_saved = |app: &App| {
+            app.entries()
+                .iter()
+                .filter(|entry| entry.head == "not saved")
+                .map(|entry| entry.meta.clone())
+                .collect::<Vec<_>>()
+        };
+
+        send_produced(&mut app, &mut journal, &mut Detached, &mut Forgotten);
+        assert_eq!(not_saved(&app), Vec::<String>::new());
+
+        journal.holding = false;
+        fold_journal(&mut app, &mut journal);
+        assert_eq!(not_saved(&app), ["1 event"]);
+        fold_journal(&mut app, &mut journal);
+        assert_eq!(not_saved(&app), ["1 event"]);
     }
 
     #[test]
@@ -942,9 +1752,15 @@ mod tests {
 
         send_produced(&mut app, &mut journal, &mut Detached, &mut Forgotten);
 
-        // The turn is still recorded — it is what the operator did — and the
-        // transcript says plainly that nothing received it.
-        assert_eq!(journal.events.len(), 1);
+        // The prompt is still recorded — it is what the operator did — as one
+        // that reached no backend, and the transcript says plainly that
+        // nothing received it.
+        assert_eq!(
+            journal.events,
+            [SessionEvent::PromptNotSent {
+                text: "x".to_owned()
+            }]
+        );
         let notice = app
             .entries()
             .iter()
@@ -954,6 +1770,62 @@ mod tests {
         assert!(
             !app.entries().iter().any(|entry| entry.head == "not sent"),
             "a session with nothing attached reported a send that was never tried"
+        );
+    }
+
+    #[test]
+    fn a_prompt_with_no_backend_reads_as_not_sent_when_the_session_is_resumed() {
+        let mut app = App::new(Repo::default());
+        for c in "hello".chars() {
+            app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let mut journal = Kept::default();
+        send_produced(&mut app, &mut journal, &mut Detached, &mut Forgotten);
+
+        let mut resumed = App::new(Repo::default());
+        for event in &journal.events {
+            resumed.apply(event);
+        }
+
+        assert!(
+            resumed
+                .entries()
+                .iter()
+                .any(|entry| entry.body.contains("the prompt above was not sent")),
+            "{:#?}",
+            journal.events
+        );
+    }
+
+    #[test]
+    fn a_prompt_with_no_backend_is_neither_a_turn_nor_the_caption_when_the_session_is_resumed() {
+        let mut app = App::new(Repo::default());
+        for c in "hello".chars() {
+            app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let mut journal = Kept::default();
+        send_produced(&mut app, &mut journal, &mut Detached, &mut Forgotten);
+
+        let mut resumed = App::new(Repo::default());
+        for event in &journal.events {
+            resumed.apply(event);
+        }
+        resumed.leave();
+
+        assert_eq!(resumed.caption(), None, "{:#?}", journal.events);
+        assert!(
+            resumed.session().turns().is_empty(),
+            "{:#?}",
+            journal.events
+        );
+        assert!(
+            resumed
+                .entries()
+                .iter()
+                .any(|entry| entry.kind == crate::app::EntryKind::User && entry.body == "hello"),
+            "the prompt is still shown, as what the operator typed"
         );
     }
 
@@ -1052,6 +1924,36 @@ mod tests {
     }
 
     #[test]
+    fn a_rule_kept_in_a_config_nobody_trusted_says_it_waits_on_niobe_trust() {
+        let mut app = app_with_a_prompt(None);
+        let mut remembered = Remembered {
+            until_trusted: true,
+            ..Remembered::default()
+        };
+
+        app.answer(Answer::AlwaysTool);
+        send_produced(
+            &mut app,
+            &mut Kept::default(),
+            &mut Attached::default(),
+            &mut remembered,
+        );
+
+        let entry = app
+            .entries()
+            .iter()
+            .find(|entry| entry.head == "not kept" && entry.meta == "Bash")
+            .expect("the notice names the rule that waits");
+        assert!(
+            entry
+                .body
+                .contains("`niobe trust` shows what the file sets"),
+            "{entry:?}"
+        );
+        assert!(app.allowed().allows("Bash", Some("anything")));
+    }
+
+    #[test]
     fn a_rule_that_could_not_be_kept_says_it_will_not_outlive_the_session() {
         let mut app = app_with_a_prompt(None);
         let mut remembered = Remembered {
@@ -1088,6 +1990,8 @@ mod tests {
                 tool: "Bash".to_owned(),
                 input: r#"{"command":"cargo test"}"#.to_owned(),
                 target: Some("cargo test".to_owned()),
+                proposal: None,
+                reason: None,
                 agent: None,
             }],
             ..Attached::default()
@@ -1121,6 +2025,8 @@ mod tests {
             tool: "Bash".to_owned(),
             input: r#"{"command":"cargo test"}"#.to_owned(),
             target: Some("cargo test".to_owned()),
+            proposal: None,
+            reason: None,
             agent: None,
         });
 
@@ -1147,6 +2053,73 @@ mod tests {
     }
 
     #[test]
+    fn esc_during_a_running_turn_reaches_the_backend_as_one_stop() {
+        let mut app = app_with_a_sent_prompt();
+        let mut backend = Attached::default();
+        send_produced(&mut app, &mut Kept::default(), &mut backend, &mut Forgotten);
+
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        send_produced(&mut app, &mut Kept::default(), &mut backend, &mut Forgotten);
+
+        assert_eq!(backend.interrupts, 1);
+        assert!(!app.should_quit());
+    }
+
+    #[test]
+    fn a_server_the_operator_asked_to_reconnect_reaches_the_backend_once() {
+        let mut app = App::new(Repo::default()).attached();
+        app.apply(&SessionEvent::McpServers {
+            servers: vec![niobe_core::event::McpServer {
+                name: "docs".to_owned(),
+                status: niobe_core::event::McpStatus::Failed,
+                source: None,
+                tools: Vec::new(),
+                scope: None,
+                error: None,
+                endpoint: None,
+                reports_as: None,
+            }],
+        });
+        let mut backend = Attached::default();
+
+        app.on_key(KeyEvent::new(KeyCode::F(7), KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+        send_produced(&mut app, &mut Kept::default(), &mut backend, &mut Forgotten);
+        send_produced(&mut app, &mut Kept::default(), &mut backend, &mut Forgotten);
+        assert_eq!(backend.reconnects, ["docs"]);
+        assert!(backend.sent.is_empty(), "a reconnect sent a turn");
+
+        backend.refuse = true;
+        app.on_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+        send_produced(&mut app, &mut Kept::default(), &mut backend, &mut Forgotten);
+        assert!(
+            app.hint()
+                .is_some_and(|hint| hint.contains("the subprocess has gone")),
+            "{:?}",
+            app.hint()
+        );
+    }
+
+    #[test]
+    fn a_stop_the_backend_would_not_take_says_the_turn_runs_on() {
+        let mut app = app_with_a_sent_prompt();
+        let mut backend = Attached::default();
+        send_produced(&mut app, &mut Kept::default(), &mut backend, &mut Forgotten);
+        backend.refuse = true;
+
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        send_produced(&mut app, &mut Kept::default(), &mut backend, &mut Forgotten);
+
+        let entry = app
+            .entries()
+            .iter()
+            .find(|entry| entry.head == "not stopped")
+            .expect("the failure is on screen");
+        assert!(entry.body.ends_with("the subprocess has gone"), "{entry:?}");
+    }
+
+    #[test]
     fn a_change_the_backend_would_not_take_says_the_session_is_running_as_it_was() {
         let mut app = App::new(Repo::default()).attached();
         let mut backend = Attached {
@@ -1164,6 +2137,68 @@ mod tests {
             .expect("the failure is on screen");
         assert_eq!(entry.meta, "mode");
         assert!(entry.body.ends_with("the subprocess has gone"), "{entry:?}");
+    }
+
+    #[test]
+    fn a_mode_the_backend_would_not_take_leaves_the_session_in_the_mode_it_was_in() {
+        let mut app = App::new(Repo::default()).attached();
+        let mut journal = Kept::default();
+        let mut backend = Attached {
+            refuse: true,
+            ..Attached::default()
+        };
+        app.apply(&SessionEvent::ModeSelected { mode: Mode::Plan });
+
+        app.on_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+        app.on_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+        send_produced(&mut app, &mut journal, &mut backend, &mut Forgotten);
+
+        assert_eq!(app.session().mode(), Some(Mode::Plan));
+        assert_eq!(
+            journal.events.last(),
+            Some(&SessionEvent::ModeSelected { mode: Mode::Plan }),
+            "a resumed session would read the refused mode as the one it ran in"
+        );
+    }
+
+    #[test]
+    fn a_model_the_backend_would_not_take_leaves_the_session_on_the_model_it_reported() {
+        let mut app =
+            App::new(Repo::default())
+                .attached()
+                .with_profile(crate::app::SelectedProfile {
+                    name: "max".to_owned(),
+                    backend: niobe_core::event::Backend::Claude,
+                    models: vec!["opus".to_owned(), "haiku".to_owned()],
+                    billing: None,
+                });
+        let mut journal = Kept::default();
+        let mut backend = Attached {
+            refuse: true,
+            ..Attached::default()
+        };
+        app.apply(&SessionEvent::SessionMeta(niobe_core::event::SessionMeta {
+            backend: niobe_core::event::Backend::Claude,
+            profile: "max".to_owned(),
+            model: "claude-opus-5".to_owned(),
+            backend_session: None,
+        }));
+
+        app.on_key(KeyEvent::new(KeyCode::F(4), KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        send_produced(&mut app, &mut journal, &mut backend, &mut Forgotten);
+
+        assert_eq!(app.session().model(), Some("claude-opus-5"));
+        assert_eq!(
+            journal.events.last(),
+            Some(&SessionEvent::ModelRefused { back_to: None })
+        );
+        assert!(
+            app.entries()
+                .iter()
+                .any(|entry| entry.head == "not changed" && entry.meta == "model")
+        );
     }
 
     #[test]
@@ -1194,6 +2229,7 @@ mod tests {
                     added: Some(3),
                     removed: Some(1),
                     hunks: Vec::new(),
+                    scope: niobe_core::event::ChangeScope::Project,
                 },
                 SessionEvent::AssistantMessage {
                     text: "done".to_owned(),

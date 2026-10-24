@@ -67,7 +67,7 @@ fn days_in_month(year: u16, month: u8) -> u8 {
 }
 
 fn is_leap(year: u16) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+    (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400)
 }
 
 /// The date `days` days after 1970-01-01, by Howard Hinnant's `civil_from_days`

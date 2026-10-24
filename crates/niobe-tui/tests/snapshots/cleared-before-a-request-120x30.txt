@@ -1,0 +1,30 @@
+ Niobe  Session  Context  Model  View  Help                            opus-5  claude · default  ○ not attached  13:41
+ ┏━━━━━━━━━━━━━━━━━━━━━━━━━ Session ─ example-app ━━━━━━━━━━━━━━━━━━━━━━━━━━┓ ┌──────────────── Usage ────────────────┐
+ ┃ · cleared                                                                ┃ │ 5h  15% ▓▓░░░░░░░░░░ resets 16:40     │
+ ┃   The conversation starts over here, as a new session: nothing above     ┃ │ ───────────────────────────────────── │
+ ┃   this line is in front of the model, and what came before is a session  ┃ │ no tokens reported yet                │
+ ┃   of its own, with its own cost. Session › Resume opens it again.        ┃ └───────────────────────────────────────┘
+ ┃                                                                          ┃ ┌─────────────── Changes ───────────────┐
+ ┃                                                                          ┃ │ ⎇ main ↑3                             █
+ ┃                                                                          ┃ │ ▾ Working tree  23 files  +≥977 −≥259 █
+ ┃                                                                          ┃ │   .                                   █
+ ┃                                                                          ┃ │     CHANGELOG.md                +0 −0 █
+ ┃                                                                          ┃ │   catalog/                            │
+ ┃                                                                          ┃ │     fetch.ts                 +149 −12 │
+ ┃                                                                          ┃ │     etag.ts                   +88 −41 │
+ ┃                                                                          ┃ │     cache/lru.ts               +31 −9 │
+ ┃                                                                          ┃ │     cache/index.ts             +12 −0 │
+ ┃                                                                          ┃ │   docs/                               │
+ ┃                                                                          ┃ │     caching.md                +64 −22 │
+ ┃                                                                          ┃ └───────────────────────────────────────┘
+ ┃                                                                          ┃ ┌────────────── Activity ───────────────┐
+ ┃                                                                          ┃ │ ▾ Sub-agents  0 running · 0 spawned   │
+ ┃                                                                          ┃ │   none spawned                        │
+ ┃                                                                          ┃ │ ▾ Decisions, as the agent says  0     │
+ ┃                                                                          ┃ │   none stated yet                     │
+ ┃                                                                          ┃ │ ▾ Tools  0 calls · 0 denied · 0 B out │
+ ┃                                                                          ┃ │   none called                         │
+ ┃ ──────────────────────────────────────────────────────────────────────── ┃ │                                       │
+ ┃  —  >  Ask for a change · @ file         Shift+Tab mode · Ctrl+J newline ┃ │                                       │
+ ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ └───────────────────────────────────────┘
+EscStop 1Help     2Compact     3Clear     4Model     5Diff     6Rewind     7MCP     8Memory     9Settings     0Quit

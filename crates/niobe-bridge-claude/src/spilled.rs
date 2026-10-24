@@ -10,6 +10,9 @@
 //! bytes went into it. That file is the CLI's output, not a credential: this
 //! reads nothing the operator could not `cat`, and only a file the CLI named.
 //!
+//! The same reading serves the file Niobe's own hook writes the whole of an
+//! output it trimmed to, named in the result the same way.
+//!
 //! The byte count is what says the file is still the one written for that
 //! result. Across 186 saved outputs on the machine this was written on, every
 //! file still there held exactly the bytes its report named.
@@ -28,7 +31,12 @@ pub(crate) fn read(path: &Path, size: u64) -> Option<String> {
     if size > LIMIT {
         return None;
     }
-    let file = std::fs::File::open(path).ok()?;
+    let file = open(path).ok()?;
+    // A path the report names is only the CLI's word: a device or a FIFO
+    // there would be read for ever or waited on, and hold the session up.
+    if !file.metadata().ok()?.is_file() {
+        return None;
+    }
     let mut bytes = Vec::new();
     // One byte past the size, so that a file that has grown is seen to have.
     file.take(size.saturating_add(1))
@@ -38,6 +46,25 @@ pub(crate) fn read(path: &Path, size: u64) -> Option<String> {
         return None;
     }
     String::from_utf8(bytes).ok()
+}
+
+/// Opens `path` for reading without waiting for a writer, which opening a
+/// FIFO otherwise does. On a regular file the flag changes nothing.
+#[cfg(unix)]
+pub(crate) fn open(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    // The flag's bits fit an `i32`; were they not to, the regular-file check
+    // after the open would still refuse a FIFO, only after waiting on it.
+    let nonblock = i32::try_from(rustix::fs::OFlags::NONBLOCK.bits()).unwrap_or(0);
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(nonblock)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+pub(crate) fn open(path: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::File::open(path)
 }
 
 #[cfg(test)]
@@ -81,6 +108,51 @@ mod tests {
         assert_eq!(read(&path, 3), None, "it is not UTF-8");
         assert_eq!(read(&dir.path().join("gone.txt"), 3), None);
         assert_eq!(read(dir.path(), 3), None, "a directory is no output");
-        assert_eq!(read(&path, LIMIT + 1), None);
+    }
+
+    /// A file that holds exactly the bytes its report names, and is past what
+    /// is read: it is the limit that refuses it, not a size that does not
+    /// match. Sparse, so nothing is written.
+    #[test]
+    fn an_output_past_the_limit_is_refused_by_the_limit_and_one_at_it_is_read() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be made");
+        let over = dir.path().join("over.txt");
+        std::fs::File::create(&over)
+            .and_then(|file| file.set_len(LIMIT + 1))
+            .expect("a sparse file is made");
+        assert_eq!(read(&over, LIMIT + 1), None);
+
+        let at = dir.path().join("at.txt");
+        std::fs::File::create(&at)
+            .and_then(|file| file.set_len(LIMIT))
+            .expect("a sparse file is made");
+        assert_eq!(read(&at, LIMIT).map(|text| text.len() as u64), Some(LIMIT));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_named_as_the_saved_output_is_refused_at_once() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be made");
+        let fifo = dir.path().join("b1x24ppwb.txt");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("mkfifo runs");
+        assert!(made.success(), "the FIFO is made");
+
+        let (sender, received) = std::sync::mpsc::channel();
+        // Size 0, which an empty read of it would equal: only the check that
+        // it is a file stands between a FIFO and an empty output.
+        std::thread::spawn(move || sender.send(read(&fifo, 0)));
+        let read = received
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("the read returns without waiting on the FIFO");
+        assert_eq!(read, None);
+    }
+
+    #[test]
+    fn a_directory_named_as_the_saved_output_is_refused() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be made");
+        assert_eq!(read(dir.path(), 0), None);
     }
 }

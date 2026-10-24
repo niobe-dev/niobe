@@ -59,6 +59,16 @@ pub struct Commands {
     /// Told of every group, so that a session killed outright does not leave
     /// them running.
     reaper: Option<Reaper>,
+    /// How long what is still running when the session ends is given to end
+    /// on SIGTERM before it is killed: [`QUIT_GRACE`], but for a test.
+    grace: Duration,
+    /// The process groups the backend has led, while the reaper is told of
+    /// them. They are the bridge's to stop; they are kept here only so that
+    /// the reaper is told when each is seen empty, as a command's is.
+    backend: Vec<u32>,
+    /// Where word of each group the backend leads comes from: the one it
+    /// started in, and one for each time it is started again.
+    backend_groups: Option<Receiver<u32>>,
 }
 
 /// The process group one command's `sh` leads.
@@ -81,6 +91,9 @@ impl Commands {
             ends,
             groups: Arc::new(Mutex::new(Vec::new())),
             reaper: None,
+            grace: QUIT_GRACE,
+            backend: Vec::new(),
+            backend_groups: None,
         }
     }
 
@@ -88,6 +101,43 @@ impl Commands {
     /// empty.
     pub fn reaped_by(mut self, reaper: Reaper) -> Self {
         self.reaper = Some(reaper);
+        self
+    }
+
+    /// Tells the reaper of each group the backend has started since the last
+    /// look.
+    fn watch_the_backends_new_groups(&mut self) {
+        let (Some(reaper), Some(groups)) = (&self.reaper, &self.backend_groups) else {
+            return;
+        };
+        for group in groups.try_iter() {
+            reaper.watch(group);
+            self.backend.push(group);
+        }
+    }
+
+    /// Tells the reaper each of the backend's groups has ended once nobody is
+    /// left in it. Until then its number cannot be given to anyone else, so
+    /// whatever the backend started is still the session's to stop.
+    fn let_go_of_the_backend_once_empty(&mut self) {
+        let reaper = self.reaper.as_ref();
+        self.backend.retain(|&group| {
+            let kept = occupied(group);
+            if !kept && let Some(reaper) = reaper {
+                reaper.forget(group);
+            }
+            kept
+        });
+    }
+
+    /// Tells the reaper of each process group the backend leads, as `groups`
+    /// names them, and, once each is seen with nobody left in it, that it has
+    /// ended.
+    pub fn reaping_the_backend(mut self, groups: Receiver<u32>) -> Self {
+        if self.reaper.is_some() {
+            self.backend_groups = Some(groups);
+            self.watch_the_backends_new_groups();
+        }
         self
     }
 }
@@ -137,25 +187,42 @@ impl Shell for Commands {
         let Some(leader) = still_running(&self.groups, id) else {
             return;
         };
+        // The line's own shell is ended outright, and first: one that has a
+        // trap on the signal, or defers it while it waits on a step, would
+        // otherwise go on to the next step of the line once the one it
+        // stopped has ended. What it started is asked and given the grace.
+        end_the_shell(leader);
         stop(leader);
         let groups = Arc::clone(&self.groups);
+        let reaper = self.reaper.clone();
         let id = id.clone();
         std::thread::spawn(move || {
             std::thread::sleep(GRACE);
-            // Only while it is still listed: a group is taken off the list
-            // once it is seen empty, so a group killed here cannot be one a
-            // new process has taken the number of.
-            if let Ok(groups) = groups.lock()
-                && groups
+            // Only while it is still listed, looked at again first: a group
+            // is taken off the list once it is seen empty, so a group killed
+            // here cannot be one a new process has taken the number of.
+            if let Ok(mut groups) = groups.lock() {
+                let_go_of_the_empty(&mut groups, reaper.as_ref());
+                if groups
                     .iter()
                     .any(|group| group.id == id && group.leader == leader)
-            {
-                kill(leader);
+                {
+                    kill(leader);
+                }
             }
         });
     }
 
+    /// Also lets go of every group that has emptied since the last look, the
+    /// backend's among them, so
+    /// that neither the quit nor the reaper is left holding the number of a
+    /// group that is gone: once empty, it can be given to anyone's.
     fn drain(&mut self) -> Vec<Ran> {
+        if let Ok(mut groups) = self.groups.lock() {
+            let_go_of_the_empty(&mut groups, self.reaper.as_ref());
+        }
+        self.watch_the_backends_new_groups();
+        self.let_go_of_the_backend_once_empty();
         self.ended.try_iter().collect()
     }
 }
@@ -167,6 +234,13 @@ impl Drop for Commands {
     /// group is asked first and killed if anything in it is still running
     /// after [`QUIT_GRACE`]; a quit with nothing still running, or only what
     /// ends when asked, is not held up.
+    ///
+    /// What is stopped is what is still in a command's process group. A
+    /// process that calls `setsid` leaves it for a session and a group of its
+    /// own, whose number nothing here is told, and is left running: a group
+    /// is the most that can be signalled without walking every process on
+    /// the machine, and a command that daemonises itself has asked to
+    /// outlive what started it.
     fn drop(&mut self) {
         if let Ok(mut groups) = self.groups.lock() {
             let_go_of_the_empty(&mut groups, self.reaper.as_ref());
@@ -174,13 +248,15 @@ impl Drop for Commands {
                 stop(group.leader);
             }
         }
-        let until = Instant::now() + QUIT_GRACE;
+        let until = Instant::now() + self.grace;
         while Instant::now() < until && !none_running(&self.groups) {
             std::thread::sleep(Duration::from_millis(5));
         }
-        // Under the lock, as in `stop`: a group is taken off the list once it
-        // is seen empty, so a group killed here is still the command's own.
-        if let Ok(groups) = self.groups.lock() {
+        // Under the lock, as in `stop`, and looked at again first: a group
+        // that emptied while this waited is let go of rather than killed, so a
+        // group killed here is still the command's own.
+        if let Ok(mut groups) = self.groups.lock() {
+            let_go_of_the_empty(&mut groups, self.reaper.as_ref());
             for group in groups.iter() {
                 kill(group.leader);
             }
@@ -226,12 +302,17 @@ fn still_running(groups: &Mutex<Vec<Group>>, id: &ToolCallId) -> Option<u32> {
 ///
 /// Standard error is sent where standard output goes by the shell itself, so
 /// the two arrive in one stream in the order they were written. There is no
-/// terminal to give it — the shell has it — so standard input is closed and
-/// a pager is told to print straight through rather than wait for a key.
+/// terminal to give it — the shell has it — so standard input is closed, a
+/// pager is told to print straight through rather than wait for a key, and
+/// the command runs in a session of its own ([`detached`]), where `/dev/tty`
+/// names no terminal: a program that opens it, as `sudo` or `ssh` asks for a
+/// password, would otherwise write over the frame the shell is drawing.
 fn spawn(cwd: &Path, command: &str) -> Result<Child, ShellError> {
     let mut sh = Command::new("sh");
     sh.arg("-c")
-        .arg(format!("exec 2>&1\n{command}"))
+        .arg("exec 2>&1\neval \"$1\"")
+        .arg("sh")
+        .arg(command)
         .current_dir(cwd)
         .env("PAGER", "cat")
         .env("GIT_PAGER", "cat")
@@ -239,9 +320,30 @@ fn spawn(cwd: &Path, command: &str) -> Result<Child, ShellError> {
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     #[cfg(unix)]
-    std::os::unix::process::CommandExt::process_group(&mut sh, 0);
+    detached(&mut sh);
     sh.spawn()
         .map_err(|error| format!("cannot start sh: {error}").into())
+}
+
+/// Starts `sh` in a session of its own, which takes it away from the
+/// terminal the shell draws on and makes it the leader of a process group of
+/// its own, numbered as its pid: the group every stop and the reaper end.
+///
+/// `unsafe` is denied workspace-wide and allowed here: `setsid` has to be
+/// called in the child between fork and exec, `pre_exec` is the only hook
+/// there, and the safe `CommandExt::setsid` is not stable yet.
+#[cfg(unix)]
+#[allow(unsafe_code)]
+fn detached(sh: &mut Command) {
+    // SAFETY: between fork and exec the child may make only async-signal-safe
+    // calls. `setsid` is a single system call that allocates nothing and takes
+    // no lock, and the closure touches nothing of the parent's.
+    unsafe {
+        std::os::unix::process::CommandExt::pre_exec(sh, || {
+            rustix::process::setsid()?;
+            Ok(())
+        });
+    }
 }
 
 /// Reads what the command prints while it runs, and ends once `sh` has:
@@ -348,6 +450,19 @@ fn stop(pid: u32) {
     signal_group(pid, rustix::process::Signal::TERM);
 }
 
+/// Ends the process `pid` itself, whether it listens or not, and nothing
+/// else in its group.
+#[cfg(unix)]
+fn end_the_shell(pid: u32) {
+    let pid = i32::try_from(pid)
+        .ok()
+        .and_then(rustix::process::Pid::from_raw);
+    if let Some(pid) = pid {
+        // A shell that has already gone is what was wanted.
+        let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+    }
+}
+
 /// Ends the process group `pid` leads, whether it listens or not.
 #[cfg(unix)]
 fn kill(pid: u32) {
@@ -383,11 +498,33 @@ fn occupied(_leader: u32) -> bool {
 fn stop(_pid: u32) {}
 
 #[cfg(not(unix))]
+fn end_the_shell(_pid: u32) {}
+
+#[cfg(not(unix))]
 fn kill(_pid: u32) {}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// How long a test waits for a command, a child of one, or its end before
+    /// calling it hung.
+    ///
+    /// A command that hangs never comes, so a long wait costs a passing test
+    /// nothing. With three copies of this binary running at once, starting
+    /// `sh` took 0.87 s at the median and the slowest wait measured was 7.25 s,
+    /// on a 12-core Mac; ten seconds had been failing under more load than
+    /// that.
+    const PATIENCE: Duration = Duration::from_secs(60);
+
+    impl Commands {
+        /// The same commands, given `grace` rather than [`QUIT_GRACE`] to end
+        /// when the session does.
+        fn with_grace(mut self, grace: Duration) -> Self {
+            self.grace = grace;
+            self
+        }
+    }
 
     /// Runs `command` in `cwd` and waits for it to end.
     fn ran(cwd: &Path, command: &str) -> Ran {
@@ -395,7 +532,7 @@ mod tests {
         commands
             .run(&ToolCallId::new("t"), command)
             .expect("sh starts");
-        ended(&mut commands, Duration::from_secs(10)).expect("the command ends")
+        ended(&mut commands, PATIENCE).expect("the command ends")
     }
 
     fn ended(commands: &mut Commands, patience: Duration) -> Option<Ran> {
@@ -422,6 +559,29 @@ mod tests {
         assert_eq!(ran.error, None, "an exit of its own needs no reason");
     }
 
+    /// A pager would wait for a key there is no terminal to give it.
+    #[test]
+    fn a_command_with_quotes_and_newlines_runs_safely() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+
+        let ran = ran(
+            dir.path(),
+            "echo \"hello 'world'\"; echo '\nline\n'; echo '$1'",
+        );
+
+        assert_eq!(ran.output, "hello 'world'\n\nline\n\n$1\n");
+        assert_eq!(ran.exit_code, Some(0));
+    }
+
+    #[test]
+    fn a_command_is_told_to_page_through_cat() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+
+        let ran = ran(dir.path(), "echo \"$PAGER $GIT_PAGER\"");
+
+        assert_eq!(ran.output, "cat cat\n");
+    }
+
     #[test]
     fn a_command_runs_in_the_sessions_directory_with_nothing_to_read() {
         let dir = tempfile::tempdir().expect("a temporary directory can be created");
@@ -444,7 +604,7 @@ mod tests {
 
         assert!(!ran.whole);
         assert_eq!(ran.bytes, 3_000_000 + 1 + 8);
-        assert_eq!(ran.output.len(), KEPT);
+        assert_eq!(ran.output.len(), 1024 * 1024, "a mebibyte is kept");
         assert!(
             ran.output.ends_with("x\nthe end\n"),
             "the end is what is kept"
@@ -459,7 +619,7 @@ mod tests {
         commands
             .run(
                 &ToolCallId::new("t"),
-                &format!("sleep 30 & echo $! > {}; wait", marker.display()),
+                &format!("sleep 300 & echo $! > {}; wait", marker.display()),
             )
             .expect("sh starts");
         let child = pid_in(&marker);
@@ -480,7 +640,7 @@ mod tests {
             .run(
                 &ToolCallId::new("t"),
                 &format!(
-                    "trap '' TERM; sleep 30 & echo $! > {}; wait",
+                    "trap '' TERM; sleep 300 & echo $! > {}; wait",
                     marker.display()
                 ),
             )
@@ -490,11 +650,10 @@ mod tests {
 
         drop(commands);
 
+        // The grace and then the kill, not the five minutes the command would
+        // run for.
         let held = quit.elapsed();
-        assert!(
-            held < QUIT_GRACE + Duration::from_millis(500),
-            "the quit was held up for {held:?}"
-        );
+        assert!(held < PATIENCE, "the quit was held up for {held:?}");
         gone(child, "a command that ignores SIGTERM outlived the session");
     }
 
@@ -502,11 +661,14 @@ mod tests {
     fn a_command_that_ends_when_asked_does_not_hold_up_the_quit_for_the_grace() {
         let dir = tempfile::tempdir().expect("a temporary directory can be created");
         let marker = dir.path().join("running");
-        let mut commands = Commands::at(dir.path());
+        // A grace no loaded machine takes that long over: only a quit that
+        // waits it out can reach half of it.
+        let grace = 2 * PATIENCE;
+        let mut commands = Commands::at(dir.path()).with_grace(grace);
         commands
             .run(
                 &ToolCallId::new("t"),
-                &format!("echo $$ > {}; exec sleep 30", marker.display()),
+                &format!("echo $$ > {}; exec sleep 300", marker.display()),
             )
             .expect("sh starts");
         pid_in(&marker);
@@ -516,7 +678,7 @@ mod tests {
 
         let held = quit.elapsed();
         assert!(
-            held < QUIT_GRACE / 2,
+            held < grace / 2,
             "a command that ended on SIGTERM held up the quit for {held:?}"
         );
     }
@@ -529,12 +691,13 @@ mod tests {
         commands
             .run(
                 &ToolCallId::new("t"),
-                &format!("echo before; (sleep 30 & echo $! > {})", marker.display()),
+                &format!("echo before; (sleep 300 & echo $! > {})", marker.display()),
             )
             .expect("sh starts");
         let child = pid_in(&marker);
 
-        let ran = ended(&mut commands, Duration::from_secs(2))
+        // Well short of the five minutes the child holds the output for.
+        let ran = ended(&mut commands, PATIENCE)
             .expect("the command was still running after its shell ended");
 
         assert_eq!(ran.output, "before\n");
@@ -552,7 +715,7 @@ mod tests {
         let ran = ran_in(
             &mut commands,
             &format!(
-                "(sleep 30 >/dev/null 2>&1 & echo $! > {})",
+                "(sleep 300 >/dev/null 2>&1 & echo $! > {})",
                 marker.display()
             ),
         );
@@ -565,6 +728,61 @@ mod tests {
             child,
             "what an ended command left running outlived the session",
         );
+    }
+
+    /// The backend's group is the bridge's to stop. Once it has emptied, its
+    /// number can be given to anyone's, so the reaper is told to let it go,
+    /// as it is of a command's.
+    #[test]
+    fn the_backends_group_is_let_go_of_once_it_has_emptied() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let mut backend = Command::new("sleep");
+        std::os::unix::process::CommandExt::process_group(backend.arg("30"), 0);
+        let mut backend = backend.spawn().expect("sleep starts");
+        let reaper = Reaper::start().expect("sh starts");
+        let (started, groups) = channel();
+        started.send(backend.id()).expect("the receiver is held");
+        let mut commands = Commands::at(dir.path())
+            .reaped_by(reaper)
+            .reaping_the_backend(groups);
+
+        commands.drain();
+        assert_eq!(commands.backend, [backend.id()]);
+
+        backend.kill().expect("sleep is killed");
+        backend.wait().expect("sleep is reaped");
+        commands.drain();
+        assert!(commands.backend.is_empty());
+    }
+
+    /// A backend started again in the same session leads a group of its own,
+    /// which the reaper is told of as the first was, and let go of as it was.
+    #[test]
+    fn a_backend_started_again_has_its_group_reaped_and_let_go_of_too() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let backend = || {
+            let mut sleep = Command::new("sleep");
+            std::os::unix::process::CommandExt::process_group(sleep.arg("30"), 0);
+            sleep.spawn().expect("sleep starts")
+        };
+        let mut first = backend();
+        let (started, groups) = channel();
+        started.send(first.id()).expect("the receiver is held");
+        let mut commands = Commands::at(dir.path())
+            .reaped_by(Reaper::start().expect("sh starts"))
+            .reaping_the_backend(groups);
+        first.kill().expect("sleep is killed");
+        first.wait().expect("sleep is reaped");
+
+        let mut again = backend();
+        started.send(again.id()).expect("the receiver is held");
+        commands.drain();
+        assert_eq!(commands.backend, [again.id()]);
+
+        again.kill().expect("sleep is killed");
+        again.wait().expect("sleep is reaped");
+        commands.drain();
+        assert!(commands.backend.is_empty());
     }
 
     #[test]
@@ -581,9 +799,53 @@ mod tests {
         );
     }
 
+    /// A group can empty after its `sh` has ended, when what the command left
+    /// running exits on its own. It is let go of at the next look rather than
+    /// kept for the quit to signal, by which time its number could be
+    /// someone else's.
+    ///
+    /// What the command left running is ended by the test, once the shell
+    /// has, and waited out, so the one drain made after is the first to see
+    /// the group empty however long the machine took to get there.
+    #[test]
+    fn a_group_that_empties_after_its_shell_ended_is_let_go_of_at_the_next_drain() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let marker = dir.path().join("left-running");
+        let mut commands = Commands::at(dir.path());
+        ran_in(
+            &mut commands,
+            &format!(
+                "(sleep 300 >/dev/null 2>&1 & echo $! > {})",
+                marker.display()
+            ),
+        );
+        let child = pid_in(&marker);
+        assert_eq!(
+            commands
+                .groups
+                .lock()
+                .expect("nothing else holds the list")
+                .len(),
+            1,
+            "a group with something still running in it was let go of"
+        );
+
+        let pid = rustix::process::Pid::from_raw(child).expect("a pid is positive");
+        rustix::process::kill_process(pid, rustix::process::Signal::KILL)
+            .expect("what the command left running can be killed");
+        gone(child, "what the command left running outlived its kill");
+        commands.drain();
+
+        let groups = commands.groups.lock().expect("nothing else holds the list");
+        assert!(
+            groups.is_empty(),
+            "a group emptied after its shell was kept for the quit: {groups:?}"
+        );
+    }
+
     /// Waits for `marker` to hold the pid a command wrote into it.
     fn pid_in(marker: &Path) -> i32 {
-        let until = Instant::now() + Duration::from_secs(10);
+        let until = Instant::now() + PATIENCE;
         loop {
             let pid = std::fs::read_to_string(marker).unwrap_or_default();
             if let Ok(pid) = pid.trim().parse::<i32>() {
@@ -600,7 +862,7 @@ mod tests {
     /// Waits for the process `pid` to be gone.
     fn gone(pid: i32, what: &str) {
         let pid = rustix::process::Pid::from_raw(pid).expect("a pid is positive");
-        let until = Instant::now() + Duration::from_secs(10);
+        let until = Instant::now() + PATIENCE;
         while rustix::process::test_kill_process(pid).is_ok() {
             assert!(Instant::now() < until, "{what}");
             std::thread::sleep(Duration::from_millis(10));
@@ -617,7 +879,7 @@ mod tests {
             .run(
                 &id,
                 &format!(
-                    "echo before; sleep 30 & echo $! > {}; wait",
+                    "echo before; sleep 300 & echo $! > {}; wait",
                     marker.display()
                 ),
             )
@@ -626,7 +888,7 @@ mod tests {
 
         commands.stop(&id);
 
-        let ran = ended(&mut commands, Duration::from_secs(10)).expect("the command ends");
+        let ran = ended(&mut commands, PATIENCE).expect("the command ends");
         assert_eq!(ran.id, id);
         // `sh` may add a line of its own saying what the signal ended.
         assert!(
@@ -640,38 +902,72 @@ mod tests {
         assert_eq!(again.output, "still here\n", "the shell runs on");
     }
 
+    /// Stopping a step stops the line: the rest of it does not run once the
+    /// step it was waiting on has been ended.
+    #[test]
+    fn a_stopped_command_runs_none_of_the_rest_of_its_line() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let started = dir.path().join("started");
+        let after = dir.path().join("marker");
+        let mut commands = Commands::at(dir.path());
+        let id = ToolCallId::new("t");
+        commands
+            .run(
+                &id,
+                // A shell with a trap on the signal acts on it only once the
+                // step it waits on has ended, and then goes on to the next.
+                &format!(
+                    "trap 'echo stopping' TERM; echo $$ > {}; sleep 30; echo done > {}",
+                    started.display(),
+                    after.display()
+                ),
+            )
+            .expect("sh starts");
+        pid_in(&started);
+
+        commands.stop(&id);
+
+        ended(&mut commands, PATIENCE).expect("the command ends");
+        assert!(!after.exists(), "the line ran on after its stop");
+    }
+
     #[test]
     fn a_command_that_will_not_end_when_asked_is_killed() {
         let dir = tempfile::tempdir().expect("a temporary directory can be created");
         let mut commands = Commands::at(dir.path());
         let id = ToolCallId::new("t");
         let marker = dir.path().join("ignoring");
-        // An ignored signal stays ignored across exec, so `sleep` ignores it
-        // too, and so does `sh`.
+        // An ignored signal stays ignored across exec, so `sleep` ignores it.
         commands
             .run(
                 &id,
-                &format!("trap '' TERM; echo $$ > {}; sleep 30", marker.display()),
+                &format!(
+                    "trap '' TERM; sleep 300 & echo $! > {}; wait",
+                    marker.display()
+                ),
             )
             .expect("sh starts");
-        pid_in(&marker);
+        let child = pid_in(&marker);
         let asked = Instant::now();
 
         commands.stop(&id);
 
-        let ran = ended(&mut commands, Duration::from_secs(10)).expect("the command ends");
-        assert!(
-            asked.elapsed() >= GRACE,
-            "it was killed before it was asked"
-        );
-        // The group is signalled one process at a time, so `sh` can see
-        // `sleep` killed and exit with 128 + 9 before its own turn comes.
+        // The line's own shell is ended at once, whatever it does with the
+        // signal, so nothing more of the line runs.
+        let ran = ended(&mut commands, PATIENCE).expect("the command ends");
         assert!(
             matches!(
                 (ran.exit_code, ran.error.as_deref()),
-                (None, Some("ended by signal 9")) | (Some(137), None)
+                (None, Some("ended by signal 9"))
             ),
-            "it was not killed: {ran:?}"
+            "the shell was not ended outright: {ran:?}"
+        );
+        // What it started, which will not end when asked, is killed once the
+        // grace has run out.
+        gone(child, "what ignored the stop was never killed");
+        assert!(
+            asked.elapsed() >= GRACE,
+            "it was killed before it was asked"
         );
     }
 
@@ -684,7 +980,7 @@ mod tests {
         commands
             .run(
                 &ToolCallId::new("other"),
-                &format!("sleep 30 & echo $! > {}; wait", marker.display()),
+                &format!("sleep 300 & echo $! > {}; wait", marker.display()),
             )
             .expect("sh starts");
         let child = pid_in(&marker);
@@ -704,7 +1000,7 @@ mod tests {
     fn ran_in(commands: &mut Commands, command: &str) -> Ran {
         let id = ToolCallId::new(command);
         commands.run(&id, command).expect("sh starts");
-        ended(commands, Duration::from_secs(10)).expect("the command ends")
+        ended(commands, PATIENCE).expect("the command ends")
     }
 
     #[test]

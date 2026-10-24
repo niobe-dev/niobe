@@ -93,17 +93,18 @@ impl Asked {
     }
 }
 
-/// Asks the terminal to report mouse buttons and the wheel, in SGR encoding.
+/// Asks the terminal to report mouse buttons, the pointer while a button is
+/// held, and the wheel, in SGR encoding.
 ///
-/// Written by hand rather than with crossterm's `EnableMouseCapture`, which
-/// also asks for every movement of the pointer: the shell reads only the
-/// wheel and a click, and a report per movement would wake the event loop for
-/// nothing.
-const MOUSE_ON: &[u8] = b"\x1b[?1000h\x1b[?1006h";
+/// Button-event tracking (1002) rather than clicks alone (1000), because a
+/// terminal that reports the mouse no longer selects text itself, and the
+/// shell needs the drag to select it instead. Written by hand rather than with
+/// crossterm's `EnableMouseCapture`, which also asks for every movement of
+/// the pointer with no button held: the shell has nothing to do with those,
+/// and a report per movement would wake the event loop for nothing.
+const MOUSE_ON: &[u8] = b"\x1b[?1002h\x1b[?1006h";
 
-/// Takes [`MOUSE_ON`] back. Harmless on a terminal that was never asked, which
-/// is what lets the panic hook write it without knowing how far entry got.
-const MOUSE_OFF: &[u8] = b"\x1b[?1006l\x1b[?1000l";
+const MOUSE_OFF: &[u8] = b"\x1b[?1006l\x1b[?1002l";
 
 /// Asks the terminal to mark the start and end of a paste, so that the lines
 /// of one are read as text rather than as a key press each, Enter included.
@@ -121,6 +122,9 @@ const PASTE_OFF: &[u8] = b"\x1b[?2004l";
 /// terminal answers the second. So an answer to the second with none to the
 /// first before it is a terminal that cannot report Shift+Enter, and nothing
 /// has to be waited out to learn so.
+// Asked only where the shell reads the terminal itself, on Unix; built and
+// tested everywhere.
+#[cfg_attr(not(unix), allow(dead_code))]
 const KEYBOARD_QUERY: &[u8] = b"\x1b[?u\x1b[c";
 
 /// Pushes the one enhancement the shell needs onto the terminal's stack:
@@ -152,9 +156,15 @@ const OTHER_KEYS_OFF: &[u8] = b"\x1b[>4m";
 /// not to report the keys. Every terminal answers the attributes, so this is
 /// only ever waited out on one that answers nothing at all, and the shell
 /// opens on it a second late rather than not at all.
+// Asked only where the shell reads the terminal itself, on Unix; built and
+// tested everywhere.
+#[cfg_attr(not(unix), allow(dead_code))]
 const KEYBOARD_PATIENCE: Duration = Duration::from_secs(1);
 
 /// What a terminal has said so far in answer to [`KEYBOARD_QUERY`].
+// Asked only where the shell reads the terminal itself, on Unix; built and
+// tested everywhere.
+#[cfg_attr(not(unix), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Answer {
     /// The attributes have not arrived yet.
@@ -168,6 +178,9 @@ enum Answer {
 /// Reads the replies in `heard`: `ESC [ ? <flags> u` for the keyboard, then
 /// `ESC [ ? <attributes> c` for the device. Anything else between them is
 /// passed over.
+// Asked only where the shell reads the terminal itself, on Unix; built and
+// tested everywhere.
+#[cfg_attr(not(unix), allow(dead_code))]
 fn answer(heard: &[u8]) -> Answer {
     const INTRODUCER: &[u8] = b"\x1b[?";
     let mut reports = false;
@@ -194,6 +207,37 @@ fn answer(heard: &[u8]) -> Answer {
     Answer::Waiting
 }
 
+/// What was typed around the replies in `heard`: every byte but those of an
+/// `ESC [ ? … u` or `ESC [ ? … c` reply, in the order it came.
+// Asked only where the shell reads the terminal itself, on Unix; built and
+// tested everywhere.
+#[cfg_attr(not(unix), allow(dead_code))]
+fn typed_around(heard: &[u8]) -> Vec<u8> {
+    const INTRODUCER: &[u8] = b"\x1b[?";
+    let mut typed = Vec::new();
+    let mut rest = heard;
+    while let Some(start) = rest
+        .windows(INTRODUCER.len())
+        .position(|window| window == INTRODUCER)
+    {
+        typed.extend_from_slice(&rest[..start]);
+        let body = &rest[start + INTRODUCER.len()..];
+        match body
+            .iter()
+            .position(|byte| !(byte.is_ascii_digit() || *byte == b';'))
+        {
+            Some(end) if matches!(body[end], b'u' | b'c') => rest = &body[end + 1..],
+            // Not a reply: what looked like one was typed.
+            _ => {
+                typed.extend_from_slice(&rest[start..start + INTRODUCER.len()]);
+                rest = body;
+            }
+        }
+    }
+    typed.extend_from_slice(rest);
+    typed
+}
+
 /// Asks the terminal whether it can report Shift+Enter, and waits for the
 /// answer on standard input. [`Answer::Waiting`] is none having come.
 ///
@@ -203,59 +247,62 @@ fn answer(heard: &[u8]) -> Answer {
 /// question goes where the screen is drawn and the answer is read where the
 /// keys are, which is the terminal the shell is actually on.
 ///
-/// The answer is read before crossterm reads anything, so whatever the
-/// operator types in the moment it takes is not a key the shell sees. Only
+/// The answer is read before the shell reads any key, so whatever the
+/// operator types in the moment it takes is read with it; it is given back
+/// beside the answer, for the shell to take as the first keys it reads. Only
 /// standard input is asked: when it is not a terminal the keys come from
 /// `/dev/tty`, which `poll(2)` cannot wait on everywhere, and the legacy keys
 /// are what the shell falls back on.
 #[cfg(unix)]
-fn reports_keys(out: &mut impl Write) -> Answer {
+fn reports_keys(out: &mut impl Write) -> (Answer, Vec<u8>) {
     use std::io::IsTerminal;
     use std::os::fd::AsFd;
 
     let stdin = io::stdin();
     if !stdin.is_terminal() {
-        return Answer::Waiting;
+        return (Answer::Waiting, Vec::new());
     }
     if out
         .write_all(KEYBOARD_QUERY)
         .and_then(|()| out.flush())
         .is_err()
     {
-        return Answer::Waiting;
+        return (Answer::Waiting, Vec::new());
     }
 
     let deadline = std::time::Instant::now() + KEYBOARD_PATIENCE;
     let mut heard = Vec::new();
     let mut buffer = [0u8; 256];
-    loop {
+    let answered = loop {
         match answer(&heard) {
             Answer::Waiting => {}
-            known => return known,
+            // Whatever the terminal answered, it is the answer.
+            known => break known,
         }
         let left = deadline.saturating_duration_since(std::time::Instant::now());
         if left.is_zero() {
-            return Answer::Waiting;
+            break Answer::Waiting;
         }
         // Idle is a wait a signal cut short as well as one that ran out, so
         // the deadline rather than the wait decides when to stop.
         match crate::input::poll_input(stdin.as_fd(), left) {
             Ok(crate::input::Input::Ready) => {}
             Ok(crate::input::Input::Idle) => continue,
-            Ok(crate::input::Input::HungUp) | Err(_) => return Answer::Waiting,
+            Ok(crate::input::Input::HungUp) | Err(_) => break Answer::Waiting,
         }
         match rustix::io::read(stdin.as_fd(), &mut buffer) {
-            Ok(0) | Err(_) => return Answer::Waiting,
+            Ok(0) | Err(_) => break Answer::Waiting,
             Ok(read) => heard.extend_from_slice(&buffer[..read]),
         }
-    }
+    };
+    (answered, typed_around(&heard))
 }
 
 /// Asks the terminal whether it can report Shift+Enter. Only the POSIX side
 /// asks; elsewhere the legacy keys are what the shell uses.
 #[cfg(not(unix))]
-fn reports_keys(_out: &mut impl Write) -> Answer {
-    Answer::Waiting
+fn reports_keys(_out: &mut impl Write) -> (Answer, Vec<u8>) {
+    (Answer::Waiting, Vec::new())
 }
 
 /// Writes the sequences that put a terminal into the drawing mode.
@@ -303,6 +350,9 @@ pub struct TerminalGuard<W: Write> {
     /// taken again rather than handed back a second time.
     suspended: bool,
     restored: bool,
+    /// What the operator typed while the shell waited for the terminal's
+    /// answer about its keyboard, not yet read as keys.
+    typed: Vec<u8>,
 }
 
 impl<W: Write> TerminalGuard<W> {
@@ -323,6 +373,7 @@ impl<W: Write> TerminalGuard<W> {
             keyboard: Asked::Nothing,
             suspended: false,
             restored: false,
+            typed: Vec::new(),
         };
         // Set before the screen is entered, not after: it is what
         // `restore` checks, and a failure on the next line has to undo raw
@@ -334,7 +385,9 @@ impl<W: Write> TerminalGuard<W> {
         // answer came, which is where standard input is a terminal `poll(2)`
         // sees — the one whose keys the shell reads itself, and so the one
         // where the form it arrives in is read rather than dropped.
-        match reports_keys(&mut guard.out) {
+        let (answered, typed) = reports_keys(&mut guard.out);
+        guard.typed = typed;
+        match answered {
             Answer::Reports => guard.ask_keyboard(Asked::Enhancement)?,
             Answer::DoesNot => guard.ask_keyboard(Asked::OtherKeys)?,
             Answer::Waiting => {}
@@ -370,6 +423,12 @@ impl<W: Write> TerminalGuard<W> {
         self.keyboard == Asked::Enhancement
     }
 
+    /// What the operator typed while the terminal was being asked about its
+    /// keyboard, for the shell to read before anything it reads after.
+    pub fn take_typed(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.typed)
+    }
+
     /// Enters the alternate screen without touching raw mode.
     ///
     /// Raw mode is a property of the process's controlling terminal, not of the
@@ -384,6 +443,7 @@ impl<W: Write> TerminalGuard<W> {
             keyboard: Asked::Nothing,
             suspended: false,
             restored: false,
+            typed: Vec::new(),
         })
     }
 
@@ -433,6 +493,33 @@ impl<W: Write> TerminalGuard<W> {
         // hand-back the terminal already had.
         self.suspended = false;
         enter_screen(&mut self.out)?;
+        self.ask_keyboard(self.keyboard)
+    }
+
+    /// Takes the terminal again after a stop the process could not catch.
+    ///
+    /// A SIGSTOP stops the process with the terminal as it held it, and the
+    /// operator's shell may have taken it back meanwhile and left it cooked.
+    /// crossterm believes raw mode is still on and would do nothing when asked
+    /// for it, so it is let go and taken again, which reads the terminal's
+    /// modes as they are now. The screen, the mouse and pastes are asked for
+    /// again, which changes nothing where they are already on; the enhanced
+    /// keys are let go before they are asked for, because a terminal keeps
+    /// them as a stack and a second push would outlive the quit's one pop.
+    /// Does nothing to a terminal handed back or suspended.
+    pub fn reassert(&mut self) -> io::Result<()> {
+        if self.restored || self.suspended {
+            return Ok(());
+        }
+        if self.raw_mode {
+            disable_raw_mode()?;
+            enable_raw_mode()?;
+            TERMINAL_ENTERED.store(true, Ordering::SeqCst);
+        }
+        enter_screen(&mut self.out)?;
+        if self.keyboard == Asked::Enhancement {
+            self.out.write_all(KEYBOARD_OFF)?;
+        }
         self.ask_keyboard(self.keyboard)
     }
 
@@ -544,6 +631,32 @@ pub struct Shutdown {
     suspend: std::sync::Arc<AtomicBool>,
     #[cfg(unix)]
     continued: std::sync::Arc<AtomicBool>,
+    /// Set once the shell is done with the terminal, when this is dropped:
+    /// from then on SIGTERM, SIGINT and SIGQUIT do what they would have
+    /// without the shell, so a teardown that stalls after the terminal was
+    /// handed back can still be ended by sending one again. Never while the
+    /// shell holds the terminal, where ending at once would leave it raw.
+    ///
+    /// `None` until [`Shutdown::hands_back_signals_when_dropped`]: signals are
+    /// the process's, and a `Shutdown` a test installs and drops must not
+    /// leave the next test's SIGTERM ending the test binary.
+    #[cfg(unix)]
+    released: Option<std::sync::Arc<AtomicBool>>,
+}
+
+/// The signals that ask the session to stop.
+#[cfg(unix)]
+const STOPPING: [i32; 3] = [
+    signal_hook::consts::SIGTERM,
+    signal_hook::consts::SIGINT,
+    signal_hook::consts::SIGQUIT,
+];
+
+impl Drop for Shutdown {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        self.release();
+    }
 }
 
 impl Shutdown {
@@ -553,11 +666,7 @@ impl Shutdown {
     pub fn install() -> io::Result<Self> {
         let requested = std::sync::Arc::new(AtomicBool::new(false));
         let hung_up = std::sync::Arc::new(AtomicBool::new(false));
-        for asked in [
-            signal_hook::consts::SIGTERM,
-            signal_hook::consts::SIGINT,
-            signal_hook::consts::SIGQUIT,
-        ] {
+        for asked in STOPPING {
             signal_hook::flag::register(asked, std::sync::Arc::clone(&requested))?;
         }
         signal_hook::flag::register(signal_hook::consts::SIGHUP, std::sync::Arc::clone(&hung_up))?;
@@ -576,7 +685,42 @@ impl Shutdown {
             hung_up,
             suspend,
             continued,
+            released: None,
         })
+    }
+
+    /// The same handlers, and once this is dropped — after the shell has
+    /// handed the terminal back — SIGTERM, SIGINT and SIGQUIT do what they
+    /// would have without them: see [`Shutdown::released`]. For the one
+    /// `Shutdown` a process runs its shell under.
+    #[cfg(unix)]
+    pub fn hands_back_signals_when_dropped(mut self) -> io::Result<Self> {
+        let released = std::sync::Arc::new(AtomicBool::new(false));
+        for asked in STOPPING {
+            signal_hook::flag::register_conditional_default(
+                asked,
+                std::sync::Arc::clone(&released),
+            )?;
+        }
+        self.released = Some(released);
+        Ok(self)
+    }
+
+    /// [`Shutdown::hands_back_signals_when_dropped`], where there are no
+    /// POSIX signals to hand back.
+    #[cfg(not(unix))]
+    pub fn hands_back_signals_when_dropped(self) -> io::Result<Self> {
+        Ok(self)
+    }
+
+    /// Hands the three stopping signals back their own behaviour: see
+    /// [`Shutdown::released`]. Done when the shell drops this, which is after
+    /// it has handed the terminal back.
+    #[cfg(unix)]
+    fn release(&self) {
+        if let Some(released) = &self.released {
+            released.store(true, Ordering::SeqCst);
+        }
     }
 
     /// Registers the handlers.
@@ -641,8 +785,8 @@ mod tests {
     const LEAVE_ALTERNATE_SCREEN: &str = "\x1b[?1049l";
     const ENTER_ALTERNATE_SCREEN: &str = "\x1b[?1049h";
     const SHOW_CURSOR: &str = "\x1b[?25h";
-    const MOUSE_ON: &str = "\x1b[?1000h";
-    const MOUSE_OFF: &str = "\x1b[?1000l";
+    const MOUSE_ON: &str = "\x1b[?1002h";
+    const MOUSE_OFF: &str = "\x1b[?1002l";
     const PASTE_ON: &str = "\x1b[?2004h";
     const PASTE_OFF: &str = "\x1b[?2004l";
 
@@ -855,6 +999,14 @@ mod tests {
             !out.contains("\x1b[>4m"),
             "took back modifyOtherKeys it never asked for: {out:?}"
         );
+    }
+
+    #[test]
+    fn keys_typed_before_between_and_after_the_replies_are_kept_in_order() {
+        assert_eq!(typed_around(b"a\x1b[?1uB\x1b[?62;22cC"), b"aBC".to_vec());
+        assert_eq!(typed_around(b"\x1b[?62;22c"), Vec::<u8>::new());
+        assert_eq!(typed_around(b"\x11"), b"\x11".to_vec(), "a Ctrl+Q alone");
+        assert_eq!(typed_around(b"\x1b[?x"), b"\x1b[?x".to_vec(), "not a reply");
     }
 
     #[test]

@@ -46,6 +46,16 @@ fn shell_on(recording: &str, translator: Translator) -> App {
         ..Repo::default()
     });
     app.extend(&events);
+    // Read at a moment the recording's windows have not yet come back at, with
+    // no timezone: the levels do not depend on the day the test runs on, and
+    // the reset times stay off the pane.
+    app.tick(
+        std::time::Instant::now(),
+        Some(niobe_tui::clock::Stamp::new(
+            std::time::UNIX_EPOCH + std::time::Duration::from_secs(RECORDED),
+            None,
+        )),
+    );
     app
 }
 
@@ -64,9 +74,8 @@ impl niobe_tui::Prices for Bundled {
 
 /// The Usage pane, as text: the rows of its box, cut out of a 120×30 frame.
 ///
-/// The shell is drawn without a clock, so a window's reset time — which reads
-/// against the moment it is drawn at — is left off rather than changing with
-/// the day the test runs on.
+/// The shell is read at a moment with no timezone, so a window's reset time —
+/// which names a time of day — is left off.
 fn usage_pane(app: &mut App) -> String {
     let mut terminal =
         Terminal::new(TestBackend::new(120, 30)).expect("a test backend cannot fail");
@@ -126,7 +135,7 @@ fn assert_snapshot(name: &str, pane: &str) {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/snapshots")
         .join(format!("{name}.txt"));
-    if std::env::var_os("UPDATE_SNAPSHOTS").is_some() {
+    if niobe_tui::snapshots::updating().unwrap_or_else(|refused| panic!("{refused}")) {
         std::fs::create_dir_all(path.parent().expect("the path has a directory"))
             .expect("the snapshot directory can be made");
         std::fs::write(&path, pane).expect("the snapshot can be written");
@@ -149,8 +158,10 @@ fn a_recorded_max_session_shows_windows_and_tokens_and_no_dollar_total() {
     let pane = usage_pane(&mut app);
     assert!(pane.contains("5h "), "{pane}");
     assert!(pane.contains("7d "), "{pane}");
-    // What the CLI priced the work at is on screen, and named for what it is.
-    assert!(pane.contains("API-equivalent $"), "{pane}");
+    // What the CLI priced the work at is not money a plan user pays, and is
+    // not drawn in any form.
+    assert!(!pane.contains('$'), "{pane}");
+    assert!(!pane.contains("API-eq"), "{pane}");
     assert!(!pane.contains("session "), "{pane}");
     assert_snapshot("usage-max-120x30", &pane);
 }
@@ -194,5 +205,85 @@ fn the_same_login_on_a_profile_billed_by_use_leads_with_money() {
     let session = pane.find("session $").expect("the cost leads the pane");
     let model = pane.find("sonnet-5").expect("the model rows are drawn");
     assert!(session < model, "{pane}");
-    assert!(!pane.contains("API-equivalent"), "{pane}");
+    assert!(!pane.contains("API-eq"), "{pane}");
+}
+
+/// When [`fresh_on`] records the earlier sessions: two hours before the
+/// five-hour window [`MAX`] reported comes back.
+const RECORDED: u64 = 1_789_689_600 - 2 * 3_600;
+
+/// A fresh session's shell, attached under `profile`, as the binary opens it
+/// on a store that holds `earlier` — each a recording and the profile it ran
+/// under — recorded at [`RECORDED`], and read twenty minutes later on a clock
+/// at UTC: the plan's windows the newest of those sessions recorded under the
+/// same profile are carried in.
+fn fresh_on(earlier: &[(&str, &str)], profile: &str) -> App {
+    let at = |seconds| std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds);
+    let store = niobe_store::Store::open_in_memory().expect("an in-memory store opens");
+    for (recording, ran_under) in earlier {
+        let session = store.create_session().expect("a session is created");
+        let mut translator = Translator::new(*ran_under);
+        for line in recording.lines().filter(|line| !line.trim().is_empty()) {
+            for event in translator.line(line) {
+                store
+                    .append_at(session, &event, at(RECORDED))
+                    .expect("an append succeeds");
+            }
+        }
+    }
+    let clock = niobe_tui::clock::Clock::fixed(0).expect("UTC is an offset");
+    let mut app = App::new(Repo {
+        name: "niobe".to_owned(),
+        branch: Some("main".to_owned()),
+        ..Repo::default()
+    })
+    .with_clock(clock.clone())
+    .attached();
+    app.tick(
+        std::time::Instant::now(),
+        Some(clock.at(at(RECORDED + 20 * 60))),
+    );
+    match store
+        .last_usage_windows(profile)
+        .expect("the store is read")
+    {
+        Some((at, windows)) => app.with_carried_windows(windows, at),
+        None => app,
+    }
+}
+
+/// A plan's windows are the account's: before its first reply, a session
+/// shows the levels the last one under the same profile saw, and says they
+/// are from before it, rather than an empty pane.
+#[test]
+fn a_fresh_session_on_a_plan_shows_the_windows_an_earlier_one_saw() {
+    let mut app = fresh_on(&[(MAX, "max")], "max");
+
+    let pane = usage_pane(&mut app);
+    assert!(pane.contains("5h  68%"), "{pane}");
+    assert!(pane.contains("7d  27%"), "{pane}");
+    assert!(pane.contains("as of 22:00, before this session"), "{pane}");
+    assert_snapshot("usage-carried-120x30", &pane);
+}
+
+/// With nothing recorded, the rows are drawn without a figure and the pane
+/// says when one arrives.
+#[test]
+fn a_fresh_session_on_an_empty_store_draws_the_windows_waiting_for_the_first_reply() {
+    let mut app = fresh_on(&[], "max");
+
+    let pane = usage_pane(&mut app);
+    assert!(pane.contains("reported with the first reply"), "{pane}");
+    assert!(!pane.contains('%'), "a share nobody reported: {pane}");
+    assert_snapshot("usage-awaited-120x30", &pane);
+}
+
+/// Another profile's account is not this one's.
+#[test]
+fn windows_recorded_under_another_profile_are_not_carried() {
+    let mut app = fresh_on(&[(MAX, "max")], "company");
+
+    let pane = usage_pane(&mut app);
+    assert!(!pane.contains("68%"), "{pane}");
+    assert!(pane.contains("reported with the first reply"), "{pane}");
 }

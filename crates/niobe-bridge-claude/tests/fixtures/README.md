@@ -27,8 +27,10 @@ Two things are checked against that, in `tests/conformance.rs`:
 - **The installed CLI is a release these recordings cover**, by `major.minor`.
   A patch bump is not held against the operator: the twenty-eight 2.1.x
   releases whose transcripts were on the machine this was written on carry the
-  same record types and the same message shapes. The check is skipped, out
-  loud, where no `claude` is installed — which is every CI runner.
+  same record types and the same message shapes. The check asks the `claude`
+  on the machine it runs on, which updates itself, so it is an ignored test
+  run by hand — `cargo test -p niobe-bridge-claude --test conformance --
+  --ignored` — and skipped, out loud, where no `claude` is installed.
 
 A session driving a release outside that set says so once, in the timeline,
 and goes on. So does an imported transcript written by one.
@@ -202,7 +204,7 @@ of that file and the `Write` that then succeeds, and an `Edit` with
 | ------- | ---- | -------------------- |
 | `4  2`  | `catalog/fetch.ts`       | **`+4 −2`** — two `Edit` calls, each carrying the text it replaced and the text it wrote |
 | `3  0`  | `catalog/conditional.ts` | **`+3 −0`** — a `Write` the CLI answered with `File created successfully at:`, so there was nothing there to remove |
-| `1  4`  | `notes.md`               | **`+1`, removal unstated** — a `Write` carries what the file becomes and never what it was |
+| `1  4`  | `notes.md`               | **both unstated** — a `Write` carries what the file becomes and never what it was, and the lines it wrote are not the lines it changed |
 | `2  2`  | `catalog/cache.ts`       | **both unstated** — `replace_all` matched twice and the call describes one occurrence |
 
 The last two are the cases the calls' arguments cannot support. The CLI also
@@ -245,8 +247,11 @@ What the recording settles:
   result arrives. Without that, the call reads as a tool that broke.
 - **The tool result for that call carries `tool_result_meta`**:
   `[{"id": …, "non_execution_kind": "permission-rule"}]`. The CLI's own
-  transcript of the same session does not keep it, so a session read back
-  from disk could not rely on it. The bridge does not read it.
+  transcript of the same session does not keep it on 2.1.278. Recorded from
+  2.1.309 (`refusals.jsonl`), the mark is on every kind of refusal and on no
+  call that ran, and the transcript keeps a `permissionDecision` beside the
+  result, so the bridge reads either as the call refused, and this recording
+  folds to `Denied` without the driver's word.
 - **The `control_request` carries `display_name` and `permission_suggestions`**
   (here, a switch to `acceptEdits` for the session). The bridge reads neither.
 - **The `Edit`'s result carries the CLI's own diff of the file** in
@@ -286,10 +291,10 @@ What it settles is how a shell command's exit status is read:
   `backgroundTaskId` on a command it moved to the background, and
   `interrupted: true`. A success with none of those is a command that exited
   zero, and the bridge says so; with any of them it names no status.
-- **A refusal made over the control channel reads as a failure here**, with
-  the refusal's words as its reason: the recording cannot say the call was
-  refused, and the driver is what tells the translator (see
-  `stdio-answers.jsonl`).
+- **A refusal made over the control channel reads as a refusal here**, with
+  the refusal's words as its reason: the CLI marks the result
+  `non_execution_kind: permission-rule`, which the bridge reads as it does the
+  driver's word (see `stdio-answers.jsonl` and `refusals.jsonl`).
 
 A failed command's status is in `sub-agents.jsonl`: its result opens with
 `Exit code 1` on a line of its own, and the rest is the command's output. The
@@ -297,6 +302,90 @@ CLI writes no report beside a sub-agent's successful commands, so those name
 no status. Across 18,756 shell results in 336 of the CLI's own transcripts of
 2.1.27x–2.1.281, every failed command that ran opened with `Exit code <n>` and
 no successful one did.
+
+## `background-commands.jsonl`
+
+Two shell commands put in the background, recorded from Claude Code 2.1.309 on
+23 October 2026 by writing the turn to `claude -p --input-format stream-json
+--output-format stream-json --verbose` and keeping its standard input open
+until both commands had ended. The model was asked to run `sleep 2; echo
+finished-in-background` and `sleep 3; echo about-to-fail; exit 3` with
+`run_in_background`, and to end its turn. The lines are the CLI's own. The only
+edits: paths rewritten to `/repo` and the CLI's task directory to
+`/tmp/claude/`, `system`/`init` cut down to the keys that say what ran, the
+`result`'s `subagent_stats` and the two `commands_changed` lines left out. The
+CLI's transcript of the same session is
+`transcripts/df5b30bf-d767-43d8-b7dd-7b101f69c268.jsonl`, holding only its
+`user`, `assistant`, `queue-operation`, `last-prompt` and `cost-state` records:
+the rest carry the system prompt and the environment of the machine it ran on.
+
+What it settles is how a background command's end reaches the session:
+
+- **The call ends at once.** Its result is `Command running in background with
+  ID: <task>. Output is being written to: <file>. You will be notified when it
+  completes.`, its report carries `backgroundTaskId`, and nothing on it says
+  how the command will exit.
+- **The end is a `system`/`task_notification`**, after a `task_updated` whose
+  `patch.status` says the same: `tool_use_id` names the call, `status` is
+  `completed` or `failed`, `output_file` the file, and `summary` the CLI's
+  sentence about it, which is the only place the exit code is —
+  `Background command "Sleep 2s then print a message" completed (exit code 0)`
+  and `… failed with exit code 3`. The description in quotes is the model's,
+  not the command. No `usage` is carried, unlike a sub-agent's.
+- **Each end starts a turn of the CLI's own**: a `system`/`init` and a reply,
+  with no prompt from the operator in front of it.
+- **The transcript says the same as a user turn** whose `origin.kind` is
+  `task-notification`, its text the `<task-notification>` markup with
+  `<tool-use-id>`, `<status>` and `<summary>` tags carrying the stream's values.
+
+The bridge shows each end as a notice naming the command, how it ended and the
+exit code the summary names, from the stream and from the transcript alike:
+``the background command `sleep 3; echo about-to-fail; exit 3` failed with exit
+code 3``.
+
+## `replace-all.jsonl`
+
+One `Edit` with `replace_all: true`, recorded from Claude Code 2.1.309 on 23
+October 2026 the way `refusals.jsonl` was, with the edit allowed over the
+control channel. `palette.txt` was committed as five lines, three of them
+holding `colour`; the model read it and replaced `colour` with `color`
+everywhere. The edits to the lines are those listed for `refusals.jsonl`.
+
+The call names one occurrence (`old_string: "colour"`), and the CLI's result
+says only that every occurrence was replaced. The count is in the report beside
+it: `replaceAll: true` and a `structuredPatch` of one hunk, `oldStart 1`,
+`oldLines 5`, `newStart 1`, `newLines 5`, removing and adding three lines.
+`git diff --numstat` read `3	3	palette.txt` afterwards, and the test expects
+the change to count `+3 −3`.
+
+## `refusals.jsonl`
+
+Four calls that did not do what was asked, recorded from Claude Code 2.1.309 on
+23 October 2026 by writing each turn to `claude -p --input-format stream-json
+--output-format stream-json --verbose --permission-prompt-tool stdio` and
+answering its permission prompts by hand. The first three turns are one
+process, started with `--disallowedTools "Bash(touch b.txt)"` and a project
+`PreToolUse` hook on `Bash` that exits 2 for a command naming `c.txt`; the
+fourth is a second process. The lines are the CLI's own. The only edits: paths
+rewritten to `/repo` and the hook's to `/hooks/block.sh`, `system`/`init` cut
+down to the keys that say what ran, the `result`'s `subagent_stats` and the
+`commands_changed` and `thinking_tokens` lines left out.
+
+| Turn | The call | How it was stopped | `tool_result_meta` beside its result |
+| ---- | -------- | ------------------ | ------------------------------------ |
+| 1 | `touch a.txt` | refused over the control channel | `non_execution_kind: permission-rule`, `permission_decision: {decision: reject, source: user_reject}` |
+| 2 | `touch b.txt` | the CLI's own rule, from `--disallowedTools` | `permission-rule`, `{reject, source: config, reason_type: rule}`, and a `system`/`permission_denied` too |
+| 3 | `touch c.txt` | the hook, `blocked by the test hook` | `permission-rule`, `{reject, source: hook, reason_type: hook}` |
+| 4 | `Read` of a file that is not there | nothing: the tool ran and failed | no `non_execution_kind`; `{accept, source: config, reason_type: mode}` |
+
+So `permission-rule` marks a call not allowed to run, whoever refused it, and
+a tool's own error is not one: the bridge reads the first three as `Denied`
+and the fourth as `Failed`. The CLI's transcript of the first process keeps the
+same decisions under `permissionDecision` on each result's record, with
+`reasonCode` (`rule:cliArg`, `hook:PreToolUse`) in place of
+`non_execution_kind`. An `Edit` of a file the session had not read, which
+2.1.27x refused as `File has not been read yet`, ran on 2.1.309 and is not
+here.
 
 ## `commands-changed.jsonl`
 
@@ -359,6 +448,44 @@ What it settles:
   with `num_turns: 0` and `total_cost_usd: 0`. `tests/stream.rs` expects one
   turn of zero tokens whose reply is that output.
 
+## `skill-mid-prompt.jsonl`
+
+Two turns that each name one of the repository's own commands in the middle
+of the prompt, recorded from Claude Code 2.1.288 on 4 October 2026 with
+`--setting-sources project` and `--model sonnet`, in an otherwise empty
+directory holding a skill, `.claude/skills/shout/SKILL.md`, and a command,
+`.claude/commands/whisper.md`. The session sent the `initialize` request the
+driver sends, then `please use /shout on the word hello` and `please run
+/whisper on the word BYE`. The lines are the CLI's own, in the order it
+printed them. The only edits: the answer to `initialize` cut to its
+`commands` — four of the 57, the skill, the command, one skill the CLI
+bundles (`simplify`) and one command of its own (`compact`) — and the keys
+that say what state the session is in; `system`/`init` cut down to the keys
+that say what ran and its `slash_commands` and `skills` to the same four, its
+`cwd` and the skill's base directory rewritten to `/repo`; and a
+`commands_changed` dropped from the first turn, which added a prompt of an
+MCP server the recording machine's account connects to and nothing else.
+
+What it settles, and what `tests/stream.rs` expects of it:
+
+- **A command named mid-prompt is read by the model, not by the CLI.** In
+  both turns the model's first message is a `Skill` tool call naming it —
+  `{"skill":"shout","args":"hello"}` and `{"skill":"whisper","args":"BYE"}` —
+  whose result is `Launching skill: <name>`, followed by a synthetic `user`
+  message (`isSynthetic: true`) carrying the skill's text and its arguments.
+  The reply follows that text: `SHOUTED: HELLO`, `WHISPERED: bye`. In a run
+  recorded the same way and not kept, `/shout goodbye` opening the prompt was
+  expanded by the CLI itself, with no `Skill` call.
+- **The command list does not say which entries the model can run.** It marks
+  `builtin: true` on what the CLI ships, and that covers the skills it bundles
+  (`simplify`) as well as its own commands (`compact`); neither the skill nor
+  the command of the repository's own carries the key. `skills` on `init`
+  names `shout` and `simplify` and not `whisper`, which the model ran all the
+  same, and it arrives only with the first turn. So the translator marks as
+  honoured mid-prompt exactly what carries no `builtin` and is not an MCP
+  prompt — every entry it marks was run that way here — and the test expects
+  `shout` and `whisper` marked and the other two not.
+
 ## `clear-command.jsonl`, `model-command.jsonl`, `compact-command.jsonl`
 
 Three sessions that each run one of the CLI's commands that change the session
@@ -392,13 +519,22 @@ What they settle, and what `tests/stream.rs` expects of each:
   is priced apart in `modelUsage` from then on ($0.0218224 and $0.036321). The
   shell sends `/model <name>` as the change its model picker makes instead,
   which the CLI applies the same way and the menu row shows at once.
-- **`/compact` is a request of its own.** `system`/`status` `compacting`, then
+- **`/compact` is a request of its own.** `system`/`status` `compacting` (line
+  13), a `status` of `null` when it is done (line 14), then
   `compact_boundary` (`trigger: "manual"`, `pre_tokens: 23193`,
   `post_tokens: 4282`), the summary handed back as a plain-text `user`
   message, and a `result` of no turns whose running total rose by $0.0376034
   with no message to count it against. The test expects the session's
-  $0.1152322 whole, the compaction's notice, and no prompt of the operator's
-  made out of the summary.
+  $0.1152322 whole, the session compacting after line 13 and after no other,
+  one manual compaction from 23193 tokens, the second of the three turns
+  recorded as that compaction's, and no prompt of the operator's made out of
+  the summary. `pre_tokens` is the last request's prompt and its reply,
+  2 + 9775 + 13412 + 4. `post_tokens` does not count what the next request
+  is sent beside the summary, so it is read as a floor: from the boundary on
+  line 16, through the `result` on line 19 where the session waits for the
+  operator, the context is 4282 and marked as a floor, and the next request
+  replaces it with its measured 2 + 8269 + 13412 = 21683, which is the
+  figure the shell shows the compaction shrank the context to.
 - **`/fast` is listed and refused.** The answer to `initialize` carries
   `fast_mode_disabled_reason: "sdk_opt_in_required"`, and `/fast on` in a
   fourth session was answered "Fast mode unavailable: Fast mode is not
@@ -545,6 +681,211 @@ Each turn is one request, so its prompt — the context it filled — is its
 `contextWindow` of the `modelUsage` entry keyed `claude-opus-5[1m]`,
 **1,000,000**, which the first `result` is the first to report.
 
+## `fast-mode-refused.jsonl`
+
+One turn on `claude-opus-5-5`, recorded from Claude Code 2.1.282 on 28
+September 2026 under
+
+```sh
+claude -p --setting-sources project --model claude-opus-5-5 \
+  --settings '{"fastMode": true}' --output-format stream-json --verbose \
+  --include-partial-messages "Reply with the single word: hi"
+```
+
+on an account whose usage credits — which fast mode is billed to, even on a
+subscription — had run out. The lines are the CLI's own. The only
+edits: `system`/`init` cut down to the keys that say what ran, with its `cwd`
+rewritten to `/repo`; and `system`/`status`, `content_block_start`,
+`content_block_stop` and `message_stop` left out, because the bridge reads
+none of them.
+
+It exists because the session says it is in fast mode and was not served in
+it:
+
+| Where | Says |
+| ----- | ---- |
+| `system`/`init` `fast_mode_state` | `on` |
+| `system`/`notification` `text` | `Fast mode disabled · usage credits exhausted` |
+| `stream_event`/`message_start` `message.usage.speed` | `standard` |
+| `stream_event`/`message_delta` `usage` | no `speed` |
+| `rate_limit_event` `overageStatus`, `overageDisabledReason` | `rejected`, `out_of_credits` |
+| `result` `fast_mode_state` | `on` |
+| `result` `usage.speed` | `standard` |
+
+So a message's price is read off its own `speed`, which the live stream
+carries on `message_start` and not on the `message_delta` the record is built
+from; `fast_mode_state` says what was asked for, not what was billed. The
+notification is the only line that says fast mode was turned off, and it is
+passed on to the operator as it is.
+
+### The arithmetic the tests assert
+
+| in | out | cache read | cache write (1h) | `total_cost_usd` |
+| -- | --- | ---------- | ---------------- | ---------------- |
+| 2  | 4   | 10,234     | 12,253           | $0.1001588 |
+
+At Opus 5.5's standard rates — $4 in, $20 out, $0.20 cache read and $8 for a
+one-hour cache write, per million tokens — that is 0.000008 + 0.00008 +
+0.0020468 + 0.098024 = **$0.1001588**, the CLI's figure to the last digit. At
+the fast price it would be twice that.
+
+## `tool-progress.jsonl`
+
+One turn on `claude-sonnet-5-5`, recorded from Claude Code 2.1.287 on 2
+October 2026 under
+
+```sh
+claude -p --setting-sources project --model sonnet --allowedTools Bash \
+  --output-format stream-json --verbose --include-partial-messages
+```
+
+in an empty directory, asked on standard input to run
+`python3 -c "import time; time.sleep(65); print(1)"` once in the foreground.
+(A bare `sleep 65` is refused by the CLI, and run again in the background.)
+The lines are the CLI's own. The only edits: `system`/`init` cut down to the
+keys that say what ran, with its `cwd` rewritten to `/repo`; and
+`system`/`status`, `content_block_start`, `content_block_stop` and
+`message_stop` left out, because the bridge reads none of them.
+
+It exists for the two `tool_progress` lines the CLI sent while the call ran:
+
+| Line | `tool_use_id` | `parent_tool_use_id` | `elapsed_time_seconds` | `heartbeat` |
+| ---- | ------------- | -------------------- | ---------------------- | ----------- |
+| first | `toolu_01Nwh9KqTRJ2ZSUTBipaiifg-heartbeat-0` | `toolu_01Nwh9KqTRJ2ZSUTBipaiifg` | 30 | `true` |
+| second | `toolu_01Nwh9KqTRJ2ZSUTBipaiifg-heartbeat-1` | `toolu_01Nwh9KqTRJ2ZSUTBipaiifg` | 60 | `true` |
+
+Neither id is the call's own, and the parent is the call rather than a
+sub-agent. They carry no tokens, so the bridge passes them over: the turn
+folds to one `Bash` call, started and finished, no sub-agent, and nothing for
+the operator to read. The same release also reports this foreground command
+with `system`/`task_started` (`task_type` `local_bash`, `is_backgrounded`
+`false`) and `system`/`task_notification`, which the bridge passes over as it
+does for any task that is not a sub-agent.
+
+### The arithmetic the tests assert
+
+| in | out | cache read | cache write (1h) | `total_cost_usd` |
+| -- | --- | ---------- | ---------------- | ---------------- |
+| 4  | 126 | 35,214     | 11,229           | $0.0532268 |
+
+The `result`'s `usage` is the sum of the turn's two `message_delta`s — 2 + 2
+in, 123 + 3 out, 12,069 + 23,145 read and 11,076 + 153 written — and its
+`modelUsage` has the one model at the same counts, so the reported cost
+settles the turn.
+
+## `interrupted.jsonl`
+
+Three turns, two of them stopped with the CLI's `interrupt` control request,
+recorded from Claude Code 2.1.285 on 30 September 2026 with the flags the
+driver passes, `--permission-prompt-tool stdio`, `--setting-sources project`,
+`--model sonnet` and `--allowedTools Bash`, in an empty directory. It opened
+with the `initialize` request the driver sends, then:
+
+1. "Run this exact shell command with the Bash tool, in the foreground:
+   `python3 -c 'import time; time.sleep(40); print(1)'`" — and, five seconds
+   after the call was announced, `{"subtype":"interrupt"}`.
+2. "Write a 600-word essay about lighthouses. No tools." — and the same request
+   once fifteen `text_delta`s had arrived.
+3. "Reply with exactly the word: pineapple".
+
+The lines are the CLI's own, in the order it printed them. The only edits: the
+answer to `initialize` cut to an empty `commands` list and the keys that say
+what state the session is in; `commands_changed` cut to an empty list;
+`system`/`init` cut down to the keys that say what ran, its `cwd` rewritten to
+`/repo`.
+
+What it settles, and what `tests/stream.rs` expects of it:
+
+- **The CLI answers the request and ends the turn.** The answer is a
+  `control_response` with `{"still_queued": []}`. The turn closes with a
+  `result` of `subtype` `error_during_execution`, `is_error: true`, and an
+  `errors` entry that is a diagnostic for the CLI's own developers
+  (`[ede_diagnostic] result_type=user …`). What says it was an interrupt is
+  `terminal_reason`: `aborted_tools` for the turn stopped while its call ran,
+  `aborted_streaming` for the one stopped while the reply was written, and
+  `completed` for the third. The test expects no error entry, a notice that the
+  turn was stopped for each of the two, and three turn ends.
+- **The call that was running is cut off and says so beside its result.** Its
+  `tool_result` is an error whose text tells the model the user rejected it,
+  with `tool_use_result` `"User rejected tool use"` and
+  `tool_result_meta: [{"id": …, "non_execution_kind": "user-rejected"}]` — the
+  same key that says `permission-rule` for a call refused over the control
+  channel. It is followed by a `user` text `[Request interrupted by user for
+  tool use]`. The test expects the call to end `Interrupted`.
+- **A reply stopped as it was written costs nothing the CLI reports.** Its
+  `assistant` message arrives whole, with the text written so far, and no
+  `message_delta` follows; the turn's `result` has `usage` all zeros and
+  `modelUsage` and `total_cost_usd` unchanged from the turn before. Its
+  `message_start` carried 2 input, 17,631 cache read and 6,505 cache write
+  tokens, which the CLI never counts again. Whether the API billed them is not
+  something the stream says.
+
+### The arithmetic the tests assert
+
+| turn | in | out | cache read | cache write | `total_cost_usd` after it |
+| ---- | -- | --- | ---------- | ----------- | ------------------------- |
+| 1    | 2  | 123 | 13,537     | 4,094       | $0.0203174 |
+| 2    | 0  | 0   | 0          | 0           | $0.0203174 |
+| 3    | 2  | 6   | 17,631     | 7,255       | $0.0529276 |
+
+The session's `modelUsage` for `claude-sonnet-5-5` after the third turn is 4
+in, 129 out, 31,168 cache read and 11,349 cache write: the sums of the
+column, which is what the fold is expected to total.
+
+## `interrupted-at-start.jsonl`
+
+One turn stopped with the CLI's `interrupt` control request as soon as its
+reply's `message_start` arrived, recorded from Claude Code 2.1.292 on
+7 October 2026 on Haiku, through the driver: `niobe-1` is the `initialize`
+it opens with and `niobe-2` the interrupt. The lines are the CLI's own, in the
+order it printed them. The only edits: the answer to `initialize` cut to an
+empty `commands` list and the keys that say what state the session is in, and
+`system`/`init` cut down to the keys that say what ran, its `cwd` rewritten to
+`/repo`.
+
+It exists because this release stops a reply differently from the one
+`interrupted.jsonl` was recorded from:
+
+- **No `assistant` line is written.** The stream has the `message_start`,
+  a `content_block_start` for a thinking block, the interrupt's answer
+  (`{"still_queued": []}`) and the CLI's `user` note
+  `[Request interrupted by user]` — and then, after the note, a
+  `content_block_stop`, a `message_delta` and a `message_stop`.
+- **The `message_delta` carries counts the CLI then leaves out.** It says 10
+  input, 4 output, 17,996 cache read and 3,739 cache write — the
+  `message_start`'s counts unchanged, 21,749 tokens — with `iterations: []`.
+  The closing `result` has `terminal_reason` `aborted_streaming`, `usage` all
+  zeros, `modelUsage` `{}` and `total_cost_usd` 0. The CLI counted nothing for
+  the stopped reply, and neither does the fold: a `message_delta` for a reply
+  the interrupt's note named while it was in flight is not counted.
+  Whether the API billed those tokens is not something the stream says.
+
+What `tests/stream.rs` expects of it: no usage record, so no tokens and none
+waiting for a cost; no `TurnTotalDiffers`, since the fold's 0 is the
+`result`'s 0; no notice that the reply was cut off; one notice that the turn
+was stopped, no error, and one turn.
+
+### The arithmetic the tests assert
+
+| line            | in | out | cache read | cache write | tokens |
+| --------------- | -- | --- | ---------- | ----------- | ------ |
+| `message_start` | 10 | 4   | 17,996     | 3,739       | 21,749 |
+| `message_delta` | 10 | 4   | 17,996     | 3,739       | 21,749 |
+| `result.usage`  | 0  | 0   | 0          | 0           | 0      |
+| counted         | 0  | 0   | 0          | 0           | 0      |
+
+10 + 4 + 17,996 + 3,739 = 21,749. Derived with:
+
+```sh
+jq -c 'select(.type == "stream_event" and .event.type == "message_delta")
+  | .event.usage
+  | [.input_tokens, .output_tokens, .cache_read_input_tokens,
+     .cache_creation_input_tokens]' interrupted-at-start.jsonl
+jq -c 'select(.type == "result")
+  | [.terminal_reason, .usage.input_tokens, .usage.output_tokens,
+     .modelUsage, .total_cost_usd]' interrupted-at-start.jsonl
+```
+
 ## `sub-agents.jsonl`
 
 The last two turns of a real session and the two turns the CLI started on its
@@ -640,10 +981,15 @@ jq -c 'select(.type=="system" and (.subtype=="task_progress" or .subtype=="task_
 
 A directory of session transcripts in the shape the CLI writes them: one
 directory per working directory it has run in, one JSON Lines file per session,
-named by the id the CLI's own `--resume` takes. It holds two sessions recorded
-in `/repo`: `2f6c1e10-8f4b-4d2a-9c3e-7a5b0d1e6f42`, which is described first,
-and `7b3e9d20-4c1a-4f5e-9b8d-2e6a1c0f5d73`, which ran sub-agents and is
-described under [its own heading](#a-session-that-ran-sub-agents).
+named by the id the CLI's own `--resume` takes. It holds four sessions
+recorded in `/repo`: `2f6c1e10-8f4b-4d2a-9c3e-7a5b0d1e6f42`, which is described
+first, `7b3e9d20-4c1a-4f5e-9b8d-2e6a1c0f5d73`, which ran sub-agents and is
+described under [its own heading](#a-session-that-ran-sub-agents),
+`4d9e2b71-6a3c-4f08-8e15-c2b7a0d94f36`, which the CLI closed while an agent was
+still writing and is described under
+[the heading after that](#a-session-closed-while-an-agent-was-still-writing),
+and `df5b30bf-d767-43d8-b7dd-7b101f69c268`, the CLI's own transcript of
+[`background-commands.jsonl`](#background-commandsjsonl).
 
 The **shapes** are those of twenty-five transcripts recorded by Claude Code
 2.1.277 on 18 September 2026 — every key here appeared in them, and no key of
@@ -657,11 +1003,20 @@ It carries what the transcript does differently from the live stream:
   into a turn of markup, and the prompt that was actually typed. The history
   keeps all but the marked one; the session list names the first the CLI did
   not write;
+- **a compaction**: the `system`/`compact_boundary` record and, after it, the
+  summary the CLI carries the session on from, written as a user turn marked
+  `isCompactSummary` and `isVisibleInTranscriptOnly` rather than `isMeta`. In
+  every transcript on the machine this was written on that held one, it was
+  the first user turn that was not a command. The boundary is folded as a
+  manual compaction from 48210 tokens to a floor of 3120, and the summary is neither in the
+  history as something the operator said nor what the session list names it
+  by;
 - **one API response written out over two records** — `msg_1`, once for its
   thinking and once for its text and its call — with the *same* `usage` stamped
-  on both. Unlike the live stream's per-record snapshots these repeated figures
-  are final, so a session counted from its messages counts one per `message.id`:
-  counting both would bill the message twice;
+  on both. Here the two agree; elsewhere a later record of a response can carry
+  more `output_tokens` than an earlier one, so a session counted from its
+  messages counts one per `message.id`, from its last record: counting both
+  would bill the message twice;
 - **no `result` line, and the bill under another name.** What the session cost
   is the closing `cost-state` record, whose `modelUsage` is the same running
   total per model that closes a live turn — but keyed by the id the session was
@@ -720,7 +1075,7 @@ way the fold does:
 
 ```sh
 jq -R -s 'split("\n") | map(fromjson? // empty)
-          | map(select(.type=="assistant").message) | unique_by(.id) | map(.usage)
+          | map(select(.type=="assistant").message) | group_by(.id) | map(.[-1].usage)
           | {in: (map(.input_tokens)|add), out: (map(.output_tokens)|add),
              cache_read: (map(.cache_read_input_tokens)|add),
              cache_write: (map(.cache_creation_input_tokens)|add),
@@ -845,3 +1200,410 @@ for meta in transcripts/7b3e9d20-4c1a-4f5e-9b8d-2e6a1c0f5d73/subagents/*.meta.js
     "${meta%.meta.json}.jsonl" | tail -1
 done
 ```
+
+### A session closed while an agent was still writing
+
+`4d9e2b71-6a3c-4f08-8e15-c2b7a0d94f36.jsonl` and the directory named after it,
+in the shapes of the session above, with content written by hand. The session
+spawns one background agent, says it is running and ends its turn at
+`12:00:07`; the agent's answer is stamped `12:00:30`, after the last stamped
+record in the session's file; and the `cost-state` the CLI wrote as it left
+follows. That is a session the operator quit while a background agent was
+still working.
+
+A `cost-state` carries no `timestamp` — not one of 506 on the machine this was
+written on did — so the stamps alone would put the agent's answer after it,
+once the accounting was settled, and count it a second time on top of a record
+that already holds it. The `cost-state` covers every message written before
+the CLI left, so every agent record stamped before the next stamped record
+after it, or every one left where none follows, is folded ahead of it.
+
+| Message | from | in | out | cache read | cache write |
+| ------- | ---- | -- | --- | ---------- | ----------- |
+| `msg_late1` | session | 3 | 100 | 10000 | 2000 |
+| `msg_late2` | session | 1 | 20  | 12000 | 300  |
+| `msg_late3` | agent   | 5 | 50  | 5000  | 500  |
+| **sum**     |         | **9** | **170** | **27000** | **2800** |
+
+The `cost-state` bills exactly that sum under `claude-opus-5[1m]`, at $0.25,
+and the session reads that and nothing more: 9 in, 170 out, 27000 cache read,
+2800 cache write, $0.25, with no record left unsettled. Folding the agent's
+answer after the `cost-state` reads 14, 220, 32000 and 3300, the agent's
+response twice. To re-derive the table:
+
+```sh
+jq -c 'select(.type=="assistant") | [.message.id, .message.usage.input_tokens,
+       .message.usage.output_tokens, .message.usage.cache_read_input_tokens,
+       .message.usage.cache_creation_input_tokens]' \
+  transcripts/4d9e2b71-6a3c-4f08-8e15-c2b7a0d94f36.jsonl \
+  transcripts/4d9e2b71-6a3c-4f08-8e15-c2b7a0d94f36/subagents/*.jsonl
+jq -c 'select(.type=="cost-state") | .modelUsage' \
+  transcripts/4d9e2b71-6a3c-4f08-8e15-c2b7a0d94f36.jsonl
+```
+
+## `resumed.jsonl`, `resumed-transcript.jsonl`
+
+A session resumed with `--resume`, recorded from Claude Code 2.1.282 on 28
+September 2026 with the flags above, `--setting-sources project` and
+`--model sonnet`, in an empty directory. A first process ran two one-word turns
+and left; `resumed-transcript.jsonl` is what the CLI's transcript of the
+session held at that point, cut to its prompts, its replies and the
+`cost-state` the CLI wrote as it left, with `cwd` rewritten to `/repo` and
+`gitBranch` to `main`. `resumed.jsonl` is a second process started with
+`--resume` on that session, which ran one more one-word turn; its answer to
+`initialize` is cut to an empty `commands` list and its `system`/`init` to the
+keys that say what ran, with `cwd` rewritten to `/repo`.
+
+What it settles: **the CLI restores its running totals on `--resume`.** The
+resumed process's first `result` reports `modelUsage` for the whole session,
+not for its own turn:
+
+```sh
+jq -s '[.[] | select(.type=="cost-state")] | last | .modelUsage["claude-sonnet-5"]' \
+  resumed-transcript.jsonl
+# inputTokens 4, outputTokens 6, cacheRead 46894, cacheCreation 11652, costUSD 0.0560548
+jq -s '[.[] | select(.type=="result")][0] | .modelUsage["claude-sonnet-5"]' resumed.jsonl
+# inputTokens 6, outputTokens 9, cacheRead 77185, cacheCreation 12270, costUSD 0.064619
+```
+
+The differences are the turn's own `result.usage` exactly — 2 input, 3 output,
+30,291 cache read and 618 cache write — and $0.0085642. `tests/stream.rs`
+expects that turn, translated by a translator that starts from the
+transcript's last `cost-state`, to cost $0.0085642 and carry those tokens; and
+the same stream translated from nothing to cost $0.064619, which is the whole
+earlier session billed a second time.
+
+## `resumed-open-transcript.jsonl`
+
+A session's transcript while a process that resumed it is still running,
+recorded from Claude Code 2.1.287 on 3 October 2026 with `--setting-sources
+project` and `--model sonnet`, in an empty directory. One process ran a
+one-word turn with `-p` and left; a second ran another with `-p --resume` and
+left; a third was started with `--resume` and stream-json input, ran a third
+turn, and the file was copied once that turn's `result` had arrived and before
+the process was told to stop. It is cut to its prompts, its replies and its
+`cost-state` records, with `cwd` rewritten to `/repo` and `gitBranch` to
+`main`.
+
+What it settles: **the CLI writes a `cost-state` each time a process leaves,
+and each is the running total since the session began**, carried over the
+resume, so the file holds two and the turn after the second is in neither:
+
+```sh
+jq -c 'select(.type=="cost-state") | .modelUsage["claude-sonnet-5-5"]
+       | [.inputTokens, .outputTokens, .cacheReadInputTokens,
+          .cacheCreationInputTokens, .costUSD]' resumed-open-transcript.jsonl
+# [2,3,10341,9370,0.0395822]
+# [4,6,22412,20888,0.0881024]
+jq -c 'select(.type=="assistant") | .message.usage
+       | [.input_tokens, .output_tokens, .cache_read_input_tokens,
+          .cache_creation_input_tokens]' resumed-open-transcript.jsonl
+# [2,3,10341,9370]
+# [2,3,12071,11518]
+# [2,3,12071,12221]
+```
+
+The second record less the first is the second reply's usage exactly — 2
+input, 3 output, 12,071 cache read and 11,518 cache write — and $0.0485202.
+The third reply comes after both. `tests/transcript.rs` expects three usage
+records: the first accounting, the second's difference from it, and the third
+reply from its own message, with no cost. The totals are the last accounting
+plus that reply: 6 input, 9 output, 34,483 cache read and 33,109 cache write,
+$0.0881024, with one record no cost settles — a floor. When the third process
+did leave, the `cost-state` it wrote (not in the fixture) held 6 input,
+9 output, 34,483 cache read and 33,109 cache write, for $0.1394346: the tokens
+counted from the reply are the ones the CLI went on to bill.
+
+## `models-listed.jsonl`
+
+One turn on a Max login, recorded from Claude Code 2.1.288 on 4 October 2026
+in an empty directory with `--setting-sources project --model haiku`. Before
+the turn the session sent the `initialize` request the driver sends, and the
+prompt asked for one word. The lines are the CLI's own, in the order it
+printed them. The only edits: the answer to `initialize` cut to its
+`commands`, themselves cut to the first three, and its `models`, kept whole —
+it also names the signed-in account, the output styles, the process id and
+the session's state; `system`/`init` cut down to the keys that say what ran,
+its `cwd` rewritten to `/repo` and its `memory_paths.auto` to a home that is
+not the recording machine's; and `system`/`commands_changed`, which this
+release sent after the `result`, cut to the same three commands.
+
+What it settles is where the models a session can run on are listed:
+
+- **The answer to `initialize` lists them, under `response.response.models`**,
+  twelve here, in the order the CLI's own picker shows them: the aliases
+  `default`, `opus`, `fable`, `sonnet` and `haiku`, then exact releases from
+  `claude-sonnet-5` to `claude-sonnet-4-6`. Each is
+  `{value, resolvedModel, displayName, description}`, most with the effort
+  levels and modes the model supports beside them; `value` is what
+  `--model` and `set_model` take, and `resolvedModel` is the release an alias
+  runs on today — `fable` is `claude-fable-5-1`, `default` and `sonnet` both
+  `claude-sonnet-5-5`. Nothing else carries the list: `init` names only the
+  model the session runs on.
+- `tests/stream.rs` folds it and expects the session to hold all twelve
+  values in that order, Fable 5.1 named and described as the CLI wrote it;
+  `tests/conformance.rs` holds every listed model to carrying `value`,
+  `displayName` and `description`.
+
+## `mcp-servers.jsonl`
+
+The `system`/`init` of a session on Claude Code 2.1.292, recorded on 8 October
+2026 in an empty directory with `--strict-mcp-config --setting-sources ""` and
+an `--mcp-config` naming three servers: `notes`, a stdio server that answers
+`initialize` and lists two tools, `search` and `fetch`; `broken`, whose
+command does not exist; and `remote docs`, an HTTP server at a port nothing
+listens on. The prompt was `/mcp`, which the CLI answers itself without a
+model request: `3 MCP server(s): 1 connected, 2 not connected, 0 disabled.
+Use /mcp in the terminal for details.`, at a cost of nothing. Only the `init`
+line is kept, cut down to the keys that say what ran, with its `cwd`
+rewritten to `/repo` and its `tools` cut to five of the CLI's own and the two
+of `notes`.
+
+What it settles is where the servers are listed without asking:
+
+- **`init` lists them, under `mcp_servers`**, each as `{name, status,
+  source}` — `notes` `connected`, `broken` and `remote docs` `failed`, all
+  three from the `dynamic` source a server given with `--mcp-config` comes
+  from. Why one failed is not there.
+- **A server's tools are among `init`'s `tools`**, as `mcp__notes__fetch` and
+  `mcp__notes__search`; a failed server has none.
+- `tests/stream.rs` folds it and expects the session to hold the three
+  servers in that order, `notes` with `fetch` and `search`, and no prompt
+  sent.
+
+## `mcp-status.jsonl`
+
+A session on Claude Code 2.1.292, recorded on 8 October 2026 with the same
+three servers, flags and empty directory as `mcp-servers.jsonl`, driven over
+the control channel: `initialize`, the prompt `/mcp`, then `mcp_status`
+(`niobe-2`), `mcp_reconnect` of `notes` (`niobe-3`) and of `broken`
+(`niobe-4`), and `mcp_status` again (`niobe-5`), each sent once the one
+before was answered. None of it is a model request; the session cost nothing.
+Kept are the turn's `init`, cut as in `mcp-servers.jsonl`, and the four
+answers whole, with the path of the `notes` server rewritten to
+`/repo/notes.py`. The answer to `initialize` is left out: it names the
+signed-in account.
+
+What it settles is what the CLI says of a server when asked, and that a
+reconnect changes nothing it keeps:
+
+- **`mcp_status` answers `{mcpServers: [...]}`**, a server each in `init`'s
+  order, as `{name, status, error, config, scope, source, serverInfo,
+  tools}`. `error` is on the two that failed only — `broken` `ENOENT: no such
+  file or directory, posix_spawn 'stdio'`, `remote docs` `ECONNREFUSED: Unable
+  to connect. Is the computer able to access the url?` — and `serverInfo`
+  (`notes` `1.0.0`) and `tools` (`search`, then `fetch`: the server's order,
+  where `init` sorts them) on the one that connected only. `scope` and
+  `source` are both `dynamic` for a server given with `--mcp-config`.
+  `config` is the server's configuration as written — `{type: "stdio",
+  command, args}` or `{type: "http", url}` — of which the bridge keeps the
+  transport and the command or the address, never `args`, `env` or
+  `headers`.
+- **`mcp_reconnect` takes `serverName`.** For `notes` it is answered with a
+  bare `success`; for `broken`, which cannot start, with `subtype: "error"`
+  and the same `error` as the status gives. Nothing the CLI keeps on disk is
+  named by either request, and the second `mcp_status` is byte for byte the
+  first but for its `request_id`: the reconnect left the servers as they
+  stood.
+- `tests/stream.rs` folds the recording and expects the session to hold the
+  three servers with those errors, scopes, endpoints (`stdio · python3`,
+  `stdio · /nonexistent/server`, `http · http://127.0.0.1:9/mcp`) and
+  `notes 1.0.0`; one warning, naming `broken` and its error, for the refused
+  reconnect; and, with the status read before the `init`, the same servers
+  with the tools in `init`'s order.
+
+Enabling or disabling a server (`mcp_toggle`) and signing in to one were not
+recorded, since each changes what the CLI keeps past the session — a server
+turned off stays off for the next one, and signing in stores a credential —
+and Niobe offers neither.
+
+## `hand-written.jsonl`
+
+**Written by hand, not recorded**, for two shapes of the protocol no
+recording here holds: the CLI withdrawing a permission prompt with
+`control_cancel_request` — which it does when the turn waiting on the answer
+is interrupted — and a turn ended by the budget, `result` with subtype
+`error_max_budget_usd`. Each line follows the shape the recordings above and
+the CLI's own schema give it; the budget line's all-zero `usage` beside a real
+`modelUsage` is how the CLI was seen to write one (18 September 2026). They are
+here so that the shape inventory in `tests/conformance.rs` names them, and so
+that `tests/stream.rs` folds them: the withdrawn prompt is withdrawn from the
+session, and the budget's end is a failure that says what stopped the turn.
+
+## `lifecycle.jsonl`
+
+**Written by hand, not recorded**, for two shapes Claude Code 2.1.292 sends
+and a short headless session did not: `command_lifecycle`, a top-level `type`
+carrying the `uuid` the operator's message was sent with and a `state` of
+`queued`, `started`, `completed` or `cancelled`, and `system`/
+`permission_check_status`, carrying the `tool_use_id` of the call being
+checked and a `status` of `checking` (sent when the permission classifier has
+taken more than four seconds) or `done`. The lines follow the shapes in the
+CLI's own source, which also adds an `agent_id` to the second inside a
+sub-agent. Two live runs under the driver's flags (`--input-format
+stream-json`, `--permission-prompt-tool stdio`) sent neither, so a recording
+is still wanted.
+
+`tests/stream.rs` folds it and asserts the session says nothing about either
+shape and still holds the one `Bash` call between them; `tests/conformance.rs`
+lists both.
+
+## `cut-off.jsonl`
+
+**Assembled, not recorded as a whole**, from a session on Claude Code 2.1.288
+(4 October 2026) in which one reply's stream was cut off. What the session
+showed, in the CLI's own transcript and in Niobe's store:
+
+- The reply — a thinking block and the text "Writing the six tasks now." —
+  arrived as a `message_start`, its text deltas and its `assistant` lines, and
+  then nothing: no `message_delta`, no `message_stop`. Its `assistant` lines
+  carried 2 input, 8 output, 118,070 cache read and 2,811 cache write tokens.
+- About twelve and a half minutes later the CLI carried the same turn on by
+  itself, writing a `user` message marked `isMeta` (and `turnCompanion` in its
+  transcript): "Your response above was cut off mid-stream. Resume directly
+  from where it stops — no apology, no recap. If none of it survived, answer
+  the request from the start." Whether the live stream carries that line was
+  not seen; the fixture holds it in the shape the transcript gave it, so the
+  tests show it is not taken for the operator's prompt if it does.
+- The turn's `result.usage` counted the cut reply at the figures on its
+  `assistant` lines, on top of every other message's `message_delta`: the
+  turn's per-message records fell short by exactly those 2, 8, 118,070 and
+  2,811 tokens.
+
+The fixture keeps three of that turn's messages, under their own ids and
+request ids and with their own counts: the reply before the cut, the cut reply,
+and the first reply after the CLI's prompt. Their content is shortened, the
+two complete replies are text rather than the tool calls they were, and the
+line framing — `stream_event` envelopes, `content_block_*`, `message_stop`,
+the `result` keys — follows `interrupted.jsonl`, recorded from 2.1.287, which
+is the release its `init` names. The `result` is written from those counts:
+its `usage` is their sum, `modelUsage` restates it for `claude-opus-5-5`, and
+the cost on both is the bundled price table's for that model with every cache
+write bought for the hour, not a figure the CLI printed. The tests assert no
+money from it.
+
+### The arithmetic the tests assert
+
+| message | in | out | cache read | cache write | counted from |
+| ------- | -- | --- | ---------- | ----------- | ------------ |
+| `msg_011Cfh9Bk1N5bT94HZstUJBU` | 2 | 2,291 | 113,494 | 4,576 | its `message_delta` |
+| `msg_011Cfh9DZarQmXXnvywwTKDD` | 2 | 8 | 118,070 | 2,811 | its last `assistant` line |
+| `msg_011CfhAAYqEyMTb7iECg8oEr` | 4 | 6,876 | 120,881 | 109 | its `message_delta` |
+| the turn's `result.usage` | 8 | 9,175 | 352,445 | 7,496 | |
+
+Counting each message from its `message_delta`, and a message that has none
+from its last `assistant` line, reproduces the `result`:
+
+```sh
+jq -s -c '
+  def counts: {in: .input_tokens, out: .output_tokens,
+               read: .cache_read_input_tokens, write: .cache_creation_input_tokens};
+  def plus($u): {in: (.in + $u.in), out: (.out + $u.out),
+                 read: (.read + $u.read), write: (.write + $u.write)};
+  def close: if .open == null then . else .open as $o | .sum |= plus($o) | .open = null end;
+  reduce .[] as $line ({sum: {in: 0, out: 0, read: 0, write: 0}, open: null, cut: []};
+    if $line.type == "stream_event" and $line.event.type == "message_start" then
+      (if .open != null then .cut += [.id] else . end) | close
+      | .open = {in: 0, out: 0, read: 0, write: 0} | .id = $line.event.message.id
+    elif $line.type == "assistant" and .open != null then .open = ($line.message.usage | counts)
+    elif $line.type == "stream_event" and $line.event.type == "message_delta" then
+      .open = null | .sum |= plus($line.event.usage | counts)
+    elif $line.type == "result" then
+      (if .open != null then .cut += [.id] else . end) | close
+      | .reported = ($line.usage | counts)
+    else . end)
+  | {per_message: .sum, reported, cut}' cut-off.jsonl
+```
+
+prints `per_message` and `reported` both as 8 in, 9,175 out, 352,445 cache
+read and 7,496 cache write, and `cut` as `["msg_011Cfh9DZarQmXXnvywwTKDD"]`.
+Without the cut reply, the messages come to 6 in, 9,167 out, 234,375 cache
+read and 4,685 cache write.
+
+## `api-errors.jsonl`, `api-errors-transcript.jsonl`
+
+One session of six turns, recorded from Claude Code 2.1.296 on 9 October 2026
+on both carriers: the live stream under the driver's flags (`--input-format
+stream-json --output-format stream-json --verbose --include-partial-messages
+--permission-mode default`, plus `--setting-sources project --model
+claude-sonnet-5`), and the transcript the CLI kept of it.
+
+**The requests went to a stand-in for the API, not to Anthropic's.** The CLI
+was pointed at a local server with `ANTHROPIC_BASE_URL` and a placeholder
+`ANTHROPIC_API_KEY`, and `CLAUDE_CODE_MAX_RETRIES=2`. The server answered by
+the operator's words: `Say hello.` with a one-word reply; `RETRY please` with
+a `529 overloaded_error` twice and then the reply; `REFUSE this` with a reply
+whose `stop_reason` is `refusal` (twice, since the CLI asks once more after
+its safeguards stop a reply); `FAIL now` with a 529 on every attempt; and
+`DENIED now` with a `400 invalid_request_error` the CLI files as
+`billing_error`. `/context` made no request. The project's settings ran a
+`Stop` hook and a `UserPromptSubmit` hook that each echo a word. So the
+tokens, costs and model names are the stand-in's and the CLI's arithmetic on
+them, and the tests assert no money from either file; what the recording is
+for is which `system` messages the CLI writes, on which carrier, around a
+failing request. Nothing else was provoked this way that a real account could
+not produce: a request that is retried, one that is refused, one that runs out
+of retries.
+
+The edits: in `api-errors.jsonl`, `system`/`init` cut down to the keys that
+say what ran, with its `cwd` rewritten to `/repo`, and the answer to
+`initialize`, `system`/`status`, `content_block_start`, `content_block_stop`
+and `message_stop` left out. In `api-errors-transcript.jsonl`, only the
+`user`, `assistant`, `system` and `cost-state` records kept — the
+`attachment` records alone were 215 KB of skill and tool listings — with
+every `cwd` rewritten to `/repo`. The lines kept are the CLI's own.
+
+### Which `system` subtypes each carrier holds
+
+| subtype | live stream | transcript | what the bridge does |
+| ------- | ----------- | ---------- | -------------------- |
+| `init` | every turn | — | read |
+| `api_retry` | 4 | — | an error entry per retry: the status and the CLI's kind of failure, the attempt and the wait |
+| `api_error` | — | 4 | the same entry, with the CLI's own sentence for the failure (`error.formatted`) |
+| `informational` | 1 | 1 | shown in the CLI's words at its `level`: `notice` a notice, `warning` or `error` a warning |
+| `model_refusal_no_fallback` | 1 | 1 | a warning naming the model, and the API's category and words where it gave them |
+| `stop_hook_summary` | — | 2 | passed over in the transcript: the hooks ran and nothing failed |
+| `local_command` | — | 1 | the command's output, a notice, as the user-turn form it replaced is read |
+
+The live stream carries the retries under another name than the transcript:
+the CLI writes `api_error` for itself and sends the operator `api_retry`,
+with `attempt`, `max_retries`, `retry_delay_ms`, `error_status` and `error`
+(its kind of failure — `overloaded`) but no sentence. The `/context` turn is
+on the live stream as a `<synthetic>` reply and a `result`; neither hook is.
+The request that ran out of retries and the one the API refused outright end
+the same way on both carriers: a `<synthetic>` reply in the CLI's words, which
+the live `result` repeats with `is_error: true`.
+
+**Not observed on the live stream**, from Claude Code 2.1.296, though the
+transcripts on the machine this was written on carry them: `turn_duration`,
+`away_summary` (a recap written for an operator who stepped away from the
+CLI's own screen), `scheduled_task_fire` (a `/loop` or scheduled prompt
+firing) and `agents_killed`. The transcript reader passes over
+`turn_duration`, `away_summary` and `agents_killed` and shows
+`scheduled_task_fire` as a notice, each with its reason in `transcript.rs`;
+on the live stream any of them would arrive as the one notice a subtype
+nobody has read gets.
+
+### What the tests assert
+
+The four retries, in order, from either file:
+
+```sh
+jq -c 'select(.subtype == "api_retry") | [.error_status, .error, .attempt, .max_retries, .retry_delay_ms]' api-errors.jsonl
+# [529,"overloaded",1,2,544]
+# [529,"overloaded",2,2,1234]
+# [529,"overloaded",1,2,592]
+# [529,"overloaded",2,2,1141]
+jq -c 'select(.subtype == "api_error") | [.error.formatted, .retryAttempt, .maxRetries, .retryInMs]' api-errors-transcript.jsonl
+# ["529 Overloaded",1,2,544]
+# ["529 Overloaded",2,2,1234]
+# ["529 Overloaded",1,2,592]
+# ["529 Overloaded",2,2,1141]
+```
+
+Each wait is shown to the tenth of a second, rounded half up: 0.5, 1.2, 0.6
+and 1.1 s. `tests/stream.rs` folds the live file and asserts those four
+entries, the refusal of `claude-sonnet-5`, the banner as a notice, and no
+notice that a subtype could not be read; `tests/transcript.rs` folds the
+transcript and asserts the same entries in the CLI's sentence, and that its
+only notices are the banner and the output of `/context`.

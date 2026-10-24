@@ -1,25 +1,32 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) Viacheslav Shynkarenko
 
-//! The rule the transcript draws where a turn ended, with what that turn
-//! spent written on it: `── turn 46 14:05 · 6400 tok · 1% of 5h · 38s ───`.
+//! The rule the transcript draws where a turn ended, with what that turn did
+//! and spent written on it:
+//! `── turn 46 14:05 · 2 sub-agents · 31 tool calls · 6400 tok · 1% of 5h · 38s ───`.
 //!
 //! It is the finest-grained cost the shell shows without a pane being opened,
-//! so every figure on it is one the session fold or the shell's clock
-//! measured, and a figure neither measured is left off rather than drawn as a
-//! zero. Where the pane is too narrow for all of them, whole figures give way
-//! — the time first, then the duration, then the window's share — and the
-//! tokens last, because they are what the turn cost. A figure is never cut
-//! short.
+//! so every figure on it is one the session fold, the transcript or the
+//! shell's clock measured, and a figure none measured is left off rather than
+//! drawn as a zero. Where the pane is too narrow for all of them, whole
+//! figures give way — the time first, then the counts of agents and calls,
+//! the duration, the window's share — and the tokens last, because they are
+//! what the turn cost. A figure is never cut short.
+//!
+//! A turn that compacted the conversation says so on its rule — `compact`
+//! in place of its number where the operator asked for it — and the row the
+//! compaction left above it says how much the conversation held before and
+//! after: `⇣ context compacted · 192k → 18k tokens`.
 
+use niobe_core::event::CompactTrigger;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
-use crate::app::TurnRule;
+use crate::app::{CompactionRow, TurnRule};
 use crate::clock;
 use crate::text;
 use crate::theme::Theme;
-use crate::ui::compact;
+use crate::ui::{compact, compact_floor};
 
 /// What the rule opens with, before the turn's number.
 const OPENING: &str = "── turn ";
@@ -35,7 +42,9 @@ pub(crate) fn lines(rule: &TurnRule, width: usize, theme: &Theme) -> Vec<Line<'s
 
 fn line(rule: &TurnRule, width: usize, theme: &Theme) -> Line<'static> {
     let dim = Style::new().fg(theme.dim);
-    let head = format!("{OPENING}{}", rule.number);
+    // A turn that was cut off says so beside its number, where it is never
+    // given up for room: its figures stop where it was cut.
+    let head = head(rule);
     let mut figures = figures(rule);
     while text::width(&head) + figures_width(&figures) + 2 > width {
         match dropped_first(&figures) {
@@ -55,7 +64,7 @@ fn line(rule: &TurnRule, width: usize, theme: &Theme) -> Line<'static> {
         spans.push(Span::styled(before, dim));
         let style = match figure.kind {
             Kind::Share => Style::new().fg(theme.fg),
-            Kind::Ended | Kind::Tokens | Kind::Took => dim,
+            Kind::Ended | Kind::Agents | Kind::Calls | Kind::Tokens | Kind::Took => dim,
         };
         spans.push(Span::styled(figure.text.clone(), style));
     }
@@ -67,19 +76,82 @@ fn line(rule: &TurnRule, width: usize, theme: &Theme) -> Line<'static> {
     Line::from(spans)
 }
 
+/// What the rule opens with: the turn's number, or `compact` for a turn the
+/// operator opened to compact the conversation, which is not a turn of the
+/// work. Whether it was cut, or compacted part-way through, is said beside
+/// it, where it is never given up for room.
+fn head(rule: &TurnRule) -> String {
+    let mut head = match rule.compacted {
+        Some(CompactTrigger::Manual) => "── compact".to_owned(),
+        Some(CompactTrigger::Auto | CompactTrigger::Unstated) | None => {
+            format!("{OPENING}{}", rule.number)
+        }
+    };
+    match rule.compacted {
+        Some(CompactTrigger::Auto) => head.push_str(" (compacted automatically)"),
+        Some(CompactTrigger::Unstated) => head.push_str(" (compacted)"),
+        Some(CompactTrigger::Manual) | None => {}
+    }
+    if rule.cut {
+        head.push_str(" (cut)");
+    }
+    head
+}
+
+/// The row a compaction leaves in the transcript, `width` cells wide, and the
+/// blank line after it: what started it, and the prompt it left against the
+/// one it took, each an em dash until something has measured it.
+pub(crate) fn compacted(row: &CompactionRow, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    let dim = Style::new().fg(theme.dim);
+    let what = match row.trigger {
+        CompactTrigger::Manual | CompactTrigger::Unstated => "context compacted",
+        CompactTrigger::Auto => "context compacted automatically",
+    };
+    let figure = |tokens: Option<u64>| tokens.map_or_else(|| "—".to_owned(), compact);
+    // Until a request measures what is left, the backend's own figure for
+    // it is all there is, and it is a floor.
+    let after = match (row.after, row.floor) {
+        (None, Some(floor)) => format!("≥{}", compact_floor(floor)),
+        (after, _) => figure(after),
+    };
+    let figures = format!("{BETWEEN}{} → {after} tokens", figure(row.before));
+    let glyph = "⇣ ";
+    let room = width.saturating_sub(text::width(glyph));
+    let what = text::truncate(what, room);
+    let figures = text::truncate(&figures, room.saturating_sub(text::width(&what)));
+    vec![
+        Line::from(vec![
+            Span::styled(glyph, dim),
+            Span::styled(what, Style::new().fg(theme.fg).bold()),
+            Span::styled(figures, dim),
+        ]),
+        Line::from(""),
+    ]
+}
+
 /// Which figure a figure is, which decides what it is drawn after and the
 /// order figures give way in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
     Ended,
+    Agents,
+    Calls,
     Tokens,
     Share,
     Took,
 }
 
 /// The order figures are dropped in when the rule does not fit: the time the
-/// turn ended is on the clock in the menu row, and what it cost goes last.
-const GIVES_WAY: [Kind; 4] = [Kind::Ended, Kind::Took, Kind::Share, Kind::Tokens];
+/// turn ended is on the clock in the menu row, what the turn did is in the
+/// rows above the rule, and what it cost goes last.
+const GIVES_WAY: [Kind; 6] = [
+    Kind::Ended,
+    Kind::Agents,
+    Kind::Calls,
+    Kind::Took,
+    Kind::Share,
+    Kind::Tokens,
+];
 
 struct Figure {
     kind: Kind,
@@ -94,6 +166,22 @@ fn figures(rule: &TurnRule) -> Vec<Figure> {
             kind: Kind::Ended,
             text: ended.to_string(),
         });
+    }
+    // A count of nothing is left off: `0 sub-agents` is most turns, and the
+    // rule would spend its room saying so.
+    for (count, one, many, kind) in [
+        (rule.agents, "sub-agent", "sub-agents", Kind::Agents),
+        (rule.calls, "tool call", "tool calls", Kind::Calls),
+    ] {
+        if count > 0 {
+            figures.push(Figure {
+                kind,
+                text: match count {
+                    1 => format!("1 {one}"),
+                    count => format!("{count} {many}"),
+                },
+            });
+        }
     }
     if let Some(tokens) = rule.tokens {
         figures.push(Figure {
@@ -160,6 +248,10 @@ mod tests {
             tokens: Some(6_400),
             five_hour_points: Some(1),
             took: Some(Duration::from_secs(38)),
+            agents: 0,
+            calls: 0,
+            cut: false,
+            compacted: None,
         }
     }
 
@@ -179,6 +271,86 @@ mod tests {
             "{said}"
         );
         assert_eq!(text::width(&said), 80, "{said:?}");
+    }
+
+    #[test]
+    fn a_rule_says_how_many_agents_and_calls_the_turn_had_and_they_give_way_early() {
+        let busy = TurnRule {
+            agents: 9,
+            calls: 83,
+            ..rule()
+        };
+        let said = drawn(&busy, 80);
+        assert!(
+            said.starts_with(
+                "── turn 46 14:05 · 9 sub-agents · 83 tool calls · 6400 tok · 1% of 5h · 38s ─"
+            ),
+            "{said}"
+        );
+        let one = drawn(
+            &TurnRule {
+                agents: 1,
+                calls: 1,
+                ..rule()
+            },
+            80,
+        );
+        assert!(one.contains("· 1 sub-agent · 1 tool call ·"), "{one}");
+        let narrow = drawn(&busy, 50);
+        assert!(
+            narrow.starts_with("── turn 46 6400 tok · 1% of 5h · 38s"),
+            "{narrow}"
+        );
+    }
+
+    /// The time a turn ended is the first figure to go, before how many
+    /// sub-agents it had: the clock in the menu row says the time.
+    #[test]
+    fn the_end_time_gives_way_before_the_count_of_sub_agents() {
+        let busy = TurnRule {
+            agents: 9,
+            calls: 83,
+            ..rule()
+        };
+        let without = "── turn 46 9 sub-agents · 83 tool calls · 6400 tok · 1% of 5h · 38s";
+        let said = drawn(&busy, text::width(without) + 2);
+        assert_eq!(said, format!("{without} ─"));
+    }
+
+    /// Two columns left over are a space and a run of rule; one is left
+    /// empty.
+    #[test]
+    fn the_rule_runs_on_from_two_columns_left_over_and_not_from_one() {
+        let bare = TurnRule {
+            ended: None,
+            tokens: None,
+            five_hour_points: None,
+            took: None,
+            ..rule()
+        };
+        let head = "── turn 46";
+        assert_eq!(drawn(&bare, text::width(head) + 2), format!("{head} ─"));
+        assert_eq!(drawn(&bare, text::width(head) + 1), head);
+    }
+
+    #[test]
+    fn a_turn_that_was_cut_off_says_so_beside_its_number() {
+        let said = drawn(
+            &TurnRule {
+                cut: true,
+                ..rule()
+            },
+            80,
+        );
+        assert!(said.starts_with("── turn 46 (cut) 14:05 ·"), "{said}");
+        let narrow = drawn(
+            &TurnRule {
+                cut: true,
+                ..rule()
+            },
+            24,
+        );
+        assert!(narrow.starts_with("── turn 46 (cut)"), "{narrow}");
     }
 
     #[test]
@@ -272,5 +444,141 @@ mod tests {
     fn the_tokens_are_the_last_figure_to_give_way() {
         let said = drawn(&rule(), 24);
         assert!(said.starts_with("── turn 46 6400 tok"), "{said}");
+    }
+
+    #[test]
+    fn a_turn_opened_to_compact_is_ruled_off_as_a_compaction_rather_than_a_turn() {
+        let compaction = TurnRule {
+            compacted: Some(CompactTrigger::Manual),
+            ..rule()
+        };
+        let said = drawn(&compaction, 80);
+        assert!(
+            said.starts_with("── compact 14:05 · 6400 tok · 1% of 5h · 38s ─"),
+            "{said}"
+        );
+        assert!(!said.contains("turn"), "{said}");
+    }
+
+    #[test]
+    fn a_turn_the_backend_compacted_part_way_through_keeps_its_number_and_says_so() {
+        let auto = TurnRule {
+            compacted: Some(CompactTrigger::Auto),
+            cut: true,
+            ..rule()
+        };
+        let said = drawn(&auto, 80);
+        assert!(
+            said.starts_with("── turn 46 (compacted automatically) (cut) 14:05 · 6400 tok"),
+            "{said}"
+        );
+        let unstated = TurnRule {
+            compacted: Some(CompactTrigger::Unstated),
+            ..rule()
+        };
+        assert!(
+            drawn(&unstated, 80).starts_with("── turn 46 (compacted) 14:05"),
+            "{}",
+            drawn(&unstated, 80)
+        );
+    }
+
+    fn compaction(row: &CompactionRow, width: usize) -> String {
+        compacted(row, width, &Theme::default())[0]
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
+    #[test]
+    fn a_compaction_row_says_what_it_shrank_from_and_to_with_a_dash_until_measured() {
+        let row = CompactionRow {
+            trigger: CompactTrigger::Manual,
+            before: Some(192_000),
+            floor: None,
+            after: None,
+        };
+        assert_eq!(
+            compaction(&row, 80),
+            "⇣ context compacted · 192k → — tokens"
+        );
+        assert_eq!(
+            compaction(
+                &CompactionRow {
+                    after: Some(18_000),
+                    ..row
+                },
+                80
+            ),
+            "⇣ context compacted · 192k → 18k tokens"
+        );
+        assert_eq!(
+            compaction(
+                &CompactionRow {
+                    trigger: CompactTrigger::Auto,
+                    before: None,
+                    floor: None,
+                    after: Some(18_000),
+                },
+                80
+            ),
+            "⇣ context compacted automatically · — → 18k tokens"
+        );
+    }
+
+    /// What the backend says the compaction left is a floor, and reads as
+    /// one until the next request measures what it left.
+    #[test]
+    fn a_compaction_row_shows_the_backends_floor_until_a_request_measures_it() {
+        let row = CompactionRow {
+            trigger: CompactTrigger::Manual,
+            before: Some(343_000),
+            floor: Some(10_763),
+            after: None,
+        };
+        assert_eq!(
+            compaction(&row, 80),
+            "⇣ context compacted · 343k → ≥10k tokens"
+        );
+        assert_eq!(
+            compaction(
+                &CompactionRow {
+                    after: Some(21_683),
+                    ..row
+                },
+                80
+            ),
+            "⇣ context compacted · 343k → 22k tokens"
+        );
+    }
+
+    #[test]
+    fn a_compaction_row_is_cut_to_the_pane() {
+        let row = CompactionRow {
+            trigger: CompactTrigger::Auto,
+            before: Some(192_000),
+            floor: Some(4_282),
+            after: Some(18_000),
+        };
+        let said = compaction(&row, 20);
+        assert!(text::width(&said) <= 20, "{said}");
+    }
+
+    /// A figure stays only while the rule keeps two columns after it, a space
+    /// and a run of rule: one column left over is not enough, so the first
+    /// figure to give way goes.
+    #[test]
+    fn a_figure_goes_when_one_column_is_left_after_the_rest_and_stays_with_two() {
+        let busy = TurnRule {
+            agents: 9,
+            calls: 83,
+            ..rule()
+        };
+        let full = "── turn 46 14:05 · 9 sub-agents · 83 tool calls · 6400 tok · 1% of 5h · 38s";
+        let width = text::width(full);
+
+        assert!(drawn(&busy, width + 2).contains("14:05"));
+        assert!(!drawn(&busy, width + 1).contains("14:05"));
     }
 }

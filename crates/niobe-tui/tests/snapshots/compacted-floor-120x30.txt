@@ -1,0 +1,30 @@
+ Niobe  Session  Context  Model  View  Help                                                                     ○ idle
+ ┏━ > /compact ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓ ┌──────────────── Usage ────────────────┐
+ ┃ > you                                                                    ┃ │ no tokens reported yet                │
+ ┃   /compact                                                               ┃ │ session — · billing not known         │
+ ┃                                                                          ┃ │ ───────────────────────────────────── │
+ ┃ ⇣ context compacted · 192k → ≥4282 tokens                                ┃ │ context  >0% ▓░░░░░░░░░░ ≥4282 / 1.0M │
+ ┃                                                                          ┃ └───────────────────────────────────────┘
+ ┃ ── compact ───────────────────────────────────────────────────────────── ┃ ┌─────────────── Changes ───────────────┐
+ ┃                                                                          ┃ │ ⎇ main                                │
+ ┃                                                                          ┃ │ ▾ Working tree  —                     │
+ ┃                                                                          ┃ │   not read yet                        │
+ ┃                                                                          ┃ │                                       │
+ ┃                                                                          ┃ │                                       │
+ ┃                                                                          ┃ │                                       │
+ ┃                                                                          ┃ │                                       │
+ ┃                                                                          ┃ │                                       │
+ ┃                                                                          ┃ │                                       │
+ ┃                                                                          ┃ │                                       │
+ ┃                                                                          ┃ └───────────────────────────────────────┘
+ ┃                                                                          ┃ ┌────────────── Activity ───────────────┐
+ ┃                                                                          ┃ │ ▾ Sub-agents  0 running · 0 spawned   │
+ ┃                                                                          ┃ │   none spawned                        │
+ ┃                                                                          ┃ │ ▾ Decisions, as the agent says  0     │
+ ┃                                                                          ┃ │   none stated yet                     │
+ ┃                                                                          ┃ │ ▾ Tools  0 calls · 0 denied · 0 B out │
+ ┃                                                                          ┃ │   none called                         │
+ ┃ ──────────────────────────────────────────────────────────────────────── ┃ │                                       │
+ ┃  —  >  Ask for a change      Shift+Tab mode · Ctrl+J newline · Tab panes ┃ │                                       │
+ ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ └───────────────────────────────────────┘
+EscStop 1Help     2Compact     3Clear     4Model     5Diff     6Rewind     7MCP     8Memory     9Settings     0Quit

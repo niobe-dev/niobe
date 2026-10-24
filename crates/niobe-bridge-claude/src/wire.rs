@@ -25,7 +25,9 @@ use serde::Deserialize;
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum Message {
     /// The CLI talking about the session rather than about the conversation.
-    System(System),
+    /// Boxed because it holds a field for every subtype read, which makes it
+    /// twice the size of any other message.
+    System(Box<System>),
     /// A message from the model, complete.
     Assistant(Envelope),
     /// A turn from the operator, or a tool result the CLI is feeding back.
@@ -36,10 +38,18 @@ pub(crate) enum Message {
     ControlRequest(ControlRequest),
     /// The CLI answering something Niobe asked it.
     ControlResponse(ControlResponse),
+    /// The CLI withdrawing a question it asked, as it does when the turn
+    /// waiting on the answer is interrupted.
+    ControlCancelRequest(CancelRequest),
     /// How much of the plan's usage windows is gone.
     RateLimitEvent(RateLimit),
     /// The conversation started over, as `/clear` starts it.
     ConversationReset(Reset),
+    /// A tool call still running, or a sub-agent's request being retried.
+    ToolProgress(Progress),
+    /// Where a message the operator sent stands: queued, started, completed
+    /// or cancelled.
+    CommandLifecycle(Lifecycle),
     /// The end of a turn, with the turn's totals.
     Result(Outcome),
     /// A `type` this bridge does not know.
@@ -78,9 +88,11 @@ pub(crate) struct System {
     /// `task_notification`: the call that started the task, where a call did.
     pub(crate) tool_name: Option<String>,
     pub(crate) tool_use_id: Option<String>,
+    /// On `permission_denied`: why the call was refused, in the CLI's words.
+    pub(crate) decision_reason: Option<String>,
     /// On `task_notification`: how the task stopped — `completed`, `failed` or
     /// `stopped` in the CLI's own schema. On `status`, the CLI's request state,
-    /// which is not read.
+    /// which is read only for whether it is `compacting`.
     pub(crate) status: Option<String>,
     /// On `task_progress`: the step the task is on, worded by the CLI from
     /// the tool call it last made — `Reading catalog/cache.py`.
@@ -91,14 +103,114 @@ pub(crate) struct System {
     pub(crate) usage: Option<TaskUsage>,
     /// On `commands_changed`: every slash command the CLI now runs.
     pub(crate) commands: Option<Vec<Command>>,
+    /// On `notification`: what the CLI tells its own operator, in its words —
+    /// `Fast mode disabled · usage credits exhausted`.
+    pub(crate) text: Option<String>,
+    /// On `init`: every tool the model is given, an MCP server's as
+    /// `mcp__<server>__<tool>`.
+    pub(crate) tools: Option<Vec<String>>,
+    /// On `init`: every MCP server the CLI configured for the session.
+    pub(crate) mcp_servers: Option<Vec<McpServer>>,
+    /// On `api_retry`: the kind of failure in the CLI's own words
+    /// (`overloaded`, `rate_limit`, `server_error`, …). Held as any value
+    /// because another subtype may one day carry an `error` of another
+    /// shape, and that must not cost the whole line.
+    pub(crate) error: Option<serde_json::Value>,
+    /// On `api_retry`: the HTTP status the request failed with, absent for a
+    /// failure that had no response, such as a dropped connection.
+    pub(crate) error_status: Option<u64>,
+    /// On `api_retry`: which retry this is, of how many the CLI will make,
+    /// and how long it waits before making it.
+    pub(crate) attempt: Option<u64>,
+    pub(crate) max_retries: Option<u64>,
+    pub(crate) retry_delay_ms: Option<u64>,
+    /// On `informational`: the line the CLI shows, and the level it shows it
+    /// at — `notice`, `warning` — as recorded from Claude Code 2.1.296.
+    pub(crate) content: Option<serde_json::Value>,
+    pub(crate) level: Option<String>,
+    /// On `model_refusal_no_fallback`: the model that declined, and the
+    /// API's category and words for why, where it gave them.
+    pub(crate) original_model: Option<String>,
+    pub(crate) api_refusal_category: Option<String>,
+    pub(crate) api_refusal_explanation: Option<String>,
+}
+
+/// One MCP server, as `init` lists it.
+///
+/// Why a server failed and where it is configured are not in `init`: the
+/// CLI says those only when asked, with `mcp_status` (see
+/// [`McpServerStatus`]).
+#[derive(Debug, Deserialize)]
+pub(crate) struct McpServer {
+    pub(crate) name: String,
+    /// `connected`, `pending`, `needs-auth`, `failed` or `disabled`, as
+    /// Claude Code 2.1.292 spells them. Empty where the entry has none or
+    /// not a string: one server's field is not worth the whole `init`.
+    #[serde(default, deserialize_with = "lenient_text")]
+    pub(crate) status: String,
+    /// Where the CLI found the server's configuration: `user`, `project`,
+    /// `local`, or `dynamic` for one handed to it with `--mcp-config`.
+    pub(crate) source: Option<String>,
+}
+
+/// One MCP server, as the answer to `mcp_status` has it.
+///
+/// Recorded from Claude Code 2.1.292: `{name, status, error, config, scope,
+/// source, serverInfo, tools}`, `error` only on one that failed and
+/// `serverInfo` and `tools` only on one that connected.
+#[derive(Debug, Deserialize)]
+pub(crate) struct McpServerStatus {
+    pub(crate) name: String,
+    /// As on `init`.
+    #[serde(default, deserialize_with = "lenient_text")]
+    pub(crate) status: String,
+    /// Why the CLI could not connect to it, in its words: `ECONNREFUSED:
+    /// Unable to connect. …` for an address nothing listens on.
+    pub(crate) error: Option<String>,
+    /// `user`, `project`, `local`, or `dynamic` for one handed to the CLI
+    /// with `--mcp-config`.
+    pub(crate) scope: Option<String>,
+    /// As on `init`.
+    pub(crate) source: Option<String>,
+    pub(crate) config: Option<McpConfig>,
+    #[serde(rename = "serverInfo")]
+    pub(crate) server_info: Option<McpServerInfo>,
+    pub(crate) tools: Option<Vec<McpTool>>,
+}
+
+/// How a server is reached, as its configuration says.
+///
+/// Only what says where: a program's `args` and `env` and an address's
+/// `headers` are not read, being where a configuration keeps its secrets.
+#[derive(Debug, Deserialize)]
+pub(crate) struct McpConfig {
+    /// `stdio`, `http` or `sse`.
+    #[serde(rename = "type")]
+    pub(crate) transport: Option<String>,
+    /// The program a `stdio` server is.
+    pub(crate) command: Option<String>,
+    /// The address of an `http` or `sse` one.
+    pub(crate) url: Option<String>,
+}
+
+/// What a connected server calls itself.
+#[derive(Debug, Deserialize)]
+pub(crate) struct McpServerInfo {
+    pub(crate) name: Option<String>,
+    pub(crate) version: Option<String>,
+}
+
+/// One tool a connected server offers, by its own name for it.
+#[derive(Debug, Deserialize)]
+pub(crate) struct McpTool {
+    pub(crate) name: String,
 }
 
 /// One slash command, as the CLI lists it in its answer to `initialize` and in
 /// `commands_changed`.
 ///
-/// The CLI also says whether it is one of its own (`builtin`) and what else
-/// it answers to (`aliases`). Neither is read: a command runs by its name
-/// whoever supplied it, and an alias runs what the name already offers.
+/// The CLI also says what else a command answers to (`aliases`), which is not
+/// read: an alias runs what the name already offers.
 #[derive(Debug, Deserialize)]
 pub(crate) struct Command {
     pub(crate) name: String,
@@ -108,6 +220,31 @@ pub(crate) struct Command {
     /// command that takes nothing.
     #[serde(rename = "argumentHint")]
     pub(crate) argument_hint: Option<String>,
+    /// `true` on what the CLI ships itself: its own commands and the skills
+    /// it bundles alike. Absent on a skill or command of the repository's or
+    /// the user's own, and on an MCP server's prompt.
+    #[serde(default)]
+    pub(crate) builtin: bool,
+}
+
+/// One model the answer to `initialize` lists.
+///
+/// Each also says which effort levels and modes it supports; only whether it
+/// runs `auto` is read, which is what a mode change is refused on.
+#[derive(Debug, Deserialize)]
+pub(crate) struct Model {
+    /// What the CLI takes it by, on `--model` and `set_model` alike.
+    pub(crate) value: String,
+    /// What the CLI's picker calls it.
+    #[serde(rename = "displayName")]
+    pub(crate) display_name: Option<String>,
+    pub(crate) description: Option<String>,
+    /// The exact model the value runs on today.
+    #[serde(rename = "resolvedModel")]
+    pub(crate) resolved_model: Option<String>,
+    /// Whether the model can run in `auto` mode, where the CLI says.
+    #[serde(rename = "supportsAutoMode")]
+    pub(crate) supports_auto_mode: Option<bool>,
 }
 
 /// What a background task has used, as the CLI counts it for the task alone.
@@ -120,11 +257,18 @@ pub(crate) struct TaskUsage {
     pub(crate) total_tokens: Option<u64>,
 }
 
-/// What the CLI says about a context compaction.
-#[derive(Debug, Deserialize)]
+/// What the CLI says about a context compaction: on the live stream in
+/// `snake_case`, and in the transcript it keeps for itself in `camelCase`.
+#[derive(Debug, Default, Deserialize)]
 pub(crate) struct CompactMetadata {
     pub(crate) trigger: Option<String>,
+    #[serde(alias = "preTokens")]
     pub(crate) pre_tokens: Option<u64>,
+    /// What the CLI says the conversation holds after it: the summary and
+    /// what was kept, without the system prompt and tools the next request
+    /// sends beside them.
+    #[serde(alias = "postTokens")]
+    pub(crate) post_tokens: Option<u64>,
 }
 
 /// An `assistant` or `user` line.
@@ -146,9 +290,131 @@ pub(crate) struct Envelope {
     /// it.
     #[serde(default)]
     pub(crate) tool_use_result: Option<serde_json::Value>,
+    /// On a `user` line that carries a tool result: why a call did not run
+    /// to its end, and from 2.1.309 how its permission was settled, per call.
+    /// The live stream carries it under this name; a transcript keeps only
+    /// the decision, as `permissionDecision`, which the transcript reader
+    /// puts here.
+    #[serde(default)]
+    pub(crate) tool_result_meta: Vec<ResultMeta>,
+    /// On an `assistant` line: the id of the API request the message is the
+    /// answer to, which is what a report to the provider names it by. Only
+    /// the live stream carries it under this name.
+    #[serde(default)]
+    pub(crate) request_id: Option<String>,
+    /// On an `assistant` line: set where the operator's interrupt stopped the
+    /// message as it was written. Recorded from Claude Code 2.1.285, whose
+    /// closing `result` then counts none of the message's tokens.
+    #[serde(default)]
+    pub(crate) aborted: bool,
+    /// On an `assistant` line the CLI wrote itself after a request failed:
+    /// the kind of failure, `rate_limit` for a plan's usage limit.
+    #[serde(default)]
+    pub(crate) error: Option<String>,
+    /// On the same line, the API's own name for the failure —
+    /// `usage_limit_reached` when a plan's window is spent.
+    #[serde(rename = "apiError", default)]
+    pub(crate) api_error: Option<String>,
+}
+
+/// Why one tool call did not run, as the CLI says beside its result.
+#[derive(Debug, Deserialize)]
+pub(crate) struct ResultMeta {
+    pub(crate) id: Option<String>,
+    /// `user-rejected` for a call cut off by an interrupt, `permission-rule`
+    /// for one refused over the control channel, as recorded from 2.1.278 and
+    /// 2.1.285. Recorded from 2.1.309, `permission-rule` also marks a call the
+    /// CLI's own rules refused and one a `PreToolUse` hook blocked, and no
+    /// call that ran, a tool's own error included.
+    #[serde(default)]
+    pub(crate) non_execution_kind: Option<String>,
+    /// How the call's permission was settled, from 2.1.309: `decision` is
+    /// `accept` or `reject`, beside who settled it.
+    #[serde(default)]
+    pub(crate) permission_decision: Option<PermissionDecision>,
+}
+
+/// How the CLI settled whether a call may run, as it says beside the call's
+/// result on the live stream and in the transcript's `permissionDecision`.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct PermissionDecision {
+    /// `accept` or `reject`.
+    #[serde(default)]
+    pub(crate) decision: Option<String>,
+}
+
+impl ResultMeta {
+    /// Whether this says the call did not run because it was not allowed to:
+    /// refused by the operator, by a rule or by a hook.
+    pub(crate) fn refused(&self) -> bool {
+        let rejected = self
+            .permission_decision
+            .as_ref()
+            .and_then(|settled| settled.decision.as_deref())
+            == Some("reject");
+        match self.non_execution_kind.as_deref() {
+            Some("permission-rule") => true,
+            Some(_) => false,
+            None => rejected,
+        }
+    }
 }
 
 impl Envelope {
+    /// Whether this is the note the CLI writes into the conversation where
+    /// the operator's interrupt stopped the request in flight:
+    /// `[Request interrupted by user]` while a reply was written, and the
+    /// same words with ` for tool use]` while a call ran, as recorded from
+    /// 2.1.285 and 2.1.292.
+    pub(crate) fn says_interrupted(&self) -> bool {
+        let Some(Content::Blocks(blocks)) = &self.message.content else {
+            return false;
+        };
+        blocks.iter().any(|block| match block {
+            Block::Text { text } => text.starts_with("[Request interrupted by user"),
+            Block::ToolUse { .. } | Block::ToolResult { .. } | Block::Other => false,
+        })
+    }
+
+    /// The words the CLI wrote where a plan's usage limit stopped a request,
+    /// if this line is that note: `You've hit your session limit · resets
+    /// 11:10pm (Europe/Berlin)`.
+    ///
+    /// Read from the failure the CLI names on the line (`rate_limit`,
+    /// `usage_limit_reached`) and, for a release that names none, from the
+    /// opening words of a message no model wrote — the transcripts of 2.1.292
+    /// carry both.
+    pub(crate) fn usage_limit(&self) -> Option<String> {
+        let Some(Content::Blocks(blocks)) = &self.message.content else {
+            return None;
+        };
+        let text = blocks.iter().find_map(|block| match block {
+            Block::Text { text } => Some(text.clone()),
+            Block::ToolUse { .. } | Block::ToolResult { .. } | Block::Other => None,
+        })?;
+        let named = self.error.as_deref() == Some("rate_limit")
+            || self.api_error.as_deref() == Some("usage_limit_reached");
+        let written_by_the_cli =
+            self.message.model.as_deref() == Some("<synthetic>") && is_usage_limit_text(&text);
+        (named || written_by_the_cli).then_some(text)
+    }
+
+    /// Whether the call `id` did not run to its end because the operator
+    /// stopped the turn it was in.
+    pub(crate) fn interrupted(&self, id: &str) -> bool {
+        self.tool_result_meta.iter().any(|meta| {
+            meta.id.as_deref() == Some(id)
+                && meta.non_execution_kind.as_deref() == Some("user-rejected")
+        })
+    }
+
+    /// Whether this line says call `id` was not allowed to run.
+    pub(crate) fn refused(&self, id: &str) -> bool {
+        self.tool_result_meta
+            .iter()
+            .any(|meta| meta.id.as_deref() == Some(id) && meta.refused())
+    }
+
     /// Whether the tool this line answers started work that carries on after
     /// the call returned: a sub-agent the CLI ran in the background, whose
     /// end the CLI reports later as a `system`/`task_notification`.
@@ -159,6 +425,11 @@ impl Envelope {
             .and_then(serde_json::Value::as_str)
             == Some("async_launched")
     }
+}
+
+/// Whether `text` opens the way the CLI words a spent usage limit.
+pub(crate) fn is_usage_limit_text(text: &str) -> bool {
+    text.starts_with("You've hit your ")
 }
 
 /// What a file tool — `Edit`, `Write` — reports about itself beside its
@@ -216,6 +487,14 @@ pub(crate) struct ShellReport {
     /// file it wrote from one that has since changed.
     #[serde(default)]
     pub(crate) persisted_output_size: Option<u64>,
+    /// Set by Niobe's own hook, where it trimmed the output the model read:
+    /// the file it wrote the whole of it to. Not the CLI's: the hook adds it
+    /// to the result it hands back, and the CLI passes it through.
+    #[serde(default)]
+    pub(crate) niobe_raw_output_path: Option<String>,
+    /// How many bytes the hook wrote to that file.
+    #[serde(default)]
+    pub(crate) niobe_raw_output_size: Option<u64>,
 }
 
 /// One hunk of a [`FileReport`]: a unified diff's `@@` header and the lines
@@ -237,6 +516,15 @@ pub(crate) struct ApiMessage {
     /// The model that answered, on an `assistant` message.
     #[serde(default)]
     pub(crate) model: Option<String>,
+    /// The API's id for an `assistant` message, which every line the CLI
+    /// splits one response over repeats, and its `message_start` names.
+    #[serde(default)]
+    pub(crate) id: Option<String>,
+    /// On an `assistant` line: the message's counts as they stood when the
+    /// line was written — a snapshot, not what the message finished at. See
+    /// `translate.rs` for when it is all there is.
+    #[serde(default)]
+    pub(crate) usage: Option<Usage>,
 }
 
 /// A message's content, which the CLI writes as a bare string for a plain turn
@@ -298,10 +586,22 @@ pub(crate) enum StreamBody {
     Other,
 }
 
-/// The head of a message: the only place the model it runs on is named.
+/// The head of a message: the only place the model it runs on is named, and
+/// on the live stream the only place its speed is.
 #[derive(Debug, Deserialize)]
 pub(crate) struct StartMessage {
     pub(crate) model: Option<String>,
+    /// The API's id for the message, which its `assistant` lines repeat.
+    #[serde(default)]
+    pub(crate) id: Option<String>,
+    pub(crate) usage: Option<Usage>,
+}
+
+impl StartMessage {
+    /// Whether the message is served in fast mode.
+    pub(crate) fn fast(&self) -> bool {
+        self.usage.as_ref().is_some_and(Usage::fast)
+    }
 }
 
 /// A fragment of one content block.
@@ -340,6 +640,19 @@ pub(crate) struct Usage {
     /// as an error lost the message the operator had been shown.
     #[serde(default, deserialize_with = "none_as_empty")]
     pub(crate) iterations: Vec<Iteration>,
+    /// `"fast"` for a request the API served in fast mode, which it bills at
+    /// a multiple of the standard rates, and `"standard"` otherwise — every
+    /// recorded message says `"standard"`, including one sent while the
+    /// session's `fast_mode_state` read `on`. The API documents both values.
+    /// On the live stream it is on `message_start`, never on `message_delta`.
+    pub(crate) speed: Option<String>,
+}
+
+impl Usage {
+    /// Whether the request was served in fast mode.
+    pub(crate) fn fast(&self) -> bool {
+        self.speed.as_deref() == Some("fast")
+    }
 }
 
 /// A list the CLI writes as `null` where it has nothing in it.
@@ -352,13 +665,6 @@ where
 }
 
 impl Usage {
-    /// Of the cache writes, the ones bought for an hour rather than for the
-    /// default five minutes. Zero where the CLI reported no split.
-    ///
-    /// The split beside the total wins where there is one; otherwise it is
-    /// summed over the iterations. Reading only the first would price every
-    /// one-hour write on a 2.1.278 `message_delta` as a five-minute one — in
-    /// the session recorded on 19 September 2026, every cache write it made.
     /// Every prompt token of the last API request the message took: its
     /// uncached input, cache reads and cache writes.
     ///
@@ -381,15 +687,26 @@ impl Usage {
         input.saturating_add(read).saturating_add(write)
     }
 
-    pub(crate) fn cache_write_1h(&self) -> u64 {
+    /// Of the cache writes, the ones bought for an hour rather than for the
+    /// default five minutes. `None` where the CLI reported no split, beside
+    /// the total or in any iteration.
+    ///
+    /// The split beside the total wins where there is one; otherwise it is
+    /// summed over the iterations. Reading only the first would price every
+    /// one-hour write on a 2.1.278 `message_delta` as a five-minute one — in
+    /// the session recorded on 19 September 2026, every cache write it made.
+    pub(crate) fn cache_write_1h(&self) -> Option<u64> {
         match &self.cache_creation {
-            Some(split) => split.ephemeral_1h_input_tokens,
+            Some(split) => Some(split.ephemeral_1h_input_tokens),
             None => self
                 .iterations
                 .iter()
                 .filter_map(|iteration| iteration.cache_creation.as_ref())
-                .fold(0, |sum, split| {
-                    sum.saturating_add(split.ephemeral_1h_input_tokens)
+                .fold(None, |sum: Option<u64>, split| {
+                    Some(
+                        sum.unwrap_or(0)
+                            .saturating_add(split.ephemeral_1h_input_tokens),
+                    )
                 }),
         }
     }
@@ -416,11 +733,11 @@ pub(crate) struct CacheCreation {
 
 /// A `rate_limit_event`: how much of the plan's metered windows is gone.
 ///
-/// The message also carries `status`, `rateLimitType`, `resetsAt`,
-/// `overageStatus` and `overageDisabledReason`. Only the windows and the
-/// overage flag are read: the rest restates the window the CLI happens to be
-/// closest to, and a status word nothing draws would widen the shared
-/// vocabulary for a figure no pane shows.
+/// The message also carries `status`, `rateLimitType` and `resetsAt`, which
+/// are not read: they restate the window the CLI happens to be closest to, and
+/// a status word nothing draws would widen the shared vocabulary for a figure
+/// no pane shows. The windows, the overage flag, and whether overage is
+/// allowed and why not, are.
 #[derive(Debug, Deserialize)]
 pub(crate) struct RateLimit {
     pub(crate) rate_limit_info: Option<RateLimitInfo>,
@@ -434,8 +751,22 @@ pub(crate) struct RateLimitInfo {
     /// Whether the plan has started spending beyond its flat fee. Absent on a
     /// CLI version that does not report it, which is read as "did not say"
     /// rather than as a promise that nothing extra is being charged.
-    #[serde(rename = "isUsingOverage", default)]
+    #[serde(rename = "isUsingOverage", default, deserialize_with = "lenient_flag")]
     pub(crate) is_using_overage: bool,
+    /// Whether the plan may spend beyond its fee: `allowed`, `allowed_warning`
+    /// or `rejected` in Claude Code 2.1.309's own schema. Empty where the CLI
+    /// did not say, or said it in a shape this does not read.
+    #[serde(rename = "overageStatus", default, deserialize_with = "lenient_text")]
+    pub(crate) overage_status: String,
+    /// Why overage is refused, from the CLI's own list (`out_of_credits`,
+    /// `overage_not_provisioned`, `org_level_disabled` and the rest). Empty
+    /// where it gave none.
+    #[serde(
+        rename = "overageDisabledReason",
+        default,
+        deserialize_with = "lenient_text"
+    )]
+    pub(crate) overage_disabled_reason: String,
 }
 
 /// The two windows a plan is metered against.
@@ -451,8 +782,43 @@ pub(crate) struct Window {
     /// The share used, 0–1. Absent from a window the CLI named without
     /// measuring, which is a window this bridge reports nothing for.
     pub(crate) utilization: Option<f64>,
-    #[serde(rename = "resetsAt")]
+    #[serde(rename = "resetsAt", default, deserialize_with = "lenient_seconds")]
     pub(crate) resets_at: Option<u64>,
+}
+
+/// A string where there is one, and nothing where there is a number, a null or
+/// no field at all: a figure no pane depends on is not worth losing the whole
+/// message over.
+fn lenient_text<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(value.as_str().unwrap_or_default().to_owned())
+}
+
+/// A boolean where there is one, and false where there is anything else.
+fn lenient_flag<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(value.as_bool().unwrap_or(false))
+}
+
+/// A whole number of seconds where there is one, a fractional one cut to its
+/// whole seconds, and nothing where there is anything else.
+fn lenient_seconds<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(value.as_u64().or_else(|| {
+        value
+            .as_f64()
+            .filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
+            .map(|seconds| seconds as u64)
+    }))
 }
 
 /// A `control_request`: the CLI asking Niobe to decide something.
@@ -466,6 +832,13 @@ pub(crate) struct ControlRequest {
     pub(crate) request: Option<ControlBody>,
 }
 
+/// A `control_cancel_request`: the `control_request` of this id is no
+/// longer waiting on an answer.
+#[derive(Debug, Deserialize)]
+pub(crate) struct CancelRequest {
+    pub(crate) request_id: Option<String>,
+}
+
 /// What a `control_request` is asking.
 #[derive(Debug, Deserialize)]
 pub(crate) struct ControlBody {
@@ -473,6 +846,11 @@ pub(crate) struct ControlBody {
     pub(crate) tool_name: Option<String>,
     pub(crate) tool_use_id: Option<String>,
     pub(crate) input: Option<serde_json::Value>,
+    /// Why the CLI is asking, in its words: a command it could not check, a
+    /// path it would not read on its own. Recorded on Claude Code 2.1.278.
+    pub(crate) decision_reason: Option<String>,
+    /// The file a path-guarded call was stopped at, where the CLI named one.
+    pub(crate) blocked_path: Option<String>,
 }
 
 /// A `control_response`: the CLI answering a request Niobe made.
@@ -489,25 +867,57 @@ pub(crate) struct ControlResponse {
 #[derive(Debug, Deserialize)]
 pub(crate) struct ControlOutcome {
     pub(crate) subtype: Option<String>,
+    /// The request this answers, as Niobe addressed it.
+    pub(crate) request_id: Option<String>,
     pub(crate) error: Option<String>,
-    /// What a request that succeeded answered with. Only the answer to
-    /// `initialize` carries anything Niobe reads.
+    /// What a request that succeeded answered with: the answers to
+    /// `initialize` and to `generate_session_title` carry what Niobe reads.
     pub(crate) response: Option<ControlAnswer>,
 }
 
 /// The body of a successful answer.
 ///
-/// The answer to `initialize` also says who is signed in, which models and
-/// output styles there are and the process's id. None of it is read: the
-/// account is the CLI's business, and the rest arrives again on `init`.
+/// The answer to `initialize` also says who is signed in, which output styles
+/// there are and the process's id. None of that is read: the account is the
+/// CLI's business, and the rest arrives again on `init`.
 #[derive(Debug, Deserialize)]
 pub(crate) struct ControlAnswer {
     /// Every slash command the CLI runs, as it stood when it answered.
     pub(crate) commands: Option<Vec<Command>>,
+    /// Every model the signed-in account can run the session on, in the order
+    /// the CLI's own picker lists them. Recorded from Claude Code 2.1.288 on a
+    /// Max login: its aliases (`default`, `opus`, `fable`, …) and the exact
+    /// releases beside them. Nothing else carries the list.
+    pub(crate) models: Option<Vec<Model>>,
     /// Why `/fast` will not switch fast mode on in this process, where it
     /// will not. Claude Code 2.1.282 says `sdk_opt_in_required` over
     /// stream-json and answers the command with a refusal.
     pub(crate) fast_mode_disabled_reason: Option<String>,
+    /// Every MCP server the CLI configured, with why one failed, the scope it
+    /// was found in, its configuration and its tools: the answer to
+    /// `mcp_status`, recorded from Claude Code 2.1.292.
+    #[serde(rename = "mcpServers")]
+    pub(crate) mcp_servers: Option<Vec<McpServerStatus>>,
+    /// The title `generate_session_title` made, or `null` where it made none.
+    /// Recorded from Claude Code 2.1.288: `{"title":"Static file handler etag
+    /// support"}` for a prompt about etags.
+    pub(crate) title: Option<String>,
+    /// Whether `rewind_files` can put the files back as they were before the
+    /// prompt it names. Recorded from Claude Code 2.1.309, started with
+    /// `CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING`: a dry run answers
+    /// `{"canRewind":true,"filesChanged":["/abs/stats.py"],"insertions":0,
+    /// "deletions":2}`, the rewind itself `{"canRewind":true,"skippedLinks":0}`.
+    #[serde(rename = "canRewind")]
+    pub(crate) can_rewind: Option<bool>,
+    /// The files a dry run of `rewind_files` would put back, by absolute path.
+    #[serde(rename = "filesChanged")]
+    pub(crate) files_changed: Option<Vec<String>>,
+    /// The lines a dry run of `rewind_files` would add back.
+    pub(crate) insertions: Option<u64>,
+    /// The lines a dry run of `rewind_files` would take out.
+    pub(crate) deletions: Option<u64>,
+    /// Why `rewind_files` cannot put the files back, where it cannot.
+    pub(crate) error: Option<String>,
 }
 
 /// `conversation_reset`: the CLI dropped the conversation and started a new
@@ -520,6 +930,31 @@ pub(crate) struct ControlAnswer {
 /// off it: the `init` is what names the session.
 #[derive(Debug, Deserialize)]
 pub(crate) struct Reset {}
+
+/// `tool_progress`: the CLI's word that something is still under way.
+///
+/// Recorded from Claude Code 2.1.287 as a heartbeat sent every thirty seconds
+/// while a tool call runs, with `elapsed_time_seconds` and `heartbeat: true`.
+/// Its `tool_use_id` is not the call's — it is the call's id with
+/// `-heartbeat-<n>` after it — and its `parent_tool_use_id` is the call
+/// itself rather than a sub-agent. The same type carries a sub-agent's request
+/// being retried (`subagent_retry`), and, on a remote or container session, a
+/// shell command's progress. None of it is read: it holds no tokens and no
+/// cost, the shell times a running call off its own clock, and the CLI's own
+/// SDK adapter drops the heartbeat and the retry too.
+#[derive(Debug, Deserialize)]
+pub(crate) struct Progress {}
+
+/// `command_lifecycle`: where one of the operator's messages stands, by the
+/// `uuid` it was sent with and a `state` of `queued`, `started`, `completed`
+/// or `cancelled`.
+///
+/// Sent as a top-level `type`, not as a `system` subtype, after nearly every
+/// turn. None of it is read: a turn's start and end already arrive as the
+/// stream's first event and the `result`, and a message the CLI cancelled ends
+/// its turn with an aborted `result` that is read as the operator's stop.
+#[derive(Debug, Deserialize)]
+pub(crate) struct Lifecycle {}
 
 /// The `result` line that closes a turn.
 ///
@@ -541,6 +976,20 @@ pub(crate) struct Outcome {
     /// budget it stopped on says it here and leaves `result` out.
     #[serde(default)]
     pub(crate) errors: Vec<String>,
+    /// How the turn came to an end: `completed`, or `aborted_tools` and
+    /// `aborted_streaming` for a turn an interrupt stopped while a call ran
+    /// and while a reply was being written, as recorded from 2.1.285.
+    pub(crate) terminal_reason: Option<String>,
+}
+
+impl Outcome {
+    /// Whether the turn ended because it was interrupted, which is how the
+    /// operator stops one.
+    pub(crate) fn interrupted(&self) -> bool {
+        self.terminal_reason
+            .as_deref()
+            .is_some_and(|reason| reason.starts_with("aborted"))
+    }
 }
 
 /// What one model has cost the session so far.
@@ -626,12 +1075,12 @@ mod tests {
     }
 
     #[test]
-    fn cache_writes_without_a_reported_split_are_no_one_hour_writes() {
+    fn cache_writes_without_a_reported_split_have_no_split() {
         let usage: Usage = serde_json::from_str(r#"{"cache_creation_input_tokens":99}"#)
             .expect("usage without a split");
 
         assert_eq!(usage.cache_creation_input_tokens, 99);
-        assert_eq!(usage.cache_write_1h(), 0);
+        assert_eq!(usage.cache_write_1h(), None);
     }
 
     #[test]
@@ -642,7 +1091,7 @@ mod tests {
         .expect("usage with both lifetimes");
 
         assert_eq!(usage.cache_creation_input_tokens, 90);
-        assert_eq!(usage.cache_write_1h(), 60);
+        assert_eq!(usage.cache_write_1h(), Some(60));
     }
 
     #[test]
@@ -654,7 +1103,7 @@ mod tests {
         )
         .expect("a message_delta's usage");
 
-        assert_eq!(usage.cache_write_1h(), 10_059);
+        assert_eq!(usage.cache_write_1h(), Some(10_059));
     }
 
     #[test]

@@ -7,8 +7,8 @@
 //! Every figure is read off the same fold the shell's panes read, and the cost
 //! carries the same label the Usage pane gives it.
 
-use niobe_core::Billing;
 use niobe_core::session::SessionState;
+use niobe_tui::Billed;
 use niobe_tui::app::App;
 
 /// The lines describing a folded session, without a header.
@@ -25,52 +25,91 @@ pub fn lines(app: &App) -> Vec<String> {
             grouped(session.assistant_messages())
         ),
         format!("files       {}", files(session)),
-        format!(
-            "record      {} decisions · {} checkpoints · {} errors",
-            session.decisions().len(),
-            session.checkpoints().len(),
-            grouped(session.errors())
-        ),
+        format!("errors      {}", grouped(session.errors())),
         format!("transcript  {} entries", app.entries().len()),
     ]
 }
 
+/// The session's tokens, and what kind they were.
+///
+/// Reasoning is named only where some record counted it: a backend that
+/// bills it as output, as the `claude` CLI does, reports none apart, and a
+/// zero there would read as a session that did no reasoning.
 fn tokens(session: &SessionState) -> String {
     let t = session.totals();
     if t.records == 0 {
         return "—".to_owned();
     }
-    format!(
-        "{} — {} in · {} out · {} cache read · {} cache write · {} reasoning",
+    let mut line = format!(
+        "{} — {} in · {} out · {} cache read · {}",
         grouped(t.tokens()),
         grouped(t.input),
         grouped(t.output),
         grouped(t.cache_read),
-        grouped(t.cache_write),
-        grouped(t.reasoning)
-    )
+        cache_write(t.cache_write, t.cache_write_1h, t.cache_write_unsplit)
+    );
+    if t.reasoning > 0 {
+        line.push_str(&format!(" · {} reasoning", grouped(t.reasoning)));
+    }
+    line
+}
+
+/// A cache-write total and how long its tokens were bought for, which every
+/// printed total says the same way.
+///
+/// The hour is billed at a dearer rate than five minutes, so a total alone
+/// cannot be read against a bill; and writes no record split are said to be
+/// unsplit, rather than read as five-minute ones nobody said they were.
+pub(crate) fn cache_write(total: u64, one_hour: u64, unsplit: u64) -> String {
+    let written = format!("{} cache write", grouped(total));
+    if total == 0 {
+        return written;
+    }
+    let split = total.saturating_sub(unsplit);
+    match (split, unsplit) {
+        (_, 0) => format!("{written} ({} for an hour)", grouped(one_hour)),
+        (0, _) => format!("{written} (lifetime not reported)"),
+        (_, _) => format!(
+            "{written} ({} for an hour, {} lifetime not reported)",
+            grouped(one_hour),
+            grouped(unsplit)
+        ),
+    }
 }
 
 /// The pane's label, and the reason a figure is an estimate, a floor or
 /// missing.
 ///
-/// On a plan the figure is named for what it is, as the pane names it.
+/// On a plan there is no figure, as the pane draws none; a session billed
+/// both ways costs what its metered part did, named as the pane names it.
 fn cost(session: &SessionState, prices: Option<&dyn niobe_tui::Prices>) -> String {
-    let t = session.totals();
-    let label = match session.billing() {
-        Some(Billing::Plan) if t.records > 0 => format!(
-            "API-equivalent {}",
-            niobe_tui::session_cost(session, prices)
-        ),
-        Some(Billing::Plan | Billing::Metered) | None => niobe_tui::session_cost(session, prices),
+    let billed = Billed::of(session);
+    let t = match billed {
+        Billed::Plan => return "—".to_owned(),
+        Billed::Metered | Billed::Both | Billed::Unknown => {
+            billed.spent(session).unwrap_or(session.totals())
+        }
+    };
+    let figure = niobe_tui::cost_of(t, prices);
+    let label = match billed.qualifier() {
+        Some(qualifier) if t.records > 0 => format!("{qualifier} {figure}"),
+        Some(_) | None => figure,
     };
     if t.records == 0 || t.cost_fully_reported() {
         return label;
     }
-    format!(
+    let owed = format!(
         "{label} — {} of {} usage records no reported cost covers",
         grouped(t.records_unsettled),
         grouped(t.records)
+    );
+    if !t.settlement_unrecorded() {
+        return owed;
+    }
+    format!(
+        "{owed} ({}: its records do not say what a reported cost settles, so some \
+         of them were quite possibly billed)",
+        niobe_tui::OLDER_RECORDING
     )
 }
 
@@ -79,18 +118,19 @@ fn cost(session: &SessionState, prices: Option<&dyn niobe_tui::Prices>) -> Strin
 /// Printed where the pane has no room to: the pane shows no dollar figure for
 /// a session nothing described, and this says why and what would.
 fn billing(session: &SessionState) -> String {
-    match session.billing() {
-        Some(Billing::Plan) => {
-            "plan — the cost is what the work would have cost on the API; no money moved \
-             with it"
+    match Billed::of(session) {
+        Billed::Plan => "plan — a plan is limited by its usage windows, not by money, so no \
+                         cost is shown"
+            .to_owned(),
+        Billed::Metered => "metered — every token is billed, so the cost is money spent".to_owned(),
+        Billed::Both => "plan and metered — part of the session was billed on a plan and part \
+                         by use, and the cost is the money the metered part spent"
+            .to_owned(),
+        Billed::Unknown => {
+            "not known — the backend did not say and the profile does not set `billing`, \
+             so the cost may be money spent or what a plan's work would have cost"
                 .to_owned()
         }
-        Some(Billing::Metered) => {
-            "metered — every token is billed, so the cost is money spent".to_owned()
-        }
-        None => "not known — the backend did not say and the profile does not set `billing`, \
-                 so the cost may be money spent or what a plan's work would have cost"
-            .to_owned(),
     }
 }
 
@@ -103,18 +143,26 @@ fn files(session: &SessionState) -> String {
         return "—".to_owned();
     }
 
-    let added: u64 = changed.iter().map(|file| file.added).sum();
-    let removed: u64 = changed.iter().map(|file| file.removed).sum();
+    let added = side(
+        changed.iter().map(|file| file.added),
+        changed
+            .iter()
+            .any(|file| file.changes > file.added_unstated),
+    );
+    let removed = side(
+        changed.iter().map(|file| file.removed),
+        changed
+            .iter()
+            .any(|file| file.changes > file.removed_unstated),
+    );
     let unstated = changed
         .iter()
         .filter(|file| !file.added_stated() || !file.removed_stated())
         .count();
 
     let mut line = format!(
-        "{} changed — +{} −{}",
-        grouped(changed.len() as u64),
-        grouped(added),
-        grouped(removed)
+        "{} changed — +{added} −{removed}",
+        grouped(changed.len() as u64)
     );
     if unstated > 0 {
         line.push_str(&format!(
@@ -123,6 +171,16 @@ fn files(session: &SessionState) -> String {
         ));
     }
     line
+}
+
+/// One side of the files' figure: the lines the calls that stated them add
+/// up to, or an em dash where no call stated any — a sum of nothing stated is
+/// not a zero.
+fn side(lines: impl Iterator<Item = u64>, stated: bool) -> String {
+    match stated {
+        true => grouped(lines.fold(0, u64::saturating_add)),
+        false => "—".to_owned(),
+    }
 }
 
 fn tool_calls(session: &SessionState) -> String {
@@ -139,11 +197,11 @@ fn tool_calls(session: &SessionState) -> String {
 }
 
 /// A count with thousands separated, so a token total reads at a glance.
-fn grouped(n: u64) -> String {
+pub(crate) fn grouped(n: u64) -> String {
     let digits = n.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
     for (i, digit) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(digit);
@@ -154,6 +212,7 @@ fn grouped(n: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use niobe_core::Billing;
     use niobe_core::event::{Event, Usage};
     use niobe_tui::app::Repo;
 
@@ -163,12 +222,12 @@ mod tests {
             output: 300,
             cache_read: 0,
             cache_write: 0,
-            cache_write_1h: 0,
+            cache_write_1h: Some(0),
             reasoning: 0,
             model: "opus-5".to_owned(),
             cost_usd,
-            cost_basis: None,
-            settles_model: false,
+            settles_model: Some(false),
+            fast: false,
         })
     }
 
@@ -176,6 +235,31 @@ mod tests {
         let mut app = App::new(Repo::default());
         app.extend(events);
         app
+    }
+
+    #[test]
+    fn files_nobody_stated_a_count_for_read_as_dashes_not_zeros() {
+        let app = folded(&[changed("a.txt", None, None), changed("b.txt", None, None)]);
+
+        assert_eq!(
+            files(app.session()),
+            "2 changed — +— −— (a floor: 2 of them changed by an amount the backend did not \
+             state)"
+        );
+    }
+
+    #[test]
+    fn files_some_of_which_stated_a_count_read_as_a_floor() {
+        let app = folded(&[
+            changed("a.txt", Some(4), Some(2)),
+            changed("b.txt", None, None),
+        ]);
+
+        assert_eq!(
+            files(app.session()),
+            "2 changed — +4 −2 (a floor: 1 of them changed by an amount the backend did not \
+             state)"
+        );
     }
 
     #[test]
@@ -203,7 +287,36 @@ mod tests {
         );
         assert_eq!(
             summary[0],
-            "tokens      3,000 — 2,400 in · 600 out · 0 cache read · 0 cache write · 0 reasoning"
+            "tokens      3,000 — 2,400 in · 600 out · 0 cache read · 0 cache write"
+        );
+    }
+
+    #[test]
+    fn a_floor_an_older_recording_left_says_it_is_one() {
+        let mut turn = usage(Some(0.25));
+        if let Event::Usage(usage) = &mut turn {
+            usage.settles_model = None;
+        }
+        let summary = lines(&folded(&[usage(None), turn]));
+        assert_eq!(
+            summary[1],
+            "cost        ≥$0.25 — 1 of 2 usage records no reported cost covers (older \
+             recording: its records do not say what a reported cost settles, so some of them \
+             were quite possibly billed)"
+        );
+    }
+
+    #[test]
+    fn reasoning_is_counted_only_where_the_backend_reported_it_apart() {
+        let mut thought = usage(Some(0.25));
+        if let Event::Usage(usage) = &mut thought {
+            usage.reasoning = 2_000;
+        }
+        let summary = lines(&folded(&[thought, usage(Some(0.5))]));
+        assert_eq!(
+            summary[0],
+            "tokens      5,000 — 2,400 in · 600 out · 0 cache read · 0 cache write · 2,000 \
+             reasoning"
         );
     }
 
@@ -238,6 +351,7 @@ mod tests {
             added,
             removed,
             hunks: Vec::new(),
+            scope: niobe_core::event::ChangeScope::Project,
         }
     }
 
@@ -270,9 +384,31 @@ mod tests {
     }
 
     #[test]
+    fn a_cache_write_total_says_how_much_of_it_was_bought_for_an_hour() {
+        assert_eq!(cache_write(0, 0, 0), "0 cache write");
+        assert_eq!(
+            cache_write(82_887, 40_054, 0),
+            "82,887 cache write (40,054 for an hour)"
+        );
+        assert_eq!(cache_write(50, 0, 0), "50 cache write (0 for an hour)");
+    }
+
+    #[test]
+    fn cache_writes_no_record_split_are_said_to_be_unsplit_not_five_minute() {
+        assert_eq!(
+            cache_write(300, 0, 300),
+            "300 cache write (lifetime not reported)"
+        );
+        assert_eq!(
+            cache_write(1_300, 400, 300),
+            "1,300 cache write (400 for an hour, 300 lifetime not reported)"
+        );
+    }
+
+    #[test]
     fn the_billing_mode_is_printed_with_the_cost_it_explains() {
         let plan = lines(&folded(&[billed(Billing::Plan), usage(Some(0.25))]));
-        assert_eq!(plan[1], "cost        API-equivalent $0.25");
+        assert_eq!(plan[1], "cost        —");
         assert!(plan[2].starts_with("billing     plan — "), "{}", plan[2]);
 
         let metered = lines(&folded(&[billed(Billing::Metered), usage(Some(0.25))]));
@@ -289,6 +425,41 @@ mod tests {
             "{}",
             unsaid[2]
         );
+    }
+
+    #[test]
+    fn a_session_billed_both_ways_costs_what_it_spent_by_use_and_says_so() {
+        for ([first, then], spent) in [
+            ([Billing::Plan, Billing::Metered], "$0.50"),
+            ([Billing::Metered, Billing::Plan], "$0.25"),
+        ] {
+            let summary = lines(&folded(&[
+                billed(first),
+                usage(Some(0.25)),
+                billed(then),
+                usage(Some(0.5)),
+            ]));
+            assert_eq!(summary[1], format!("cost        metered part {spent}"));
+            assert!(
+                summary[2].starts_with("billing     plan and metered — "),
+                "{}",
+                summary[2]
+            );
+        }
+    }
+
+    #[test]
+    fn a_plan_session_prints_no_dollar_figure() {
+        let summary = lines(&folded(&[
+            billed(Billing::Plan),
+            usage(Some(0.25)),
+            usage(None),
+        ]));
+        for line in &summary {
+            assert!(!line.contains('$'), "{line}");
+            assert!(!line.contains("API"), "{line}");
+        }
+        assert_eq!(summary[1], "cost        —");
     }
 
     #[test]

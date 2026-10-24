@@ -43,8 +43,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn provenance_variants_are_distinct() {
-        assert_ne!(Provenance::Measured, Provenance::ApiEquivalent);
-        assert_ne!(Provenance::Measured, Provenance::Unpriced);
+    fn a_cost_says_how_it_was_arrived_at() {
+        assert_eq!(
+            Cost::ApiEquivalent(0.5).provenance(),
+            Provenance::ApiEquivalent
+        );
+        assert_eq!(Cost::Unpriced.provenance(), Provenance::Unpriced);
+        assert_eq!(Cost::ApiEquivalent(0.5).usd(), Some(0.5));
+        assert_eq!(Cost::Unpriced.usd(), None);
     }
 }

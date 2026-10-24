@@ -23,6 +23,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::proposal::Proposal;
+
 /// Declares a string newtype used to correlate events with each other.
 ///
 /// The ids are opaque: a backend supplies whatever it uses (a UUID, a counter,
@@ -75,11 +77,6 @@ id_newtype! {
 id_newtype! {
     /// Identifies a sub-agent across its spawn and its exit.
     AgentId
-}
-
-id_newtype! {
-    /// Identifies a checkpoint so that a rewind can name what it returns to.
-    CheckpointId
 }
 
 /// Which engine produced the event stream.
@@ -138,8 +135,8 @@ pub struct SessionMeta {
 ///
 /// On a flat-rate plan the fee does not move with the work, and what runs out
 /// is the plan's usage windows; a figure in dollars there is what the same
-/// work would have cost elsewhere. On a metered account every token is billed,
-/// and the dollars are the budget.
+/// work would have cost elsewhere, which nobody pays, so none is shown. On a
+/// metered account every token is billed, and the dollars are the budget.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Billing {
@@ -157,22 +154,6 @@ impl Billing {
             Self::Metered => "metered",
         }
     }
-}
-
-/// Where a cost a backend reported came from.
-///
-/// A subscription plan bills a flat fee, so a per-session figure a plan
-/// backend prints is what the same work would have cost on the provider's API
-/// — not money that moved. Showing it as though it were measured spend is the
-/// difference between a bill and a guess, so the stream carries which one it
-/// is rather than leaving every consumer to infer it from the backend.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CostBasis {
-    /// The provider billed this amount for this work.
-    Measured,
-    /// The backend derived it from published list prices.
-    ApiEquivalent,
 }
 
 /// Token counts and, when the backend reports one, the billed cost of a single
@@ -194,24 +175,22 @@ pub struct Usage {
     /// Of [`Usage::cache_write`], the tokens written to live for an hour
     /// rather than the default five minutes. A provider that offers both bills
     /// the hour at a higher rate, so a cost derived from the total alone would
-    /// be wrong in whichever direction it guessed. Zero where the backend does
-    /// not report the split, and in records written before it was kept.
-    #[serde(default)]
-    pub cache_write_1h: u64,
+    /// be wrong in whichever direction it guessed. `None` where the backend
+    /// did not report the split, and in records written before it was kept:
+    /// not "all five-minute", which nobody said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_1h: Option<u64>,
     /// Reasoning tokens, where the backend reports them separately.
     pub reasoning: u64,
     /// The model these counts were billed against.
     pub model: String,
     /// The cost the backend reported, in USD. `None` means "not reported",
     /// never "zero".
+    ///
+    /// Money spent only where the session is billed by use
+    /// ([`Billing::Metered`]). On a plan no money moves with the work, and a
+    /// figure the backend prints anyway is not a bill: consumers show none.
     pub cost_usd: Option<f64>,
-    /// What [`Usage::cost_usd`] is: money the provider billed, or a figure the
-    /// backend derived from list prices. `None` wherever there is no cost, and
-    /// wherever a producer did not say — an unlabelled cost is never read as a
-    /// measured one, so a record from a producer that says nothing cannot be
-    /// promoted to a measurement by being stored.
-    #[serde(default)]
-    pub cost_basis: Option<CostBasis>,
     /// Whether [`Usage::cost_usd`] settles every record already folded in for
     /// the same model, rather than pricing this record alone.
     ///
@@ -219,11 +198,20 @@ pub struct Usage {
     /// `claude` CLI does — leaves the message records with no cost of their
     /// own. They are not unpriced: the turn's figure covers them. A consumer
     /// that counted them as unpriced would call a fully reported session a
-    /// floor forever. `false` is the safe reading, so a producer that says
-    /// nothing, and a record written before this was kept, price only
-    /// themselves.
+    /// floor forever. Anything but `Some(true)` prices the record alone.
+    ///
+    /// `None` is a record that does not say, which is every record stored
+    /// before this was kept: the bookkeeping is younger than the recording, so
+    /// what it left unsettled may have been billed all the same. Kept apart
+    /// from `Some(false)` so that a floor can say which it is, and never
+    /// written as a `false` the producer did not write.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settles_model: Option<bool>,
+    /// Whether the provider served the request in its fast mode, which it
+    /// bills at a premium over the model's standard rates. `false` where the
+    /// backend did not say, and in records written before this was kept.
     #[serde(default)]
-    pub settles_model: bool,
+    pub fast: bool,
 }
 
 impl Usage {
@@ -234,6 +222,66 @@ impl Usage {
             .saturating_add(self.cache_read)
             .saturating_add(self.cache_write)
             .saturating_add(self.reasoning)
+    }
+}
+
+/// Token counts with no model and no money: one side of a comparison a
+/// backend can make between two of its own figures.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenCounts {
+    /// Input tokens billed at the full rate.
+    pub input: u64,
+    /// Output tokens.
+    pub output: u64,
+    /// Input tokens served from the prompt cache.
+    pub cache_read: u64,
+    /// Input tokens written into the prompt cache.
+    pub cache_write: u64,
+    /// Of the cache writes, the ones bought for an hour rather than for five
+    /// minutes. `None` where a side gave no split, or summed a record that
+    /// gave none: a share counted from part of the writes would read as all
+    /// of them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_1h: Option<u64>,
+}
+
+impl TokenCounts {
+    /// Every token counted here, cache traffic included.
+    pub fn total(&self) -> u64 {
+        self.input
+            .saturating_add(self.output)
+            .saturating_add(self.cache_read)
+            .saturating_add(self.cache_write)
+    }
+
+    /// What `other` has that this does not, field by field. A field where
+    /// `other` has less reads as nothing rather than as a negative count.
+    pub fn short_of(&self, other: &Self) -> Self {
+        Self {
+            input: other.input.saturating_sub(self.input),
+            output: other.output.saturating_sub(self.output),
+            cache_read: other.cache_read.saturating_sub(self.cache_read),
+            cache_write: other.cache_write.saturating_sub(self.cache_write),
+            cache_write_1h: self
+                .cache_write_1h
+                .zip(other.cache_write_1h)
+                .map(|(this, other)| other.saturating_sub(this)),
+        }
+    }
+
+    /// These counts and `other`'s, summed field by field. The one-hour share
+    /// is summed only where both have one.
+    pub fn plus(&self, other: &Self) -> Self {
+        Self {
+            input: self.input.saturating_add(other.input),
+            output: self.output.saturating_add(other.output),
+            cache_read: self.cache_read.saturating_add(other.cache_read),
+            cache_write: self.cache_write.saturating_add(other.cache_write),
+            cache_write_1h: self
+                .cache_write_1h
+                .zip(other.cache_write_1h)
+                .map(|(this, other)| this.saturating_add(other)),
+        }
     }
 }
 
@@ -260,10 +308,10 @@ pub struct UsageWindow {
 pub struct UsageWindows {
     /// The rolling five-hour window. `None` where the backend reported none,
     /// never a zero: a zero would claim the window is untouched.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "measured_window")]
     pub five_hour: Option<UsageWindow>,
     /// The rolling seven-day window, read the same way.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "measured_window")]
     pub seven_day: Option<UsageWindow>,
     /// Whether the plan has started spending beyond its flat fee.
     ///
@@ -272,6 +320,48 @@ pub struct UsageWindows {
     /// nothing further is being charged.
     #[serde(default)]
     pub using_overage: bool,
+    /// Whether the plan may spend beyond its flat fee at all, where the
+    /// backend said. Apart from [`UsageWindows::using_overage`], which is
+    /// whether it is spending now: a plan can be allowed extra it has not
+    /// needed yet, and a plan refused extra says so before anything is cut
+    /// off. [`Overage::Unreported`] in a record written before this was kept.
+    #[serde(default)]
+    pub overage: Overage,
+}
+
+/// Whether a plan may spend beyond its flat fee, as its backend reported.
+///
+/// Three states and not a flag, because the backend saying nothing and the
+/// backend saying no are different things to tell an operator: only the
+/// second is a promise that no extra is being charged.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Overage {
+    /// The backend did not say.
+    #[default]
+    Unreported,
+    /// Extra usage is allowed: past the windows, the work goes on and is
+    /// billed beyond the fee.
+    Allowed,
+    /// Extra usage is refused, and why where the backend said.
+    Refused(OverageRefusal),
+}
+
+/// Why a backend refused a plan extra usage, in Niobe's terms rather than any
+/// backend's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OverageRefusal {
+    /// The credits extra usage is paid from have run out.
+    OutOfCredits,
+    /// Extra usage was never set up for the account.
+    NotSetUp,
+    /// Someone with the say over the account turned it off.
+    TurnedOff,
+    /// The limit extra usage may spend up to is zero.
+    ZeroLimit,
+    /// The backend gave no reason, or one this build does not know.
+    Unstated,
 }
 
 impl UsageWindows {
@@ -280,6 +370,27 @@ impl UsageWindows {
     pub fn is_empty(&self) -> bool {
         self.five_hour.is_none() && self.seven_day.is_none()
     }
+}
+
+/// A window as a record holds it, read back as no window where its level is
+/// not a finite number. JSON has no NaN, so a level that was not a number was
+/// written as `null`; refusing it would refuse the whole session it is in.
+fn measured_window<'de, D>(deserializer: D) -> Result<Option<UsageWindow>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    struct Stored {
+        utilization: Option<f64>,
+        resets_at: Option<u64>,
+    }
+    let stored = Option::<Stored>::deserialize(deserializer)?;
+    Ok(stored.and_then(|stored| {
+        Some(UsageWindow {
+            utilization: stored.utilization.filter(|level| level.is_finite())?,
+            resets_at: stored.resets_at,
+        })
+    }))
 }
 
 /// The prompt the main agent's last request sent, and the window it was sent
@@ -324,6 +435,121 @@ pub struct SlashCommand {
     /// `[on|off]`. `None` for a command that takes nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub argument_hint: Option<String>,
+    /// Whether naming it anywhere in a prompt, not only at its start, is
+    /// read by the backend as asking for it.
+    ///
+    /// A skill the model can be asked to run is honoured wherever the prompt
+    /// names it; a command the backend runs itself, only where the prompt
+    /// opens with it. `false` where the backend did not say, which is the
+    /// reading that offers nothing it would not run.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mid_prompt: bool,
+}
+
+/// A model the backend offers to run the session on, as it listed it.
+///
+/// Only what the operator needs to choose one: the backend is what resolves
+/// the id, and a model it does not list is not one this offers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelOption {
+    /// What the backend takes the model by — an alias such as `opus` or an
+    /// exact release such as `claude-opus-4-8` — and what choosing it sends.
+    pub id: String,
+    /// What the backend calls it, such as `Opus 4.8`, where it names it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// What it is for, in the backend's words, where it says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// The exact model the id runs on today, where the backend said: an
+    /// alias moves as releases do, and this is what the session reports
+    /// itself running once it does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolves_to: Option<String>,
+    /// Whether the model can run in `auto` mode, where the backend said. A
+    /// backend that does not say leaves it unknown, which is not a refusal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_mode: Option<bool>,
+}
+
+/// A Model Context Protocol server the backend has configured for the
+/// session, as the backend last reported it.
+///
+/// Which servers there are, how each stands and the tools each gave the
+/// model are said unasked; why one failed, the scope its configuration was
+/// found in, how it is reached and what it calls itself only where the
+/// backend was asked, and each is `None` where it was not, or did not say.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpServer {
+    /// Its name, as it is configured.
+    pub name: String,
+    /// How it stands.
+    pub status: McpStatus,
+    /// Where the backend found its configuration, in the backend's own word
+    /// — `user`, `project`, `local` — where the backend said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// The tools it gave the model, by the server's own names for them, in
+    /// the backend's order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<String>,
+    /// The scope its configuration was found in, in the backend's own word —
+    /// `user`, `project`, `local`, or `dynamic` for one handed to the backend
+    /// as it started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    /// Why the backend could not connect to it, in the backend's words.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// How it is reached: its transport and the program run or the address
+    /// called, as `stdio · python3` or `http · https://example.com/mcp`.
+    /// Never a program's arguments or environment, nor an address's query or
+    /// credentials, which is where a configuration keeps its secrets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    /// What the server calls itself once connected: its name and version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reports_as: Option<String>,
+}
+
+impl McpServer {
+    /// Where its configuration came from: the scope where the backend was
+    /// asked, or else the source it named unasked.
+    pub fn origin(&self) -> Option<&str> {
+        self.scope.as_deref().or(self.source.as_deref())
+    }
+}
+
+/// How an MCP server stands.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpStatus {
+    /// Connected: its tools are the model's.
+    Connected,
+    /// Still being connected to.
+    Pending,
+    /// Waiting for the operator to sign in to it.
+    NeedsAuth,
+    /// The backend could not connect to it.
+    Failed,
+    /// Turned off.
+    Disabled,
+    /// A state this version of Niobe has no word for, in the backend's own.
+    Other(String),
+}
+
+impl McpStatus {
+    /// What the status is called on screen.
+    pub fn label(&self) -> &str {
+        match self {
+            Self::Connected => "connected",
+            Self::Pending => "connecting",
+            Self::NeedsAuth => "needs sign-in",
+            Self::Failed => "failed",
+            Self::Disabled => "disabled",
+            Self::Other(word) => word,
+        }
+    }
 }
 
 /// The tool name a command the operator ran with `!` is recorded under.
@@ -345,6 +571,9 @@ pub enum ToolOutcome {
     Failed,
     /// The user denied the permission request that gated the call.
     Denied,
+    /// The operator stopped the turn before the call ran to its end: it was
+    /// cut off while running, or never started.
+    Interrupted,
 }
 
 /// The answer to a permission request.
@@ -421,6 +650,19 @@ impl std::fmt::Display for Mode {
     }
 }
 
+/// What started a compaction of the conversation.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactTrigger {
+    /// The operator asked for it.
+    Manual,
+    /// The backend did it on its own, because the context was filling up.
+    Auto,
+    /// The backend did not say, or said it in a word Niobe does not know.
+    #[default]
+    Unstated,
+}
+
 /// How a sub-agent finished.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -431,6 +673,36 @@ pub enum AgentOutcome {
     Failed,
     /// Killed from the Activity pane, or by a budget.
     Cancelled,
+}
+
+/// Whose file an [`Event::FileChange`] changed.
+///
+/// An agent keeps notes for itself between sessions — what it learned about
+/// the operator and the project — in files of its own outside the
+/// repository. Writing one is part of how the agent works, not a change to
+/// what is being built, so it is told apart here, by the backend that knows
+/// where its agent keeps them, and nothing downstream has to know a path.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChangeScope {
+    /// A file of the project's, or one the backend could not place: every
+    /// change is the project's unless the backend says otherwise.
+    #[default]
+    Project,
+    /// One of the notes the agent keeps for itself.
+    AgentMemory,
+}
+
+impl ChangeScope {
+    /// Whether this is [`ChangeScope::Project`], which a recorded event
+    /// leaves unwritten: every log written before the scope existed reads as
+    /// what it was.
+    pub fn is_project(&self) -> bool {
+        match self {
+            ChangeScope::Project => true,
+            ChangeScope::AgentMemory => false,
+        }
+    }
 }
 
 /// Everything that can happen in a session.
@@ -445,6 +717,18 @@ pub enum Event {
 
     /// The operator said something.
     UserMessage {
+        /// The prompt as typed.
+        text: String,
+    },
+
+    /// The operator sent a prompt that reached no backend: the session was
+    /// not attached to one.
+    ///
+    /// Its own event rather than an [`Event::UserMessage`], because nothing
+    /// was asked: it opens no turn, captions nothing, and is not one of the
+    /// session's prompts. A log written before this event existed holds such
+    /// a prompt as a user message followed by a notice, and reads as it did.
+    PromptNotSent {
         /// The prompt as typed.
         text: String,
     },
@@ -539,6 +823,20 @@ pub enum Event {
         /// which is shown as exactly that rather than as a reason made up.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
+        /// The whole shell command the call ran, where it ran one: what the
+        /// kind of work it did is read from ([`crate::work`]), since the
+        /// arguments are the backend's to spell and the summary is one line
+        /// of it. `None` for a call that runs no command, and in a record
+        /// kept before calls carried it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        command: Option<String>,
+        /// What the tool returned before Niobe's own trimming left lines out
+        /// of it ([`crate::trim`]), where it did: `output` is then the
+        /// shorter copy the model read, and `bytes` the size of this. `None`
+        /// where nothing was trimmed, and where the whole could not be read
+        /// back as it was written.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        untrimmed: Option<String>,
     },
 
     /// The backend finished answering the operator's last prompt: every call
@@ -584,12 +882,60 @@ pub enum Event {
     /// The backend started the conversation over, at the operator's word:
     /// nothing said before this point is in front of the model any more.
     ///
-    /// The session goes on — what it spent stays spent, and the transcript
-    /// keeps what was said — but the context the last request measured is
-    /// gone with the conversation, and nothing measures the new one until its
-    /// first request. A backend that names its conversations says what the new
-    /// one is called with a fresh [`Event::SessionMeta`].
+    /// The session it ends and the one it starts are two: the fold forgets
+    /// everything the session did — its calls, sub-agents, errors, title,
+    /// turns and what it spent — and keeps what the backend and the account
+    /// say (the model and mode, the plan's windows, how it is billed, the
+    /// commands, models and servers on offer). A store records it as the
+    /// first event of a session of its own, so the one before it replays with
+    /// its own figures. A backend that names its conversations says what the
+    /// new one is called with a fresh [`Event::SessionMeta`].
     Cleared,
+
+    /// The backend began compacting the conversation: summarising what was
+    /// said so that the requests after it carry less.
+    ///
+    /// A phase of the turn rather than a reply: until
+    /// [`Event::CompactionEnded`], what the session is waiting on is the
+    /// summary, not the model thinking about the last prompt. No backend
+    /// reports how far along a compaction is, so nothing here says.
+    CompactionStarted,
+
+    /// The backend stopped compacting, whether or not it compacted anything.
+    CompactionEnded,
+
+    /// The backend compacted the conversation: from here on the model is sent
+    /// a summary in place of what came before.
+    ///
+    /// What it shrank to is measured by the next request
+    /// ([`Event::Context`]); until then `after` is the most a consumer has.
+    Compacted {
+        /// Who started it.
+        #[serde(default)]
+        trigger: CompactTrigger,
+        /// Every prompt token the conversation held before it, as the backend
+        /// measured it. `None` where the backend did not say.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        before: Option<u64>,
+        /// The tokens the backend says the conversation holds after it: the
+        /// summary and what was kept, without the system prompt and tools
+        /// every request sends beside them. A floor under the next request's
+        /// prompt, then, and not a measurement of one. `None` where the
+        /// backend did not say, which a session stored before it was read
+        /// is too.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after: Option<u64>,
+    },
+
+    /// The process the session ran in stopped while a turn was running — the
+    /// operator quit, or it was killed and this is recorded when the session
+    /// is taken up again.
+    ///
+    /// The turn ends here, cut: the next prompt opens a turn of its own rather
+    /// than joining one a process that is gone was running, and nothing the
+    /// turn had running reports an end after this. What the turn is timed to
+    /// is the event before this one, since nothing happened in it after that.
+    SessionLeft,
 
     /// A tool call is waiting on the operator.
     PermissionRequest {
@@ -606,6 +952,18 @@ pub enum Event {
         /// the call acts on nothing.
         #[serde(default)]
         target: Option<String>,
+        /// What the call would do, where the backend knows the tool well
+        /// enough to read it out of `input`. `None` leaves `input` to be
+        /// shown as it is.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        proposal: Option<Proposal>,
+        /// Why the backend asked, in its own words, where it said: a command
+        /// it could not check, a path outside the project. Shown with the
+        /// question, since a call that looks routine is not one the backend
+        /// would have stopped on. `None` is that it gave none, which is no
+        /// claim that the call is routine.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
         /// The sub-agent whose call is waiting, or `None` for the session's
         /// own. It says who is asking and nothing more: a standing answer is
         /// about the tool and its target, whichever agent asked.
@@ -626,6 +984,14 @@ pub enum Event {
         message: Option<String>,
     },
 
+    /// The backend stopped asking about a call: the turn it gated was
+    /// interrupted before an answer came. An answer given after this reaches
+    /// nothing, so the question is not left open.
+    PermissionWithdrawn {
+        /// The call that had been gated.
+        id: ToolCallId,
+    },
+
     /// How tool calls are gated: the mode a session started under, or the one
     /// the operator moved it to.
     ModeSelected {
@@ -638,10 +1004,28 @@ pub enum Event {
     /// A backend applies it from its next turn and says what it ended up on
     /// with a fresh [`Event::SessionMeta`], which may name the model
     /// differently from the way it was asked for — an alias resolves to an id.
-    /// Until then this is the honest answer to what the session is on.
+    /// Until then, or until the backend refuses it with
+    /// [`Event::ModelRefused`], this is the honest answer to what the session
+    /// is on.
     ModelSelected {
         /// The model, as the operator named it.
         model: String,
+    },
+
+    /// The backend refused the model the operator last chose, so the session
+    /// is still on the one the backend last reported with a
+    /// [`Event::SessionMeta`].
+    ///
+    /// Without it the operator's choice would stand until the next
+    /// `SessionMeta`, and the session would be shown, priced and measured
+    /// against a model that is not running.
+    ModelRefused {
+        /// The model the backend is running, where it has said: the one a
+        /// change it took before this one put it on, which a later
+        /// `SessionMeta` has not yet confirmed. `None` goes back to what the
+        /// last `SessionMeta` reported, or to no model where there was none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        back_to: Option<String>,
     },
 
     /// A tool call changed a file, and by how many lines.
@@ -678,6 +1062,10 @@ pub enum Event {
         /// file as it is now.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         hunks: Vec<crate::diff::Hunk>,
+        /// Whose file it is: the project's, or one of the agent's own notes,
+        /// which the session's figures leave out.
+        #[serde(default, skip_serializing_if = "ChangeScope::is_project")]
+        scope: ChangeScope,
     },
 
     /// A shell command the session ran was a test run, and this is what it
@@ -720,33 +1108,19 @@ pub enum Event {
         failures: Vec<crate::test_run::FailedTests>,
     },
 
-    /// A structured `decide` record: why a plan, a model, a file or a declined
-    /// scope was chosen. Surfaced in the changes pane and exported into commit
-    /// and PR bodies.
-    Decision {
-        /// One line, as it appears in the pane.
-        summary: String,
-        /// The reasoning, where there is more of it than fits on one line.
-        rationale: Option<String>,
-        /// What was considered and rejected.
-        rejected: Vec<String>,
-    },
-
-    /// A restore point, taken before an edit so that a rewind has somewhere to
-    /// land.
-    Checkpoint {
-        /// Names the point a rewind returns to.
-        id: CheckpointId,
-        /// What was about to happen, for the undo list.
-        label: String,
-    },
-
     /// A sub-agent started.
     AgentSpawn {
         /// The new agent.
         id: AgentId,
         /// The agent that spawned it, if it was not the session itself.
         parent: Option<AgentId>,
+        /// The kind of agent it was asked to be — `Explore`,
+        /// `general-purpose`, an agent the operator defined — where the call
+        /// that spawned it named one. The shell names the agent's rows by it.
+        /// `None` where the call named none, and in a record written before
+        /// the kind was kept apart, whose label still carries it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kind: Option<String>,
         /// What it was spawned to do, for the Activity pane.
         label: String,
     },
@@ -798,6 +1172,48 @@ pub enum Event {
         commands: Vec<SlashCommand>,
     },
 
+    /// Every MCP server the backend has configured for the session, as they
+    /// now stand. Replaces the list before it whole, as [`Event::Commands`]
+    /// does.
+    McpServers {
+        /// The servers, in the backend's order.
+        servers: Vec<McpServer>,
+    },
+
+    /// Every model the backend offers to run the session on, as it now
+    /// stands. Replaces the list before it whole, as [`Event::Commands`] does.
+    Models {
+        /// The models, in the backend's order.
+        models: Vec<ModelOption>,
+    },
+
+    /// The backend's own total for a turn is not what the turn's messages
+    /// added up to.
+    ///
+    /// Every pane derives its figures from the per-message records, so a
+    /// difference between them and the backend's figure is something the
+    /// operator has to be able to see, and trace: the event carries what a
+    /// report of it needs — the backend's own name for the conversation and
+    /// the messages that never said what they finished at. Which turn it was
+    /// and when are where the event stands in the session. Whatever the
+    /// backend reported beyond the messages is not added to any total by this
+    /// event; where the backend bills it, the turn's bill already carries it.
+    TurnTotalDiffers {
+        /// What the turn's messages reported, summed.
+        per_message: TokenCounts,
+        /// What the backend reported for the turn as a whole.
+        reported: TokenCounts,
+        /// The backend's own id for the conversation, where it named one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        backend_session: Option<String>,
+        /// The turn's messages whose stream ended before it reported the
+        /// count the message finished at, each as the backend names it.
+        /// Counted from an earlier figure where the backend gave one, and not
+        /// at all where it gave none.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        unfinished: Vec<String>,
+    },
+
     /// Something happened in the session that is neither a message nor a
     /// failure: a context compaction, a retried request, a backend saying what
     /// it is doing. Kept in the stream rather than shown and forgotten,
@@ -808,6 +1224,12 @@ pub enum Event {
         message: String,
     },
 
+    /// The operator pressed a key after something a catch-up counts had
+    /// happened: what the next one is counted from ([`crate::catch_up`]),
+    /// kept with the session so that one taken up again tells them what
+    /// happened after they last looked, even where the process that ran it
+    /// was ended while they were away.
+    Looked,
     /// Something went wrong.
     Error {
         /// The message, as it will be shown.
@@ -819,6 +1241,105 @@ pub enum Event {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_change_to_the_project_is_written_as_before_and_one_to_the_agents_notes_says_so() {
+        let change = |scope| Event::FileChange {
+            path: "a.md".to_owned(),
+            added: Some(1),
+            removed: Some(0),
+            hunks: Vec::new(),
+            scope,
+        };
+        let project = serde_json::to_string(&change(ChangeScope::Project))
+            .expect("the temporary directory is writable");
+        assert_eq!(
+            project,
+            r#"{"type":"file_change","path":"a.md","added":1,"removed":0}"#
+        );
+        let read: Event = serde_json::from_str(&project).expect("read back");
+        assert_eq!(read, change(ChangeScope::Project));
+
+        let memory = serde_json::to_string(&change(ChangeScope::AgentMemory))
+            .expect("the temporary directory is writable");
+        assert!(memory.contains(r#""scope":"agent_memory""#), "{memory}");
+        let read: Event = serde_json::from_str(&memory).expect("read back");
+        assert_eq!(read, change(ChangeScope::AgentMemory));
+    }
+
+    #[test]
+    fn a_window_stored_with_a_level_that_was_not_a_number_reads_back_as_none() {
+        let stored = r#"{"five_hour":{"utilization":null,"resets_at":1},"seven_day":{"utilization":0.2,"resets_at":null},"using_overage":false}"#;
+
+        let windows: UsageWindows =
+            serde_json::from_str(stored).expect("a stored record reads back");
+
+        assert_eq!(windows.five_hour, None);
+        assert_eq!(
+            windows.seven_day,
+            Some(UsageWindow {
+                utilization: 0.2,
+                resets_at: None
+            })
+        );
+    }
+
+    #[test]
+    fn a_window_stored_before_overage_was_kept_reads_it_as_unreported() {
+        let stored = r#"{"five_hour":null,"seven_day":null,"using_overage":true}"#;
+        let windows: UsageWindows =
+            serde_json::from_str(stored).expect("a stored record reads back");
+        assert_eq!(windows.overage, Overage::Unreported);
+        assert!(windows.using_overage);
+    }
+
+    #[test]
+    fn a_refusal_of_extra_usage_and_its_reason_survive_the_store() {
+        for overage in [
+            Overage::Unreported,
+            Overage::Allowed,
+            Overage::Refused(OverageRefusal::OutOfCredits),
+            Overage::Refused(OverageRefusal::Unstated),
+        ] {
+            let windows = UsageWindows {
+                five_hour: None,
+                seven_day: None,
+                using_overage: false,
+                overage,
+            };
+            let stored =
+                serde_json::to_string(&Event::UsageWindows(windows)).expect("an event is written");
+            let read: Event = serde_json::from_str(&stored).expect("and read back");
+            assert_eq!(read, Event::UsageWindows(windows), "{stored}");
+        }
+    }
+
+    #[test]
+    fn a_window_whose_level_is_not_a_number_survives_the_store() {
+        let windows = UsageWindows {
+            five_hour: Some(UsageWindow {
+                utilization: f64::NAN,
+                resets_at: Some(1),
+            }),
+            seven_day: None,
+            using_overage: true,
+            overage: crate::event::Overage::Unreported,
+        };
+
+        let stored =
+            serde_json::to_string(&Event::UsageWindows(windows)).expect("an event is written");
+        let read: Event = serde_json::from_str(&stored).expect("and read back");
+
+        assert_eq!(
+            read,
+            Event::UsageWindows(UsageWindows {
+                five_hour: None,
+                seven_day: None,
+                using_overage: true,
+                overage: crate::event::Overage::Unreported,
+            })
+        );
+    }
     use super::*;
 
     #[test]
@@ -828,12 +1349,12 @@ mod tests {
             output: 20,
             cache_read: 30,
             cache_write: 40,
-            cache_write_1h: 0,
+            cache_write_1h: Some(0),
             reasoning: 50,
             model: "opus-5".to_owned(),
             cost_usd: None,
-            cost_basis: None,
-            settles_model: false,
+            settles_model: Some(false),
+            fast: false,
         };
         assert_eq!(usage.tokens(), 150);
     }
@@ -845,39 +1366,53 @@ mod tests {
             output: 20,
             cache_read: 30,
             cache_write: 40,
-            cache_write_1h: 25,
+            cache_write_1h: Some(25),
             reasoning: 50,
             model: "opus-5".to_owned(),
             cost_usd: None,
-            cost_basis: None,
-            settles_model: false,
+            settles_model: Some(false),
+            fast: false,
         };
         assert_eq!(usage.tokens(), 150);
     }
 
     #[test]
-    fn a_usage_record_without_one_hour_writes_reads_them_as_zero() {
+    fn a_usage_record_written_before_settlement_was_kept_reads_as_unsaid() {
+        let json = r#"{"type":"usage","input":1,"output":2,"cache_read":3,"cache_write":4,"reasoning":0,"model":"opus-5","cost_usd":0.5}"#;
+        let Event::Usage(old) = serde_json::from_str(json).expect("an old record reads") else {
+            panic!("a usage record read as something else");
+        };
+        assert_eq!(old.settles_model, None);
+
+        let said = json.replace(
+            "\"cost_usd\":0.5",
+            "\"cost_usd\":0.5,\"settles_model\":false",
+        );
+        let Event::Usage(said) = serde_json::from_str(&said).expect("a new record reads") else {
+            panic!("a usage record read as something else");
+        };
+        assert_eq!(said.settles_model, Some(false));
+
+        // Written and read back, an unsaid settlement stays unsaid rather than
+        // becoming a `false` the producer never wrote.
+        let line = serde_json::to_string(&Event::Usage(old)).expect("it serializes");
+        let Event::Usage(read) = serde_json::from_str(&line).expect("it reads back") else {
+            panic!("a usage record read back as something else: {line}");
+        };
+        assert_eq!(read.settles_model, None, "{line}");
+    }
+
+    #[test]
+    fn a_usage_record_without_one_hour_writes_reads_the_split_as_unreported() {
         let json = r#"{"type":"usage","input":1,"output":2,"cache_read":3,"cache_write":4,"reasoning":0,"model":"opus-5","cost_usd":null}"#;
         let event: Event = serde_json::from_str(json).expect("a record from before the field");
         let Event::Usage(usage) = event else {
             panic!("the record is a usage record: {event:?}");
         };
         assert_eq!(usage.cache_write, 4);
-        assert_eq!(usage.cache_write_1h, 0);
-    }
-
-    #[test]
-    fn a_record_from_before_the_basis_field_reads_as_unlabelled() {
-        let json = r#"{"type":"usage","input":1,"output":2,"cache_read":3,"cache_write":4,"reasoning":0,"model":"opus-5","cost_usd":0.25}"#;
-        let event: Event = serde_json::from_str(json).expect("a record from before the field");
-        let Event::Usage(usage) = event else {
-            panic!("the record is a usage record: {event:?}");
-        };
-        assert_eq!(usage.cost_usd, Some(0.25));
-        assert_eq!(
-            usage.cost_basis, None,
-            "a cost whose producer said nothing about it was read as a measurement"
-        );
+        assert_eq!(usage.cache_write_1h, None);
+        let line = serde_json::to_string(&Event::Usage(usage)).expect("a record serializes");
+        assert!(!line.contains("cache_write_1h"), "{line}");
     }
 
     #[test]
@@ -968,6 +1503,8 @@ mod tests {
             tool: "Bash".to_owned(),
             input: "{}".to_owned(),
             target: Some("ls".to_owned()),
+            proposal: None,
+            reason: None,
             agent,
         };
         for agent in [Some(AgentId::new("toolu_a")), None] {
@@ -1011,26 +1548,21 @@ mod tests {
         );
     }
 
+    /// Records once said whether their cost was billed or derived from list
+    /// prices, which nothing read. A store holding them still opens.
     #[test]
-    fn a_plan_backends_cost_survives_the_round_trip_labelled() {
-        let usage = Usage {
-            input: 6,
-            output: 305,
-            cache_read: 84_805,
-            cache_write: 16_178,
-            cache_write_1h: 16_178,
-            reasoning: 0,
-            model: "claude-sonnet-5".to_owned(),
-            cost_usd: Some(0.084_735),
-            cost_basis: Some(CostBasis::ApiEquivalent),
-            settles_model: false,
-        };
-
-        let line = serde_json::to_string(&Event::Usage(usage.clone())).expect("a usage record");
-        let read: Event = serde_json::from_str(&line).expect("what was written reads back");
-
-        assert_eq!(read, Event::Usage(usage));
-        assert!(line.contains(r#""cost_basis":"api_equivalent""#), "{line}");
+    fn a_usage_record_written_with_a_cost_basis_still_reads() {
+        for basis in ["null", r#""api_equivalent""#, r#""measured""#] {
+            let json = format!(
+                r#"{{"type":"usage","input":1,"output":2,"cache_read":3,"cache_write":4,"reasoning":0,"model":"opus-5","cost_usd":0.25,"cost_basis":{basis}}}"#
+            );
+            let event: Event = serde_json::from_str(&json).expect("a record with the old field");
+            let Event::Usage(usage) = event else {
+                panic!("the record is a usage record: {event:?}");
+            };
+            assert_eq!(usage.cost_usd, Some(0.25), "{basis}");
+            assert_eq!(usage.tokens(), 10, "{basis}");
+        }
     }
 
     #[test]
@@ -1062,6 +1594,7 @@ mod tests {
                 resets_at: Some(1_790_118_000),
             }),
             using_overage: false,
+            overage: crate::event::Overage::Unreported,
         });
 
         let line = serde_json::to_string(&event).expect("an event serializes");
@@ -1100,14 +1633,20 @@ mod tests {
             output: 1,
             cache_read: 0,
             cache_write: 0,
-            cache_write_1h: 0,
+            cache_write_1h: Some(0),
             reasoning: 0,
             model: "gpt-5-codex".to_owned(),
             cost_usd: None,
-            cost_basis: None,
-            settles_model: false,
+            settles_model: Some(false),
+            fast: false,
         };
-        assert!(usage.cost_usd.is_none());
+        // Written and read back, as the store does: an unreported cost must
+        // not come back as a zero, which would read as measured.
+        let line = serde_json::to_string(&Event::Usage(usage)).expect("it serializes");
+        let Event::Usage(read) = serde_json::from_str(&line).expect("it reads back") else {
+            panic!("a usage record read back as something else: {line}");
+        };
+        assert_eq!(read.cost_usd, None, "{line}");
     }
 
     #[test]
@@ -1142,11 +1681,26 @@ mod tests {
     }
 
     #[test]
+    fn a_prompt_that_reached_no_backend_survives_the_round_trip_under_a_type_of_its_own() {
+        let event = Event::PromptNotSent {
+            text: "hello".to_owned(),
+        };
+        let line = serde_json::to_string(&event).expect("an event serializes");
+        assert_eq!(line, r#"{"type":"prompt_not_sent","text":"hello"}"#);
+        let read: Event = serde_json::from_str(&line).expect("what was written reads back");
+        assert_eq!(read, event);
+    }
+
+    #[test]
     fn a_chosen_mode_and_model_survive_the_round_trip() {
         for event in [
             Event::ModeSelected { mode: Mode::Plan },
             Event::ModelSelected {
                 model: "haiku".to_owned(),
+            },
+            Event::ModelRefused { back_to: None },
+            Event::ModelRefused {
+                back_to: Some("opus".to_owned()),
             },
         ] {
             let line = serde_json::to_string(&event).expect("an event serializes");
@@ -1201,6 +1755,8 @@ mod tests {
             summary: None,
             exit_code: Some(2),
             error: Some("no such file".to_owned()),
+            command: None,
+            untrimmed: None,
         };
         let line = serde_json::to_string(&ended).expect("an event serializes");
         let read: Event = serde_json::from_str(&line).expect("what was written reads back");
@@ -1230,5 +1786,46 @@ mod tests {
         assert!(PermissionDecision::AllowAlways.allowed());
         assert!(PermissionDecision::AllowByRule.allowed());
         assert!(!PermissionDecision::Deny.allowed());
+    }
+
+    #[test]
+    fn an_mcp_server_recorded_before_its_detail_was_asked_for_reads_back_as_written() {
+        let plain = r#"{"type":"mcp_servers","servers":[{"name":"notes","status":"connected","source":"dynamic","tools":["search"]}]}"#;
+        let read: Event = serde_json::from_str(plain).expect("an older record reads");
+        let Event::McpServers { servers } = &read else {
+            panic!("the record is a server list: {read:?}");
+        };
+        let [notes] = servers.as_slice() else {
+            panic!("one server: {servers:?}");
+        };
+        assert_eq!(
+            (
+                &notes.scope,
+                &notes.error,
+                &notes.endpoint,
+                &notes.reports_as
+            ),
+            (&None, &None, &None, &None)
+        );
+        assert_eq!(notes.origin(), Some("dynamic"));
+        assert_eq!(
+            serde_json::to_string(&read).expect("an event serializes"),
+            plain
+        );
+    }
+
+    #[test]
+    fn an_mcp_servers_scope_is_its_origin_over_the_source_it_was_listed_under() {
+        let server = McpServer {
+            name: "notes".to_owned(),
+            status: McpStatus::Failed,
+            source: Some("dynamic".to_owned()),
+            tools: Vec::new(),
+            scope: Some("project".to_owned()),
+            error: None,
+            endpoint: None,
+            reports_as: None,
+        };
+        assert_eq!(server.origin(), Some("project"));
     }
 }

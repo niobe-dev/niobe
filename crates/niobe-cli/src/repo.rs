@@ -6,13 +6,14 @@
 //! Read here rather than in the TUI, which has no business touching the
 //! filesystem.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime};
 
 use niobe_store::Store;
-use niobe_tui::app::{Commit, Repo, WorkingFile};
+use niobe_tui::app::{Repo, WorkingFile};
 use niobe_tui::watch::Watch;
 
 /// The directory in a repository that holds Niobe's own files.
@@ -62,6 +63,12 @@ pub fn config_path(root: &Path) -> PathBuf {
     root.join(DIR).join(niobe_config::FILE_NAME)
 }
 
+/// Where a session under `trim = true` keeps the whole outputs it trimmed,
+/// and the settings it starts the `claude` CLI with.
+pub fn trim_dir(root: &Path) -> PathBuf {
+    root.join(DIR).join(crate::trim::DIR)
+}
+
 /// Where the session store of `root` is, whether or not it exists yet.
 pub fn store_path(root: &Path) -> PathBuf {
     root.join(DIR).join(STORE_FILE)
@@ -76,22 +83,356 @@ pub fn open_or_create_store(root: &Path) -> Result<Store, String> {
         format!("cannot open the session store at {}: {e}", path.display())
     };
 
-    std::fs::create_dir_all(&dir).map_err(|e| failed(&e))?;
+    store_stays_inside(root)?;
+    private_dir(&dir).map_err(|e| failed(&e))?;
     let ignore = dir.join(".gitignore");
     if !ignore.exists() {
         std::fs::write(&ignore, GITIGNORE).map_err(|e| failed(&e))?;
     }
-    Store::open(&path).map_err(|e| failed(&e))
+    keep_store_unpublished(root)?;
+    private_file(&path).map_err(|e| failed(&e))?;
+    let store = Store::open(&path).map_err(|e| failed(&e))?;
+    keep_side_files_private(root);
+    Ok(store)
+}
+
+/// The mode the session store and its side files are kept in: every prompt
+/// and every tool output of every session is in them, including whatever a
+/// tool read — an `.env`, a key — so they are the operator's alone, as the
+/// CLI keeps its own transcripts.
+#[cfg(unix)]
+const PRIVATE_FILE: u32 = 0o600;
+
+/// The mode of the directory the store is in, for the same reason.
+#[cfg(unix)]
+const PRIVATE_DIR: u32 = 0o700;
+
+/// Makes `dir` if it is not there, readable by the operator alone, and takes
+/// the other users' access away from one that is, where the mount lets it.
+///
+/// The config and the ignore file in it keep the mode any file would have:
+/// they are meant to be committed, and a directory's own mode is not.
+fn private_dir(dir: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(PRIVATE_DIR)
+            .create(dir)?;
+        let _ = tighten(dir, PRIVATE_DIR);
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    std::fs::create_dir_all(dir)
+}
+
+/// Creates the store's file with a private mode before SQLite opens it, since
+/// SQLite gives the side files it makes the mode of the store, and takes the
+/// other users' access away from a store made before this was.
+fn private_file(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // Created only where there is none: opening a store that is there to
+        // write it would turn SQLite's own report of a read-only store into
+        // a bare refusal.
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(PRIVATE_FILE)
+            .open(path)
+        {
+            Ok(_) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                // On a mount that refuses the change the store is still
+                // opened, as it is read, and SQLite says what it can do.
+                let _ = tighten(path, PRIVATE_FILE);
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(())
+    }
+}
+
+/// Takes away from `path` every permission `private` does not grant, leaving
+/// the rest of its mode as it was.
+#[cfg(unix)]
+fn tighten(path: &Path, private: u32) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::metadata(path)?.permissions().mode();
+    if mode & 0o777 & !private == 0 {
+        return Ok(());
+    }
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode & private))
+}
+
+/// Side files a store made before its mode was tightened keep the mode they
+/// were made with until SQLite next deletes them; they are tightened here.
+///
+/// A side file that cannot be tightened — one another account owns, say —
+/// does not stop the session: the store itself already is private, and the
+/// session is not the place to settle who owns what beside it.
+fn keep_side_files_private(root: &Path) {
+    #[cfg(unix)]
+    for suffix in STORE_SIDE_FILES {
+        let mut name = store_path(root).into_os_string();
+        name.push(suffix);
+        let path = PathBuf::from(name);
+        if path.exists() {
+            let _ = tighten(&path, PRIVATE_FILE);
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = root;
 }
 
 /// Opens the session store of `root` if one has been created, and never
 /// creates one: listing or resuming sessions leaves a directory as it was.
 pub fn open_existing_store(root: &Path) -> Result<Option<Store>, String> {
     let path = store_path(root);
+    store_stays_inside(root)?;
     if !path.exists() {
         return Ok(None);
     }
-    Store::open(&path)
+    // A store made before its mode was kept private is made so here too; one
+    // that cannot be — on a mount that refuses the change — is still opened.
+    #[cfg(unix)]
+    {
+        let _ = tighten(&root.join(DIR), PRIVATE_DIR);
+        let _ = tighten(&path, PRIVATE_FILE);
+    }
+    let store = Store::open(&path)
+        .map_err(|e| format!("cannot open the session store at {}: {e}", path.display()))?;
+    keep_side_files_private(root);
+    Ok(Some(store))
+}
+
+/// The files beside the store that SQLite creates and writes at the store's
+/// path plus a suffix: its write-ahead log, its shared-memory index and its
+/// rollback journal.
+const STORE_SIDE_FILES: [&str; 3] = ["-wal", "-shm", "-journal"];
+
+/// Refuses a session store of the repository rooted at `root` that would be
+/// written through a link to somewhere else.
+///
+/// Niobe creates `.niobe`, its ignore file and the store itself, and writes
+/// every prompt and tool output of a session into the store. A cloned
+/// repository chooses its links, so one committed at any of those names would
+/// choose where that goes — a tracked file the next push publishes, or a file
+/// of the operator's own outside the checkout. A link is followed only where
+/// it leads to something that exists inside the repository; one that leads
+/// nowhere is refused too, because writing through it creates a file where
+/// the link says.
+pub fn store_stays_inside(root: &Path) -> Result<(), String> {
+    let dir = root.join(DIR);
+    let store = store_path(root);
+    let mut paths = vec![dir.clone(), dir.join(".gitignore"), store.clone()];
+    paths.extend(STORE_SIDE_FILES.iter().map(|suffix| {
+        let mut name = store.clone().into_os_string();
+        name.push(suffix);
+        PathBuf::from(name)
+    }));
+    let real_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    paths
+        .iter()
+        .try_for_each(|path| link_stays_inside(&real_root, path))?;
+    store_is_not_tracked(root)
+}
+
+/// The store's paths relative to the repository root, as git is asked about
+/// them: the store and the side files SQLite makes beside it.
+fn store_pathspecs() -> Vec<String> {
+    std::iter::once(String::new())
+        .chain(STORE_SIDE_FILES.iter().map(|suffix| (*suffix).to_owned()))
+        .map(|suffix| format!("{DIR}/{STORE_FILE}{suffix}"))
+        .collect()
+}
+
+/// Runs `git` in `root` for what it answers by its exit status. The paths it
+/// is given are constants with no pattern character in them.
+///
+/// `None` where git cannot be run or `root` is not a work tree of one: there
+/// is then nothing to publish the store through, and not knowing is not a
+/// reason to refuse a session.
+fn git_status(root: &Path, args: &[&str]) -> Option<(i32, String)> {
+    if !root.join(".git").exists() {
+        return None;
+    }
+    let output = reading(root).args(args).output().ok()?;
+    Some((
+        output.status.code()?,
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+    ))
+}
+
+/// Refuses a store that git tracks.
+///
+/// What a repository tracks arrived with the clone or will leave with the
+/// next push. A store committed there holds sessions that are not the
+/// operator's, which `niobe sessions`, the prompt history and the plan usage
+/// windows would show as theirs, and every session recorded into it would be
+/// a change to a tracked file whose content is every prompt and tool output.
+fn store_is_not_tracked(root: &Path) -> Result<(), String> {
+    let mut args = vec!["ls-files", "-z", "--"];
+    let specs = store_pathspecs();
+    args.extend(specs.iter().map(String::as_str));
+    let Some((0, listed)) = git_status(root, &args) else {
+        return Ok(());
+    };
+    match listed.split('\0').find(|name| !name.is_empty()) {
+        None => Ok(()),
+        Some(tracked) => Err(format!(
+            "{tracked} is tracked by git: sessions recorded into it would be published by the \
+             next push, and the ones already in it did not come from you. Niobe will not use \
+             it; remove it from the repository with `git rm --cached {tracked}`"
+        )),
+    }
+}
+
+/// Makes sure git does not offer the store for a commit, whatever the
+/// repository's own ignore files say.
+///
+/// A `.niobe/.gitignore` that arrived with the clone may ignore nothing, and
+/// niobe writes its own only where there is none. The rule goes into the
+/// repository's `info/exclude` otherwise, which is the operator's alone and
+/// is never committed or cloned. A repository where it still is not ignored
+/// is refused: the store would be one `git add -A` from publication.
+fn keep_store_unpublished(root: &Path) -> Result<(), String> {
+    let store = format!("{DIR}/{STORE_FILE}");
+    let ignored = |root: &Path| git_status(root, &["check-ignore", "-q", "--", &store]);
+    if !matches!(ignored(root), Some((1, _))) {
+        return Ok(());
+    }
+    let exclude = git_status(root, &["rev-parse", "--git-path", "info/exclude"])
+        .filter(|(code, _)| *code == 0)
+        .map(|(_, path)| root.join(path.trim_end()))
+        .ok_or_else(|| not_ignored(&store))?;
+    let written = (|| {
+        if let Some(dir) = exclude.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&exclude)?;
+        use std::io::Write as _;
+        // A first line of its own: the file may not end in a newline.
+        write!(
+            file,
+            "\n# Written by niobe: the session store is not for commits.\n"
+        )?;
+        write!(file, "/{store}\n/{store}-*\n")
+    })();
+    if written.is_err() || !matches!(ignored(root), Some((0, _))) {
+        return Err(not_ignored(&store));
+    }
+    Ok(())
+}
+
+/// The refusal for a store that git does not ignore and niobe could not make
+/// it ignore.
+fn not_ignored(store: &str) -> String {
+    format!(
+        "{store} is not ignored by git, and niobe could not add it to .git/info/exclude: \
+         a session recorded there would be one `git add -A` from being published. Add \
+         `{store}*` to an ignore file of yours and start again"
+    )
+}
+
+/// Whether `path`, if it is a link, leads to something that exists under
+/// `real_root`, which is already canonical.
+fn link_stays_inside(real_root: &Path, path: &Path) -> Result<(), String> {
+    let is_link = std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink());
+    if !is_link {
+        return Ok(());
+    }
+    match std::fs::canonicalize(path) {
+        Ok(target) if target.starts_with(real_root) => Ok(()),
+        Ok(target) => Err(format!(
+            "{} links to {}, outside the repository; niobe keeps its session store only \
+             inside it",
+            path.display(),
+            target.display()
+        )),
+        Err(_) => Err(format!(
+            "{} is a link to nothing; niobe does not create its session store through a \
+             repository's links",
+            path.display()
+        )),
+    }
+}
+
+/// Refuses a file of the repository rooted at `root` that is a link to one
+/// outside it, whether the file is the link or a directory above it is.
+///
+/// A cloned repository chooses its links, so one there would choose which of
+/// the operator's own files is read — and quoted back, in the error that says
+/// it is not a config. A path that is not there, a link that leads nowhere
+/// and one to something that is not a regular file — which is never read —
+/// are left to the read that follows to report.
+pub fn inside(root: &Path, path: &Path) -> Result<(), String> {
+    let Ok(target) = std::fs::canonicalize(path) else {
+        return Ok(());
+    };
+    if !target.is_file() {
+        return Ok(());
+    }
+    let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    match target.starts_with(&root) {
+        true => Ok(()),
+        false => Err(format!(
+            "{} links to {}, outside the repository; niobe reads a repository's config \
+             only from inside it",
+            path.display(),
+            target.display()
+        )),
+    }
+}
+
+/// Refuses to write the file `path` of the repository rooted at `root` where
+/// the write would land outside it: the file is a link to one outside, or
+/// the directory it would be created in is.
+///
+/// [`inside`] is checked when a session starts; this is checked at each
+/// write, because a link can be planted while the session runs — by a shell
+/// command the operator allowed, or a checkout — and a rule written through
+/// it would land in a file of the operator's own, where it holds in every
+/// repository and no trust gates it. The deepest part of `path` that exists
+/// is what is resolved, since a file not there yet is created in it.
+pub fn writes_inside(root: &Path, path: &Path) -> Result<(), String> {
+    let Some(existing) = path.ancestors().find(|part| part.exists()) else {
+        return Ok(());
+    };
+    let target = std::fs::canonicalize(existing)
+        .map_err(|e| format!("cannot resolve {}: {e}", existing.display()))?;
+    let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    match target.starts_with(&root) {
+        true => Ok(()),
+        false => Err(format!(
+            "{} leads to {}, outside the repository; niobe writes a repository's config \
+             only inside it",
+            path.display(),
+            target.display()
+        )),
+    }
+}
+
+/// Opens the session store of `root` to read it, if one has been created:
+/// one that cannot be written, as on a read-only mount, is read as it is. See
+/// [`Store::open_to_read`].
+pub fn read_existing_store(root: &Path) -> Result<Option<Store>, String> {
+    let path = store_path(root);
+    store_stays_inside(root)?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    Store::open_to_read(&path)
         .map(Some)
         .map_err(|e| format!("cannot open the session store at {}: {e}", path.display()))
 }
@@ -104,7 +445,10 @@ fn git_dir(dot_git: &Path) -> Option<PathBuf> {
     if dot_git.is_dir() {
         return Some(dot_git.to_path_buf());
     }
-    let pointer = std::fs::read_to_string(dot_git).ok()?;
+    // Read as config files are — no waiting on a FIFO, a regular file only,
+    // and only so much of it — since a tree that did not come from a clone
+    // can hold a `.git` that is anything.
+    let pointer = niobe_config::read::text(dot_git).ok()?;
     let target = Path::new(pointer.trim().strip_prefix("gitdir:")?.trim());
     if target.is_absolute() {
         return Some(target.to_path_buf());
@@ -120,7 +464,7 @@ fn git_dir(dot_git: &Path) -> Option<PathBuf> {
 fn git_branch(from: &Path) -> Option<String> {
     from.ancestors().find_map(|dir| {
         let head = git_dir(&dir.join(".git"))?.join("HEAD");
-        let contents = std::fs::read_to_string(head).ok()?;
+        let contents = niobe_config::read::text(&head).ok()?;
         let head = contents.trim();
         Some(match head.strip_prefix("ref: refs/heads/") {
             Some(branch) => branch.to_owned(),
@@ -143,27 +487,6 @@ const REFRESH: Duration = Duration::from_secs(2);
 /// where a read takes a second is read every twenty seconds rather than every
 /// two. A pane is not worth a core, and the operator's own build is.
 const IDLE_SHARE: u32 = 20;
-
-/// Where the session's commits are counted from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Since<'a> {
-    /// The session has made no commits yet, so none are listed. The first read
-    /// of a session, which is what the rest are measured against.
-    Nothing,
-    /// The commit the session started on: everything after it is its own.
-    Commit(&'a str),
-    /// The repository had no commits when the session started, so every commit
-    /// in it is one the session made.
-    Everything,
-}
-
-/// One read of the repository: what the shell shows, and the commit `HEAD` was
-/// on, which the next reads measure the session's own commits from.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Read {
-    repo: Repo,
-    head: Option<String>,
-}
 
 /// Reads the repository a session is running in, on a thread of its own.
 ///
@@ -202,14 +525,13 @@ impl Watch for Watcher {
 /// The name comes from `cwd` — the directory the operator opened the session
 /// in — and everything else from the repository that encloses it, so a session
 /// started in a subdirectory reports the whole tree it is part of.
-pub fn watch(cwd: &Path) -> Watcher {
+pub fn watch(root: &Path) -> Watcher {
     let (reads, from_reads) = channel();
     let (nudge, nudged) = channel();
-    let root = root(cwd);
-    let here = cwd.to_path_buf();
-    let name = describe(cwd).name;
+    let root = root.to_path_buf();
+    let name = describe(&root).name;
 
-    std::thread::spawn(move || keep_reading(&root, &here, &name, &reads, &nudged));
+    std::thread::spawn(move || keep_reading(&root, &name, &reads, &nudged));
 
     Watcher {
         reads: from_reads,
@@ -222,163 +544,270 @@ pub fn watch(cwd: &Path) -> Watcher {
 /// A read that failed sends nothing, which is what leaves the last read that
 /// worked on screen: an emptied pane and a repository with nothing in it would
 /// look the same, and only one of them would be true.
-fn keep_reading(root: &Path, here: &Path, name: &str, reads: &Sender<Repo>, nudged: &Receiver<()>) {
-    // The commit the session started on, taken from the first read that
-    // worked. `Some(None)` is a repository that had no commits then.
-    let mut started_on: Option<Option<String>> = None;
+fn keep_reading(root: &Path, name: &str, reads: &Sender<Repo>, nudged: &Receiver<()>) {
     let mut last: Option<Repo> = None;
+    let mut counts = Counts::default();
+    // Whether this read was asked for. One that was is sent even where the
+    // tree is as it was: the shell asked so as to know the tree as of a
+    // moment, and a read that says nothing leaves it not knowing.
+    let mut asked = false;
 
     loop {
-        let since = match &started_on {
-            None => Since::Nothing,
-            Some(None) => Since::Everything,
-            Some(Some(oid)) => Since::Commit(oid),
-        };
-
         let began = Instant::now();
-        if let Ok(read) = read(root, here, name, since) {
-            started_on.get_or_insert(read.head);
-            if last.as_ref() != Some(&read.repo) {
-                if reads.send(read.repo.clone()).is_err() {
-                    return;
-                }
-                last = Some(read.repo);
+        if let Ok(repo) = read(root, name, &mut counts)
+            && (asked || !last.as_ref().is_some_and(|last| unchanged(last, &repo)))
+        {
+            if reads.send(repo.clone()).is_err() {
+                return;
             }
+            last = Some(repo);
         }
         let idle = REFRESH.max(began.elapsed().saturating_mul(IDLE_SHARE));
 
-        match nudged.recv_timeout(idle) {
+        asked = match nudged.recv_timeout(idle) {
             // A turn changes many files and every one of them asks; they are
             // drained into the single read that follows.
-            Ok(()) => while nudged.try_recv().is_ok() {},
-            Err(RecvTimeoutError::Timeout) => {}
+            Ok(()) => {
+                while nudged.try_recv().is_ok() {}
+                true
+            }
+            Err(RecvTimeoutError::Timeout) => false,
             Err(RecvTimeoutError::Disconnected) => return,
-        }
+        };
     }
 }
 
-/// Everything the shell shows about the repository at `root`, in one pass,
-/// for a session running in `here`.
-fn read(root: &Path, here: &Path, name: &str, since: Since<'_>) -> Result<Read, String> {
+/// Whether `repo` holds what `last` did, whenever each was read.
+fn unchanged(last: &Repo, repo: &Repo) -> bool {
+    Repo {
+        began: repo.began,
+        ..last.clone()
+    } == *repo
+}
+
+/// The files the working tree of the repository at `root` holds changed or
+/// untracked, as git names them from the root, read once; `None` where git
+/// cannot read it.
+pub fn uncommitted(root: &Path) -> Option<Vec<String>> {
+    let repo = read(root, "", &mut Counts::default()).ok()?;
+    Some(repo.working.into_iter().map(|file| file.path).collect())
+}
+
+/// Everything the shell shows about the repository at `root`, in one pass.
+///
+/// `counts` is what the last read counted in the files git does not track,
+/// and leaves holding what this one did.
+fn read(root: &Path, name: &str, counts: &mut Counts) -> Result<Repo, String> {
+    let started = Instant::now();
+    let began = SystemTime::now();
     let status = branch_status(&git(
         root,
         // The per-file lines are discarded — what the tree did to each file is
         // counted from `git diff --numstat`, which the header does not carry —
         // so git is told not to go looking for untracked ones, which is the
-        // part of the scan that grows with the tree.
+        // part of the scan that grows with the tree. Nor into a submodule's
+        // working tree: that is a repository with a config of its own, which
+        // the `git` run inside it to look would read and run the filters of.
         &[
             "status",
             "--porcelain=v2",
             "--branch",
             "--untracked-files=no",
+            "--ignore-submodules=dirty",
         ],
     )?);
 
-    let working = match &status.head {
-        // A repository with no commits has nothing to have changed against:
-        // every file in it is untracked, and git counts no lines in those.
+    let mut working = match &status.head {
+        // A repository with no commits has nothing to have changed against,
+        // and git counts no lines in a file it has only staged.
         None => Vec::new(),
-        Some(_) => working_tree(&git(root, &["diff", "--numstat", "-z", "HEAD"])?),
-    };
-
-    let listed = match since {
-        Since::Nothing => Vec::new(),
-        Since::Everything if status.head.is_none() => Vec::new(),
-        Since::Everything => commits(&git(
-            root,
-            &["log", "-z", "--format=%h%x00%s%x00%ct", "HEAD"],
-        )?),
-        Since::Commit(oid) => commits(&git(
+        Some(_) => working_tree(&git(
             root,
             &[
-                "log",
+                "diff",
+                "--numstat",
                 "-z",
-                "--format=%h%x00%s%x00%ct",
-                &format!("{oid}..HEAD"),
+                // A count needs no converter and no external diff, and a
+                // config that names either must not get to run it. A
+                // submodule is looked at only for the commit it is on, as
+                // the status above is.
+                "--no-textconv",
+                "--no-ext-diff",
+                "--ignore-submodules=dirty",
+                "HEAD",
             ],
         )?),
     };
 
-    let commits = pushed(root, listed, &status)?;
-    // Listed from where the session runs rather than from the root, so each
-    // path is the one the agent, which runs there too, would name the file by.
-    let files = files(&git(
-        here,
+    // Listed from the root, which is where the agent runs and the operator's
+    // commands do, so each path is the one both would name the file by. `-t`
+    // tags each with what git holds of it, which is what says a file is new:
+    // this is the one scan of the tree for untracked files, and it serves both.
+    let tree = tagged(&git(
+        root,
         &[
             "ls-files",
             "-z",
+            "-t",
             "--cached",
             "--others",
             "--exclude-standard",
         ],
     )?);
-    Ok(Read {
-        repo: Repo {
-            name: name.to_owned(),
-            branch: status.branch,
-            read: true,
-            ahead: status.ahead,
-            behind: status.behind,
-            working,
-            commits,
-            files,
-        },
-        head: status.head,
+    let last = std::mem::take(counts);
+    working.extend(
+        tree.iter()
+            .filter(|(untracked, _)| *untracked)
+            .map(|(_, path)| new_file(root, path, &last, counts, began)),
+    );
+    working.sort_by(|one, other| one.path.cmp(&other.path));
+    let files = files(tree.into_iter().map(|(_, path)| path));
+    Ok(Repo {
+        name: name.to_owned(),
+        branch: status.branch,
+        read: true,
+        ahead: status.ahead,
+        behind: status.behind,
+        working,
+        files,
+        began: Some(started),
     })
 }
 
-/// The paths `git ls-files -z` printed, in the order it printed them, each
-/// once: a file with a merge conflict is listed once per side.
-fn files(listed: &str) -> Vec<String> {
+/// The paths `git ls-files -z -t` printed, in the order it printed them,
+/// each with whether git tracks it: the tag `?` is a file it does not.
+fn tagged(printed: &str) -> Vec<(bool, String)> {
+    printed
+        .split('\0')
+        .filter_map(|record| record.split_once(' '))
+        .map(|(tag, path)| (tag == "?", path.to_owned()))
+        .collect()
+}
+
+/// The paths listed, each once: a file with a merge conflict is listed once
+/// per side.
+fn files(listed: impl Iterator<Item = String>) -> Vec<String> {
     let mut files: Vec<String> = Vec::new();
-    for path in listed.split('\0').filter(|path| !path.is_empty()) {
-        if files.last().map(String::as_str) != Some(path) {
-            files.push(path.to_owned());
+    for path in listed {
+        if files.last() != Some(&path) {
+            files.push(path);
         }
     }
     files
 }
 
-/// Says, for each of `listed`, whether the branch's upstream already has it.
+/// A file git does not track yet, at `path` under `root`, counted as the
+/// lines it holds where it can be read — the count `git diff --numstat`
+/// gives it once it is added — and not counted where it cannot: a link, not a
+/// regular file, or past [`niobe_config::read::LIMIT`], which is read no
+/// further than that rather than whole on every look at the tree.
 ///
-/// Three of the four answers cost nothing: a branch with no upstream has
-/// nowhere to have pushed anything, a branch that is not ahead of its upstream
-/// has pushed all of it, and a branch whose upstream the repository cannot
-/// find — which git reports by naming the upstream and then refusing to say
-/// how far apart the two are — is not known either way. Only a branch that is
-/// genuinely ahead has to be asked which of its commits are the ones ahead.
-fn pushed(root: &Path, listed: Vec<Commit>, status: &Branch) -> Result<Vec<Commit>, String> {
-    if listed.is_empty() {
-        return Ok(listed);
+/// A file that looks as it did when `last` counted it keeps that count
+/// without being opened; whatever is counted goes into `now`. `began` is when
+/// the read started, which says whether a stamp can be trusted yet.
+fn new_file(
+    root: &Path,
+    path: &str,
+    last: &Counts,
+    now: &mut Counts,
+    began: SystemTime,
+) -> WorkingFile {
+    let added = std::fs::symlink_metadata(root.join(path))
+        .ok()
+        .filter(std::fs::Metadata::is_file)
+        .and_then(|meta| {
+            let stamp = Stamp::settled(&meta, began);
+            let lines = match stamp.and_then(|stamp| last.of(path, stamp)) {
+                Some(lines) => lines,
+                None => niobe_config::read::bytes(&root.join(path))
+                    .ok()
+                    .and_then(|bytes| lines_in(&bytes)),
+            };
+            if let Some(stamp) = stamp {
+                now.keep(path, stamp, lines);
+            }
+            lines
+        });
+    WorkingFile {
+        path: path.to_owned(),
+        added,
+        removed: Some(0),
+        new: true,
     }
-    if !status.upstream {
-        return Ok(said(listed, Some(false)));
-    }
-    let Some(ahead) = status.ahead else {
-        return Ok(said(listed, None));
-    };
-    if ahead == 0 {
-        return Ok(said(listed, Some(true)));
-    }
-
-    let unpushed = git(root, &["log", "--format=%h", "@{upstream}..HEAD"])?;
-    let unpushed: Vec<&str> = unpushed.lines().map(str::trim).collect();
-    Ok(listed
-        .into_iter()
-        .map(|commit| Commit {
-            pushed: Some(!unpushed.contains(&commit.hash.as_str())),
-            ..commit
-        })
-        .collect())
 }
 
-/// Says the same thing about every commit, where the repository answered for
-/// the branch as a whole.
-fn said(listed: Vec<Commit>, pushed: Option<bool>) -> Vec<Commit> {
-    listed
-        .into_iter()
-        .map(|commit| Commit { pushed, ..commit })
-        .collect()
+/// The lines counted in each file git does not track, by its path, with the
+/// [`Stamp`] it had when it was counted.
+///
+/// Opening every untracked file on every read is what makes a read of a tree
+/// with many of them cost minutes, and almost none of them change between
+/// two reads. A read keeps only the files it saw, so one that is gone is
+/// forgotten with it.
+#[derive(Debug, Default)]
+struct Counts(HashMap<String, (Stamp, Option<u64>)>);
+
+impl Counts {
+    /// The count kept for `path`, where it was taken from a file stamped
+    /// `stamp`: `Some(None)` is a file that was read and has no count.
+    fn of(&self, path: &str, stamp: Stamp) -> Option<Option<u64>> {
+        self.0
+            .get(path)
+            .filter(|(kept, _)| *kept == stamp)
+            .map(|(_, lines)| *lines)
+    }
+
+    fn keep(&mut self, path: &str, stamp: Stamp, lines: Option<u64>) {
+        self.0.insert(path.to_owned(), (stamp, lines));
+    }
+
+    #[cfg(test)]
+    fn paths(&self) -> Vec<String> {
+        let mut paths: Vec<String> = self.0.keys().cloned().collect();
+        paths.sort();
+        paths
+    }
+}
+
+/// What says a file has not changed without opening it: its size and when it
+/// was last modified, which is what git's own index trusts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Stamp {
+    len: u64,
+    modified: SystemTime,
+}
+
+/// How long before a read a file has to have been last modified for its
+/// stamp to be trusted. Some filesystems keep the time to the second, or two,
+/// and a file written twice within that time can read the same both times;
+/// one modified that recently is counted again on the next read instead.
+const SETTLED: Duration = Duration::from_secs(2);
+
+impl Stamp {
+    /// The stamp of the file `meta` describes, or `None` where it cannot be
+    /// trusted to change when the file does: the system keeps no modification
+    /// time, or the file was modified too close to `began`.
+    fn settled(meta: &std::fs::Metadata, began: SystemTime) -> Option<Stamp> {
+        let modified = meta.modified().ok()?;
+        let settled = modified
+            .checked_add(SETTLED)
+            .is_some_and(|after| after < began);
+        settled.then_some(Stamp {
+            len: meta.len(),
+            modified,
+        })
+    }
+}
+
+/// The lines in `bytes` as git counts them: a last line with no line break
+/// after it is a line, and a file git would call binary — one with a NUL in
+/// its first 8000 bytes, which is git's test — has no count.
+fn lines_in(bytes: &[u8]) -> Option<u64> {
+    if bytes.iter().take(8000).any(|&byte| byte == 0) {
+        return None;
+    }
+    let breaks = bytes.iter().filter(|&&byte| byte == b'\n').count();
+    let unended = usize::from(bytes.last().is_some_and(|&byte| byte != b'\n'));
+    u64::try_from(breaks + unended).ok()
 }
 
 /// What `git status --porcelain=v2 --branch` says in its header lines.
@@ -388,8 +817,6 @@ struct Branch {
     branch: Option<String>,
     /// What `HEAD` is on, or `None` in a repository with no commits.
     head: Option<String>,
-    /// Whether the branch has an upstream to be ahead or behind of.
-    upstream: bool,
     ahead: Option<u32>,
     behind: Option<u32>,
 }
@@ -416,7 +843,6 @@ fn branch_status(status: &str) -> Branch {
             Some(("branch.head", head)) if head != "(detached)" => {
                 read.branch = Some(head.to_owned());
             }
-            Some(("branch.upstream", _)) => read.upstream = true,
             Some(("branch.ab", ab)) => {
                 let (ahead, behind) = ab.split_once(' ').unwrap_or((ab, ""));
                 read.ahead = ahead.strip_prefix('+').and_then(|n| n.parse().ok());
@@ -468,72 +894,143 @@ fn working_tree(numstat: &str) -> Vec<WorkingFile> {
             path,
             added: added.parse().ok(),
             removed: removed.parse().ok(),
+            new: false,
         });
     }
     files
-}
-
-/// Reads `git log -z --format=%h%x00%s%x00%ct`, newest first: `-z` separates
-/// one commit from the next with a NUL, so a subject with a newline in it
-/// cannot be read as two commits.
-///
-/// The date is `%ct`, the commit date in seconds since the epoch, which is
-/// what the pane draws an age from. A record whose date will not parse keeps
-/// its hash and subject and loses only the age: a commit dated from the moment
-/// it was read would be a figure about this read rather than about the commit.
-fn commits(log: &str) -> Vec<Commit> {
-    let mut fields = log.split('\0').filter(|field| !field.is_empty());
-    let mut commits = Vec::new();
-
-    while let (Some(hash), Some(subject), Some(at)) = (fields.next(), fields.next(), fields.next())
-    {
-        commits.push(Commit {
-            hash: hash.to_owned(),
-            subject: subject.to_owned(),
-            at: at
-                .trim()
-                .parse()
-                .ok()
-                .map(|seconds| UNIX_EPOCH + Duration::from_secs(seconds)),
-            // Filled in for all of them by `pushed`: it can take one more read
-            // of the repository to know, and this one has none.
-            pushed: None,
-        });
-    }
-    commits
 }
 
 /// Runs one `git` command in `root` and hands back what it printed.
 ///
 /// Shelled out to rather than linked: a git library is megabytes in a binary
 /// with a size budget, and this asks git the same questions the operator would.
+///
+/// A tree that did not come from a clone can carry a `.git/config` of its own
+/// choosing, and some of its settings run commands on what is only a read.
+/// None may run here, so every `git` this runs has them turned off, whatever
+/// it was asked.
 fn git(root: &Path, args: &[&str]) -> Result<String, String> {
-    let output = Command::new("git")
+    let drivers = filter_drivers(&filters_configured(root)?);
+    let mut command = reading(root);
+    // A filter runs on any file whose attributes name it, and attributes come
+    // from the tree, the index and `.git/info/attributes`, none of which can
+    // be turned off. What can be is the command a name stands for: every
+    // driver the configuration defines, through whatever file it includes, is
+    // given none, which git takes as no filter. Set through the environment
+    // because a driver's name can hold an `=`, which `-c` would split it at.
+    let blanks = blanks(&drivers);
+    command.env("GIT_CONFIG_COUNT", blanks.len().to_string());
+    for (at, (key, value)) in blanks.iter().enumerate() {
+        command
+            .env(format!("GIT_CONFIG_KEY_{at}"), key)
+            .env(format!("GIT_CONFIG_VALUE_{at}"), value);
+    }
+    let output = command
+        .args(args)
+        .output()
+        .map_err(|e| format!("cannot run git: {e}"))?;
+
+    if !output.status.success() {
+        return Err(failed(args, &output.stderr));
+    }
+    // Lossy: a path that is not UTF-8 is a path the shell cannot draw anyway,
+    // and one of them must not cost the other files their counts.
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// A `git` in `root` that only reads, set up so that nothing the repository
+/// configures runs a command while it does.
+fn reading(root: &Path) -> Command {
+    let mut command = Command::new("git");
+    command
         // The repository is only ever read here, and this runs every few
         // seconds beside an operator who is using the same tree: refreshing
         // the index under them would take the lock their own `git` wants.
+        // `status` heeds this; `diff` does not, and is told below.
         .env("GIT_OPTIONAL_LOCKS", "0")
-        .args(args)
+        // A partial clone fetches an object it lacks from the remote it came
+        // from, over whatever transport and `core.sshCommand` the config
+        // names. A read goes to no network: the object is missing instead.
+        .env("GIT_NO_LAZY_FETCH", "1")
+        // A filesystem monitor runs on every status, and a hook on anything
+        // that would write the index. `diff` writes it, lock and all, for
+        // every file whose time changed and whose content did not, unless it
+        // is told to leave the index as it found it.
+        .args([
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "diff.autoRefreshIndex=false",
+        ])
         .current_dir(root)
         // Nothing here may stop for a prompt or a pager: there is no terminal
         // to answer on — the shell has it.
         .stdin(Stdio::null())
         .stderr(Stdio::piped())
-        .stdout(Stdio::piped())
+        .stdout(Stdio::piped());
+    command
+}
+
+/// Every `filter.*` setting the repository's configuration holds, from every
+/// file git reads it from, as `git config -z --get-regexp` prints them, or
+/// nothing where there is none, which it says by exiting with 1.
+fn filters_configured(root: &Path) -> Result<String, String> {
+    let args = ["config", "-z", "--get-regexp", r"^filter\."];
+    let output = reading(root)
+        .args(args)
         .output()
         .map_err(|e| format!("cannot run git: {e}"))?;
-
-    if !output.status.success() {
-        let said = String::from_utf8_lossy(&output.stderr);
-        return Err(format!(
-            "git {}: {}",
-            args.join(" "),
-            said.lines().next().unwrap_or("failed").trim()
-        ));
+    match output.status.code() {
+        Some(0) => Ok(String::from_utf8_lossy(&output.stdout).into_owned()),
+        Some(1) => Ok(String::new()),
+        _ => Err(failed(&args, &output.stderr)),
     }
-    // Lossy: a path that is not UTF-8 is a path the shell cannot draw anyway,
-    // and one of them must not cost the other files their counts.
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// The names of the filter drivers in what `git config -z --get-regexp
+/// '^filter\.'` printed, each once: a record is a key, then a newline and its
+/// value, and a key is `filter.<name>.<variable>` with dots allowed in the
+/// name, so the name is everything between the first dot and the last.
+fn filter_drivers(listed: &str) -> Vec<String> {
+    let mut names: Vec<String> = listed
+        .split('\0')
+        .filter_map(|record| record.split('\n').next())
+        .filter_map(|key| key.strip_prefix("filter."))
+        .filter_map(|rest| rest.rsplit_once('.'))
+        .map(|(name, _)| name.to_owned())
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// The settings that leave each of `drivers` with no command to run. An empty
+/// `process` also stops git from using `clean`, and a driver marked
+/// `required` would fail the read for having none, so it is marked not to be.
+fn blanks(drivers: &[String]) -> Vec<(String, &'static str)> {
+    drivers
+        .iter()
+        .flat_map(|name| {
+            [
+                (format!("filter.{name}.clean"), ""),
+                (format!("filter.{name}.process"), ""),
+                (format!("filter.{name}.required"), "false"),
+            ]
+        })
+        .collect()
+}
+
+/// The error a `git` that failed is reported as: its arguments and the first
+/// line it said.
+fn failed(args: &[&str], stderr: &[u8]) -> String {
+    let said = String::from_utf8_lossy(stderr);
+    format!(
+        "git {}: {}",
+        args.join(" "),
+        said.lines().next().unwrap_or("failed").trim()
+    )
 }
 
 #[cfg(test)]
@@ -559,7 +1056,6 @@ mod tests {
             status.head.as_deref(),
             Some("f92f3750bb407beefafde085c9001ec7a2a00a0c")
         );
-        assert!(status.upstream);
         assert_eq!(status.ahead, Some(3));
         assert_eq!(status.behind, Some(1));
     }
@@ -570,7 +1066,6 @@ mod tests {
             "# branch.oid f92f375\n# branch.head local-only\n1 .M N... 100644 100644 100644 a a f\n",
         );
 
-        assert!(!status.upstream);
         assert_eq!(
             status.ahead, None,
             "a branch nobody pushes is not zero commits ahead"
@@ -604,6 +1099,7 @@ mod tests {
                 path: "src/lib.rs".to_owned(),
                 added: Some(12),
                 removed: Some(3),
+                new: false,
             }]
         );
     }
@@ -629,43 +1125,6 @@ mod tests {
         assert_eq!(files[1].added, Some(1));
     }
 
-    #[test]
-    fn a_log_is_read_as_a_hash_and_the_first_line_of_its_message() {
-        let made = commits(
-            "f92f375\0chore: release 0.7.0\x001789939986\0d432ed6\0feat: split the tokens\x001789939158\0",
-        );
-
-        assert_eq!(
-            made,
-            [
-                Commit {
-                    hash: "f92f375".to_owned(),
-                    subject: "chore: release 0.7.0".to_owned(),
-                    at: Some(UNIX_EPOCH + Duration::from_secs(1_789_939_986)),
-                    pushed: None,
-                },
-                Commit {
-                    hash: "d432ed6".to_owned(),
-                    subject: "feat: split the tokens".to_owned(),
-                    at: Some(UNIX_EPOCH + Duration::from_secs(1_789_939_158)),
-                    pushed: None,
-                },
-            ]
-        );
-    }
-
-    #[test]
-    fn a_commit_whose_date_will_not_parse_keeps_everything_else() {
-        let made = commits("f92f375\0chore: release 0.7.0\0not a date\0");
-
-        assert_eq!(made.len(), 1);
-        assert_eq!(
-            made[0].at, None,
-            "an age counted from the moment it was read would be about the read"
-        );
-        assert_eq!(made[0].subject, "chore: release 0.7.0");
-    }
-
     /// A repository with one commit and an origin it has been pushed to, so
     /// that a read has an upstream to measure against.
     fn repository() -> tempfile::TempDir {
@@ -679,6 +1138,7 @@ mod tests {
         run(&work, &["init", "--initial-branch=main", "."]);
         run(&work, &["config", "user.email", "test@example.invalid"]);
         run(&work, &["config", "user.name", "A Test"]);
+        pin_the_config(&work);
         std::fs::write(work.join("kept.txt"), "a\nb\nc\n").expect("the file is written");
         run(&work, &["add", "kept.txt"]);
         run(&work, &["commit", "-m", "first"]);
@@ -690,9 +1150,39 @@ mod tests {
         dir
     }
 
+    /// Sets, in the repository at `work`, the settings a developer's global
+    /// git configuration would otherwise change the reads of: the repository
+    /// is read the way niobe reads the operator's, with their configuration,
+    /// and the repository's own file is what wins over it.
+    fn pin_the_config(work: &Path) {
+        for (key, value) in [
+            ("commit.gpgsign", "false"),
+            ("tag.gpgsign", "false"),
+            ("core.hooksPath", "/dev/null"),
+            ("status.showUntrackedFiles", "normal"),
+            ("diff.renames", "true"),
+        ] {
+            run(work, &["config", key, value]);
+        }
+    }
+
+    /// Runs `git` to set a test's repository up, with no configuration but
+    /// the repository's own: a developer's `commit.gpgsign`, hooks or
+    /// defaults would otherwise decide whether a commit here works.
     fn run(at: &Path, args: &[&str]) {
-        let done = git(at, args).unwrap_or_else(|e| panic!("git {args:?} failed: {e}"));
-        let _ = done;
+        let output = std::process::Command::new("git")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .args(args)
+            .current_dir(at)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap_or_else(|e| panic!("git {args:?} did not run: {e}"));
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]
@@ -701,27 +1191,174 @@ mod tests {
         let work = dir.path().join("work");
         std::fs::write(work.join("kept.txt"), "a\nb\nc\nd\ne\n").expect("the file is written");
 
-        let read = read(&work, &work, "work", Since::Nothing).expect("the repository reads");
+        let read = read(&work, "work", &mut Counts::default()).expect("the repository reads");
 
-        assert_eq!(read.repo.branch.as_deref(), Some("main"));
-        assert_eq!(read.repo.ahead, Some(0));
-        assert_eq!(read.repo.behind, Some(0));
+        assert_eq!(read.branch.as_deref(), Some("main"));
+        assert_eq!(read.ahead, Some(0));
+        assert_eq!(read.behind, Some(0));
         assert_eq!(
-            read.repo.working,
+            read.working,
             [WorkingFile {
                 path: "kept.txt".to_owned(),
                 added: Some(2),
                 removed: Some(0),
+                new: false,
             }]
         );
-        assert!(
-            read.repo.commits.is_empty(),
-            "the session has committed nothing"
+    }
+
+    /// A file git does not track yet is in the working tree too: new, and
+    /// counted as the lines it holds, which is what `git diff --numstat` says
+    /// of it once it is added. One too large to read is new and not counted,
+    /// and one the repository ignores is not listed.
+    #[test]
+    fn a_new_file_is_in_the_working_tree_counted_and_an_ignored_one_is_not() {
+        let dir = repository();
+        let work = dir.path().join("work");
+        std::fs::write(work.join(".gitignore"), "*.log\n").expect("the file is written");
+        run(&work, &["add", ".gitignore"]);
+        run(&work, &["commit", "-m", "ignore logs"]);
+        std::fs::write(work.join("kept.txt"), "a\nb\nc\nd\n").expect("the file is written");
+        std::fs::create_dir_all(work.join("sub/dir")).expect("the directory can be made");
+        std::fs::write(work.join("sub/dir/inner.txt"), "one\ntwo\nthree")
+            .expect("the temporary directory is writable");
+        std::fs::write(
+            work.join("large.txt"),
+            "x\n".repeat(niobe_config::read::LIMIT as usize),
+        )
+        .expect("the temporary directory is writable");
+        std::fs::write(work.join("noise.log"), "ignored\n").expect("the file is written");
+
+        let read = read(&work, "work", &mut Counts::default()).expect("the repository reads");
+
+        assert_eq!(
+            read.working,
+            [
+                WorkingFile {
+                    path: "kept.txt".to_owned(),
+                    added: Some(1),
+                    removed: Some(0),
+                    new: false,
+                },
+                WorkingFile {
+                    path: "large.txt".to_owned(),
+                    added: None,
+                    removed: Some(0),
+                    new: true,
+                },
+                WorkingFile {
+                    path: "sub/dir/inner.txt".to_owned(),
+                    added: Some(3),
+                    removed: Some(0),
+                    new: true,
+                },
+            ]
         );
     }
 
     #[test]
-    fn a_read_lists_the_files_under_the_sessions_directory_that_git_does_not_ignore() {
+    fn a_new_file_git_would_call_binary_is_new_and_not_counted() {
+        assert_eq!(lines_in(b"a\nb\n"), Some(2));
+        assert_eq!(lines_in(b"a\nb"), Some(2));
+        assert_eq!(lines_in(b""), Some(0));
+        assert_eq!(lines_in(b"PNG\0\x01\x02\n"), None);
+    }
+
+    /// Writes `contents` to `path` and stamps it as last modified `at`, so
+    /// that two writes of the same size can leave a file looking untouched.
+    fn write_as_of(path: &Path, contents: &str, at: SystemTime) {
+        std::fs::write(path, contents).expect("the file is written");
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .and_then(|file| file.set_modified(at))
+            .expect("the file's modification time can be set");
+    }
+
+    /// The lines a read counts in the new file at `path`.
+    fn counted(read: &Repo, path: &str) -> Option<u64> {
+        read.working
+            .iter()
+            .find(|file| file.path == path)
+            .and_then(|file| file.added)
+    }
+
+    #[test]
+    fn a_new_file_unchanged_since_the_last_read_is_not_opened_again() {
+        let dir = repository();
+        let work = dir.path().join("work");
+        let then = SystemTime::now() - Duration::from_secs(60);
+        write_as_of(&work.join("new.txt"), "abcde\n", then);
+        let mut counts = Counts::default();
+        let first = read(&work, "work", &mut counts).expect("the repository reads");
+        assert_eq!(counted(&first, "new.txt"), Some(1));
+
+        // The same size and the same modification time: what a file that was
+        // not touched looks like without opening it.
+        write_as_of(&work.join("new.txt"), "a\nb\nc\n", then);
+        let again = read(&work, "work", &mut counts).expect("the repository reads");
+
+        assert_eq!(
+            counted(&again, "new.txt"),
+            Some(1),
+            "a file that looked untouched was opened and counted again"
+        );
+    }
+
+    #[test]
+    fn a_new_file_that_changed_since_the_last_read_is_counted_again() {
+        let dir = repository();
+        let work = dir.path().join("work");
+        let then = SystemTime::now() - Duration::from_secs(60);
+        write_as_of(&work.join("new.txt"), "a\n", then);
+        let mut counts = Counts::default();
+        read(&work, "work", &mut counts).expect("the repository reads");
+
+        write_as_of(&work.join("new.txt"), "a\nb\nc\n", then);
+        let again = read(&work, "work", &mut counts).expect("the repository reads");
+
+        assert_eq!(counted(&again, "new.txt"), Some(3));
+    }
+
+    /// A filesystem that keeps modification times to the second, or two, can
+    /// give a file written twice within that time the same stamp both times,
+    /// so a file modified that recently is counted again on the next read.
+    #[test]
+    fn a_new_file_written_just_before_a_read_is_counted_again_on_the_next() {
+        let dir = repository();
+        let work = dir.path().join("work");
+        // Stamped ahead of the clock rather than at it: a read that starts
+        // more than SETTLED after a stamp taken here, as it can on a loaded
+        // machine, would otherwise find the file already settled.
+        let recent = SystemTime::now() + Duration::from_secs(60);
+        write_as_of(&work.join("new.txt"), "abcde\n", recent);
+        let mut counts = Counts::default();
+        read(&work, "work", &mut counts).expect("the repository reads");
+
+        write_as_of(&work.join("new.txt"), "a\nb\nc\n", recent);
+        let again = read(&work, "work", &mut counts).expect("the repository reads");
+
+        assert_eq!(counted(&again, "new.txt"), Some(3));
+    }
+
+    #[test]
+    fn a_new_file_that_is_gone_is_not_remembered() {
+        let dir = repository();
+        let work = dir.path().join("work");
+        let then = SystemTime::now() - Duration::from_secs(60);
+        write_as_of(&work.join("gone.txt"), "a\n", then);
+        write_as_of(&work.join("kept.new"), "a\n", then);
+        let mut counts = Counts::default();
+        read(&work, "work", &mut counts).expect("the repository reads");
+
+        std::fs::remove_file(work.join("gone.txt")).expect("the file is removed");
+        read(&work, "work", &mut counts).expect("the repository reads");
+
+        assert_eq!(counts.paths(), ["kept.new"]);
+    }
+
+    #[test]
+    fn a_read_lists_the_files_in_the_repository_that_git_does_not_ignore() {
         let dir = repository();
         let work = dir.path().join("work");
         let docs = work.join("docs");
@@ -730,75 +1367,13 @@ mod tests {
         std::fs::write(work.join("scratch.log"), "noise\n").expect("the file is written");
         std::fs::write(work.join(".gitignore"), "*.log\n").expect("the file is written");
 
-        let whole = read(&work, &work, "work", Since::Nothing).expect("the repository reads");
-        let below = read(&work, &docs, "docs", Since::Nothing).expect("the repository reads");
+        let whole = read(&work, "work", &mut Counts::default()).expect("the repository reads");
 
         assert_eq!(
-            whole.repo.files,
+            whole.files,
             [".gitignore", "docs/guide.md", "kept.txt"],
             "committed and new files, and not the ignored one"
         );
-        assert_eq!(
-            below.repo.files,
-            ["guide.md"],
-            "a session started in a subdirectory names files the way its agent does"
-        );
-    }
-
-    #[test]
-    fn the_commits_a_session_made_are_listed_and_say_whether_they_are_pushed() {
-        let dir = repository();
-        let work = dir.path().join("work");
-        let started_on = read(&work, &work, "work", Since::Nothing)
-            .expect("the repository reads")
-            .head
-            .expect("the repository has a commit");
-
-        std::fs::write(work.join("kept.txt"), "a\nb\nc\nd\n").expect("the file is written");
-        run(&work, &["commit", "-am", "second"]);
-        std::fs::write(work.join("kept.txt"), "a\nb\n").expect("the file is written");
-        run(&work, &["commit", "-am", "third"]);
-        run(&work, &["push", "origin", "main"]);
-        std::fs::write(work.join("kept.txt"), "a\n").expect("the file is written");
-        run(&work, &["commit", "-am", "fourth"]);
-
-        let read =
-            read(&work, &work, "work", Since::Commit(&started_on)).expect("the repository reads");
-
-        let subjects: Vec<(&str, Option<bool>)> = read
-            .repo
-            .commits
-            .iter()
-            .map(|c| (c.subject.as_str(), c.pushed))
-            .collect();
-        assert_eq!(
-            subjects,
-            [
-                ("fourth", Some(false)),
-                ("third", Some(true)),
-                ("second", Some(true))
-            ],
-            "newest first, and only the one the origin has not got is unpushed"
-        );
-        assert_eq!(read.repo.ahead, Some(1));
-    }
-
-    #[test]
-    fn a_branch_with_no_upstream_has_pushed_none_of_its_commits() {
-        let dir = tempfile::tempdir().expect("a temporary directory can be created");
-        let work = dir.path().to_path_buf();
-        run(&work, &["init", "--initial-branch=main", "."]);
-        run(&work, &["config", "user.email", "test@example.invalid"]);
-        run(&work, &["config", "user.name", "A Test"]);
-        std::fs::write(work.join("a.txt"), "a\n").expect("the file is written");
-        run(&work, &["add", "a.txt"]);
-        run(&work, &["commit", "-m", "only"]);
-
-        let read = read(&work, &work, "work", Since::Everything).expect("the repository reads");
-
-        assert_eq!(read.repo.ahead, None);
-        assert_eq!(read.repo.commits.len(), 1);
-        assert_eq!(read.repo.commits[0].pushed, Some(false));
     }
 
     #[test]
@@ -807,21 +1382,27 @@ mod tests {
         run(dir.path(), &["init", "--initial-branch=main", "."]);
         std::fs::write(dir.path().join("new.txt"), "a\n").expect("the file is written");
 
-        let read =
-            read(dir.path(), dir.path(), "work", Since::Everything).expect("the repository reads");
+        let read = read(dir.path(), "work", &mut Counts::default()).expect("the repository reads");
 
-        assert_eq!(read.head, None);
-        assert_eq!(read.repo.branch.as_deref(), Some("main"));
-        assert!(read.repo.working.is_empty());
-        assert!(read.repo.commits.is_empty());
+        assert_eq!(read.branch.as_deref(), Some("main"));
+        assert_eq!(
+            read.working,
+            [WorkingFile {
+                path: "new.txt".to_owned(),
+                added: Some(1),
+                removed: Some(0),
+                new: true,
+            }],
+            "with nothing committed, every file in the tree is new"
+        );
     }
 
     #[test]
     fn a_directory_that_is_not_a_repository_is_a_failed_read_and_not_a_panic() {
         let dir = tempfile::tempdir().expect("a temporary directory can be created");
 
-        let failed = read(dir.path(), dir.path(), "work", Since::Nothing)
-            .expect_err("there is no repository");
+        let failed =
+            read(dir.path(), "work", &mut Counts::default()).expect_err("there is no repository");
 
         assert!(failed.starts_with("git status"), "{failed}");
     }
@@ -833,11 +1414,30 @@ mod tests {
         std::fs::write(work.join("kept.txt"), "a\nb\nc\nd\n").expect("the file is written");
 
         let mut watching = watch(&work);
-        let read = within(&mut watching, Duration::from_secs(10)).expect("a read comes back");
+        // Reading the repository starts `git` more than once; with three
+        // copies of this binary running at once the slowest read measured came
+        // back in 7.25 s, and one that never comes waits the same either way.
+        let read = within(&mut watching, Duration::from_secs(60)).expect("a read comes back");
 
         assert_eq!(read.name, "work");
         assert_eq!(read.branch.as_deref(), Some("main"));
         assert_eq!(read.working.len(), 1);
+    }
+
+    #[test]
+    fn a_read_asked_for_comes_back_dated_after_the_asking_though_nothing_changed() {
+        let dir = repository();
+        let work = dir.path().join("work");
+        let mut watching = watch(&work);
+        let first = within(&mut watching, Duration::from_secs(60)).expect("a read comes back");
+
+        let asked = Instant::now();
+        watching.changed();
+        let again = within(&mut watching, Duration::from_secs(60))
+            .expect("a read asked for comes back even where the tree is as it was");
+
+        assert!(again.began.is_some_and(|began| began >= asked), "{again:?}");
+        assert!(unchanged(&first, &again), "the tree itself did not move");
     }
 
     #[test]
@@ -870,56 +1470,27 @@ mod tests {
         );
         std::fs::write(checkout.join("kept.txt"), "a\n").expect("the file is written");
 
-        let read = read(&checkout, &checkout, "wt", Since::Nothing).expect("the worktree reads");
+        let read = read(&checkout, "wt", &mut Counts::default()).expect("the worktree reads");
 
-        assert_eq!(read.repo.branch.as_deref(), Some("side"));
-        assert_eq!(
-            read.repo.ahead, None,
-            "a branch made here has no upstream yet"
-        );
-        assert_eq!(read.repo.working.len(), 1);
-        assert_eq!(read.repo.working[0].removed, Some(2));
+        assert_eq!(read.branch.as_deref(), Some("side"));
+        assert_eq!(read.ahead, None, "a branch made here has no upstream yet");
+        assert_eq!(read.working.len(), 1);
+        assert_eq!(read.working[0].removed, Some(2));
     }
 
     #[test]
     fn a_detached_head_is_read_as_the_commit_it_is_sitting_on() {
         let dir = repository();
         let work = dir.path().join("work");
-        let head = read(&work, &work, "work", Since::Nothing)
-            .expect("the repository reads")
-            .head
-            .expect("the repository has a commit");
-        run(&work, &["checkout", "--detach", &head]);
+        let head = git(&work, &["rev-parse", "HEAD"]).expect("the repository has a commit");
+        let head = head.trim();
+        run(&work, &["checkout", "--detach", head]);
 
-        let read = read(&work, &work, "work", Since::Nothing).expect("a detached head reads");
+        let read = read(&work, "work", &mut Counts::default()).expect("a detached head reads");
 
-        assert_eq!(read.repo.branch.as_deref(), Some(&head[..7]));
-        assert_eq!(read.repo.ahead, None, "a commit has no upstream");
-        assert!(read.repo.working.is_empty());
-    }
-
-    #[test]
-    fn an_upstream_the_repository_cannot_find_leaves_pushed_unknown() {
-        let dir = repository();
-        let work = dir.path().join("work");
-        let started_on = read(&work, &work, "work", Since::Nothing)
-            .expect("the repository reads")
-            .head
-            .expect("the repository has a commit");
-        std::fs::write(work.join("kept.txt"), "a\n").expect("the file is written");
-        run(&work, &["commit", "-am", "second"]);
-        // The upstream branch is still configured but is no longer there, so
-        // git names it and refuses to say how far apart the two are.
-        run(&work, &["update-ref", "-d", "refs/remotes/origin/main"]);
-
-        let read = read(&work, &work, "work", Since::Commit(&started_on))
-            .expect("a missing upstream is not a failed read");
-
-        assert_eq!(read.repo.ahead, None);
-        assert_eq!(
-            read.repo.commits[0].pushed, None,
-            "git would not say, so neither does the shell"
-        );
+        assert_eq!(read.branch.as_deref(), Some(&head[..7]));
+        assert_eq!(read.ahead, None, "a commit has no upstream");
+        assert!(read.working.is_empty());
     }
 
     /// How many ticks of the event loop are timed against one frame's budget.
@@ -927,14 +1498,17 @@ mod tests {
     /// is ten seconds of an idle session, and several seconds of a busy one.
     const TICKS: usize = 100;
 
-    /// One frame at 60 Hz, which is what [`niobe_tui`]'s own budget test holds
-    /// a redraw to.
-    const FRAME: Duration = Duration::from_millis(16);
+    /// Two seconds. Asking without waiting costs microseconds a time, and a
+    /// look that waited for a read would cost tens of milliseconds each —
+    /// seconds over [`TICKS`] — so this bound still tells the two apart, with
+    /// room for a debug build sharing its cores with the tests around it,
+    /// where a bound of one frame's worth, and then a quarter second, did not.
+    const FRAME: Duration = Duration::from_secs(2);
 
     /// A read of this workspace takes tens of milliseconds — several frames —
     /// so the loop can never be the thing doing it. A hundred ticks' worth of
-    /// asking has to come in under a single frame, while a read of a real
-    /// repository is going on behind them.
+    /// asking has to come in far under what a single read costs, while a read
+    /// of a real repository is going on behind them.
     #[test]
     fn asking_what_the_repository_looks_like_never_waits_for_the_answer() {
         let mut watching = watch(Path::new(env!("CARGO_MANIFEST_DIR")));
@@ -947,7 +1521,7 @@ mod tests {
 
         assert!(
             spent < FRAME,
-            "{TICKS} ticks spent {spent:?} asking, over the {FRAME:?} a whole frame gets"
+            "{TICKS} ticks spent {spent:?} asking, over the {FRAME:?} they may"
         );
     }
 
@@ -964,11 +1538,288 @@ mod tests {
         None
     }
 
+    /// Writes a script under `dir` that leaves `<name>-ran` beside it when
+    /// anything runs it, and hands back the script and that marker. It passes
+    /// what it is given through, so a git that did run it reads on unharmed.
+    #[cfg(unix)]
+    fn marking(dir: &Path, name: &str) -> (PathBuf, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let script = dir.join(format!("{name}.sh"));
+        let marker = dir.join(format!("{name}-ran"));
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\ntouch '{}'\nexec cat \"$@\"\n", marker.display()),
+        )
+        .expect("the script is written");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+            .expect("the script is made executable");
+        (script, marker)
+    }
+
+    /// Asserts that none of `markers` was left, naming the first that was.
+    fn none_ran(markers: &[PathBuf]) {
+        for marker in markers {
+            assert!(!marker.exists(), "a read ran {}", marker.display());
+        }
+    }
+
+    /// Every file here is rewritten to the size it was committed at, so git
+    /// cannot tell from the size alone that it changed and has to read it,
+    /// which is where a filter or a converter would run.
+    #[cfg(unix)]
     #[test]
-    fn the_branch_is_read_from_the_repository_this_test_runs_in() {
-        let here = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let branch = git_branch(here).expect("the workspace is a git repository");
-        assert!(!branch.is_empty());
+    fn a_read_runs_no_command_the_repositorys_own_config_names() {
+        let dir = repository();
+        let work = dir.path().join("work");
+        let (monitor, monitored) = marking(dir.path(), "monitor");
+        let (clean, cleaned) = marking(dir.path(), "clean");
+        let (process, processed) = marking(dir.path(), "process");
+        let (textconv, converted) = marking(dir.path(), "textconv");
+        let (external, diffed) = marking(dir.path(), "external");
+        for name in ["cleaned.txt", "processed.txt", "converted.txt"] {
+            std::fs::write(work.join(name), "a\nb\n").expect("the file is written");
+        }
+        std::fs::write(
+            work.join(".gitattributes"),
+            "cleaned.txt filter=x\nprocessed.txt filter=y\nconverted.txt diff=x\n",
+        )
+        .expect("the attributes are written");
+        run(&work, &["add", "."]);
+        run(&work, &["commit", "-m", "attributed"]);
+        for (key, value) in [
+            ("core.fsmonitor", &monitor),
+            ("filter.x.clean", &clean),
+            ("filter.y.process", &process),
+            ("diff.x.textconv", &textconv),
+            ("diff.external", &external),
+        ] {
+            run(&work, &["config", key, &value.display().to_string()]);
+        }
+        run(&work, &["config", "filter.x.required", "true"]);
+        run(&work, &["config", "filter.y.required", "true"]);
+        for name in ["cleaned.txt", "processed.txt", "converted.txt"] {
+            std::fs::write(work.join(name), "a\nc\n").expect("the file is written");
+        }
+
+        let read = read(&work, "work", &mut Counts::default()).expect("the repository reads");
+
+        none_ran(&[monitored, cleaned, processed, converted, diffed]);
+        let changed = |path: &str| WorkingFile {
+            path: path.to_owned(),
+            added: Some(1),
+            removed: Some(1),
+            new: false,
+        };
+        assert_eq!(
+            read.working,
+            [
+                changed("cleaned.txt"),
+                changed("converted.txt"),
+                changed("processed.txt"),
+            ]
+        );
+    }
+
+    /// Sets the modification time of the file at `path` an hour back, leaving
+    /// what it holds alone: the index no longer describes it, and git has to
+    /// read it again to see that it did not change.
+    fn touched(path: &Path) {
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .and_then(|file| file.set_modified(SystemTime::now() - Duration::from_secs(3600)))
+            .expect("the file's modification time is set");
+    }
+
+    /// A file git has to read again is one it would refresh the index for,
+    /// and refreshing it takes the lock the operator's own `git` wants.
+    #[test]
+    fn a_read_leaves_the_index_as_the_operator_had_it() {
+        let dir = repository();
+        let work = dir.path().join("work");
+        touched(&work.join("kept.txt"));
+        let index = work.join(".git").join("index");
+        let before = std::fs::read(&index).expect("the index is read");
+
+        let read = read(&work, "work", &mut Counts::default()).expect("the repository reads");
+
+        assert_eq!(read.working, []);
+        assert_eq!(
+            std::fs::read(&index).expect("the index is read again"),
+            before,
+            "the read rewrote the index"
+        );
+    }
+
+    /// The repository's config can name a directory of hooks, and git runs one
+    /// whenever it writes the index, whatever it was asked.
+    #[cfg(unix)]
+    #[test]
+    fn a_reading_git_runs_no_hook_the_repository_names_even_where_it_writes_the_index() {
+        let dir = repository();
+        let work = dir.path().join("work");
+        let hooks = dir.path().join("hooks");
+        std::fs::create_dir(&hooks).expect("the hooks directory can be made");
+        let (hook, ran) = marking(&hooks, "post-index-change");
+        std::fs::rename(&hook, hooks.join("post-index-change"))
+            .expect("the hook is put under the name git runs it by");
+        run(
+            &work,
+            &["config", "core.hooksPath", &hooks.display().to_string()],
+        );
+        touched(&work.join("kept.txt"));
+
+        let refreshed = reading(&work)
+            .args(["update-index", "--refresh"])
+            .output()
+            .expect("git runs");
+
+        assert!(refreshed.status.success(), "{refreshed:?}");
+        none_ran(&[ran]);
+    }
+
+    /// A filter can be defined in a file the repository's config only
+    /// includes, under a name with dots in it, and given to a file by
+    /// attributes that are not in the tree at all.
+    #[test]
+    fn every_filter_driver_the_config_lists_is_named_once() {
+        let listed = "filter.lfs.clean\ngit-lfs clean -- %f\0\
+                      filter.lfs.required\ntrue\0\
+                      filter.x.y=z.process\nrun it\0\
+                      filter.bare\0";
+
+        assert_eq!(filter_drivers(listed), ["lfs", "x.y=z"]);
+        assert_eq!(filter_drivers(""), Vec::<String>::new());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_read_runs_no_filter_an_included_file_defines_for_attributes_outside_the_tree() {
+        let dir = repository();
+        let work = dir.path().join("work");
+        let (clean, cleaned) = marking(dir.path(), "clean");
+        let included = dir.path().join("included");
+        std::fs::write(
+            &included,
+            format!("[filter \"x.y=z\"]\n\tclean = {}\n", clean.display()),
+        )
+        .expect("the included file is written");
+        run(
+            &work,
+            &["config", "include.path", &included.display().to_string()],
+        );
+        std::fs::create_dir_all(work.join(".git/info")).expect("the info directory can be made");
+        std::fs::write(work.join(".git/info/attributes"), "kept.txt filter=x.y=z\n")
+            .expect("the attributes are written");
+        std::fs::write(work.join("kept.txt"), "a\nb\nd\n").expect("the file is written");
+
+        read(&work, "work", &mut Counts::default()).expect("the repository reads");
+
+        none_ran(&[cleaned]);
+    }
+
+    /// A submodule is a repository of its own, with a config of its own that
+    /// a read of the repository around it never looks at.
+    #[cfg(unix)]
+    #[test]
+    fn a_read_runs_no_filter_a_submodules_own_config_names() {
+        let dir = repository();
+        let work = dir.path().join("work");
+        let (clean, cleaned) = marking(dir.path(), "clean");
+        let origin = dir.path().join("origin").display().to_string();
+        run(
+            &work,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                &origin,
+                "sub",
+            ],
+        );
+        run(&work, &["commit", "-m", "submodule"]);
+        let sub = work.join("sub");
+        run(
+            &sub,
+            &["config", "filter.x.clean", &clean.display().to_string()],
+        );
+        std::fs::write(
+            work.join(".git/modules/sub/info/attributes"),
+            "kept.txt filter=x\n",
+        )
+        .expect("the attributes are written");
+        std::fs::write(sub.join("kept.txt"), "a\nb\nd\n").expect("the file is written");
+
+        read(&work, "work", &mut Counts::default()).expect("the repository reads");
+
+        none_ran(&[cleaned]);
+    }
+
+    /// A repository can say an object it lacks is to be fetched from a
+    /// remote, and how to reach that remote. A read goes to no network, and
+    /// runs no command to get there.
+    #[cfg(unix)]
+    #[test]
+    fn a_read_fetches_no_object_the_repository_is_missing() {
+        let dir = repository();
+        let work = dir.path().join("work");
+        let (ssh, connected) = marking(dir.path(), "ssh");
+        for (key, value) in [
+            ("core.repositoryformatversion", "1"),
+            ("extensions.partialClone", "origin"),
+            ("remote.origin.promisor", "true"),
+            ("remote.origin.url", "ssh://example.invalid/repository"),
+            ("core.sshCommand", &ssh.display().to_string()),
+        ] {
+            run(&work, &["config", key, value]);
+        }
+        let blob = git(&work, &["rev-parse", "HEAD:kept.txt"]).expect("the file has a blob");
+        let blob = blob.trim();
+        std::fs::remove_file(work.join(".git/objects").join(&blob[..2]).join(&blob[2..]))
+            .expect("the blob is a loose object");
+        std::fs::write(work.join("kept.txt"), "a\nb\nd\n").expect("the file is written");
+
+        let _ = read(&work, "work", &mut Counts::default());
+
+        none_ran(&[connected]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_dot_git_that_is_a_pipe_leaves_the_branch_unknown_without_waiting() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let made = std::process::Command::new("mkfifo")
+            .arg(dir.path().join(".git"))
+            .status()
+            .expect("mkfifo runs");
+        assert!(made.success());
+
+        let (sender, received) = std::sync::mpsc::channel();
+        let from = dir.path().to_path_buf();
+        std::thread::spawn(move || sender.send(git_branch(&from)));
+        let branch = received
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the branch is read without waiting on the pipe");
+        assert_eq!(branch, None);
+    }
+
+    #[test]
+    fn the_branch_is_read_from_the_repository_git_reports() {
+        let dir = repository();
+        let here = dir.path().join("work");
+        run(&here, &["checkout", "-q", "-b", "feature/read-me"]);
+        assert_eq!(git_branch(&here).as_deref(), Some("feature/read-me"));
+
+        // Detached: the commit, shortened as git shortens it.
+        run(&here, &["checkout", "-q", "--detach"]);
+        let out = std::process::Command::new("git")
+            .args(["rev-parse", "--short=7", "HEAD"])
+            .current_dir(&here)
+            .output()
+            .expect("git runs");
+        let short = String::from_utf8(out.stdout).expect("git prints UTF-8");
+        assert_eq!(git_branch(&here).as_deref(), Some(short.trim()));
     }
 
     #[test]
@@ -988,6 +1839,108 @@ mod tests {
         std::fs::create_dir_all(&checkout).expect("the checkout can be made");
         std::fs::write(checkout.join(".git"), pointer).expect("the pointer file is written");
         checkout
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_store_linked_to_a_file_inside_the_repository_is_opened_there() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        std::fs::create_dir_all(dir.path().join(".niobe")).expect("the directory is made");
+        std::fs::create_dir_all(dir.path().join("kept")).expect("the directory is made");
+        let real = dir.path().join("kept").join("sessions.db");
+        std::fs::write(&real, "").expect("the file is written");
+        std::os::unix::fs::symlink(&real, store_path(dir.path())).expect("the link is made");
+
+        open_or_create_store(dir.path()).expect("a link inside the repository is followed");
+
+        assert!(
+            std::fs::metadata(&real)
+                .expect("the file was just created")
+                .len()
+                > 0
+        );
+    }
+
+    /// A clone whose upstream committed `files` under `.niobe`, as the work
+    /// tree of the repository [`repository`] builds.
+    fn clone_with(files: &[(&str, &str)]) -> (tempfile::TempDir, PathBuf) {
+        let dir = repository();
+        let work = dir.path().join("work");
+        std::fs::create_dir_all(work.join(DIR)).expect("the directory is made");
+        for (name, text) in files {
+            std::fs::write(work.join(DIR).join(name), text).expect("the file is written");
+            run(&work, &["add", &format!("{DIR}/{name}")]);
+        }
+        run(&work, &["commit", "-m", "ship niobe files"]);
+        (dir, work)
+    }
+
+    fn untracked_or_modified(work: &Path) -> String {
+        let out = std::process::Command::new("git")
+            .args(["status", "--short", "--", DIR])
+            .current_dir(work)
+            .output()
+            .expect("git runs");
+        String::from_utf8(out.stdout).expect("git prints UTF-8")
+    }
+
+    #[test]
+    fn a_store_the_clone_tracks_is_refused_to_record_and_to_read() {
+        let (_dir, work) = clone_with(&[("sessions.db", "")]);
+
+        let said = open_or_create_store(&work).expect_err("a tracked store is not the operator's");
+
+        assert!(
+            said.contains(".niobe/sessions.db is tracked by git"),
+            "{said}"
+        );
+        assert!(said.contains("git rm --cached"), "{said}");
+        assert!(read_existing_store(&work).is_err(), "nor is it read");
+        assert!(open_existing_store(&work).is_err(), "nor listed");
+    }
+
+    #[test]
+    fn a_committed_ignore_file_that_ignores_nothing_does_not_leave_the_store_for_a_commit() {
+        let (_dir, work) = clone_with(&[(".gitignore", "# nothing is ignored here\n")]);
+
+        open_or_create_store(&work).expect("the store is made");
+
+        assert_eq!(
+            untracked_or_modified(&work),
+            "",
+            "the store is not offered to `git add -A`"
+        );
+        assert!(store_path(&work).exists());
+    }
+
+    #[test]
+    fn a_store_in_a_directory_git_does_not_know_is_made_as_before() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+
+        open_or_create_store(dir.path()).expect("no repository, nothing to publish through");
+
+        assert!(store_path(dir.path()).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_niobe_directory_linked_out_of_the_repository_is_refused() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let outside = tempfile::tempdir().expect("a temporary directory can be created");
+        std::os::unix::fs::symlink(outside.path(), dir.path().join(DIR))
+            .expect("a link can be made in a temporary directory");
+
+        let said = open_or_create_store(dir.path()).expect_err("the store would be outside");
+
+        assert!(said.contains("outside the repository"), "{said}");
+        assert_eq!(
+            std::fs::read_dir(outside.path())
+                .expect("the directory exists and is readable")
+                .count(),
+            0
+        );
+        let said = read_existing_store(dir.path()).expect_err("so would the one read");
+        assert!(said.contains(".niobe"), "{said}");
     }
 
     #[test]
@@ -1080,5 +2033,87 @@ mod tests {
                 .is_none()
         );
         assert!(!dir.path().join(".niobe").exists());
+    }
+
+    #[cfg(unix)]
+    fn mode(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path)
+            .expect("the file is there")
+            .permissions()
+            .mode()
+            & 0o777
+    }
+
+    /// The side files of the store at `root` that SQLite has made so far.
+    fn side_files(root: &Path) -> Vec<PathBuf> {
+        STORE_SIDE_FILES
+            .iter()
+            .map(|suffix| {
+                let mut name = store_path(root).into_os_string();
+                name.push(suffix);
+                PathBuf::from(name)
+            })
+            .filter(|path| path.exists())
+            .collect()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_new_store_and_its_directory_are_the_operators_alone() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+
+        let store = open_or_create_store(dir.path()).expect("the store is created");
+
+        assert_eq!(mode(&dir.path().join(DIR)), 0o700);
+        assert_eq!(mode(&store_path(dir.path())), 0o600);
+        let side = side_files(dir.path());
+        assert!(!side.is_empty(), "SQLite made no side files to check");
+        for path in side {
+            assert_eq!(mode(&path), 0o600, "{}", path.display());
+        }
+        drop(store);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_store_any_user_could_read_is_the_operators_alone_once_opened() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let store = open_or_create_store(dir.path()).expect("the store is created");
+        let open = std::fs::Permissions::from_mode(0o644);
+        std::fs::set_permissions(store_path(dir.path()), open.clone())
+            .expect("the file is the test's own and can be given a mode");
+        std::fs::set_permissions(dir.path().join(DIR), std::fs::Permissions::from_mode(0o755))
+            .expect("the file is the test's own and can be given a mode");
+        for path in side_files(dir.path()) {
+            std::fs::set_permissions(&path, open.clone())
+                .expect("the file is the test's own and can be given a mode");
+        }
+        drop(store);
+
+        let _store = open_or_create_store(dir.path()).expect("the store opens");
+
+        assert_eq!(mode(&store_path(dir.path())), 0o600);
+        assert_eq!(mode(&dir.path().join(DIR)), 0o700);
+        for path in side_files(dir.path()) {
+            assert_eq!(mode(&path), 0o600, "{}", path.display());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_files_meant_to_be_committed_keep_the_mode_any_file_would_have() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let probe = dir.path().join("probe");
+        std::fs::write(&probe, "").expect("a file can be written");
+        let ordinary = mode(&probe);
+        std::fs::create_dir(dir.path().join(DIR)).expect("the directory can be made");
+        std::fs::write(config_path(dir.path()), "").expect("the config is written");
+
+        let _store = open_or_create_store(dir.path()).expect("the store is created");
+
+        assert_eq!(mode(&config_path(dir.path())), ordinary);
+        assert_eq!(mode(&dir.path().join(DIR).join(".gitignore")), ordinary);
     }
 }

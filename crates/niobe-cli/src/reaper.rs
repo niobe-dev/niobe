@@ -102,8 +102,13 @@ impl Drop for Watcher {
     /// Kills the reaper before its pipe closes: the session is ending by its
     /// own way out, which stops what it started, and the reaper reading the
     /// end of its input would signal those groups again.
+    ///
+    /// The pipe is closed before the wait, so that a reaper the kill did not
+    /// reach ends on its own rather than leaving the wait for ever: a `wait`
+    /// holding the write end open is waiting on a `sh` that is waiting on it.
     fn drop(&mut self) {
         let _ = self.sh.kill();
+        drop(self.told.take());
         let _ = self.sh.wait();
     }
 }
@@ -120,13 +125,18 @@ mod tests {
     /// tenth of a second or more to start on an idle Mac and seconds on a
     /// loaded one, and the reaper starts one and forks a `sleep` before its
     /// SIGKILL, so a budget of a few seconds measures the machine rather than
-    /// the reaper. Waiting returns as soon as the thing has happened.
-    const PATIENCE: Duration = Duration::from_secs(20);
+    /// the reaper. Waiting returns as soon as the thing has happened; twenty
+    /// seconds ran out under a load average of forty.
+    const PATIENCE: Duration = Duration::from_secs(60);
+
+    /// How long each group's `sleep` runs if nothing ends it: well past
+    /// [`PATIENCE`], so a group can only have ended because it was signalled.
+    const ASLEEP: &str = "300";
 
     /// A process leading a group of its own, as a `!` command is.
     fn group() -> Child {
         let mut sleep = Command::new("sleep");
-        sleep.arg("30").process_group(0);
+        sleep.arg(ASLEEP).process_group(0);
         sleep.spawn().expect("sleep starts")
     }
 
@@ -139,9 +149,12 @@ mod tests {
     /// child killed and exit with 128 + 9 before its own turn came.
     fn group_ignoring_term() -> Child {
         let mut sh = Command::new("sh");
-        sh.args(["-c", "trap '' TERM; echo trapped; exec sleep 30"])
-            .stdout(Stdio::piped())
-            .process_group(0);
+        sh.args([
+            "-c",
+            &format!("trap '' TERM; echo trapped; exec sleep {ASLEEP}"),
+        ])
+        .stdout(Stdio::piped())
+        .process_group(0);
         let mut ignoring = sh.spawn().expect("sh starts");
         let mut said = String::new();
         BufReader::new(ignoring.stdout.take().expect("its output is piped"))
@@ -204,6 +217,34 @@ mod tests {
     }
 
     #[test]
+    fn a_group_the_session_started_is_asked_to_end_before_it_is_killed() {
+        let reaper = Reaper::start().expect("sh starts");
+        let mut started = group();
+        reaper.watch(started.id());
+
+        session_killed(&reaper);
+
+        let status = ended_within(&mut started, PATIENCE).expect("the group outlived the session");
+        assert_eq!(
+            status.signal(),
+            Some(15),
+            "the group ended on something other than SIGTERM: {status:?}"
+        );
+    }
+
+    #[test]
+    fn the_reaper_leads_a_process_group_of_its_own() {
+        let reaper = Reaper::start().expect("sh starts");
+        let watcher = reaper.0.lock().expect("nothing else holds the reaper");
+        let pid = rustix::process::Pid::from_child(&watcher.sh);
+
+        assert_eq!(
+            rustix::process::getpgid(Some(pid)).expect("the reaper's group can be read"),
+            pid
+        );
+    }
+
+    #[test]
     fn a_group_that_will_not_end_when_asked_is_killed_a_second_later() {
         let reaper = Reaper::start().expect("sh starts");
         let mut ignoring = group_ignoring_term();
@@ -255,6 +296,29 @@ mod tests {
         assert!(
             ended_within(&mut started, Duration::from_millis(1500)).is_none(),
             "the reaper signalled a group the session was left to stop"
+        );
+        let _ = started.kill();
+        let _ = started.wait();
+    }
+
+    #[test]
+    fn dropping_the_last_reaper_returns_promptly_and_signals_nothing() {
+        let reaper = Reaper::start().expect("sh starts");
+        let mut started = group();
+        reaper.watch(started.id());
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            drop(reaper);
+            let _ = done.send(());
+        });
+
+        assert!(
+            finished.recv_timeout(PATIENCE).is_ok(),
+            "dropping the reaper did not return"
+        );
+        assert!(
+            ended_within(&mut started, Duration::from_millis(1500)).is_none(),
+            "dropping the reaper signalled a group the session was left to stop"
         );
         let _ = started.kill();
         let _ = started.wait();

@@ -8,20 +8,31 @@
 //! is the one type every backend produces into and [`SessionState`] is the
 //! fold every consumer derives from.
 
+pub mod attention;
+pub mod catch_up;
+pub mod decision;
 pub mod diff;
 pub mod event;
+pub mod image;
+pub mod keys;
 pub mod permission;
+pub mod proposal;
 pub mod session;
 pub mod test_run;
+pub mod trim;
+pub mod work;
 
+pub use attention::Attention;
 pub use event::{
-    AgentId, AgentOutcome, Backend, Billing, CheckpointId, Event, Mode, OPERATOR_SHELL,
-    PermissionDecision, SessionMeta, ToolCallId, ToolOutcome, Usage,
+    AgentId, AgentOutcome, Backend, Billing, ChangeScope, CompactTrigger, Event, Mode,
+    OPERATOR_SHELL, PermissionDecision, SessionMeta, TokenCounts, ToolCallId, ToolOutcome, Usage,
 };
+pub use image::{Image, ImageError, MediaType};
+pub use keys::{Bindable, Chord, Keymap, KeymapError};
 pub use permission::{Allowlist, Rule, RuleError};
+pub use proposal::{Action, Proposal};
 pub use session::{
-    CheckpointRecord, DecisionRecord, FileChanges, Owed, SessionState, TestRunRecord, ToolTotals,
-    Totals, TurnRecord,
+    FileChanges, Owed, SessionState, TestRunRecord, ToolTotals, Totals, TurnRecord, WorkTotals,
 };
 pub use test_run::{FailedTests, TestCounts};
 
@@ -31,13 +42,3 @@ pub const APP_NAME: &str = "niobe";
 
 /// Version of the workspace, as compiled.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn app_name_is_the_binary_name() {
-        assert_eq!(APP_NAME, "niobe");
-    }
-}

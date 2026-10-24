@@ -7,23 +7,27 @@
 //! comments and their ordering, and Niobe writes one array in it and touches
 //! nothing else. So the document is not re-rendered from the parsed config —
 //! that would return a file with the comments gone and the keys sorted — but
-//! spliced: the `allow` array is replaced in place, at the byte range the
-//! parser says it occupies, and every other byte of the file survives.
+//! spliced: the rule is written into the `allow` array just before its
+//! closing bracket, at the byte offset the parser gives, and every other byte
+//! of the file survives — the rules already there, a narrower one a broader
+//! one covers included, and the comments between them.
 //!
 //! Three cases, and the third is the one that refuses:
 //!
 //! * There is no `permissions` table: a new one is appended at the end.
-//! * There is a `permissions.allow` array: it is replaced with itself plus the
-//!   rule.
+//! * There is a `permissions.allow` array: the rule is added as its last
+//!   element, on a line of its own where the array is written one to a line.
 //! * There is a `permissions` table written in some other shape: nothing is
 //!   written, and the failure says what is in the way. Guessing where the rule
 //!   belongs in a file this code does not understand is how an operator's
 //!   config gets broken by a program they asked to remember one thing.
 
 use std::io::Write as _;
+use std::ops::Range;
 use std::path::Path;
 
 use niobe_core::permission::Rule;
+use toml::Spanned;
 use toml::de::{DeTable, DeValue};
 
 use crate::{Config, ConfigError, replace};
@@ -34,10 +38,29 @@ const INDENT: &str = "    ";
 /// Adds `rule` to the config file at `path`, creating the file and its
 /// directory if this is the first rule kept there.
 ///
-/// A rule the file's own allowlist already covers is not written again: the
-/// operator answering "always" twice must not grow the file twice.
-pub fn remember(path: &Path, rule: &Rule) -> Result<(), ConfigError> {
+/// A rule the file already lists is not written again: the operator answering
+/// "always" twice must not grow the file twice. One a broader rule in the file
+/// covers is written all the same, because whether that broader rule is in
+/// force depends on the file being trusted, which this does not know: in a
+/// file nobody trusted it answers nothing, and trusting the file would grant
+/// it rather than the narrower rule the operator chose.
+///
+/// Says what the file held when the lock was taken and what it holds when it
+/// is let go, both read under it: whoever decides whether the new text is
+/// trusted decides about exactly these, and not about whatever a later read
+/// finds once another writer has had its turn.
+pub fn remember(path: &Path, rule: &Rule) -> Result<Remembered, ConfigError> {
     remember_with(path, rule, |file, bytes| file.write_all(bytes))
+}
+
+/// The config file's text either side of [`remember`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Remembered {
+    /// What the file held before, or `None` where there was no file.
+    pub before: Option<String>,
+    /// What it holds now: the text written, or the text as it was where the
+    /// rule was already listed and nothing was.
+    pub after: String,
 }
 
 /// [`remember`], with the write of the new text handed in so that a test can
@@ -51,7 +74,7 @@ fn remember_with(
     path: &Path,
     rule: &Rule,
     write: impl FnOnce(&mut std::fs::File, &[u8]) -> std::io::Result<()>,
-) -> Result<(), ConfigError> {
+) -> Result<Remembered, ConfigError> {
     let failed = |error| ConfigError::Write {
         path: path.to_path_buf(),
         error,
@@ -61,9 +84,9 @@ fn remember_with(
     std::fs::create_dir_all(dir).map_err(failed)?;
     let _lock = replace::Lock::directory(dir).map_err(failed)?;
 
-    let text = match crate::read::text(&target) {
-        Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+    let before = match crate::read::text(&target) {
+        Ok(text) => Some(text),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => {
             return Err(ConfigError::Read {
                 path: path.to_path_buf(),
@@ -71,73 +94,201 @@ fn remember_with(
             });
         }
     };
+    let text = before.clone().unwrap_or_default();
 
     // Parsed before anything is written, so a rule is never added to a file
     // that would not load afterwards.
-    let config = Config::parse(&text, path)?;
-    if config.allowed().allows(rule.tool_name(), rule.target()) {
-        return Ok(());
+    Config::parse(&text, path)?;
+    if lists(&text, rule) {
+        return Ok(Remembered {
+            before,
+            after: text,
+        });
     }
 
-    let mut rules: Vec<String> = config
-        .allowed()
-        .rules()
-        .iter()
-        .map(Rule::to_string)
-        .collect();
-    rules.push(rule.to_string());
-
-    let written = splice(&text, path, &rules)?;
-    replace::replace_with(&target, written.as_bytes(), write).map_err(failed)
+    let written = splice(&text, path, &rule.to_string())?;
+    replace::replace_with(&target, written.as_bytes(), write).map_err(failed)?;
+    Ok(Remembered {
+        before,
+        after: written,
+    })
 }
 
-/// The file's text with `rules` as its `permissions.allow` array.
-fn splice(text: &str, path: &Path, rules: &[String]) -> Result<String, ConfigError> {
+/// Whether the `permissions.allow` array of `text`, a config that parses,
+/// holds `rule` itself.
+///
+/// Read from the array as written rather than from the parsed allowlist,
+/// which leaves out a rule a broader one before it covers: that rule is in
+/// the file all the same, and writing it again would grow the file on every
+/// "always".
+fn lists(text: &str, rule: &Rule) -> bool {
+    let Ok(document) = DeTable::parse(text) else {
+        return false;
+    };
+    let root = document.get_ref();
+    let Some(DeValue::Table(table)) = root.get("permissions").map(|value| value.get_ref()) else {
+        return false;
+    };
+    let Some(DeValue::Array(items)) = table.get("allow").map(|value| value.get_ref()) else {
+        return false;
+    };
+    items.iter().any(|item| match item.get_ref() {
+        DeValue::String(listed) => Rule::parse(listed).is_ok_and(|listed| listed == *rule),
+        _ => false,
+    })
+}
+
+/// The file's text with `rule` added to its `permissions.allow` array.
+fn splice(text: &str, path: &Path, rule: &str) -> Result<String, ConfigError> {
     let document = DeTable::parse(text).map_err(|_| unwritable(path, 1, "is not valid TOML"))?;
     let root = document.get_ref();
 
     let Some((key, value)) = root.get_key_value("permissions") else {
-        let mut written = text.to_owned();
-        if !written.is_empty() && !written.ends_with('\n') {
-            written.push('\n');
-        }
-        if !written.is_empty() {
-            written.push('\n');
-        }
-        written.push_str("[permissions]\nallow = ");
-        written.push_str(&array(rules));
-        written.push('\n');
-        return Ok(written);
+        return Ok(append_permissions(text, rule));
     };
 
+    let (items, span) = allow_array(key.span(), value, text, path)?;
+    let last_end = items.last().map(|item| item.span().end);
+    splice_into_array(text, path, rule, span, last_end)
+}
+
+/// Appends a new `[permissions]` table and `allow` array to a file that lacks one.
+fn append_permissions(text: &str, rule: &str) -> String {
+    let mut written = text.to_owned();
+    if !written.is_empty() && !written.ends_with('\n') {
+        written.push('\n');
+    }
+    if !written.is_empty() {
+        written.push('\n');
+    }
+    written.push_str("[permissions]\nallow = ");
+    written.push_str(&array(&[rule]));
+    written.push('\n');
+    written
+}
+
+/// Extracts the slice of items and byte span of `permissions.allow`, or returns a descriptive error.
+fn allow_array<'t, 'i>(
+    key_span: Range<usize>,
+    value: &'t Spanned<DeValue<'i>>,
+    text: &str,
+    path: &Path,
+) -> Result<(&'t [Spanned<DeValue<'i>>], Range<usize>), ConfigError> {
     let DeValue::Table(table) = value.get_ref() else {
         return Err(unwritable(
             path,
-            line(text, key.span().start),
+            line(text, key_span.start),
             "is not a table, so Niobe cannot add a rule to it",
         ));
     };
     let Some(allow) = table.get("allow") else {
         return Err(unwritable(
             path,
-            line(text, key.span().start),
+            line(text, key_span.start),
             "has no `allow` array for Niobe to add a rule to; add `allow = []` to it",
         ));
     };
-    if !matches!(allow.get_ref(), DeValue::Array(_)) {
+    let DeValue::Array(items) = allow.get_ref() else {
         return Err(unwritable(
             path,
             line(text, allow.span().start),
             "is not an array, so Niobe cannot add a rule to it",
         ));
+    };
+    Ok((items, allow.span()))
+}
+
+/// Safely extracts a string slice from `text` if `start` and `end` are within bounds and on UTF-8 char boundaries.
+fn safe_slice(text: &str, start: usize, end: usize) -> Option<&str> {
+    if start <= end
+        && end <= text.len()
+        && text.is_char_boundary(start)
+        && text.is_char_boundary(end)
+    {
+        Some(&text[start..end])
+    } else {
+        None
+    }
+}
+
+/// Splices `rule` into the array at `span`, preserving formatting and comments.
+fn splice_into_array(
+    text: &str,
+    path: &Path,
+    rule: &str,
+    span: Range<usize>,
+    last_end: Option<usize>,
+) -> Result<String, ConfigError> {
+    let invalid = || {
+        unwritable(
+            path,
+            line(text, span.start),
+            "has an array that cannot be edited",
+        )
+    };
+
+    let close = span.end.saturating_sub(1);
+    if span.start > close || close > text.len() {
+        return Err(invalid());
     }
 
-    let span = allow.span();
-    let (before, after) = (
-        text.get(..span.start).unwrap_or_default(),
-        text.get(span.end..).unwrap_or_default(),
-    );
-    Ok(format!("{before}{}{after}", array(rules)))
+    let within_span = safe_slice(text, span.start, close).ok_or_else(invalid)?;
+    let before_close = safe_slice(text, 0, close).ok_or_else(invalid)?;
+
+    let open_a_line = within_span.contains('\n')
+        && before_close
+            .rfind('\n')
+            .is_some_and(|at| safe_slice(text, at + 1, close).is_some_and(|s| s.trim().is_empty()));
+
+    let mut written = String::with_capacity(text.len() + rule.len() + INDENT.len() + 4);
+    let mut from = 0;
+
+    // The element before the new one needs its comma, where it has none.
+    if let Some(end) = last_end {
+        let between = safe_slice(text, end, close).ok_or_else(invalid)?;
+        if !comma_after(between) {
+            let prefix = safe_slice(text, 0, end).ok_or_else(invalid)?;
+            written.push_str(prefix);
+            written.push(',');
+            from = end;
+        }
+    }
+
+    match open_a_line {
+        // One to a line: the rule goes on a line of its own, above the one
+        // the bracket closes on and below whatever comment ends the array.
+        true => {
+            let at = before_close.rfind('\n').map_or(close, |at| at + 1);
+            let head = safe_slice(text, from, at).ok_or_else(invalid)?;
+            let tail = safe_slice(text, at, text.len()).ok_or_else(invalid)?;
+            written.push_str(head);
+            written.push_str(INDENT);
+            written.push_str(&quoted(rule));
+            written.push_str(",\n");
+            written.push_str(tail);
+        }
+        false => {
+            let head = safe_slice(text, from, close).ok_or_else(invalid)?;
+            let tail = safe_slice(text, close, text.len()).ok_or_else(invalid)?;
+            written.push_str(head);
+            if last_end.is_some() {
+                written.push(' ');
+            }
+            written.push_str(&quoted(rule));
+            written.push_str(tail);
+        }
+    }
+    Ok(written)
+}
+
+/// Whether `between`, the text from the end of an array's last element to its
+/// closing bracket, holds the comma that separates another element from it,
+/// outside any comment.
+fn comma_after(between: &str) -> bool {
+    between
+        .lines()
+        .map(|line| line.split('#').next().unwrap_or_default())
+        .any(|code| code.contains(','))
 }
 
 /// A `permissions` table Niobe will not write into.
@@ -153,7 +304,7 @@ fn unwritable(path: &Path, line: usize, message: &str) -> ConfigError {
 /// The rules as a TOML array, one to a line so that a file with a dozen of
 /// them still reads down the page and a diff of it shows the rule that was
 /// added rather than the whole line.
-fn array(rules: &[String]) -> String {
+fn array(rules: &[&str]) -> String {
     let mut out = String::from("[\n");
     for rule in rules {
         out.push_str(INDENT);
@@ -202,24 +353,28 @@ fn line(text: &str, at: usize) -> usize {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_control_character_in_a_rule_is_written_escaped_delete_included() {
+        assert_eq!(quoted("a\u{7f}b\u{1}c"), "\"a\\u007Fb\\u0001c\"");
+    }
+
     use std::path::PathBuf;
 
     fn path() -> PathBuf {
         PathBuf::from("/configs/repo/config.toml")
     }
 
-    /// The text `rules` splice into `text`, or the failure as the operator
+    /// The text `rule` splices into `text`, or the failure as the operator
     /// reads it.
-    fn spliced(text: &str, rules: &[&str]) -> Result<String, String> {
-        let rules: Vec<String> = rules.iter().map(|r| (*r).to_owned()).collect();
-        splice(text, &path(), &rules).map_err(|error| error.to_string())
+    fn spliced(text: &str, rule: &str) -> Result<String, String> {
+        splice(text, &path(), rule).map_err(|error| error.to_string())
     }
 
     #[test]
     fn a_file_with_no_permissions_table_gets_one_at_the_end() {
         let written = spliced(
             "# my profiles\n[profiles.max]\nbackend = \"claude\"\n",
-            &["Bash(cargo test)"],
+            "Bash(cargo test)",
         )
         .expect("the file takes a new table");
 
@@ -231,8 +386,19 @@ mod tests {
     }
 
     #[test]
+    fn a_file_that_does_not_end_its_last_line_gets_the_table_on_a_line_of_its_own() {
+        let written = spliced("[profiles.max]\nbackend = \"claude\"", "Read")
+            .expect("the file takes a new table");
+
+        assert_eq!(
+            written,
+            "[profiles.max]\nbackend = \"claude\"\n\n[permissions]\nallow = [\n    \"Read\",\n]\n"
+        );
+    }
+
+    #[test]
     fn an_empty_file_is_written_without_a_blank_line_at_the_top() {
-        let written = spliced("", &["Read"]).expect("an empty file takes a table");
+        let written = spliced("", "Read").expect("an empty file takes a table");
 
         assert_eq!(written, "[permissions]\nallow = [\n    \"Read\",\n]\n");
     }
@@ -249,7 +415,7 @@ allow = [\"Read\"]
 [profiles.max]
 backend = \"claude\"
 ";
-        let written = spliced(before, &["Read", "Bash(cargo test)"]).expect("the array is spliced");
+        let written = spliced(before, "Bash(cargo test)").expect("the array is spliced");
 
         assert_eq!(
             written,
@@ -258,10 +424,7 @@ default_profile = \"max\"  # the one I use
 
 [permissions]
 # added by hand
-allow = [
-    \"Read\",
-    \"Bash(cargo test)\",
-]
+allow = [\"Read\", \"Bash(cargo test)\"]
 
 [profiles.max]
 backend = \"claude\"
@@ -269,31 +432,90 @@ backend = \"claude\"
         );
     }
 
+    /// The rules already written, the narrower one a broader one covers
+    /// included, and the comments between them are the operator's: the new
+    /// rule is one line added, and nothing else moves.
+    #[test]
+    fn a_rule_is_added_to_an_array_without_touching_what_is_in_it() {
+        let before = "\
+[permissions]
+allow = [
+ \"Bash\", # everything
+ \"Bash(cargo test)\",
+ # \"Write\", disabled
+]
+";
+        let written = spliced(before, "Read").expect("the array is spliced");
+
+        assert_eq!(
+            written,
+            "\
+[permissions]
+allow = [
+ \"Bash\", # everything
+ \"Bash(cargo test)\",
+ # \"Write\", disabled
+    \"Read\",
+]
+"
+        );
+    }
+
+    #[test]
+    fn a_last_element_with_no_comma_is_given_one() {
+        assert_eq!(
+            spliced("[permissions]\nallow = [\n  \"Bash\" # all\n]\n", "Read")
+                .expect("the text in this test is an allow array the splice reads"),
+            "[permissions]\nallow = [\n  \"Bash\", # all\n    \"Read\",\n]\n"
+        );
+        assert_eq!(
+            spliced("[permissions]\nallow = []\n", "Read")
+                .expect("the text in this test is an allow array the splice reads"),
+            "[permissions]\nallow = [\"Read\"]\n"
+        );
+    }
+
+    #[test]
+    fn a_comma_in_the_comment_after_the_last_element_is_not_taken_for_its_comma() {
+        let written = spliced("[permissions]\nallow = [\"Bash(ls)\" # a, b\n]\n", "Read")
+            .expect("the array is spliced");
+
+        assert_eq!(
+            written,
+            "[permissions]\nallow = [\"Bash(ls)\", # a, b\n    \"Read\",\n]\n"
+        );
+        let config = Config::parse(&written, &path()).expect("what was written reads back");
+        assert_eq!(
+            config.allowed().rules(),
+            [Rule::targeted("Bash", "ls"), Rule::tool("Read")]
+        );
+    }
+
     #[test]
     fn a_rule_that_would_not_read_back_is_escaped() {
         let written =
-            spliced("", &[r#"Bash(echo "one" \ two)"#]).expect("the rule is written escaped");
+            spliced("", r#"Bash(echo "one" \ two)"#).expect("the rule is written escaped");
 
         let config = Config::parse(&written, &path()).expect("what was written reads back");
         assert_eq!(
-            config.allowed().rules()[0].target(),
-            Some(r#"echo "one" \ two"#)
+            config.allowed().rules()[0],
+            Rule::targeted("Bash", r#"echo "one" \ two"#)
         );
     }
 
     #[test]
     fn a_permissions_table_niobe_does_not_understand_is_left_alone() {
-        let said = spliced("[permissions]\n", &["Read"]).expect_err("there is no array");
+        let said = spliced("[permissions]\n", "Read").expect_err("there is no array");
         assert!(said.contains("no `allow` array"), "{said}");
         assert!(said.contains("config.toml:1"), "{said}");
 
-        let said = spliced("permissions = \"none\"\n", &["Read"]).expect_err("not a table");
+        let said = spliced("permissions = \"none\"\n", "Read").expect_err("not a table");
         assert!(said.contains("is not a table"), "{said}");
     }
 
     #[test]
     fn an_inline_permissions_table_is_spliced_like_any_other() {
-        let written = spliced("permissions = { allow = [] }\n", &["Read"])
+        let written = spliced("permissions = { allow = [] }\n", "Read")
             .expect("an inline table holds an array too");
 
         let config = Config::parse(&written, &path()).expect("what was written reads back");
@@ -311,6 +533,37 @@ backend = \"claude\"
         assert_eq!(
             std::fs::read_to_string(&file).expect("the file is still there"),
             "[permissions]\nallow = [\"Read\"]\n"
+        );
+    }
+
+    /// The broader rule may be in a file nobody has trusted, where it answers
+    /// nothing; the narrower one is what the operator granted.
+    #[test]
+    fn a_rule_a_broader_one_in_the_file_covers_is_still_written() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let file = dir.path().join("config.toml");
+        std::fs::write(&file, "[permissions]\nallow = [\"Bash\"]\n").expect("the file is written");
+
+        remember(&file, &Rule::targeted("Bash", "cargo test")).expect("the rule is written");
+
+        assert_eq!(
+            std::fs::read_to_string(&file).expect("the file is still there"),
+            "[permissions]\nallow = [\"Bash\", \"Bash(cargo test)\"]\n"
+        );
+    }
+
+    #[test]
+    fn a_rule_listed_after_a_broader_one_is_not_written_again() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let file = dir.path().join("config.toml");
+        let text = "[permissions]\nallow = [\"Bash\", \"Bash(cargo test)\"]\n";
+        std::fs::write(&file, text).expect("the file is written");
+
+        remember(&file, &Rule::targeted("Bash", "cargo test")).expect("nothing to do");
+
+        assert_eq!(
+            std::fs::read_to_string(&file).expect("the file is still there"),
+            text
         );
     }
 
@@ -335,7 +588,8 @@ backend = \"claude\"
     fn a_config_that_does_not_load_is_not_written_to() {
         let dir = tempfile::tempdir().expect("a temporary directory");
         let file = dir.path().join("config.toml");
-        std::fs::write(&file, "[profiles.max]\nbackend = \"nothing\"\n").expect("written");
+        std::fs::write(&file, "[profiles.max]\nbackend = \"nothing\"\n")
+            .expect("the temporary directory is writable");
 
         let said = remember(&file, &Rule::tool("Read"))
             .expect_err("the file does not load")
@@ -375,12 +629,16 @@ backend = \"claude\"
         assert_eq!(left, ["config.toml"], "a failed write left a file behind");
     }
 
+    // Only where the directory can be locked: elsewhere a writer goes
+    // unlocked, as `replace::Lock` says.
+    #[cfg(unix)]
     #[test]
     fn two_sessions_answering_always_at_once_both_keep_their_rule() {
         for round in 0..100 {
             let dir = tempfile::tempdir().expect("a temporary directory");
             let file = dir.path().join("config.toml");
-            std::fs::write(&file, "[profiles.max]\nbackend = \"claude\"\n").expect("written");
+            std::fs::write(&file, "[profiles.max]\nbackend = \"claude\"\n")
+                .expect("the temporary directory is writable");
             let start = std::sync::Barrier::new(2);
 
             std::thread::scope(|scope| {
@@ -403,5 +661,20 @@ backend = \"claude\"
                 "round {round} lost a rule: {rules:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_multibyte_utf8_comment_before_array_closing_bracket_does_not_panic() {
+        let before = "[permissions]\nallow = [\n  \"Bash\" # 🦀 crab\n]\n";
+        let written = spliced(before, "Read").expect("spliced without panic");
+        assert!(written.contains("\"Read\""));
+    }
+
+    #[test]
+    fn an_empty_or_invalid_array_span_does_not_panic_splice_into_array() {
+        let text = "[permissions]\nallow = []";
+        // span 10..10 -> close = 9, so span.start (10) > close (9)
+        let res = splice_into_array(text, &path(), "Read", 10..10, None);
+        assert!(res.is_err(), "returns typed error instead of panicking");
     }
 }

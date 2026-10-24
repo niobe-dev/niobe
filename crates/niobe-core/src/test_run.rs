@@ -23,11 +23,22 @@
 //! off part-way is not. Those leave a run that happened and whose result was
 //! not read, never a total of the suites that happened to survive the filter.
 //!
+//! A verbose run, `cargo test -v`, is read like any other: it names each
+//! binary by the command that runs it rather than by its target, and the
+//! doc-tests by the `rustdoc` command under their own header.
+//!
+//! A quiet run, `cargo test -q`, is a test run whose counts are never read:
+//! it prints no line saying where the build ended, so its whole output and
+//! the last part of it look the same. Colour codes cargo puts around its
+//! status words are read past.
+//!
 //! Nor does the output say when the run is over: `cargo test` prints nothing
 //! after its last binary, so a run killed between two binaries reads as a
 //! whole run of fewer. What says it finished is the status it exited with,
 //! which has to agree with the counts — `0` for a run with no failures, `101`
-//! for one with any — or the counts are not read.
+//! for one with any — or the counts are not read. Only a command that ends in
+//! `cargo test` exits with the run's status: one cut off by `| head` or
+//! followed by `; echo done` exits with that other command's.
 //!
 //! A hook that rewrites the command before it runs leaves the command the
 //! agent wrote in the call, so a run whose output was replaced by another
@@ -103,10 +114,16 @@ where
 /// that `&&`, `||`, `&`, `;`, `|`, a newline or a subshell's parentheses
 /// separate. A redirection — `2>&1`, `&> log`, `>| log` — is part of the
 /// command it redirects, not a separator.
-/// One of them has to be `cargo test` or `cargo +<toolchain> test`, after any
-/// `NAME=value` assignments and the wrappers `env`, `time` and `nice` that
-/// change nothing about what is printed. A `cargo test` that builds the tests
-/// and runs none — `--no-run`, `--help`, `-- --list` — is not a test run.
+/// One of them has to be `cargo test`, or its alias `cargo t`, after any of
+/// the shell's own words that can lead a command (`then`, `do`, `!`, `{`),
+/// any `NAME=value` assignments — quoted or not — and the wrappers `env`,
+/// `time`, `nice`, `timeout`, `sudo`, `exec` and `command` with their own
+/// options, which change nothing about what is printed; cargo may be named by
+/// a path, and given a `+<toolchain>` and its own options before the
+/// subcommand (`cargo -q --locked test`), except those that make it do
+/// something else (`cargo --list`). A `cargo test` that builds the
+/// tests and runs none — `--no-run`, `--help`, `-- --list` — is not a test
+/// run.
 ///
 /// It does not look inside a quoted string, so neither `echo "cargo test"` nor
 /// `git commit -m "fix; cargo test passes"` is one; nor inside a `$(…)` or
@@ -114,61 +131,266 @@ where
 /// output may not be what `cargo test` printed.
 pub fn is_test_run(command: &str) -> bool {
     simple_commands(command)
-        .into_iter()
-        .any(|simple| runs_cargo_test(simple.split_whitespace()))
+        .iter()
+        .any(|simple| runs_cargo_test(simple))
 }
 
-/// The simple commands in `command`, in order, split where a shell would run
-/// the next one, and empty where two separators meet (`&&`, `||`).
+/// The simple commands in `command`, in order, each as the words a shell would
+/// hand the program it runs, split where a shell would run the next one, and
+/// empty where two separators meet (`&&`, `||`).
 ///
-/// A separator inside quotes, a `$(…)` or backticks, or escaped with `\`, is
-/// part of a word: `git commit -m "fix; cargo test passes"` is one command,
-/// `git`'s. What a command substitution runs is not split out either, since
-/// what it prints is captured and its status is not the command's.
-fn simple_commands(command: &str) -> Vec<&str> {
-    let bytes = command.as_bytes();
-    let mut commands = Vec::new();
-    let mut start = 0;
+/// A word is read with its quoting taken off — `RUSTFLAGS="-D warnings"` is
+/// one word, and `cargo 'test'` names `test` — and a line ended with `\` goes
+/// on to the next. A separator inside quotes, a `$(…)` or backticks, or
+/// escaped with `\`, is part of a word: `git commit -m "fix; cargo test
+/// passes"` is one command, `git`'s. What a command substitution runs is not
+/// split out either, since what it prints is captured and its status is not
+/// the command's; its text is kept in the word as it was written, quotes and
+/// all, and a `)` quoted inside it does not close it. Nor is the
+/// body of a here-document, which is the input of the command that opened it,
+/// nor a comment, from an unquoted `#` that starts a word to the end of its
+/// line: writing a script that runs `cargo test` is not running it.
+pub(crate) fn simple_commands(command: &str) -> Vec<Vec<String>> {
+    simple_commands_marked(command)
+        .into_iter()
+        .map(|words| words.into_iter().map(|word| word.text).collect())
+        .collect()
+}
+
+/// A word of a simple command, and whether any of it was quoted.
+///
+/// A quoted `>` is a pattern or some text, which no shell reads as a
+/// redirection; read with its quoting taken off it looks like one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Word {
+    pub(crate) text: String,
+    pub(crate) quoted: bool,
+}
+
+/// [`simple_commands`], each word with whether it was quoted.
+pub(crate) fn simple_commands_marked(command: &str) -> Vec<Vec<Word>> {
+    let chars: Vec<char> = command.chars().collect();
+    let mut split = Split::default();
     let mut open: Vec<Quoted> = Vec::new();
     let mut at = 0;
-    while let Some(&byte) = bytes.get(at) {
+    while let Some(&c) = chars.get(at) {
         let inner = open.last().copied();
-        let substitution = byte == b'$' && bytes.get(at + 1) == Some(&b'(');
-        match (inner, byte) {
-            (Some(Quoted::Single), b'\'') => {
+        let next = chars.get(at + 1).copied();
+        let substituted = in_substitution(&open);
+        match (inner, c) {
+            (Some(Quoted::Single), '\'') => {
                 open.pop();
-            }
-            (Some(Quoted::Single), _) => {}
-            (_, b'\\') => at += 1,
-            (_, b'$') if substitution => {
-                open.push(Quoted::Substitution);
-                at += 1;
-            }
-            (Some(Quoted::Double), b'"') | (Some(Quoted::Backticks), b'`') => {
-                open.pop();
-            }
-            (_, b'`') => open.push(Quoted::Backticks),
-            (Some(Quoted::Double), _) => {}
-            (_, b'\'') => open.push(Quoted::Single),
-            (_, b'"') => open.push(Quoted::Double),
-            (Some(Quoted::Substitution | Quoted::Parenthesis), b'(') => {
-                open.push(Quoted::Parenthesis);
-            }
-            (Some(Quoted::Substitution | Quoted::Parenthesis), b')') => {
-                open.pop();
-            }
-            (Some(Quoted::Substitution | Quoted::Parenthesis | Quoted::Backticks), _) => {}
-            (None, _) => {
-                if separates(bytes, at) {
-                    commands.extend(command.get(start..at));
-                    start = at + 1;
+                if in_substitution(&open) {
+                    split.push(c);
                 }
             }
+            (Some(Quoted::Single), _) => split.push(c),
+            (Some(Quoted::Double) | None, '\\') => {
+                match next {
+                    // A line that goes on: the two characters are not there.
+                    Some('\n') => {}
+                    Some(next) => {
+                        let kept = inner.is_none() || matches!(next, '"' | '\\' | '$' | '`');
+                        if !kept || substituted {
+                            split.push('\\');
+                        }
+                        split.push(next);
+                    }
+                    None => split.push(c),
+                }
+                at += 1;
+            }
+            (Some(_), '\\') => {
+                split.push(c);
+                if let Some(next) = next {
+                    split.push(next);
+                    at += 1;
+                }
+            }
+            (_, '$') if next == Some('(') => {
+                open.push(Quoted::Substitution);
+                split.push(c);
+                split.push('(');
+                at += 1;
+            }
+            (Some(Quoted::Double), '"') => {
+                open.pop();
+                if in_substitution(&open) {
+                    split.push(c);
+                }
+            }
+            (Some(Quoted::Backticks), '`') => {
+                open.pop();
+                split.push(c);
+            }
+            (_, '`') => {
+                open.push(Quoted::Backticks);
+                split.push(c);
+            }
+            (Some(Quoted::Double), _) => split.push(c),
+            (None | Some(Quoted::Substitution | Quoted::Parenthesis), '\'' | '"') => {
+                open.push(match c {
+                    '\'' => Quoted::Single,
+                    _ => Quoted::Double,
+                });
+                if substituted {
+                    split.push(c);
+                } else {
+                    split.quoted();
+                }
+            }
+            (Some(Quoted::Substitution | Quoted::Parenthesis), '(') => {
+                open.push(Quoted::Parenthesis);
+                split.push(c);
+            }
+            (Some(Quoted::Substitution | Quoted::Parenthesis), ')') => {
+                open.pop();
+                split.push(c);
+            }
+            (Some(Quoted::Substitution | Quoted::Parenthesis | Quoted::Backticks), _) => {
+                split.push(c);
+            }
+            (None, '#') if split.between_words() => {
+                // A comment runs to the end of the line, which still ends
+                // the command.
+                while chars.get(at + 1).is_some_and(|&c| c != '\n') {
+                    at += 1;
+                }
+            }
+            (None, '<') if heredoc_at(&chars, at) => {
+                split.end_word();
+                at = split.heredoc(&chars, at);
+            }
+            (None, '\n') => {
+                split.end_command();
+                at = split.skip_heredoc_bodies(&chars, at);
+            }
+            (None, _) if separates(&chars, at) => split.end_command(),
+            (None, ' ' | '\t') => split.end_word(),
+            (None, _) => split.push(c),
         }
         at += 1;
     }
-    commands.extend(command.get(start..));
-    commands
+    split.end_command();
+    split.commands
+}
+
+/// The words and commands [`simple_commands`] has read so far.
+#[derive(Debug, Default)]
+struct Split {
+    commands: Vec<Vec<Word>>,
+    words: Vec<Word>,
+    word: String,
+    /// Whether the word being read has been quoted, so that `''` is a word
+    /// though nothing is in it.
+    quoted: bool,
+    /// The delimiters of the here-documents the current line opened, and
+    /// whether each strips leading tabs (`<<-`). Their bodies start on the
+    /// next line and are not commands.
+    heredocs: Vec<(String, bool)>,
+}
+
+impl Split {
+    fn push(&mut self, c: char) {
+        self.word.push(c);
+    }
+
+    fn quoted(&mut self) {
+        self.quoted = true;
+    }
+
+    fn end_word(&mut self) {
+        if self.quoted || !self.word.is_empty() {
+            self.words.push(Word {
+                text: std::mem::take(&mut self.word),
+                quoted: self.quoted,
+            });
+            self.quoted = false;
+        }
+    }
+
+    fn end_command(&mut self) {
+        self.end_word();
+        self.commands.push(std::mem::take(&mut self.words));
+    }
+
+    /// Whether nothing of a word has been read yet, where a `#` starts a
+    /// comment rather than being part of the word.
+    fn between_words(&self) -> bool {
+        !self.quoted && self.word.is_empty()
+    }
+
+    /// Reads the `<<WORD` or `<<-WORD` starting at `at` as two words of the
+    /// command it redirects, and keeps the delimiter for the body the next
+    /// line starts; returns where it ended.
+    fn heredoc(&mut self, chars: &[char], at: usize) -> usize {
+        let mut at = at + 1;
+        let strip_tabs = chars.get(at + 1) == Some(&'-');
+        if strip_tabs {
+            at += 1;
+        }
+        self.words.push(Word {
+            text: if strip_tabs { "<<-" } else { "<<" }.to_owned(),
+            quoted: false,
+        });
+        while chars.get(at + 1).is_some_and(|&c| c == ' ' || c == '\t') {
+            at += 1;
+        }
+        let mut delimiter = String::new();
+        while let Some(&c) = chars.get(at + 1) {
+            if c.is_whitespace() || matches!(c, ';' | '&' | '|' | '(' | ')' | '<' | '>') {
+                break;
+            }
+            if !matches!(c, '\'' | '"' | '\\') {
+                delimiter.push(c);
+            }
+            at += 1;
+        }
+        if !delimiter.is_empty() {
+            self.words.push(Word {
+                text: delimiter.clone(),
+                quoted: false,
+            });
+            self.heredocs.push((delimiter, strip_tabs));
+        }
+        at
+    }
+
+    /// Passes over the bodies of the here-documents the line ending at `at`
+    /// opened, each up to the line that is its delimiter; returns where the
+    /// last one ended.
+    fn skip_heredoc_bodies(&mut self, chars: &[char], mut at: usize) -> usize {
+        for (delimiter, strip_tabs) in std::mem::take(&mut self.heredocs) {
+            loop {
+                let start = at + 1;
+                if start >= chars.len() {
+                    return chars.len();
+                }
+                let end = chars[start..]
+                    .iter()
+                    .position(|&c| c == '\n')
+                    .map_or(chars.len(), |len| start + len);
+                let line: String = chars[start..end].iter().collect();
+                let line = match strip_tabs {
+                    true => line.trim_start_matches('\t'),
+                    false => line.as_str(),
+                };
+                at = end;
+                if line == delimiter {
+                    break;
+                }
+            }
+        }
+        at
+    }
+}
+
+/// Whether the `<` at `at` opens a here-document: `<<` or `<<-`, and not the
+/// here-string `<<<`.
+fn heredoc_at(chars: &[char], at: usize) -> bool {
+    chars.get(at + 1) == Some(&'<')
+        && chars.get(at + 2) != Some(&'<')
+        && at.checked_sub(1).and_then(|i| chars.get(i)) != Some(&'<')
 }
 
 /// What a byte of a command is inside of, where a separator is not one.
@@ -186,41 +408,169 @@ enum Quoted {
     Backticks,
 }
 
+/// Whether what is being read is inside a `$(…)`, where a quote is kept as
+/// written, since the substitution's text is, and a `)` it quotes does not
+/// close the substitution.
+fn in_substitution(open: &[Quoted]) -> bool {
+    open.iter()
+        .any(|quoted| matches!(quoted, Quoted::Substitution | Quoted::Parenthesis))
+}
+
 /// Whether the byte at `at` ends a simple command. An `&` that follows `>` or
 /// `<` or precedes `>`, and a `|` that follows `>`, belong to a redirection:
 /// `cargo test 2>&1` is one command, whose status is `cargo test`'s.
-fn separates(bytes: &[u8], at: usize) -> bool {
-    let before = at.checked_sub(1).and_then(|i| bytes.get(i)).copied();
-    let after = bytes.get(at + 1).copied();
-    match bytes.get(at) {
-        Some(b'&') => !matches!(before, Some(b'>' | b'<')) && after != Some(b'>'),
-        Some(b'|') => before != Some(b'>'),
-        Some(b';' | b'\n' | b'(' | b')') => true,
+fn separates(chars: &[char], at: usize) -> bool {
+    let before = at.checked_sub(1).and_then(|i| chars.get(i)).copied();
+    let after = chars.get(at + 1).copied();
+    match chars.get(at) {
+        Some('&') => !matches!(before, Some('>' | '<')) && after != Some('>'),
+        Some('|') => before != Some('>'),
+        Some(';' | '\n' | '(' | ')') => true,
         _ => false,
     }
 }
 
-fn runs_cargo_test<'a>(mut words: impl Iterator<Item = &'a str>) -> bool {
-    let mut word = words.next();
-    while let Some(w) = word
-        && (is_assignment(w) || matches!(w, "env" | "time" | "nice"))
-    {
-        word = words.next();
-    }
-    if word != Some("cargo") {
+fn runs_cargo_test(words: &[String]) -> bool {
+    let Some(mut words) = after_cargo(words) else {
+        return false;
+    };
+    let _toolchain = words.next_if(|word| word.starts_with('+'));
+    if !skip_options(&mut words, CARGO_TAKES_A_VALUE, CARGO_RUNS_NOTHING) {
         return false;
     }
-    let mut word = words.next();
-    if let Some(toolchain) = word
-        && toolchain.starts_with('+')
-    {
-        word = words.next();
+    matches!(words.next(), Some("test" | "t"))
+        && words.all(|w| !matches!(w, "--no-run" | "--help" | "-h" | "--list"))
+}
+
+/// The subcommand the simple command `words` runs cargo with, read past the
+/// shell's own words, assignments and the wrappers [`runs_cargo_test`] reads
+/// past, and cargo's own toolchain and options. `None` where it does not run
+/// cargo, or runs it to do something of its own (`cargo --list`).
+pub(crate) fn cargo_subcommand(words: &[String]) -> Option<&str> {
+    let mut words = after_cargo(words)?;
+    let _toolchain = words.next_if(|word| word.starts_with('+'));
+    if !skip_options(&mut words, CARGO_TAKES_A_VALUE, CARGO_RUNS_NOTHING) {
+        return None;
     }
-    word == Some("test") && words.all(|w| !matches!(w, "--no-run" | "--help" | "-h" | "--list"))
+    words.next()
+}
+
+/// The words of `words` after the one that names cargo, where it runs cargo.
+fn after_cargo(words: &[String]) -> Option<std::iter::Peekable<impl Iterator<Item = &str>>> {
+    let mut words = words
+        .iter()
+        .map(String::as_str)
+        .skip_while(|word| RESERVED.contains(word))
+        .peekable();
+    loop {
+        match words.next() {
+            Some(word) if is_assignment(word) => {}
+            Some(word) => match Wrapper::named(word) {
+                Some(wrapper) => {
+                    if !wrapper.skip_its_own(&mut words) {
+                        return None;
+                    }
+                }
+                None if is_cargo(word) => return Some(words),
+                None => return None,
+            },
+            None => return None,
+        }
+    }
+}
+
+/// The words a shell reads as part of its own grammar at the head of a
+/// command, before the command itself: `then cargo test`, `! cargo test`,
+/// `{ cargo test; }`.
+pub(crate) const RESERVED: &[&str] = &[
+    "!", "{", "if", "then", "elif", "else", "while", "until", "do",
+];
+
+/// Whether `word` names cargo, as a bare name or by a path to it.
+fn is_cargo(word: &str) -> bool {
+    word.rsplit('/').next() == Some("cargo")
+}
+
+/// The options cargo takes before a subcommand that make it do something of
+/// its own instead: `cargo --list test` lists the commands and runs none.
+const CARGO_RUNS_NOTHING: &[&str] = &["--list", "-h", "--help", "-V", "--version", "--explain"];
+
+/// The options cargo takes before its subcommand that are followed by a
+/// value: `--color always`, `--config net.offline=true`, `-Z <flag>`,
+/// `-C <dir>`.
+const CARGO_TAKES_A_VALUE: &[&str] = &["--color", "--config", "-Z", "-C"];
+
+/// A command that runs the command after it with its output and its status
+/// left as they are, so that what it runs is what is read.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Wrapper {
+    /// Its options that are followed by a value.
+    takes_a_value: &'static [&'static str],
+    /// Its options that make it run nothing after them.
+    runs_nothing: &'static [&'static str],
+    /// The words it takes after its options and before the command, as
+    /// `timeout` takes its duration.
+    operands: usize,
+}
+
+impl Wrapper {
+    pub(crate) fn named(word: &str) -> Option<Wrapper> {
+        let (takes_a_value, runs_nothing, operands): (
+            &'static [&'static str],
+            &'static [&'static str],
+            usize,
+        ) = match word {
+            "env" => (&["-u", "--unset", "-C", "--chdir"], &[], 0),
+            "time" => (&["-f", "--format", "-o", "--output"], &[], 0),
+            "nice" => (&["-n", "--adjustment"], &[], 0),
+            "timeout" => (&["-s", "--signal", "-k", "--kill-after"], &[], 1),
+            "sudo" => (&["-u", "--user", "-g", "--group"], &[], 0),
+            "exec" => (&["-a"], &[], 0),
+            // `command -v cargo test` says where cargo is and runs nothing.
+            "command" => (&[], &["-v", "-V"], 0),
+            _ => return None,
+        };
+        Some(Wrapper {
+            takes_a_value,
+            runs_nothing,
+            operands,
+        })
+    }
+
+    /// Moves `words` past this wrapper's options and operands, or says there
+    /// was nothing after them, or that an option made it run nothing.
+    pub(crate) fn skip_its_own<'a>(
+        self,
+        words: &mut std::iter::Peekable<impl Iterator<Item = &'a str>>,
+    ) -> bool {
+        if !skip_options(words, self.takes_a_value, self.runs_nothing) {
+            return false;
+        }
+        (0..self.operands).all(|_| words.next().is_some()) && words.peek().is_some()
+    }
+}
+
+/// Moves `words` past the options at their head — each a word that starts
+/// with `-`, and the value after one of `takes_a_value` — or says a value
+/// was missing, or that one of `runs_nothing` was given.
+fn skip_options<'a>(
+    words: &mut std::iter::Peekable<impl Iterator<Item = &'a str>>,
+    takes_a_value: &[&str],
+    runs_nothing: &[&str],
+) -> bool {
+    while let Some(option) = words.next_if(|word| word.starts_with('-')) {
+        if runs_nothing.contains(&option) {
+            return false;
+        }
+        if takes_a_value.contains(&option) && words.next().is_none() {
+            return false;
+        }
+    }
+    true
 }
 
 /// `NAME=value`, where the name is one a shell would take as a variable.
-fn is_assignment(word: &str) -> bool {
+pub(crate) fn is_assignment(word: &str) -> bool {
     word.split_once('=').is_some_and(|(name, _)| {
         name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
             && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
@@ -238,12 +588,18 @@ fn is_assignment(word: &str) -> bool {
 /// status is not known or disagrees with its counts: `cargo test` exits `0`
 /// where no test failed and `101` where one did, and anything else — a
 /// signal, a status nobody reported — is a run that may have stopped between
-/// two binaries.
+/// two binaries. The status has to be `cargo test`'s own for that, so
+/// `command` must end in it, as for [`failed`]: `cargo test | head -20` exits
+/// with `head`'s status, and `cargo test; echo done` with `echo`'s, whether or
+/// not the run went on past where its output stops.
 ///
 /// `output` is what the command printed, with its standard error in it: the
 /// headers that say which binary is running are written there.
-pub fn counts(output: &str, exit_code: Option<i32>) -> Option<TestCounts> {
-    let counts = whole_run(output)?;
+pub fn counts(command: &str, output: &str, exit_code: Option<i32>) -> Option<TestCounts> {
+    if !ends_in_cargo_test(command) {
+        return None;
+    }
+    let counts = whole_run(&uncoloured(output))?;
     match (exit_code, counts.failing()) {
         (Some(0), false) | (Some(FAILED_STATUS), true) => Some(counts),
         _ => None,
@@ -264,7 +620,9 @@ pub fn counts(output: &str, exit_code: Option<i32>) -> Option<TestCounts> {
 /// status of `cargo test && cargo clippy` may be clippy's, which also exits
 /// `101`. Nothing here says how many tests failed, or which.
 pub fn failed(command: &str, output: &str, exit_code: Option<i32>) -> bool {
-    exit_code == Some(FAILED_STATUS) && ends_in_cargo_test(command) && tests_started(output)
+    exit_code == Some(FAILED_STATUS)
+        && ends_in_cargo_test(command)
+        && tests_started(&uncoloured(output))
 }
 
 /// The tests each failing binary in `output` named, in the order they ran,
@@ -286,6 +644,7 @@ pub fn failed(command: &str, output: &str, exit_code: Option<i32>) -> bool {
 /// in it says how many tests the run as a whole ran or failed, nor that no
 /// other binary failed: one whose list was lost is not in it.
 pub fn failures(output: &str) -> Vec<FailedTests> {
+    let output = uncoloured(output);
     let lines: Vec<&str> = output.lines().map(str::trim_end).collect();
     (0..lines.len())
         .filter_map(|at| failures_closed_at(&lines, at))
@@ -347,15 +706,20 @@ const FAILED_STATUS: i32 = 101;
 /// status the whole command exited with is the run's.
 fn ends_in_cargo_test(command: &str) -> bool {
     simple_commands(command)
-        .into_iter()
-        .rfind(|simple| !simple.trim().is_empty())
-        .is_some_and(|simple| runs_cargo_test(simple.split_whitespace()))
+        .iter()
+        .rfind(|simple| !simple.is_empty())
+        .is_some_and(|simple| runs_cargo_test(simple))
 }
 
-/// Whether an output shows a build finishing and a test binary starting after
-/// it, and no crate failing to compile.
+/// Whether an output shows a build finishing and a test binary starting to
+/// run its tests after it, and no crate failing to compile.
+///
+/// A binary has started its tests once it says how many it is running. One
+/// that stops between its header and that line refused what it was asked to
+/// run — a flag only a nightly harness takes — and ran no test.
 fn tests_started(output: &str) -> bool {
     let mut built = false;
+    let mut headed = false;
     let mut started = false;
     for line in output.lines() {
         if line.trim_start().starts_with("error: could not compile ") {
@@ -363,11 +727,39 @@ fn tests_started(output: &str) -> bool {
         }
         match Line::of(line) {
             Line::Finished => built = true,
-            Line::Header => started |= built,
-            Line::Running(_) | Line::Result(_) | Line::Other => {}
+            Line::Header | Line::Invocation => headed = built,
+            Line::Running(_) => started |= headed,
+            Line::Result(_) | Line::Other => {}
         }
     }
     started
+}
+
+/// `output` without the colour codes cargo writes around its status words
+/// when told to colour what it prints, as `CARGO_TERM_COLOR=always` does.
+///
+/// Every escape sequence of the `ESC [ … <final byte>` form is removed, which
+/// is the form colour takes; nothing else is changed.
+fn uncoloured(output: &str) -> std::borrow::Cow<'_, str> {
+    if !output.contains('\x1b') {
+        return std::borrow::Cow::Borrowed(output);
+    }
+    let mut plain = String::with_capacity(output.len());
+    let mut chars = output.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' && chars.next_if_eq(&'[').is_some() {
+            // Parameters and intermediates run up to the final byte, which
+            // is in `@`..=`~`.
+            for c in chars.by_ref() {
+                if ('@'..='~').contains(&c) {
+                    break;
+                }
+            }
+            continue;
+        }
+        plain.push(c);
+    }
+    std::borrow::Cow::Owned(plain)
 }
 
 /// The counts in an output that holds a whole run, however it ended.
@@ -383,7 +775,12 @@ fn whole_run(output: &str) -> Option<TestCounts> {
         state = match (state, Line::of(line)) {
             (_, Line::Other) => state,
             (Block::Building | Block::Between, Line::Finished) => Block::Between,
-            (Block::Between, Line::Header) => Block::Headed,
+            (Block::Between, Line::Header | Line::Invocation) => Block::Headed,
+            // `cargo test -v` names the `rustdoc` it runs on a line of its
+            // own, under the `Doc-tests` header of the block it belongs to.
+            // Only that line: a header straight after a header is a block
+            // cut out of the middle of the run.
+            (Block::Headed, Line::Invocation) => Block::Headed,
             (Block::Headed, Line::Running(tests)) => Block::Running(tests),
             (Block::Running(tests), Line::Result(result)) if result.total() == Some(tests) => {
                 counts.passed = counts.passed.saturating_add(result.passed);
@@ -424,6 +821,9 @@ enum Line {
     /// `     Running unittests src/lib.rs (target/debug/deps/…)` or
     /// `   Doc-tests demo`.
     Header,
+    /// ``     Running `/repo/target/debug/deps/demo-…` ``, as `cargo test
+    /// -v` names a binary, or the `rustdoc` it runs the doc-tests with.
+    Invocation,
     /// `running 5 tests`.
     Running(u64),
     /// `test result: ok. 4 passed; 0 failed; …`.
@@ -444,6 +844,8 @@ impl Line {
                     Line::Finished
                 } else if is_header(words) {
                     Line::Header
+                } else if is_invocation(words) {
+                    Line::Invocation
                 } else {
                     Line::Other
                 }
@@ -454,6 +856,15 @@ impl Line {
                 .unwrap_or(Line::Other),
         }
     }
+}
+
+/// ``Running `<the command>` ``, which is how `cargo test -v` names what it
+/// runs: a test binary, where it heads a block, or the `rustdoc` that runs
+/// the doc-tests, under their own header.
+fn is_invocation(words: &str) -> bool {
+    words
+        .strip_prefix("Running `")
+        .is_some_and(|rest| rest.len() > 1 && rest.ends_with('`'))
 }
 
 /// `Running <what> (<binary>)` or `Doc-tests <crate>`.
@@ -536,6 +947,25 @@ impl Summary {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_measured_benchmark_is_one_of_the_tests_a_binary_ran() {
+        let summary = Summary::of(
+            "test result: ok. 1 passed; 0 failed; 0 ignored; 1 measured; 0 filtered out; finished in 0.10s",
+        )
+        .expect("a libtest summary line");
+        assert_eq!(summary.total(), Some(2));
+    }
+
+    #[test]
+    fn a_verdict_that_disagrees_with_the_failures_counted_is_no_summary() {
+        for line in [
+            "test result: ok. 3 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+            "test result: FAILED. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        ] {
+            assert_eq!(Summary::of(line), None, "{line}");
+        }
+    }
 
     // Recorded from `cargo test` 1.91 on a crate with five unit tests (one
     // ignored), one integration test and one doc-test, with its standard
@@ -686,24 +1116,28 @@ error: could not compile `demo` (lib test) due to 1 previous error
 
     #[test]
     fn a_clean_pass_is_read_as_the_sum_of_its_binaries() {
-        assert_eq!(counts(PASSED, Some(0)), counted(6, 0, 1, 3));
+        assert_eq!(counts("cargo test", PASSED, Some(0)), counted(6, 0, 1, 3));
     }
 
     #[test]
     fn a_run_with_a_failure_is_read_as_failing_with_its_own_count() {
-        let read = counts(FAILED, Some(101)).expect("a failing run's summary is whole");
+        let read =
+            counts("cargo test", FAILED, Some(101)).expect("a failing run's summary is whole");
         assert_eq!(Some(read), counted(3, 1, 1, 1));
         assert!(read.failing());
     }
 
     #[test]
     fn a_run_that_kept_going_past_a_failure_counts_every_binary() {
-        assert_eq!(counts(FAILED_EVERY_BINARY, Some(101)), counted(5, 1, 1, 3));
+        assert_eq!(
+            counts("cargo test", FAILED_EVERY_BINARY, Some(101)),
+            counted(5, 1, 1, 3)
+        );
     }
 
     #[test]
     fn an_interrupted_run_is_not_read() {
-        assert_eq!(counts(INTERRUPTED, None), None);
+        assert_eq!(counts("cargo test", INTERRUPTED, None), None);
     }
 
     #[test]
@@ -711,7 +1145,7 @@ error: could not compile `demo` (lib test) due to 1 previous error
         let (before, _) = PASSED
             .split_once("test result: ok. 1 passed")
             .expect("the recording has a second binary");
-        assert_eq!(counts(before, Some(0)), None);
+        assert_eq!(counts("cargo test", before, Some(0)), None);
     }
 
     #[test]
@@ -725,20 +1159,39 @@ error: could not compile `demo` (lib test) due to 1 previous error
              test result: ok. 4 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; \
              finished in 60.01s\n\n"
         );
-        assert_eq!(counts(&orphaned, Some(142)), None);
-        assert_eq!(counts(&orphaned, None), None);
+        assert_eq!(counts("cargo test", &orphaned, Some(142)), None);
+        assert_eq!(counts("cargo test", &orphaned, None), None);
+    }
+
+    #[test]
+    fn a_run_cut_by_head_between_two_binaries_is_not_read_as_the_binaries_before() {
+        let first: String = PASSED.lines().take(11).map(|l| format!("{l}\n")).collect();
+        assert_eq!(counts("cargo test", &first, Some(0)), counted(4, 0, 1, 1));
+        assert_eq!(counts("cargo test 2>&1 | head -11", &first, Some(0)), None);
+        assert_eq!(
+            counts("timeout 5 cargo test; echo done", &first, Some(0)),
+            None
+        );
+    }
+
+    #[test]
+    fn a_whole_run_whose_status_is_its_own_is_read_however_it_is_led() {
+        assert_eq!(
+            counts("cd crates/x && cargo test", PASSED, Some(0)),
+            counted(6, 0, 1, 3)
+        );
     }
 
     #[test]
     fn counts_the_status_disagrees_with_are_not_read() {
-        assert_eq!(counts(PASSED, Some(101)), None);
-        assert_eq!(counts(FAILED, Some(0)), None);
-        assert_eq!(counts(FAILED, Some(1)), None);
+        assert_eq!(counts("cargo test", PASSED, Some(101)), None);
+        assert_eq!(counts("cargo test", FAILED, Some(0)), None);
+        assert_eq!(counts("cargo test", FAILED, Some(1)), None);
     }
 
     #[test]
     fn a_filtered_run_is_not_read_as_the_summaries_that_survived() {
-        assert_eq!(counts(TAILED, Some(0)), None);
+        assert_eq!(counts("cargo test", TAILED, Some(0)), None);
     }
 
     #[test]
@@ -747,37 +1200,38 @@ error: could not compile `demo` (lib test) due to 1 previous error
         // run under a hook that rewrote the command before it ran; the call
         // still named `cargo test`.
         let replaced = "cargo test: 111 passed (1 suite, 0.00s)";
-        assert_eq!(counts(replaced, Some(0)), None);
+        assert_eq!(counts("cargo test", replaced, Some(0)), None);
     }
 
     #[test]
     fn a_build_that_failed_ran_no_tests_and_is_not_read() {
-        assert_eq!(counts(BUILD_FAILED, Some(101)), None);
+        assert_eq!(counts("cargo test", BUILD_FAILED, Some(101)), None);
     }
 
     #[test]
     fn a_run_cut_out_of_its_middle_is_not_read() {
         let cut = PASSED.replace("running 1 test\ntest from_outside ... ok\n", "");
-        assert_eq!(counts(&cut, Some(0)), None);
+        assert_eq!(counts("cargo test", &cut, Some(0)), None);
     }
 
     #[test]
     fn a_summary_that_does_not_add_up_to_its_binary_is_not_read() {
         let wrong = PASSED.replace("running 5 tests", "running 6 tests");
-        assert_eq!(counts(&wrong, Some(0)), None);
+        assert_eq!(counts("cargo test", &wrong, Some(0)), None);
     }
 
     #[test]
     fn a_verdict_that_disagrees_with_the_failures_is_not_read() {
         let wrong = FAILED.replace("test result: FAILED.", "test result: ok.");
-        assert_eq!(counts(&wrong, Some(0)), None);
+        assert_eq!(counts("cargo test", &wrong, Some(0)), None);
     }
 
     #[test]
     fn output_with_no_test_binary_in_it_is_not_read() {
-        assert_eq!(counts("", Some(0)), None);
+        assert_eq!(counts("cargo test", "", Some(0)), None);
         assert_eq!(
             counts(
+                "cargo test",
                 "    Finished `test` profile [unoptimized] target(s) in 0.01s\n",
                 Some(0)
             ),
@@ -788,7 +1242,7 @@ error: could not compile `demo` (lib test) due to 1 previous error
     #[test]
     fn a_line_ending_in_a_carriage_return_reads_as_the_line() {
         assert_eq!(
-            counts(&PASSED.replace('\n', "\r\n"), Some(0)),
+            counts("cargo test", &PASSED.replace('\n', "\r\n"), Some(0)),
             counted(6, 0, 1, 3)
         );
     }
@@ -812,6 +1266,42 @@ error: could not compile `demo` (lib test) due to 1 previous error
             "echo 'a;b' && cargo test",
             "git commit -m \"$(cat msg)\" && cargo test",
             "echo \\\"; cargo test",
+            "cargo t",
+            "cargo t -p niobe-core",
+            "cargo -q test",
+            "cargo --locked test",
+            "cargo --color always test",
+            "cargo --color=always --offline test",
+            "cargo +nightly -Z unstable-options test",
+            "cargo --config net.offline=true test",
+            "timeout 600 cargo test",
+            "timeout -k 5 -s INT 10m cargo test",
+            "env -u RUSTFLAGS cargo test",
+            "env -i PATH=/bin cargo test",
+            "sudo cargo test",
+            "sudo -u ci cargo test",
+            "nice -n 10 cargo test",
+            "time -p cargo test",
+            "time -o times.txt cargo test",
+            "time --output times.txt cargo test",
+            "RUSTFLAGS=\"-D warnings\" cargo test",
+            "RUSTFLAGS='-D warnings' cargo test",
+            "A=`b c` cargo test",
+            "cargo test \\\n  --workspace",
+            "if true; then cargo test; fi",
+            "for i in 1 2; do cargo test; done",
+            "{ cargo test; }",
+            "! cargo test",
+            "exec cargo test",
+            "command cargo test",
+            "~/.cargo/bin/cargo test",
+            "cargo 'test'",
+            "cargo test <<EOF\ninput\nEOF",
+            "cat <<EOF\nnotes\nEOF\ncargo test",
+            "echo a#b; cargo test",
+            "echo $(echo ')') ; cargo test",
+            "echo $(echo \")\") ; cargo test",
+            "echo \"$(echo ')')\"; cargo test",
         ] {
             assert!(is_test_run(command), "{command:?} runs the tests");
         }
@@ -839,10 +1329,31 @@ error: could not compile `demo` (lib test) due to 1 previous error
             "git commit -m \"$(printf 'x'); cargo test\"",
             "echo $(date; cargo test)",
             "echo `date; cargo test`",
+            "echo \"$(echo ')')\"",
+            "echo \"$(echo ')') ; cargo test\"",
+            "echo $(echo ')'; cargo test)",
             "cargo xtask ci",
             "cargo nextest run",
             "pytest",
             "",
+            "cargo t --no-run",
+            "cargo tree",
+            "cargo -q build",
+            "cargo --color test",
+            "timeout 600 cargo build",
+            "timeout 600",
+            "env -u cargo test",
+            "sudo -u cargo test",
+            "nice -n cargo test",
+            "cargo --list test",
+            "cargo --explain test",
+            "cargo -h test",
+            "command -v cargo test",
+            "cat > run.sh <<'EOF'\n#!/bin/sh\ncargo test\nEOF",
+            "cat <<EOF\ncargo test\nEOF",
+            "cat <<-\"EOF\"\n\tcargo test\n\tEOF\necho done",
+            "echo hi # ; cargo test",
+            "# cargo test",
         ] {
             assert!(!is_test_run(command), "{command:?} runs no tests");
         }
@@ -858,10 +1369,191 @@ error: could not compile `demo` (lib test) due to 1 previous error
         format!("{head}test tests::add\n\n... [20014 characters truncated] ...\n\nsult: ok. 1 pas")
     }
 
+    // Recorded from `cargo test -q` 1.91 on a crate with two unit tests and
+    // no doc-test.
+    const QUIET: &str = "
+running 2 tests
+..
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+";
+
+    /// A quiet run prints no line saying where the build ended, which is
+    /// what tells an output that holds the whole run from the last part of
+    /// one; its counts are not read.
+    /// `cargo test -v` on a crate with unit tests, an integration test and a
+    /// doc test, recorded with cargo 1.9x on 28 September 2026 and cut to the
+    /// lines after the build; the paths are scrubbed.
+    const VERBOSE_PASS: &str = "    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.68s
+     Running `/repo/target/debug/deps/demo-760e00b68511d171`
+
+running 2 tests
+test tests::a ... ok
+test tests::b ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running `/repo/target/debug/deps/it-ba8b357ade733549`
+
+running 1 test
+test it ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests demo
+     Running `/home/user/.rustup/toolchains/stable/bin/rustdoc --edition=2024 --crate-type lib --crate-name demo --test src/lib.rs`
+
+running 1 test
+test src/lib.rs - two (line 1) ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+";
+
+    /// The same crate with one unit test failing, which stops the run at its
+    /// first binary.
+    const VERBOSE_FAIL: &str =
+        "    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.52s
+     Running `/repo/target/debug/deps/demo-760e00b68511d171`
+
+running 2 tests
+test tests::a ... ok
+test tests::b ... FAILED
+
+failures:
+
+---- tests::b stdout ----
+
+thread 'tests::b' panicked at src/lib.rs:6:78:
+assertion `left == right` failed
+  left: 1
+ right: 2
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    tests::b
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--lib`
+";
+
+    #[test]
+    fn a_verbose_run_is_read_like_any_other() {
+        let passed =
+            counts("cargo test", VERBOSE_PASS, Some(0)).expect("a whole verbose run is read");
+        assert_eq!((passed.passed, passed.failed, passed.suites), (4, 0, 3));
+
+        let failing =
+            counts("cargo test", VERBOSE_FAIL, Some(101)).expect("a whole failing run is read");
+        assert_eq!((failing.passed, failing.failed, failing.suites), (1, 1, 1));
+        assert!(failed("cargo test -v", VERBOSE_FAIL, Some(101)));
+        let cut = &VERBOSE_FAIL[..VERBOSE_FAIL.find("failures:").expect("a list")];
+        assert!(
+            failed("cargo test -v", cut, Some(101)),
+            "a cut failing run failed too"
+        );
+    }
+
+    #[test]
+    fn a_header_straight_after_a_header_is_a_run_with_a_block_cut_out() {
+        let cut = "    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.68s
+     Running unittests src/lib.rs (target/debug/deps/demo-1)
+... (12 lines truncated)
+     Running tests/it.rs (target/debug/deps/it-2)
+
+running 1 test
+test it ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+";
+        assert_eq!(counts("cargo test", cut, Some(0)), None);
+    }
+
+    #[test]
+    fn a_quiet_run_is_a_test_run_whose_counts_are_not_read() {
+        assert!(is_test_run("cargo test -q"));
+        assert!(is_test_run("cargo -q test"));
+        assert_eq!(counts("cargo test", QUIET, Some(0)), None);
+    }
+
+    // The same crate under `CARGO_TERM_COLOR=always`: cargo's own status
+    // words arrive wrapped in colour codes.
+    const COLOURED: &str = "\x1b[1m\x1b[92m   Compiling\x1b[0m demo v0.1.0 (/work/demo)
+\x1b[1m\x1b[92m    Finished\x1b[0m `test` profile [unoptimized + debuginfo] target(s) in 0.15s
+\x1b[1m\x1b[92m     Running\x1b[0m unittests src/lib.rs (target/debug/deps/demo-760e00b68511d171)
+
+running 2 tests
+test tests::b ... ok
+test tests::a ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+\x1b[1m\x1b[92m   Doc-tests\x1b[0m demo
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+";
+
+    #[test]
+    fn a_coloured_run_is_read_as_the_same_run_uncoloured() {
+        assert!(is_test_run("CARGO_TERM_COLOR=always cargo test"));
+        assert_eq!(counts("cargo test", COLOURED, Some(0)), counted(2, 0, 0, 2));
+    }
+
+    #[test]
+    fn a_coloured_failing_runs_list_is_named_as_its_binarys() {
+        let coloured = FAILED.replace(
+            "error: test failed",
+            "\x1b[1m\x1b[91merror\x1b[0m: test failed",
+        );
+        let named = failures(&coloured);
+        assert_eq!(named.len(), 1, "{named:?}");
+        assert_eq!(named[0].binary, "--lib");
+    }
+
+    // Recorded from `cargo test -- -Z unstable-options --format json` on a
+    // stable 1.91: the binary refuses the flag before it runs a test, and
+    // cargo exits as it does for a failed test.
+    const REFUSED_FLAG: &str =
+        "    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.00s
+     Running unittests src/lib.rs (target/debug/deps/demo-760e00b68511d171)
+error: the option `Z` is only accepted on the nightly compiler
+error: test failed, to rerun pass `--lib`
+";
+
+    #[test]
+    fn a_binary_that_refused_its_flags_ran_no_tests_and_did_not_fail() {
+        let command = "cargo test -- -Z unstable-options --format json";
+        assert!(is_test_run(command));
+        assert_eq!(counts("cargo test", REFUSED_FLAG, Some(101)), None);
+        assert!(!failed(command, REFUSED_FLAG, Some(101)));
+    }
+
+    #[test]
+    fn a_failing_run_led_by_a_quoted_assignment_is_known_to_have_failed() {
+        assert!(failed(
+            "RUSTFLAGS=\"-D warnings\" cargo test",
+            FAILED,
+            Some(101)
+        ));
+    }
+
     #[test]
     fn a_run_that_exited_failing_after_its_tests_started_failed_though_it_was_cut() {
         let kept = cut(FAILED);
-        assert_eq!(counts(&kept, Some(101)), None, "no count survives the cut");
+        assert_eq!(
+            counts("cargo test", &kept, Some(101)),
+            None,
+            "no count survives the cut"
+        );
         assert!(failed("cargo test --workspace", &kept, Some(101)));
         assert!(failed("cd crates/x && cargo test", &kept, Some(101)));
     }
@@ -882,6 +1574,14 @@ error: could not compile `demo` (lib test) due to 1 previous error
         ] {
             assert!(failed(command, &kept, Some(101)), "{command:?}");
         }
+    }
+
+    #[test]
+    fn a_failing_run_cut_from_its_start_is_not_known_to_have_failed() {
+        let start = FAILED
+            .find("running 5 tests")
+            .expect("the recording runs its tests");
+        assert!(!failed("cargo test", &FAILED[start..], Some(101)));
     }
 
     #[test]
@@ -986,7 +1686,7 @@ error: could not compile `demo` (lib test) due to 1 previous error
         // list proves itself.
         let lines: Vec<&str> = FAILED.lines().collect();
         let tail = lines[lines.len() - 8..].join("\n");
-        assert_eq!(counts(&tail, Some(0)), None);
+        assert_eq!(counts("cargo test", &tail, Some(0)), None);
         assert!(!failed("cargo test 2>&1 | tail -8", &tail, Some(0)));
         assert_eq!(
             failures(&tail),
@@ -1079,6 +1779,161 @@ error: doctest failed, to rerun pass `--doc`
     #[test]
     fn an_unrelated_commands_output_is_not_read() {
         let listing = "total 24\ndrwxr-xr-x  5 op  staff  160 Sep 25 10:00 .\n-rw-r--r--  1 op  staff  42 Sep 25 10:00 Cargo.toml\n";
-        assert_eq!(counts(listing, Some(0)), None);
+        assert_eq!(counts("cargo test", listing, Some(0)), None);
+    }
+
+    #[test]
+    fn a_single_failed_tests_struct_or_list_deserializes_via_one_or_many() {
+        #[derive(Debug, PartialEq, Deserialize)]
+        struct Envelope {
+            #[serde(deserialize_with = "one_or_many")]
+            failures: Vec<FailedTests>,
+        }
+
+        let single_json = r#"{"failures":{"binary":"--lib","tests":["test1","test2"]}}"#;
+        let single: Envelope =
+            serde_json::from_str(single_json).expect("a single FailedTests object deserializes");
+        assert_eq!(
+            single.failures,
+            vec![FailedTests {
+                binary: "--lib".to_owned(),
+                tests: vec!["test1".to_owned(), "test2".to_owned()],
+            }]
+        );
+
+        let many_json =
+            r#"{"failures":[{"binary":"--lib","tests":["t1"]},{"binary":"--doc","tests":["t2"]}]}"#;
+        let many: Envelope =
+            serde_json::from_str(many_json).expect("a Vec<FailedTests> deserializes");
+        assert_eq!(
+            many.failures,
+            vec![
+                FailedTests {
+                    binary: "--lib".to_owned(),
+                    tests: vec!["t1".to_owned()],
+                },
+                FailedTests {
+                    binary: "--doc".to_owned(),
+                    tests: vec!["t2".to_owned()],
+                },
+            ]
+        );
+
+        let invalid_json = r#"{"failures":"invalid"}"#;
+        assert!(serde_json::from_str::<Envelope>(invalid_json).is_err());
+    }
+
+    #[test]
+    fn uncoloured_output_strips_complex_and_unterminated_ansi_escape_sequences() {
+        assert_eq!(uncoloured("hello \x1b[31"), "hello ");
+        assert_eq!(uncoloured("clear \x1b[2J screen"), "clear  screen");
+        assert_eq!(uncoloured("\x1b[1m\x1b[31mPASSED\x1b[0m"), "PASSED");
+    }
+
+    #[test]
+    fn a_summary_line_with_overflowing_counts_or_invalid_duration_is_refused() {
+        let overflow = "test result: ok. 18446744073709551616 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s";
+        assert_eq!(Summary::of(overflow), None);
+
+        let bad_time = "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in fasts";
+        assert_eq!(Summary::of(bad_time), None);
+
+        let ok_failed = "test result: ok. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s";
+        assert_eq!(Summary::of(ok_failed), None);
+
+        let failed_zero = "test result: FAILED. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s";
+        assert_eq!(Summary::of(failed_zero), None);
+    }
+
+    #[test]
+    fn multiple_command_wrappers_and_tab_stripped_heredocs_are_parsed_correctly() {
+        let chained = "env RUST_LOG=info timeout 10s sudo cargo test";
+        assert!(is_test_run(chained));
+
+        let heredoc = "cat <<-EOF\n\tcargo test\nEOF";
+        assert!(!is_test_run(heredoc));
+    }
+
+    #[test]
+    fn a_failures_list_with_misaligned_indentation_or_blank_lines_is_rejected() {
+        let short_indent = FAILED.replace("    tests::wrong", "  tests::wrong");
+        assert_eq!(failures(&short_indent), []);
+
+        let extra_space = FAILED.replace("    tests::wrong", "     tests::wrong");
+        assert_eq!(failures(&extra_space), []);
+    }
+
+    #[test]
+    fn a_malformed_failed_tests_json_is_rejected_by_one_or_many_deserializer() {
+        #[derive(Debug, PartialEq, Deserialize)]
+        struct Envelope {
+            #[serde(deserialize_with = "one_or_many")]
+            failures: Vec<FailedTests>,
+        }
+
+        assert!(serde_json::from_str::<Envelope>(r#"{"failures": 12345}"#).is_err());
+        assert!(serde_json::from_str::<Envelope>(r#"{"failures": false}"#).is_err());
+    }
+
+    #[test]
+    fn a_test_run_with_multiple_wrapper_commands_and_env_vars_is_recognised() {
+        assert!(is_test_run(
+            "env RUST_LOG=info CARGO_TERM_COLOR=always timeout 10s sudo cargo test"
+        ));
+    }
+
+    #[test]
+    fn a_failed_test_run_with_missing_exit_code_is_not_treated_as_failed() {
+        assert!(!failed("cargo test", FAILED, None));
+    }
+
+    #[test]
+    fn a_summary_with_overflowing_test_counts_returns_none() {
+        let overflow = "test result: ok. 18446744073709551616 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s";
+        assert_eq!(Summary::of(overflow), None);
+    }
+
+    #[test]
+    fn a_failing_test_run_with_ansi_color_codes_around_test_failures_extracts_failed_tests() {
+        let coloured_failures = FAILED
+            .replace("FAILED", "\x1b[1m\x1b[91mFAILED\x1b[0m")
+            .replace("failures:", "\x1b[1mfailures:\x1b[0m")
+            .replace(
+                "error: test failed",
+                "\x1b[1m\x1b[91merror\x1b[0m: test failed",
+            );
+
+        let extracted = failures(&coloured_failures);
+        assert_eq!(extracted.len(), 1);
+        assert_eq!(extracted[0].binary, "--lib");
+        assert_eq!(extracted[0].tests, vec!["tests::wrong"]);
+    }
+
+    #[test]
+    fn a_cargo_test_command_with_mixed_quotes_and_escaped_separators_is_recognised_as_a_test_run() {
+        assert!(is_test_run("echo 'a;b' && cargo test"));
+        assert!(is_test_run("echo \"foo; bar\" ; cargo test"));
+        assert!(!is_test_run("echo hello\\; cargo test"));
+        assert!(!is_test_run("git commit -m \"fix; cargo test passes\""));
+        assert!(!is_test_run("echo \"cargo test; echo hi\""));
+    }
+
+    #[test]
+    fn test_counts_failing_returns_true_only_when_failed_count_is_positive() {
+        let clean = TestCounts {
+            passed: 10,
+            failed: 0,
+            ignored: 1,
+            suites: 1,
+        };
+        assert!(!clean.failing());
+
+        let failed = TestCounts {
+            passed: 9,
+            failed: 1,
+            ignored: 0,
+            suites: 1,
+        };
+        assert!(failed.failing());
     }
 }

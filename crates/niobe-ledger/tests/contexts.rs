@@ -23,22 +23,39 @@ fn date(year: u16, month: u8, day: u8) -> Date {
     Date::new(year, month, day).expect("a real calendar date")
 }
 
-/// "Claude Fable 5.1, …, Claude Opus 5.5, Claude Opus 5, …, Claude Sonnet 5 …
-/// have a 1M-token context window" — build-with-claude/context-windows. The
-/// `[1m]` spelling Claude Code uses names the same window.
+/// "Claude Fable 5.1, …, Claude Opus 5.5, Claude Opus 5, …, Claude Sonnet 5.5,
+/// Claude Sonnet 5 … have a 1M-token context window" —
+/// build-with-claude/context-windows. The `[1m]` spelling Claude Code uses
+/// names the same window.
 #[test]
 fn the_claude_5_models_have_a_million_token_window() {
     let table = bundled();
-    let day = date(2026, 9, 24);
+    let day = date(2026, 10, 1);
     for model in [
         "claude-fable-5-1",
         "claude-opus-5-5",
         "claude-opus-5",
         "claude-opus-5[1m]",
+        "claude-sonnet-5-5",
+        "claude-sonnet-5-5[1m]",
         "claude-sonnet-5",
         "us.anthropic.claude-opus-5",
+        "eu.anthropic.claude-sonnet-5-5",
     ] {
         assert_eq!(table.context_window(model, day), Some(1_000_000), "{model}");
+    }
+}
+
+/// The models overview lists Claude Haiku 5.5, released on 7 October 2026, at
+/// "1M tokens" and gives it no dated id.
+#[test]
+fn haiku_5_5_has_a_million_token_window_from_its_release() {
+    for model in ["claude-haiku-5-5", "claude-haiku-5-5[1m]"] {
+        assert_eq!(
+            bundled().context_window(model, date(2026, 10, 10)),
+            Some(1_000_000),
+            "{model}"
+        );
     }
 }
 
@@ -86,14 +103,45 @@ fn a_model_the_table_does_not_list_has_no_window() {
     let table = bundled();
     let day = date(2026, 9, 24);
     assert_eq!(table.context_window("claude-opus-9", day), None);
-    assert_eq!(table.context_window("gpt-5.6", day), None);
+    assert_eq!(table.context_window("gpt-4o", day), None);
     assert_eq!(table.context_window("claude-opus-5 ", day), None);
 }
 
 #[test]
 fn a_model_has_no_window_before_it_was_released() {
     assert_eq!(
+        bundled().context_window("claude-haiku-5-5", date(2026, 10, 6)),
+        None
+    );
+    assert_eq!(
         bundled().context_window("claude-opus-5-5", date(2026, 9, 21)),
         None
+    );
+    assert_eq!(
+        bundled().context_window("claude-sonnet-5-5", date(2026, 9, 27)),
+        None
+    );
+}
+
+/// "1,050,000 context window" — the GPT-5.6 Sol, Terra and Luna pages under
+/// developers.openai.com/api/docs/models, each also giving "Maximum input
+/// tokens: 922,000" and "128,000 max output tokens", which add up to it.
+#[test]
+fn the_gpt_5_6_models_have_a_window_of_1_050_000() {
+    let table = bundled();
+    let day = date(2026, 10, 1);
+    for model in ["gpt-5.6-sol", "gpt-5.6", "gpt-5.6-terra", "gpt-5.6-luna"] {
+        assert_eq!(table.context_window(model, day), Some(1_050_000), "{model}");
+    }
+}
+
+/// "400,000 context window", with "Maximum input tokens: 272,000" and "128,000
+/// max output tokens" — the GPT-5.3-Codex page. The window is the 400K, not
+/// the prompt cap the price table names.
+#[test]
+fn gpt_5_3_codex_has_a_window_of_400_000_beyond_its_272_000_prompt_cap() {
+    assert_eq!(
+        bundled().context_window("gpt-5.3-codex", date(2026, 10, 1)),
+        Some(400_000)
     );
 }

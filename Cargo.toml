@@ -16,21 +16,21 @@ members = [
 ]
 
 [workspace.package]
-version = "0.12.0"
+version = "0.16.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 license = "Apache-2.0"
 repository = "https://github.com/niobe-dev/niobe"
 authors = ["Viacheslav Shynkarenko"]
 
 [workspace.dependencies]
-niobe-core = { path = "crates/niobe-core", version = "0.12.0" }
-niobe-ledger = { path = "crates/niobe-ledger", version = "0.12.0" }
-niobe-config = { path = "crates/niobe-config", version = "0.12.0" }
-niobe-store = { path = "crates/niobe-store", version = "0.12.0" }
-niobe-tui = { path = "crates/niobe-tui", version = "0.12.0" }
-niobe-bridge-claude = { path = "crates/niobe-bridge-claude", version = "0.12.0" }
-niobe-bridge-codex = { path = "crates/niobe-bridge-codex", version = "0.12.0" }
+niobe-core = { path = "crates/niobe-core", version = "0.16.0" }
+niobe-ledger = { path = "crates/niobe-ledger", version = "0.16.0" }
+niobe-config = { path = "crates/niobe-config", version = "0.16.0" }
+niobe-store = { path = "crates/niobe-store", version = "0.16.0" }
+niobe-tui = { path = "crates/niobe-tui", version = "0.16.0" }
+niobe-bridge-claude = { path = "crates/niobe-bridge-claude", version = "0.16.0" }
+niobe-bridge-codex = { path = "crates/niobe-bridge-codex", version = "0.16.0" }
 
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -60,20 +60,24 @@ sha2 = { version = "0.10", default-features = false }
 ratatui = "0.30"
 ratatui-textarea = "0.9"
 unicode-width = "0.2"
+# What the operator sees as one character, which the composer deletes whole.
+unicode-segmentation = "1.13"
 signal-hook = "0.4"
 
 # Safe wrappers for the POSIX calls the workspace needs — `unsafe` is denied,
-# so the raw ones are not an option. The event loop waits with `poll(2)`, and
-# the CLI's tests drive the binary through a pty.
+# so the raw ones are not an option. The event loop waits with `poll(2)`, the
+# CLI's tests drive the binary through a pty, and a `!` command is given a
+# session of its own with `setsid` (the one call made from `pre_exec`).
 rustix = "1.1"
 
 # The wall clock the shell shows, and the local offset it needs to be a wall
 # clock rather than UTC. Reading `/etc/localtime` and applying the right
 # transition is the tzdb's job, not a thing to hand-roll: an offset guessed
 # from `TZ` is wrong across a DST boundary, and a clock that is an hour out is
-# worse than no clock. Only what that needs: no serde, and no bundled database
-# — the system's own is read, and where there is none the shell draws no time.
-jiff = { version = "0.2", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }
+# worse than no clock. Only what that needs: no serde, and the system's own
+# database is read; a copy of it is bundled only where the system keeps none,
+# which is Windows, so the shell draws the time there too.
+jiff = { version = "0.2", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo", "tzdb-bundle-platform"] }
 
 # The assistant's replies are CommonMark, and the transcript draws them styled.
 # Only the parser: the default features add an HTML renderer and a command

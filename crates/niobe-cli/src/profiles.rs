@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 use niobe_config::{Config, Profile, Withheld};
 use niobe_core::Backend;
 
+use crate::printable::on_one_line;
+
 /// The list: one row per profile under a header, the selected one marked with
 /// `*`, and under each row what the profile sets beyond its backend.
 ///
@@ -31,9 +33,12 @@ pub fn table(
     forcing_bedrock: Option<&Path>,
 ) -> Vec<String> {
     let profiles = config.profiles();
+    // Everything a config file holds is drawn on one line: a line break in a
+    // profile's name or one of its values would start a row of its own that
+    // reads as another profile's, a selected one among them.
     let name_width = profiles
         .keys()
-        .map(|name| name.chars().count())
+        .map(|name| on_one_line(name).chars().count())
         .max()
         .unwrap_or(0)
         .max("PROFILE".len());
@@ -48,18 +53,32 @@ pub fn table(
         } else {
             ' '
         };
+        let name = on_one_line(name);
         lines.push(format!(
             "{marker} {name:<name_width$}  {:<7}  {}",
             profile.backend().as_str(),
-            profile.source().display()
+            on_one_line(&profile.source().display().to_string())
         ));
 
         lines.extend(details(profile, forcing_bedrock, name_width));
     }
     if let Some((name, path)) = config.withheld_default() {
         lines.push(format!(
-            "  default_profile `{name}` in {} is not in force: that file is not trusted",
-            path.display()
+            "  default_profile `{}` in {} is not in force: that file is not trusted",
+            on_one_line(name),
+            on_one_line(&path.display().to_string())
+        ));
+    }
+    if let Some((rules, path)) = config.withheld_rules() {
+        let rules: Vec<String> = rules
+            .rules()
+            .iter()
+            .map(|rule| format!("`{}`", on_one_line(&rule.to_string())))
+            .collect();
+        lines.push(format!(
+            "  permissions allow {} in {} are not in force: that file is not trusted",
+            rules.join(", "),
+            on_one_line(&path.display().to_string())
         ));
     }
     lines
@@ -67,7 +86,7 @@ pub fn table(
 
 /// Formats a detail row for a profile property, aligned under the profile name.
 fn detail_row(label: &str, value: String, name_width: usize) -> String {
-    format!("  {:<name_width$}  {label:<13}{value}", "")
+    format!("  {:<name_width$}  {label:<13}{}", "", on_one_line(&value))
 }
 
 /// What a profile sets beyond its backend, one indented row each, under the
@@ -119,24 +138,27 @@ fn status_details(
 
     // A profile whose settings file is withheld for want of trust names none
     // here, which is right: a file that is not in force runs nothing under it.
-    if let Some(path) = forcing_bedrock {
-        if profile.backend() == Backend::Claude && profile.settings().is_none() {
-            rows.push(detail_row(
-                "no settings",
-                format!(
-                    "{} sets CLAUDE_CODE_USE_BEDROCK for every session; a `settings` file \
-                     here is what would run this profile elsewhere",
-                    path.display()
-                ),
-                name_width,
-            ));
-        }
+    if let Some(path) = forcing_bedrock
+        && profile.backend() == Backend::Claude
+        && profile.settings().is_none()
+    {
+        rows.push(detail_row(
+            "no settings",
+            format!(
+                "{} sets CLAUDE_CODE_USE_BEDROCK for every session; a `settings` file \
+                 here is what would run this profile elsewhere",
+                path.display()
+            ),
+            name_width,
+        ));
     }
     if let Some(withheld) = profile.withheld() {
         rows.push(detail_row("not in force", listed(withheld), name_width));
         rows.push(detail_row(
             "not trusted",
-            "`niobe trust` reads that file as it stands and puts them in force".to_owned(),
+            "`niobe trust` shows what that file sets, values included, and asks before it \
+             puts them in force"
+                .to_owned(),
             name_width,
         ));
     }
@@ -148,7 +170,9 @@ fn status_details(
         ));
         rows.push(detail_row(
             "not trusted",
-            "`niobe trust` reads that file as it stands and puts its profile in force".to_owned(),
+            "`niobe trust` shows what that file sets, values included, and asks before it \
+             puts its profile in force"
+                .to_owned(),
             name_width,
         ));
     }
@@ -175,6 +199,31 @@ fn listed(withheld: &Withheld) -> String {
         parts.push("billing".to_owned());
     }
     parts.join(", ")
+}
+
+/// What `niobe profiles` adds under the table where the profile in it is the
+/// implied one: that no file was found, and the file that would make it
+/// explicit, to be written at `searched`'s first path, the user's.
+pub fn implied_note(searched: &[PathBuf]) -> Vec<String> {
+    let mut lines = vec![String::new()];
+    lines.push(format!(
+        "`{}` is implied: no config file was found, so niobe runs the `claude` on PATH \
+         with its own settings. Writing a config file replaces it.",
+        niobe_config::IMPLIED_PROFILE
+    ));
+    if let Some(path) = searched.first() {
+        lines.push(format!(
+            "To make it explicit, put this in {}:",
+            path.display()
+        ));
+        lines.push(String::new());
+    }
+    lines.extend(
+        niobe_config::IMPLIED_FILE
+            .lines()
+            .map(|line| format!("  {line}")),
+    );
+    lines
 }
 
 /// What `niobe profiles` prints when no config defines a profile.
@@ -322,8 +371,8 @@ auth_refresh = "aws sso login"
                 "  personal  claude   /r/.niobe/config.toml",
                 "  work      claude   /r/.niobe/config.toml",
                 "            not in force env (AWS_PROFILE, SECRET_TOKEN), args, auth_refresh",
-                "            not trusted  `niobe trust` reads that file as it stands and puts \
-                 them in force",
+                "            not trusted  `niobe trust` shows what that file sets, values included, \
+                 and asks before it puts them in force",
             ]
         );
         let listing = table(&config, None, None).join("\n");
@@ -337,6 +386,17 @@ auth_refresh = "aws sso login"
         assert!(!listing.contains("do-not-print"), "{listing}");
         assert!(!listing.contains("example-sso"), "{listing}");
         assert!(!listing.contains('*'), "{listing}");
+    }
+
+    #[test]
+    fn the_implied_profile_is_said_to_be_implied_with_the_file_that_makes_it_explicit() {
+        let said = implied_note(&[PathBuf::from("/u/config.toml")]).join("\n");
+
+        assert!(said.contains("`claude` is implied"), "{said}");
+        assert!(said.contains("put this in /u/config.toml"), "{said}");
+        assert!(said.contains("  default_profile = \"claude\""), "{said}");
+        assert!(said.contains("  [profiles.claude]"), "{said}");
+        assert!(said.contains("  backend = \"claude\""), "{said}");
     }
 
     #[test]

@@ -48,9 +48,20 @@ const SHAPES: &[&str] = &[
     "teleport",
     // The live stream.
     "assistant",
+    // A tool's result given back as blocks rather than a string; its text is
+    // what the call's output is read from.
+    "block/tool_result/text",
     "control_request/can_use_tool",
     "rate_limit_event",
     "result/success",
+    // A turn an interrupt stopped: its `terminal_reason` says it was aborted,
+    // and it ends as the operator's stop rather than as a failure.
+    "result/error_during_execution",
+    // The two below are in `hand-written.jsonl` rather than a recording: a
+    // prompt the CLI withdraws, which becomes a withdrawal of the question,
+    // and a turn stopped by the budget, which ends the turn as a failure.
+    "control_cancel_request",
+    "result/error_max_budget_usd",
     "stream_event/content_block_delta",
     "stream_event/message_delta",
     "stream_event/message_start",
@@ -61,6 +72,8 @@ const SHAPES: &[&str] = &[
     "stream_event/message_stop",
     "system/compact_boundary",
     "system/init",
+    // What the CLI would show its own operator, passed on in its words.
+    "system/notification",
     "system/permission_denied",
     "system/status",
     // Read where it names a sub-agent's call: the first is how a sub-agent
@@ -81,6 +94,21 @@ const SHAPES: &[&str] = &[
     // recorded from Claude Code 2.1.282. Each replaces the list before it.
     "control_response/success",
     "system/commands_changed",
+    // A request of Niobe's the CLI refused, recorded from Claude Code 2.1.292
+    // as the reconnect of an MCP server that cannot be started: said with the
+    // server's name and the CLI's reason, as a refused change is said.
+    "control_response/error",
+    // A tool call still running, recorded from Claude Code 2.1.287 as a
+    // heartbeat every thirty seconds. Passed over on purpose: it carries no
+    // tokens, and the shell times a running call off its own clock.
+    "tool_progress",
+    // Where the operator's message stands (`queued`, `started`, `completed`,
+    // `cancelled`) and that the permission classifier is checking a call,
+    // from Claude Code 2.1.292's own source (`lifecycle.jsonl`). Each is
+    // passed over on purpose: a turn's start and end already arrive on the
+    // stream and the `result`, and the call is on screen before its check.
+    "command_lifecycle",
+    "system/permission_check_status",
     // `/clear`, recorded from Claude Code 2.1.282: the conversation starts
     // over and the CLI's running totals with it, which the translator reads as
     // the point the totals are measured from again.
@@ -113,6 +141,18 @@ const SHAPES: &[&str] = &[
     "pr-link",
     "queue-operation",
     "system/local_command",
+    // A session against a stand-in for the API that fails on cue, recorded
+    // from Claude Code 2.1.296 on both carriers (`api-errors.jsonl` and its
+    // transcript). A retried request is `api_retry` on the live stream and
+    // `api_error` in the transcript, each an error entry saying which retry
+    // it is; a refusal with no model to fall back on is a warning, and the
+    // CLI's banner is shown at the level it names. The stop hook the session
+    // ran is written only into the transcript, and passed over there.
+    "system/api_error",
+    "system/api_retry",
+    "system/informational",
+    "system/model_refusal_no_fallback",
+    "system/stop_hook_summary",
 ];
 
 fn fixtures() -> PathBuf {
@@ -171,11 +211,23 @@ fn shapes_of(line: &str) -> Vec<String> {
         .and_then(serde_json::Value::as_array)
     {
         for block in blocks {
-            let block = block
+            let kind = block
                 .get("type")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("(untyped)");
-            shapes.push(format!("block/{block}"));
+            shapes.push(format!("block/{kind}"));
+            // What a tool gave back is blocks of its own where it is not a
+            // plain string, and a kind the bridge does not read there is one
+            // it passes over as surely as one at the top.
+            if let Some(nested) = block.get("content").and_then(serde_json::Value::as_array) {
+                for inner in nested {
+                    let inner = inner
+                        .get("type")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("(untyped)");
+                    shapes.push(format!("block/{kind}/{inner}"));
+                }
+            }
         }
     }
     shapes
@@ -274,6 +326,25 @@ const SUB_AGENT_KEYS: &[(&str, &[&str], Kind)] = &[
     ("assistant", &["message", "model"], Kind::Text),
 ];
 
+/// The ids of the calls in a recording that spawn a sub-agent, under either
+/// name the CLI gives the tool.
+fn agent_calls(lines: &[String]) -> BTreeSet<String> {
+    lines
+        .iter()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter_map(|value| value.get("message")?.get("content")?.as_array().cloned())
+        .flatten()
+        .filter(|block| {
+            block.get("type").and_then(serde_json::Value::as_str) == Some("tool_use")
+                && matches!(
+                    block.get("name").and_then(serde_json::Value::as_str),
+                    Some("Agent" | "Task")
+                )
+        })
+        .filter_map(|block| block.get("id")?.as_str().map(str::to_owned))
+        .collect()
+}
+
 /// What a key has to hold for the bridge to read it.
 #[derive(Debug, Clone, Copy)]
 enum Kind {
@@ -285,7 +356,9 @@ enum Kind {
 fn every_recorded_sub_agent_report_carries_the_keys_its_figures_are_read_from() {
     let mut checked = BTreeSet::new();
     for path in recordings() {
-        for line in lines_of(&path) {
+        let lines = lines_of(&path);
+        let agents = agent_calls(&lines);
+        for line in lines {
             let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
                 continue;
             };
@@ -294,6 +367,18 @@ fn every_recorded_sub_agent_report_carries_the_keys_its_figures_are_read_from() 
                 && value
                     .get("parent_tool_use_id")
                     .is_none_or(serde_json::Value::is_null)
+            {
+                continue;
+            }
+            // A task the CLI runs for a shell command is reported in the same
+            // shapes — Claude Code 2.1.287 sends a `task_notification` with no
+            // `usage` for one in the foreground — and the bridge reads only
+            // the ones naming a sub-agent's call.
+            if value.get("type").and_then(serde_json::Value::as_str) == Some("system")
+                && value
+                    .get("tool_use_id")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|id| !agents.contains(id))
             {
                 continue;
             }
@@ -519,6 +604,48 @@ fn every_recorded_shell_result_carries_what_its_exit_status_is_read_from() {
     );
 }
 
+/// The keys each model the answer to `initialize` lists is read from: the id
+/// the CLI takes it by, the name it shows, and what it says it is for.
+///
+/// Recorded from Claude Code 2.1.288 under `models`. A release that renamed
+/// one would leave the model picker offering nothing the backend listed, or
+/// rows with no name, and nothing failing; here it is a recording that lacks
+/// the key, by name.
+const MODEL_KEYS: &[&str] = &["value", "displayName", "description"];
+
+#[test]
+fn every_recorded_initialize_answer_lists_its_models_by_the_keys_they_are_read_from() {
+    let mut listed = 0;
+    for path in recordings() {
+        for line in lines_of(&path) {
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+                continue;
+            };
+            let Some(models) = value
+                .pointer("/response/response/models")
+                .and_then(serde_json::Value::as_array)
+            else {
+                continue;
+            };
+            for model in models {
+                for key in MODEL_KEYS {
+                    assert!(
+                        model.get(key).and_then(serde_json::Value::as_str).is_some(),
+                        "{}: a model the answer to `initialize` lists has no `{key}`, which is \
+                         where the bridge reads it from: {model}",
+                        path.display()
+                    );
+                }
+                listed += 1;
+            }
+        }
+    }
+    assert!(
+        listed > 0,
+        "no recording holds an answer to `initialize` that lists the models"
+    );
+}
+
 #[test]
 fn every_recording_says_which_cli_version_it_was_recorded_from() {
     for path in recordings() {
@@ -543,34 +670,34 @@ fn every_recording_says_which_cli_version_it_was_recorded_from() {
     }
 }
 
+/// Asks the `claude` installed on this machine, which updates itself: the day
+/// it moves to a series nobody recorded, this fails for a commit that changed
+/// nothing. So it is run by hand, as AGENTS.md says, rather than by every
+/// `cargo test`. Run where no `claude` answers with its version, it fails:
+/// it is asked for only to check an installed release, and passing would say
+/// one was checked.
 #[test]
+#[ignore = "reads the machine's own claude; run with --ignored after it updates"]
 fn the_installed_cli_is_a_release_these_recordings_cover() {
-    let Ok(output) = Command::new(niobe_bridge_claude::BINARY)
+    let binary = niobe_bridge_claude::BINARY;
+    let output = Command::new(binary)
         .arg("--version")
         .output()
-    else {
-        // The CLI is not on this machine, which is every CI runner: there is
-        // no installed release to check the recordings against, and saying so
-        // beats a green tick that means nothing.
-        println!("skipped: the `claude` CLI is not installed here");
-        return;
-    };
+        .unwrap_or_else(|error| {
+            panic!("`{binary} --version` did not run ({error}): there is no CLI here to check")
+        });
     let said = String::from_utf8_lossy(&output.stdout);
-    let Some(installed) = output
+    let installed = output
         .status
         .success()
         .then(|| said.split_whitespace().next())
         .flatten()
-    else {
-        // Something on this machine answers to `claude` and does not answer
-        // `--version` with one. There is nothing to compare, and guessing at
-        // what it is would be worse than saying so.
-        println!(
-            "skipped: `{} --version` said no version",
-            niobe_bridge_claude::BINARY
-        );
-        return;
-    };
+        .unwrap_or_else(|| {
+            panic!(
+                "`{binary} --version` said no version ({}): there is no release to check",
+                output.status
+            )
+        });
 
     assert!(
         conformance::recorded(installed),
@@ -579,4 +706,151 @@ fn the_installed_cli_is_a_release_these_recordings_cover() {
          conformance::RECORDED.",
         conformance::RECORDED
     );
+}
+
+/// The tools a recorded `init` lists that are put under no kind of work on
+/// purpose, each with why.
+const OTHER_ON_PURPOSE: &[&str] = &[
+    // A shell: what it did is read from the command each call ran, not from
+    // the tool's name, and a call with no command is put under what nothing
+    // else says.
+    "Bash",
+    // What these do is not in their names, and no recording holds a call to
+    // either to read it from: each is shown by its own name.
+    "DesignSync",
+    "ReportFindings",
+];
+
+/// Every tool the CLI says it offers is put under the kind of work its name
+/// says, so that a release adding tools of its own does not leave the
+/// Activity pane counting the agent's ordinary work as `Other`.
+#[test]
+fn every_tool_a_recorded_init_lists_is_put_under_a_kind_of_work() {
+    use niobe_core::work::{Work, of_call};
+
+    let mut listed = BTreeSet::new();
+    for path in recordings() {
+        for line in lines_of(&path) {
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+                continue;
+            };
+            if value.get("type").and_then(serde_json::Value::as_str) != Some("system")
+                || value.get("subtype").and_then(serde_json::Value::as_str) != Some("init")
+            {
+                continue;
+            }
+            let tools = value.get("tools").and_then(serde_json::Value::as_array);
+            listed.extend(
+                tools
+                    .into_iter()
+                    .flatten()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(str::to_owned),
+            );
+        }
+    }
+    assert!(!listed.is_empty(), "no recorded `init` lists its tools");
+
+    let unread: Vec<&str> = listed
+        .iter()
+        .map(String::as_str)
+        .filter(|tool| of_call(tool, None, None, "{}").work == Work::Other)
+        .filter(|tool| !OTHER_ON_PURPOSE.contains(tool))
+        .collect();
+    assert!(
+        unread.is_empty(),
+        "the CLI offers tools that read as `Other`: {unread:?}. Put each under the kind of work \
+         it does in `niobe_core::work`, or list it in OTHER_ON_PURPOSE with why."
+    );
+}
+
+/// The reason the CLI gives for asking, and for refusing, is read off the
+/// recordings: a release that renamed the field would leave every question
+/// reading as routine, and nothing else here would say so.
+#[test]
+fn the_recordings_still_carry_the_reason_a_call_was_asked_or_refused() {
+    let mut asked = 0;
+    let mut refused = 0;
+    for path in recordings() {
+        let text = std::fs::read_to_string(&path).expect("a recording reads");
+        for line in text.lines() {
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            let has_reason = |at: &serde_json::Value| {
+                at.get("decision_reason")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|said| !said.is_empty())
+            };
+            match value.get("type").and_then(serde_json::Value::as_str) {
+                Some("control_request") if value.get("request").is_some_and(has_reason) => {
+                    asked += 1;
+                }
+                Some("system")
+                    if value.get("subtype").and_then(serde_json::Value::as_str)
+                        == Some("permission_denied")
+                        && has_reason(&value) =>
+                {
+                    refused += 1;
+                }
+                _ => {}
+            }
+        }
+    }
+    assert!(asked >= 3, "no recorded question carries a reason: {asked}");
+    assert!(refused >= 1, "no recorded refusal carries one: {refused}");
+}
+
+/// Whether a plan may spend beyond its fee is read from the `overageStatus`
+/// and `overageDisabledReason` of a `rate_limit_event`, against the values
+/// Claude Code 2.1.309's schema lists. A recording that holds another value
+/// is a release the bridge would read as saying nothing, so it fails here
+/// rather than going unnoticed.
+#[test]
+fn every_recorded_overage_state_is_one_the_bridge_reads() {
+    const STATUSES: [&str; 3] = ["allowed", "allowed_warning", "rejected"];
+    const REASONS: [&str; 13] = [
+        "overage_not_provisioned",
+        "org_level_disabled",
+        "org_level_disabled_until",
+        "out_of_credits",
+        "seat_tier_level_disabled",
+        "member_level_disabled",
+        "seat_tier_zero_credit_limit",
+        "group_zero_credit_limit",
+        "member_zero_credit_limit",
+        "org_service_level_disabled",
+        "no_limits_configured",
+        "fetch_error",
+        "unknown",
+    ];
+    let mut checked = 0;
+    for path in recordings() {
+        for line in lines_of(&path) {
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+                continue;
+            };
+            let Some(info) = value.get("rate_limit_info") else {
+                continue;
+            };
+            if let Some(status) = info.get("overageStatus") {
+                let status = status.as_str().unwrap_or_default();
+                assert!(
+                    STATUSES.contains(&status),
+                    "{}: an `overageStatus` the bridge does not read: {line}",
+                    path.display()
+                );
+                checked += 1;
+            }
+            if let Some(reason) = info.get("overageDisabledReason") {
+                let reason = reason.as_str().unwrap_or_default();
+                assert!(
+                    REASONS.contains(&reason),
+                    "{}: an `overageDisabledReason` the bridge does not read: {line}",
+                    path.display()
+                );
+            }
+        }
+    }
+    assert!(checked > 0, "no recording says whether overage is allowed");
 }

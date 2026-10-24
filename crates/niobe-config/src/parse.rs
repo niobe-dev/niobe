@@ -12,12 +12,15 @@ use std::collections::BTreeMap;
 use std::ops::Range;
 use std::path::Path;
 
+use niobe_core::keys::{Bindable, Chord, Keymap};
 use niobe_core::permission::{Allowlist, Rule};
 use niobe_core::{Backend, Billing};
 use toml::Spanned;
 use toml::de::{DeString, DeTable, DeValue};
 
-use crate::{Config, ConfigError, DefaultProfile, Profile, Settings, ThemeName};
+use crate::{
+    CatchUp, Config, ConfigError, DefaultProfile, Notify, Profile, Settings, ThemeName, Titles,
+};
 
 /// What `backend` may be, in the order an error lists them.
 const BACKENDS: [Backend; 3] = [Backend::Claude, Backend::Codex, Backend::Native];
@@ -47,15 +50,25 @@ impl File<'_> {
                     config.default_profile = Some(self.default_profile(value, &at)?)
                 }
                 "theme" => config.theme = Some(self.theme(value, &at)?),
-                "effects" => config.effects = Some(self.boolean(value, &at)?),
+                "titles" => config.titles = Some(self.titles(value, &at)?),
+                "terse" => config.terse = Some(self.boolean(value, &at)?),
+                "decisions" => config.decisions = Some(self.boolean(value, &at)?),
+                "trim" => config.trim = Some(self.boolean(value, &at)?),
+                // The switch for the desktop's animation, which the shell no
+                // longer has. A file written to turn it off still loads.
+                "effects" => {}
                 "permissions" => config.allowed = self.permissions(value, &at)?,
+                "keys" => config.keys = self.keys(value, &at)?,
+                "notify" => config.notify = self.notify(value, &at)?,
+                "catch_up" => config.catch_up = self.catch_up(value, &at)?,
                 "profiles" => config.profiles.extend(self.profiles(value, &at)?),
                 _ => {
                     return Err(self.invalid(
                         &key.span(),
                         &at,
-                        "unknown key; expected `default_profile`, `theme`, `effects`, \
-                         `profiles` or `permissions`",
+                        "unknown key; expected `default_profile`, `theme`, `titles`, `terse`, \
+                         `decisions`, `trim`, `profiles`, `permissions`, `keys`, `notify` or \
+                         `catch_up`",
                     ));
                 }
             }
@@ -63,12 +76,8 @@ impl File<'_> {
         Ok(config)
     }
 
-    /// The standing answers to permission prompts, as the shell will match
-    /// them.
-    ///
-    /// A rule that is not one is reported at its line: a config that silently
-    /// dropped one would leave the operator expecting a prompt not to come
-    /// back when it will.
+    /// The profile a session runs under when none is named, which must be
+    /// a name and not an empty one.
     fn default_profile(
         &self,
         value: &Spanned<DeValue<'_>>,
@@ -90,6 +99,52 @@ impl File<'_> {
         })
     }
 
+    fn titles(&self, value: &Spanned<DeValue<'_>>, at: &Key) -> Result<Titles, ConfigError> {
+        let name = self.string(value, at)?;
+        [Titles::Model, Titles::FirstPrompt]
+            .into_iter()
+            .find(|titles| titles.as_str() == name)
+            .ok_or_else(|| {
+                self.invalid(
+                    &value.span(),
+                    at,
+                    &format!(
+                        "`{name}` is not a way to title a session; expected `model` or \
+                         `first-prompt`"
+                    ),
+                )
+            })
+    }
+
+    /// The keys the F-key bar's actions have been given other than their own.
+    ///
+    /// A name that is no action, a key that cannot be bound, and two actions
+    /// on one key are each reported at the line that made them: a binding
+    /// dropped quietly is a key that does nothing when pressed.
+    fn keys(&self, value: &Spanned<DeValue<'_>>, at: &Key) -> Result<Keymap, ConfigError> {
+        let mut bindings: Vec<(Bindable, Chord)> = Vec::new();
+        for (name, chord) in in_file_order(self.table(value, at)?) {
+            let at = at.child(name.get_ref());
+            let Some(action) = Bindable::from_name(name.get_ref()) else {
+                let names: Vec<&str> = Bindable::ALL.iter().map(|action| action.name()).collect();
+                return Err(self.invalid(
+                    &name.span(),
+                    &at,
+                    &format!("unknown action; expected {}", names.join(", ")),
+                ));
+            };
+            let text = self.string(chord, &at)?;
+            let chord_value =
+                Chord::parse(text).map_err(|error| self.invalid(&chord.span(), &at, &error))?;
+            bindings.push((action, chord_value));
+            // Checked as each is made, so the error names the line that
+            // made the clash and not the first line of the table.
+            Keymap::new(bindings.iter().copied())
+                .map_err(|error| self.invalid(&chord.span(), &at, &error.to_string()))?;
+        }
+        Keymap::new(bindings).map_err(|error| self.invalid(&value.span(), at, &error.to_string()))
+    }
+
     fn profiles(
         &self,
         value: &Spanned<DeValue<'_>>,
@@ -107,6 +162,52 @@ impl File<'_> {
         Ok(profiles)
     }
 
+    /// The switches for calling the operator back.
+    fn notify(&self, value: &Spanned<DeValue<'_>>, at: &Key) -> Result<Notify, ConfigError> {
+        let mut notify = Notify::default();
+        for (key, value) in in_file_order(self.table(value, at)?) {
+            let at = at.child(key.get_ref());
+            match key.get_ref().as_ref() {
+                "bell" => notify.bell = Some(self.boolean(value, &at)?),
+                "notification" => notify.notification = Some(self.boolean(value, &at)?),
+                _ => {
+                    return Err(self.invalid(
+                        &key.span(),
+                        &at,
+                        "unknown key; expected `bell` or `notification`",
+                    ));
+                }
+            }
+        }
+        Ok(notify)
+    }
+
+    /// When the shell tells the operator what happened while they were away.
+    fn catch_up(&self, value: &Spanned<DeValue<'_>>, at: &Key) -> Result<CatchUp, ConfigError> {
+        let mut catch_up = CatchUp::default();
+        for (key, value) in in_file_order(self.table(value, at)?) {
+            let at = at.child(key.get_ref());
+            match key.get_ref().as_ref() {
+                "after" => catch_up.after = Some(self.minutes(value, &at)?),
+                "automatic" => catch_up.automatic = Some(self.boolean(value, &at)?),
+                _ => {
+                    return Err(self.invalid(
+                        &key.span(),
+                        &at,
+                        "unknown key; expected `after` or `automatic`",
+                    ));
+                }
+            }
+        }
+        Ok(catch_up)
+    }
+
+    /// The standing answers to permission prompts, as the shell will match
+    /// them.
+    ///
+    /// A rule that is not one is reported at its line: a config that silently
+    /// dropped one would leave the operator expecting a prompt not to come
+    /// back when it will.
     fn permissions(
         &self,
         value: &Spanned<DeValue<'_>>,
@@ -306,6 +407,25 @@ impl File<'_> {
         }
     }
 
+    fn boolean(&self, value: &Spanned<DeValue<'_>>, at: &Key) -> Result<bool, ConfigError> {
+        match value.get_ref() {
+            DeValue::Boolean(on) => Ok(*on),
+            _ => Err(self.wrong_type(value, at, "a boolean")),
+        }
+    }
+
+    /// A whole number of minutes, one at least: a catch-up after no time away
+    /// would be one after every key.
+    fn minutes(&self, value: &Spanned<DeValue<'_>>, at: &Key) -> Result<u64, ConfigError> {
+        let DeValue::Integer(number) = value.get_ref() else {
+            return Err(self.wrong_type(value, at, "a whole number of minutes"));
+        };
+        match u64::from_str_radix(number.as_str(), number.radix()) {
+            Ok(minutes) if minutes > 0 => Ok(minutes),
+            _ => Err(self.invalid(&value.span(), at, "expected one minute or more")),
+        }
+    }
+
     fn string<'t>(
         &self,
         value: &'t Spanned<DeValue<'_>>,
@@ -314,13 +434,6 @@ impl File<'_> {
         match value.get_ref() {
             DeValue::String(text) => Ok(text),
             _ => Err(self.wrong_type(value, at, "a string")),
-        }
-    }
-
-    fn boolean(&self, value: &Spanned<DeValue<'_>>, at: &Key) -> Result<bool, ConfigError> {
-        match value.get_ref() {
-            DeValue::Boolean(on) => Ok(*on),
-            _ => Err(self.wrong_type(value, at, "a boolean")),
         }
     }
 

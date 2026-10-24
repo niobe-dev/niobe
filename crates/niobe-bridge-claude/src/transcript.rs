@@ -17,24 +17,29 @@
 //!
 //! The file carries the same messages as the live protocol in envelopes of its
 //! own, so the folding is [`Translator`]'s and only the envelopes are read
-//! here. Four differences are the reason this module exists:
+//! here. Five differences are the reason this module exists:
 //!
 //! * **The operator's turns are in it.** A live session's prompts are ones
 //!   Niobe sent, so the translator drops the CLI's echo of them; a transcript
 //!   is the only record of what was said, so its user turns become
 //!   [`Event::UserMessage`].
 //! * **Usage is on the message, and repeated.** One API response is written
-//!   out as several records — one per run of content blocks — with the same
-//!   `usage` stamped on each. Unlike the live stream's per-record snapshots
-//!   the repeated figures are identical and final, so counting one per
-//!   `message.id` is both necessary and enough.
+//!   out as several records — one per run of content blocks — each with the
+//!   `usage` the CLI had when it wrote it. Mostly the figures repeat; where
+//!   they move it is `output_tokens` growing, and the last record carries the
+//!   largest, so one per `message.id` is counted, from its last record; see
+//!   [`last_usage`].
 //! * **There is no `result` line, and the bill is under other names.** What the
 //!   session cost is in a `cost-state` record the CLI writes when it leaves,
 //!   whose `modelUsage` is the same running total per model that closes a live
 //!   turn — but keyed by the id the session was *billed* under, which is not
-//!   the id its messages named. A session that has one is therefore counted
-//!   from it alone, and one the CLI has not closed yet is counted from its
-//!   messages; see [`Fold::assistant`] for why the two cannot be added.
+//!   the id its messages named. What one covers is therefore counted from it
+//!   alone, and what none does — a session the CLI has not closed yet, or the
+//!   turns a resumed session took after the last time it was — is counted
+//!   from its messages; see [`Fold::assistant`] for why the two cannot both
+//!   count the same message. The CLI writes one each time a process leaves,
+//!   so a resumed session's file holds several, each the running total up to
+//!   where it stands.
 //! * **Most records are the CLI's own furniture.** Attachments, file
 //!   snapshots and queue operations say nothing about what the session did,
 //!   what it changed or what it cost. They are named here so that they are
@@ -50,6 +55,11 @@
 //!   the CLI's timestamps put them among the session's, which is where the
 //!   live stream would have shown them; see [`side_files`] and [`Threads`].
 //!
+//! A live event is dated by the clock as it arrives; a transcript's is dated
+//! by the `timestamp` of the record it was read from, which [`timed`] carries
+//! out beside it. A record with no stamp — most of the furniture — dates
+//! nothing, and what the reader says itself has no time either.
+//!
 //! [`Event::Titled`]: niobe_core::event::Event::Titled
 //!
 //! [`Event::UserMessage`]: niobe_core::event::Event::UserMessage
@@ -57,16 +67,18 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::ffi::OsStr;
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use serde::Deserialize;
 
-use niobe_core::event::Event;
+use niobe_core::event::{CompactTrigger, Event};
 
 use crate::conformance;
 use crate::spilled;
+use crate::stamp;
+use crate::translate::Spent;
 use crate::translate::{self, RecordedAgent, Translator};
 use crate::wire;
 
@@ -76,6 +88,14 @@ const PROJECTS: &str = "projects";
 
 /// The extension the CLI gives a transcript.
 const EXTENSION: &str = "jsonl";
+
+/// The largest transcript read, in bytes.
+///
+/// The largest of the 1,052 transcripts on the machine this was written on,
+/// 3 October 2026, was 49 MB. A file five times that is not a session anyone
+/// will read back, and holding more of one in memory would cost the shell
+/// more than its history is worth.
+const LIMIT: u64 = 256 * 1024 * 1024;
 
 /// What the CLI wraps a turn it wrote itself in, rather than one the operator
 /// typed: a slash command as the CLI expanded it, and the output of one.
@@ -228,7 +248,7 @@ fn recorded_cwd(path: &Path) -> Option<PathBuf> {
     struct Placed {
         cwd: Option<PathBuf>,
     }
-    BufReader::new(File::open(path).ok()?)
+    BufReader::new(open(path).ok()?)
         .lines()
         .map_while(Result::ok)
         .filter_map(|line| serde_json::from_str::<Placed>(&line).ok())
@@ -248,6 +268,13 @@ pub struct Transcript {
     /// The first turn the CLI did not write itself, where the transcript has
     /// one.
     pub first_prompt: Option<String>,
+    /// Whether the CLI recorded the session as started by a program over its
+    /// SDK protocol rather than at a terminal: its records' `entrypoint` names
+    /// the SDK. Such a session's prompts were written by a script or an
+    /// orchestrating agent. A Niobe session is one too, since Niobe drives the
+    /// CLI the same way, and is read from Niobe's own store. A transcript that
+    /// names no entrypoint, as older releases' do not, is not marked.
+    pub scripted: bool,
 }
 
 /// Why a transcript could not be read.
@@ -321,10 +348,12 @@ pub fn list(dir: &Path) -> Result<Vec<Transcript>, TranscriptError> {
         let Some(id) = path.file_stem().and_then(OsStr::to_str) else {
             continue;
         };
+        let opening = opening(&path);
         transcripts.push(Transcript {
             id: id.to_owned(),
             last_at: entry.metadata().ok().and_then(|at| at.modified().ok()),
-            first_prompt: first_prompt(&path),
+            first_prompt: opening.first_prompt,
+            scripted: opening.entrypoint.as_deref().is_some_and(is_sdk),
             path,
         });
     }
@@ -337,30 +366,109 @@ pub fn list(dir: &Path) -> Result<Vec<Transcript>, TranscriptError> {
     Ok(transcripts)
 }
 
+/// What the transcript at `path` last recorded the session as spending: the
+/// running totals the CLI restores when that session is resumed, which the
+/// resumed process's first turn reports on top of. Nothing where the CLI never
+/// wrote a `cost-state`, which is a session it did not leave cleanly.
+///
+/// The last `cost-state` record alone is the one the CLI restores. Where it
+/// cannot be read — a field of a shape this build does not know, or a record
+/// the CLI was cut off writing — the spend is [`Spent::unknown`] and not an
+/// older record's figure, which would count the turns in between again as
+/// measured on the resumed session's first result.
+pub fn spent(path: &Path) -> Result<Spent, TranscriptError> {
+    let text = read(path)?;
+    for line in text
+        .lines()
+        .rev()
+        .filter(|line| line.contains(r#""cost-state""#))
+    {
+        match serde_json::from_str::<Line>(line) {
+            Ok(Line::CostState(record)) => return Ok(Spent::from_model_usage(&record.model_usage)),
+            // Another record that happens to name the type, a message that
+            // talks about it: not the CLI's accounting.
+            Ok(_) => {}
+            Err(error) if is_cost_state(line) => {
+                return Ok(Spent::unknown(format!(
+                    "the transcript's last cost-state record cannot be read: {error}"
+                )));
+            }
+            Err(_) => {}
+        }
+    }
+    Ok(Spent::default())
+}
+
+/// Whether `line`, which this build could not read as a record, is a
+/// `cost-state` one: its `type` says so, or it was cut off in the middle of
+/// writing what begins by saying so.
+fn is_cost_state(line: &str) -> bool {
+    match serde_json::from_str::<serde_json::Value>(line) {
+        Ok(value) => value.get("type").and_then(|t| t.as_str()) == Some("cost-state"),
+        Err(_) => line.trim_start().starts_with(r#"{"type":"cost-state""#),
+    }
+}
+
+/// One event a transcript folded to, and when the CLI recorded the record it
+/// came from.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Timed {
+    /// What happened.
+    pub event: Event,
+    /// The `timestamp` of the record the event was read from. Every event one
+    /// record folds to carries that record's time, and nothing is
+    /// interpolated between two records. `None` where the record carries no
+    /// stamp, as the CLI's bookkeeping records do not, where the stamp is not
+    /// in the shape the CLI writes, and for what the reader says itself
+    /// rather than reads off a record — the session's caption, a warning
+    /// about the release that wrote it.
+    pub at: Option<SystemTime>,
+}
+
 /// Everything the transcript at `path` says happened, as events, for a session
-/// running under `profile` in `cwd`.
+/// running under `profile` in `cwd`; [`timed`] without the times.
+pub fn events(path: &Path, profile: &str, cwd: &Path) -> Result<Vec<Event>, TranscriptError> {
+    Ok(timed(path, profile, cwd)?
+        .into_iter()
+        .map(|timed| timed.event)
+        .collect())
+}
+
+/// Everything the transcript at `path` says happened, as events, for a session
+/// running under `profile` in `cwd`, each at the time the CLI recorded it.
 ///
 /// A line that cannot be read becomes a warning entry and the rest of the file
 /// is still folded, exactly as on the live stream: a transcript written by a
 /// newer CLI than this build knows must not take the history with it.
-pub fn events(path: &Path, profile: &str, cwd: &Path) -> Result<Vec<Event>, TranscriptError> {
-    let text = std::fs::read_to_string(path).map_err(|error| TranscriptError::File {
-        path: path.to_path_buf(),
-        error,
-    })?;
+pub fn timed(path: &Path, profile: &str, cwd: &Path) -> Result<Vec<Timed>, TranscriptError> {
+    let text = read(path)?;
     let id = path
         .file_stem()
         .and_then(OsStr::to_str)
         .unwrap_or_default()
         .to_owned();
 
-    // Read once, then folded: whether the session was priced decides where its
-    // tokens are counted from, and the record that says so is at the end.
+    // Read once, then folded: whether a message is covered by an accounting
+    // decides where its tokens are counted from, and the record that says so
+    // comes after it.
     let read = records(&text);
-    let priced = read
+    let accountings = read
         .iter()
-        .any(|record| matches!(record.record, Ok(Line::CostState(_))));
-    let sides = side_files(path);
+        .filter(|record| matches!(record.record, Ok(Line::CostState(_))))
+        .count();
+    let mut sides = side_files(path);
+    // One agent has one file. Where two name the same call, the first by name
+    // is read and the other is said to have been passed over, with the call:
+    // read in turn they would replace each other, and which won would depend
+    // on the directory.
+    let mut passed_over: Vec<(String, String)> = Vec::new();
+    sides.dedup_by(|later, kept| {
+        let same = later.call == kept.call;
+        if same {
+            passed_over.push((later.call.clone(), later.file.clone()));
+        }
+        same
+    });
     let mut threads = Threads::read(&sides);
     let last_usage = last_usage(read.iter().chain(threads.records()));
     let agents = sides
@@ -368,7 +476,13 @@ pub fn events(path: &Path, profile: &str, cwd: &Path) -> Result<Vec<Event>, Tran
         .map(|side| (side.call.clone(), recorded_agent(&side.text)))
         .collect();
 
-    let mut fold = Fold::new(profile, cwd, id, priced, agents).counting(last_usage);
+    let mut fold = Fold::new(profile, cwd, id, accountings, agents).counting(last_usage);
+    for (call, file) in passed_over {
+        fold.out.push(translate::warn(format!(
+            "two files of sub-agent records name the call `{call}`: `{file}` is not read, and \
+             what it holds is not counted"
+        )));
+    }
     // A session the CLI never titled is captioned by what the operator first
     // asked. Said here rather than left to the first message, because the
     // first message in a transcript may be one the CLI wrote itself.
@@ -391,18 +505,92 @@ pub fn events(path: &Path, profile: &str, cwd: &Path) -> Result<Vec<Event>, Tran
         fold.out
             .push(translate::warn(conformance::unrecorded(&version)));
     }
-    for record in read {
+    let next_stamps = next_stamps(&read);
+    for (record, next_stamp) in read.into_iter().zip(next_stamps) {
         // The session's own file is kept in the order the CLI wrote it, which
         // is not always the order of its stamps: an agent's records go in
         // before the first of the session's that was stamped after them.
         if let Some(at) = &record.at {
             threads.fold_before(Some(at), &mut fold);
         }
+        // A `cost-state` carries no stamp, and covers everything the process
+        // wrote before it left — an agent's records stamped after the
+        // session's last record before it among them, where the operator
+        // left while a background agent was still writing. Those go in ahead
+        // of it, or the accounting would be settled before them and each of
+        // their responses counted again on top of it.
+        if matches!(record.record, Ok(Line::CostState(_))) {
+            threads.fold_before(next_stamp.as_deref(), &mut fold);
+        }
         threads.spawned_in(&record.record);
-        fold.record(record.line, record.record, None);
+        fold.record(record.line, record.record, record.at.as_deref(), None);
     }
     threads.fold_before(None, &mut fold);
-    Ok(fold.out)
+    Ok(fold.timed())
+}
+
+/// For each of `records`, the stamp of the first record after it that has
+/// one, or nothing where none after it does.
+fn next_stamps(records: &[Record<'_>]) -> Vec<Option<String>> {
+    let mut next = None;
+    let mut stamps: Vec<Option<String>> = records
+        .iter()
+        .rev()
+        .map(|record| {
+            let after = next.clone();
+            if let Some(at) = &record.at {
+                next = Some(at.clone());
+            }
+            after
+        })
+        .collect();
+    stamps.reverse();
+    stamps
+}
+
+/// The text of the transcript at `path`, with anything that is not UTF-8 in
+/// it read as U+FFFD.
+///
+/// A CLI stopped while it writes a record can cut it inside a character, and
+/// a file read as strict UTF-8 is then not read at all — the whole history
+/// gone over the one record that was never finished. Read this way, the cut
+/// record is a last line that does not parse, which [`records`] leaves out.
+fn read(path: &Path) -> Result<String, TranscriptError> {
+    let mut bytes = Vec::new();
+    open(path)
+        .and_then(|mut file| file.read_to_end(&mut bytes))
+        .map_err(|error| TranscriptError::File {
+            path: path.to_path_buf(),
+            error,
+        })?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// The file at `path`, opened to be read no further than [`LIMIT`], where it
+/// is a regular file no larger than that.
+///
+/// The CLI's directory is the operator's, but what is in it is whatever was
+/// put there: a FIFO named as a transcript would hold the open until something
+/// wrote to it, and a device or a file of gigabytes would be read into memory
+/// whole. Either is refused without waiting on it or reading it. One that
+/// grows past the limit while it is read is cut there, and its last record,
+/// cut with it, is left out as one still being written would be.
+fn open(path: &Path) -> std::io::Result<std::io::Take<File>> {
+    let file = spilled::open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "not a regular file",
+        ));
+    }
+    if metadata.len() > LIMIT {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("larger than {} MiB", LIMIT / (1024 * 1024)),
+        ));
+    }
+    Ok(file.take(LIMIT))
 }
 
 /// One record of a transcript, as read, with the time the CLI stamped on it.
@@ -418,13 +606,19 @@ struct Record<'a> {
 }
 
 /// Every record of the transcript `text`, in the order it holds them.
+///
+/// The CLI writes a record as a line and its line break, so a transcript
+/// whose CLI is still running can end part-way through the next one. A last
+/// line with no break after it that does not read is that record on its way
+/// and is left out; one that reads is whole, and is kept.
 fn records(text: &str) -> Vec<Record<'_>> {
     #[derive(Deserialize)]
     struct Stamp {
         timestamp: Option<String>,
     }
 
-    text.lines()
+    let mut records: Vec<Record<'_>> = text
+        .lines()
         .filter(|line| !line.trim().is_empty())
         .map(|line| Record {
             line,
@@ -433,7 +627,11 @@ fn records(text: &str) -> Vec<Record<'_>> {
                 .and_then(|stamp| stamp.timestamp),
             record: serde_json::from_str::<Line>(line),
         })
-        .collect()
+        .collect();
+    if !text.ends_with('\n') && records.last().is_some_and(|last| last.record.is_err()) {
+        records.pop();
+    }
+    records
 }
 
 /// The usage of the last record the CLI wrote of each API response, by its
@@ -449,7 +647,7 @@ fn records(text: &str) -> Vec<Record<'_>> {
 fn last_usage<'a>(records: impl Iterator<Item = &'a Record<'a>>) -> BTreeMap<String, wire::Usage> {
     let mut last = BTreeMap::new();
     for record in records {
-        if let Ok(Line::Assistant(Assistant { message })) = &record.record
+        if let Ok(Line::Assistant(Assistant { message, .. })) = &record.record
             && let (Some(id), Some(usage)) = (&message.id, &message.usage)
         {
             last.insert(id.clone(), usage.clone());
@@ -493,7 +691,7 @@ impl<'a> Threads<'a> {
 
     /// Notes each agent whose spawning call `record` makes.
     fn spawned_in(&mut self, record: &Result<Line, serde_json::Error>) {
-        let Ok(Line::Assistant(Assistant { message })) = record else {
+        let Ok(Line::Assistant(Assistant { message, .. })) = record else {
             return;
         };
         let Some(wire::Content::Blocks(blocks)) = &message.content else {
@@ -514,7 +712,12 @@ impl<'a> Threads<'a> {
     fn fold_before(&mut self, bound: Option<&str>, fold: &mut Fold) {
         while let Some((call, record)) = self.next_before(bound) {
             self.spawned_in(&record.record);
-            fold.record(record.line, record.record, Some(&call));
+            fold.record(
+                record.line,
+                record.record,
+                record.at.as_deref(),
+                Some(&call),
+            );
         }
     }
 
@@ -543,6 +746,8 @@ impl<'a> Threads<'a> {
 /// A sub-agent's own transcript, and the call that spawned the agent.
 struct SideFile {
     call: String,
+    /// The name of the file the text was read from, without its extension.
+    file: String,
     text: String,
 }
 
@@ -574,21 +779,26 @@ fn side_files(path: &Path) -> Vec<SideFile> {
         let Some(stem) = name.to_str().and_then(|name| name.strip_suffix(META)) else {
             continue;
         };
-        let Some(call) = std::fs::read_to_string(entry.path())
+        let Some(call) = read(&entry.path())
             .ok()
             .and_then(|text| serde_json::from_str::<Meta>(&text).ok())
             .and_then(|meta| meta.tool_use_id)
         else {
             continue;
         };
-        let Ok(text) = std::fs::read_to_string(dir.join(format!("{stem}.{EXTENSION}"))) else {
+        let Ok(text) = read(&dir.join(format!("{stem}.{EXTENSION}"))) else {
             continue;
         };
-        sides.push(SideFile { call, text });
+        sides.push(SideFile {
+            call,
+            file: stem.to_owned(),
+            text,
+        });
     }
-    // The directory's own order is the file system's; the call's id is at
-    // least the same on every machine.
-    sides.sort_by(|a, b| a.call.cmp(&b.call));
+    // The directory's own order is the file system's; the call's id, and the
+    // file's name where two name the same call, are at least the same on every
+    // machine.
+    sides.sort_by(|a, b| (&a.call, &a.file).cmp(&(&b.call, &b.file)));
     sides
 }
 
@@ -602,7 +812,8 @@ fn side_files(path: &Path) -> Vec<SideFile> {
 fn recorded_agent(text: &str) -> RecordedAgent {
     let mut agent = RecordedAgent::default();
     for line in text.lines() {
-        let Ok(Line::Assistant(Assistant { message })) = serde_json::from_str::<Line>(line) else {
+        let Ok(Line::Assistant(Assistant { message, .. })) = serde_json::from_str::<Line>(line)
+        else {
             continue;
         };
         let Some(wire::Content::Blocks(blocks)) = message.content else {
@@ -636,19 +847,54 @@ fn release_of(text: &str) -> Option<String> {
         .find_map(|stamp| stamp.version)
 }
 
+/// What a list says of a transcript, read from its first records.
+#[derive(Debug, Default)]
+struct Opening {
+    /// The first turn the CLI did not write itself.
+    first_prompt: Option<String>,
+    /// How the CLI was started, as the first record that says spells it.
+    entrypoint: Option<String>,
+}
+
 /// The first turn of the transcript at `path` that the CLI did not write
-/// itself.
-fn first_prompt(path: &Path) -> Option<String> {
-    let file = BufReader::new(File::open(path).ok()?);
-    for line in file.lines() {
-        let Ok(record) = serde_json::from_str::<Line>(&line.ok()?) else {
-            continue;
+/// itself, and how the CLI that wrote it was started. Read only as far as
+/// both are known, since a list reads every transcript of the repository.
+fn opening(path: &Path) -> Opening {
+    #[derive(Deserialize)]
+    struct Entered {
+        entrypoint: Option<String>,
+    }
+
+    let mut opening = Opening::default();
+    let Ok(file) = open(path) else {
+        return opening;
+    };
+    for line in BufReader::new(file).lines() {
+        let Ok(line) = line else {
+            break;
         };
-        if let Some(said) = prompt(&record) {
-            return Some(said);
+        if opening.entrypoint.is_none() {
+            opening.entrypoint = serde_json::from_str::<Entered>(&line)
+                .ok()
+                .and_then(|entered| entered.entrypoint);
+        }
+        if opening.first_prompt.is_none()
+            && let Ok(record) = serde_json::from_str::<Line>(&line)
+        {
+            opening.first_prompt = prompt(&record);
+        }
+        if opening.first_prompt.is_some() && opening.entrypoint.is_some() {
+            break;
         }
     }
-    None
+    opening
+}
+
+/// Whether `entrypoint` is the CLI started over its SDK protocol: `sdk-cli`
+/// for `claude -p` and stream-json, and the `sdk-` names of the SDKs that
+/// spawn it.
+fn is_sdk(entrypoint: &str) -> bool {
+    entrypoint.starts_with("sdk")
 }
 
 /// What the operator said in `record`, where it is a turn they typed rather
@@ -657,7 +903,7 @@ fn prompt(record: &Line) -> Option<String> {
     let Line::User(user) = record else {
         return None;
     };
-    if user.is_meta {
+    if user.is_meta || user.is_compact_summary || user.transcript_only || user.notifies() {
         return None;
     }
     let said = user.message.content.as_ref().and_then(said)?;
@@ -668,10 +914,15 @@ fn prompt(record: &Line) -> Option<String> {
 struct Fold {
     translator: Translator,
     out: Vec<Event>,
-    /// Whether the transcript carries the CLI's own accounting for the session,
-    /// which is where a session that has one is counted from. See
+    /// When each of `out` was recorded, by position, as far as a record has
+    /// said; an event past its end was pushed by the reader itself and has
+    /// no time.
+    times: Vec<Option<SystemTime>>,
+    /// How many of the CLI's `cost-state` records are still to be folded. A
+    /// message with one still ahead of it is counted by that accounting, and
+    /// one after the last is counted by nothing but itself. See
     /// [`Fold::assistant`].
-    priced: bool,
+    accountings: usize,
     /// The `message.id` of every API response whose tokens have been counted,
     /// so that the records that repeat one are not billed again.
     counted: BTreeMap<String, ()>,
@@ -684,6 +935,18 @@ struct Fold {
     mode: Option<String>,
     /// The title the CLI last gave the session, for the same reason.
     title: Option<String>,
+    /// Whether the main agent has answered since the operator last spoke,
+    /// so that the operator speaking again ends the turn.
+    answered: bool,
+    /// Whether a compaction's boundary record has been folded and the
+    /// summary written after it has not, so that the summary does not report
+    /// the same compaction again.
+    compacted: bool,
+    /// A command line the CLI recorded the operator typing, not yet known to
+    /// be a prompt: a local command makes no request, and what it printed
+    /// follows it, so it is the CLI's note between turns and no turn of its
+    /// own. Anything else that follows makes it the prompt it was.
+    command: Option<String>,
 }
 
 impl Fold {
@@ -691,7 +954,7 @@ impl Fold {
         profile: &str,
         cwd: &Path,
         id: String,
-        priced: bool,
+        accountings: usize,
         agents: BTreeMap<String, RecordedAgent>,
     ) -> Self {
         Self {
@@ -701,11 +964,15 @@ impl Fold {
                 .reading_spilled_with(spilled::read)
                 .knowing_agents(agents),
             out: Vec::new(),
-            priced,
+            times: Vec::new(),
+            accountings,
             counted: BTreeMap::new(),
             last_usage: BTreeMap::new(),
             mode: None,
             title: None,
+            answered: false,
+            compacted: false,
+            command: None,
         }
     }
 
@@ -716,9 +983,39 @@ impl Fold {
         self
     }
 
+    /// Every event folded, each with the time of the record it came from.
+    fn timed(mut self) -> Vec<Timed> {
+        self.flush_command();
+        self.times.resize(self.out.len(), None);
+        self.out
+            .into_iter()
+            .zip(self.times)
+            .map(|(event, at)| Timed { event, at })
+            .collect()
+    }
+
     /// Folds one record of the session's own file, where `agent` is `None`,
-    /// or of the file of the sub-agent spawned by call `agent`.
-    fn record(&mut self, line: &str, record: Result<Line, serde_json::Error>, agent: Option<&str>) {
+    /// or of the file of the sub-agent spawned by call `agent`, every event it
+    /// folds to at the moment `at` names.
+    fn record(
+        &mut self,
+        line: &str,
+        record: Result<Line, serde_json::Error>,
+        at: Option<&str>,
+        agent: Option<&str>,
+    ) {
+        let start = self.out.len();
+        self.fold_record(line, record, agent);
+        self.times.resize(start, None);
+        self.times.resize(self.out.len(), at.and_then(stamp::parse));
+    }
+
+    fn fold_record(
+        &mut self,
+        line: &str,
+        record: Result<Line, serde_json::Error>,
+        agent: Option<&str>,
+    ) {
         match record {
             Ok(Line::Assistant(record)) => self.assistant(record, agent),
             Ok(Line::User(record)) => self.user(record, agent),
@@ -726,6 +1023,7 @@ impl Fold {
             Ok(Line::PermissionMode(record)) => self.mode(record),
             Ok(Line::AiTitle(record)) => self.title(record),
             Ok(Line::Attachment(record)) => self.attachment(record),
+            Ok(Line::System(record)) => self.system(record),
             Ok(Line::Aside) => {}
             Ok(Line::Unknown) => self.out.push(translate::unread(format!(
                 "the transcript holds a record of type `{}`, which this version of Niobe does \
@@ -746,8 +1044,17 @@ impl Fold {
     /// the agent's rather than the session's, its tokens under that model,
     /// and the session's context meter left where it was.
     fn assistant(&mut self, record: Assistant, agent: Option<&str>) {
-        let Assistant { message } = record;
+        let Assistant {
+            message,
+            error,
+            api_error,
+        } = record;
         let parent = agent.map(str::to_owned);
+        if agent.is_none() {
+            // A command the model went on to answer was a prompt.
+            self.flush_command();
+            self.answered = true;
+        }
 
         // The model is named on the message itself, which is where the live
         // stream reads it from too — off the head of the message rather than
@@ -760,7 +1067,11 @@ impl Fold {
         if let Some(model) = message.model.filter(|model| model != NO_MODEL) {
             self.fold(wire::Message::StreamEvent(wire::StreamEvent {
                 event: wire::StreamBody::MessageStart {
-                    message: wire::StartMessage { model: Some(model) },
+                    message: wire::StartMessage {
+                        model: Some(model),
+                        id: None,
+                        usage: None,
+                    },
                 },
                 parent_tool_use_id: parent.clone(),
             }));
@@ -780,12 +1091,22 @@ impl Fold {
                 content: message.content,
                 // Reported above, off the message's head, as the stream does.
                 model: None,
+                // Counted below, once per response, from the record's own
+                // figures: a transcript holds every message whole, so none of
+                // them is left to be counted from a snapshot.
+                id: None,
+                usage: None,
             },
             parent_tool_use_id: parent.clone(),
             tool_use_result: None,
+            tool_result_meta: Vec::new(),
+            request_id: None,
+            aborted: false,
+            error,
+            api_error,
         }));
 
-        // Counted here only where the session was never priced. A message
+        // Counted here only where no accounting is still to come. A message
         // names the model it ran on as the family — `claude-opus-5` — and the
         // CLI bills the session against the id that carries the context window
         // with it — `claude-opus-5[1m]`, which is a different rate. Measured on
@@ -794,10 +1115,11 @@ impl Fold {
         // would report every token twice, and deciding that one id is the
         // other would be a guess about a price: the live `result` names the
         // family behind a billed id in `canonicalModel`, and `cost-state`
-        // does not. So a priced session is counted
-        // from the CLI's own accounting and this from the messages, and a
-        // session the CLI has not closed yet — which has no accounting — is
-        // counted from the messages, which is measured and reads as a floor.
+        // does not. So what an accounting covers is counted from it, and this
+        // from the messages. What none covers — the whole of a session the CLI
+        // has not closed yet, or what a resumed one did after the last time
+        // it was closed — is counted from the messages, which is measured and
+        // reads as a floor.
         //
         // A sub-agent's messages are counted the same way. They are billed
         // like the session's own, and the CLI's accounting for a session
@@ -806,9 +1128,9 @@ impl Fold {
         // sessions' own messages came to 33.6% of the cache writes their
         // `cost-state` recorded and 92.4% with their agents' messages added,
         // and the agents' took no session over its own record in 55 of them.
-        // A session with that record is counted from it, so an agent's
-        // messages add nothing to one; an unclosed session's floor without
-        // them would leave out most of what it spent.
+        // What that record covers is counted from it, so an agent's messages
+        // add nothing there; an unclosed session's floor without them would
+        // leave out most of what it spent.
         let usage = message
             .id
             .as_ref()
@@ -816,12 +1138,90 @@ impl Fold {
             .or(message.usage);
         if let Some(usage) = usage
             && first_time
-            && !self.priced
+            && self.accountings == 0
         {
             self.fold(wire::Message::StreamEvent(wire::StreamEvent {
                 event: wire::StreamBody::MessageDelta { usage: Some(usage) },
                 parent_tool_use_id: parent,
             }));
+        }
+    }
+
+    /// One of the CLI's own notes, each subtype read or passed over for its
+    /// own reason. The subtypes are every one the transcripts on the machine
+    /// this was written on carry, releases up to 2.1.296; the README names
+    /// which of them the live stream carries too.
+    fn system(&mut self, record: SystemRecord) {
+        let content = record.content.as_ref().and_then(|content| content.as_str());
+        match record.subtype.as_deref() {
+            Some("compact_boundary") => {
+                self.out.push(translate::compacted(
+                    record.compact_metadata.unwrap_or_default(),
+                ));
+                self.compacted = true;
+            }
+            // A request that failed and was made again, which the live stream
+            // reports as `api_retry`. Said in the CLI's own sentence for the
+            // failure, so that a session read back does not look as though
+            // every request went through.
+            Some("api_error") => {
+                let error = record.error.unwrap_or_default();
+                let failure = error
+                    .formatted
+                    .or(error.message)
+                    .unwrap_or_else(|| "no reason given".to_owned());
+                self.out.push(translate::retrying(
+                    &failure,
+                    translate::Retry {
+                        attempt: record.retry_attempt,
+                        of: record.max_retries,
+                        in_ms: record.retry_in_ms,
+                    },
+                ));
+            }
+            Some("model_refusal_no_fallback") => self.out.push(translate::declined(
+                record.original_model.as_deref(),
+                record.api_refusal_category.as_deref(),
+                record.api_refusal_explanation.as_deref(),
+            )),
+            Some("informational") => {
+                self.out.extend(
+                    content.and_then(|said| translate::informed(said, record.level.as_deref())),
+                );
+            }
+            // What a slash command printed, which a release before 2.1.296
+            // wrote as a user turn and which is read the same way here: the
+            // CLI's answer to the command, from inside its markup.
+            Some("local_command") => {
+                if let Some(printed) = content.and_then(local_output) {
+                    self.printed(printed);
+                }
+            }
+            // A scheduled prompt firing — a `/loop` waking up — which is why
+            // the turn after it starts with nobody having typed.
+            Some("scheduled_task_fire") => {
+                if let Some(said) = content.filter(|said| !said.trim().is_empty()) {
+                    self.out.push(Event::Notice {
+                        message: said.to_owned(),
+                    });
+                }
+            }
+            // Passed over, each on purpose:
+            //
+            // * `turn_duration` is the CLI's own timing of a turn, which its
+            //   screen draws as `Done in Ns`; the turn is in the history
+            //   either way.
+            // * `stop_hook_summary` lists the hooks the CLI ran as a turn
+            //   stopped, at the CLI's `suggestion` level; every one of the
+            //   750 on the machine this was written on said nothing failed.
+            // * `away_summary` is a model's recap of the session for an
+            //   operator who stepped away, restating the history being read.
+            // * `agents_killed` names no agent and no call, so there is
+            //   nothing to end by it.
+            //
+            // And any subtype a later release adds, which in a history is the
+            // CLI's furniture until it is read.
+            Some(_) | None => {}
         }
     }
 
@@ -834,15 +1234,27 @@ impl Fold {
         if record.is_meta {
             return;
         }
+        // After a compaction the CLI carries the session on from its own
+        // summary of the conversation, written as a user turn. Nobody typed
+        // it; that the context was compacted is what it says, where the
+        // boundary record before it has not already said so.
+        if record.is_compact_summary {
+            if !std::mem::take(&mut self.compacted) {
+                self.out.push(Event::Compacted {
+                    trigger: CompactTrigger::Unstated,
+                    before: None,
+                    after: None,
+                });
+            }
+            return;
+        }
+        if record.transcript_only {
+            return;
+        }
         // Background work stopping is written as a user turn too, and it is
         // the CLI speaking. What it says is how a sub-agent launched in the
         // background ended, which the call's own result never does.
-        let kind = record
-            .origin
-            .as_ref()
-            .and_then(|origin| origin.get("kind"))
-            .and_then(serde_json::Value::as_str);
-        if kind == Some(TASK_NOTIFICATION) {
+        if record.notifies() {
             if let Some(text) = record.message.content.as_ref().and_then(said) {
                 self.notified(&text);
             }
@@ -853,17 +1265,38 @@ impl Fold {
         if agent.is_none()
             && let Some(text) = record.message.content.as_ref().and_then(said)
         {
-            self.out.push(Event::UserMessage { text });
+            // What a local command printed is the CLI's answer to it, not
+            // something the operator said.
+            if let Some(printed) = local_output(&text) {
+                self.printed(printed);
+            } else if let Some(command) = typed_command(&text) {
+                self.flush_command();
+                self.command = Some(command);
+            } else {
+                self.flush_command();
+                self.said(text);
+            }
         }
         // The same record carries the results of the calls the turn before it
         // made, which the translator reads and this does not.
+        let tool_result_meta = record.result_meta();
         self.fold(wire::Message::User(wire::Envelope {
             message: wire::ApiMessage {
                 content: record.message.content,
                 model: None,
+                id: None,
+                usage: None,
             },
             parent_tool_use_id: agent.map(str::to_owned),
             tool_use_result: record.tool_use_result,
+            // The CLI keeps no note of an interrupt in its own transcripts,
+            // so an interrupted call reads as a failed one there; a refusal it
+            // notes, from 2.1.309.
+            tool_result_meta,
+            request_id: None,
+            aborted: false,
+            error: None,
+            api_error: None,
         }));
     }
 
@@ -887,15 +1320,23 @@ impl Fold {
 
     /// The CLI's word, in its own markup, that background work stopped. What
     /// it says about a sub-agent is how it ended; its `<summary>` is the
-    /// CLI's wording and not the agent's, and is not read.
+    /// CLI's wording and not the agent's, and is read only for the status a
+    /// background command exited with.
     fn notified(&mut self, text: &str) {
         if let Some(id) = tag(text, "tool-use-id") {
-            let mut ended = self.translator.task_stopped(id, tag(text, "status"));
+            let mut ended =
+                self.translator
+                    .task_stopped(id, tag(text, "status"), tag(text, "summary"));
             self.out.append(&mut ended);
         }
     }
 
+    /// The CLI's accounting as a process left the session. The CLI carries
+    /// its running totals over into a process that resumes the session, so
+    /// each covers every message written before it, in this process or an
+    /// earlier one; see `tests/fixtures/README.md`.
     fn cost(&mut self, record: CostState) {
+        self.accountings = self.accountings.saturating_sub(1);
         // The CLI says when it could not price something it ran, and a total
         // that is missing a model is a floor rather than the bill. Said
         // plainly, because nothing else in the record marks which model it was.
@@ -923,6 +1364,7 @@ impl Fold {
             permission_denials: Vec::new(),
             result: None,
             errors: Vec::new(),
+            terminal_reason: None,
         }));
     }
 
@@ -962,6 +1404,62 @@ impl Fold {
     fn fold(&mut self, message: wire::Message) {
         self.out.append(&mut self.translator.message(message));
     }
+
+    /// The operator speaking: a transcript has no `result` to end a turn
+    /// with, so a turn ends where the operator speaks again after an answer.
+    fn said(&mut self, text: String) {
+        if std::mem::take(&mut self.answered) {
+            self.out.push(Event::TurnEnded);
+        }
+        self.out.push(Event::UserMessage { text });
+    }
+
+    /// The command line held back, as the prompt it turned out to be.
+    fn flush_command(&mut self) {
+        if let Some(command) = self.command.take() {
+            self.said(command);
+        }
+    }
+
+    /// What a local command printed, which is the CLI's note and no turn of
+    /// the operator's: the command line held back for it is dropped, since a
+    /// command that made no request is not a prompt.
+    ///
+    /// A command that printed nothing keeps its line, as a live session shows
+    /// `/clear` typed: there is no note to be the whole of it.
+    fn printed(&mut self, printed: &str) {
+        match (self.command.take(), printed.is_empty()) {
+            (Some(command), true) => self.said(command),
+            (_, true) => {}
+            (_, false) => self.out.push(Event::Notice {
+                message: printed.to_owned(),
+            }),
+        }
+    }
+}
+
+/// What a local command printed, where `text` is the CLI's record of that
+/// rather than something typed: the inside of its `<local-command-stdout>` or
+/// `<local-command-stderr>`.
+fn local_output(text: &str) -> Option<&str> {
+    ["local-command-stdout", "local-command-stderr"]
+        .into_iter()
+        .find(|name| text.starts_with(&format!("<{name}>")))
+        .map(|name| tag(text, name).unwrap_or_default())
+}
+
+/// The command line the operator typed, where `text` is the markup the CLI
+/// writes for one it expanded: `<command-name>/clear</command-name>` with its
+/// `<command-args>`, which a live session sees as the `/clear` typed.
+fn typed_command(text: &str) -> Option<String> {
+    if !text.starts_with("<command-name>") {
+        return None;
+    }
+    let name = tag(text, "command-name")?.trim();
+    Some(match tag(text, "command-args").map(str::trim) {
+        Some(args) if !args.is_empty() => format!("{name} {args}"),
+        _ => name.to_owned(),
+    })
 }
 
 /// The text of the first `<name>` element in a turn the CLI wrote in its own
@@ -969,9 +1467,10 @@ impl Fold {
 fn tag<'a>(text: &'a str, name: &str) -> Option<&'a str> {
     let open = format!("<{name}>");
     let close = format!("</{name}>");
-    let start = text.find(&open)? + open.len();
-    let length = text[start..].find(&close)?;
-    Some(text[start..start + length].trim())
+    let start = text.find(&open)?.checked_add(open.len())?;
+    let rest = text.get(start..)?;
+    let length = rest.find(&close)?;
+    Some(rest.get(..length)?.trim())
 }
 
 /// What a turn holds as prose, where it holds any.
@@ -1020,25 +1519,28 @@ enum Line {
     /// model, and once in a while the notice that a sub-agent stopped.
     #[serde(rename = "attachment")]
     Attachment(Attachment),
+    /// The CLI's own notes to the screen: a compaction's boundary, a retried
+    /// request, a refusal, a banner, a command's output and a scheduled
+    /// prompt firing are read, and the rest passed over (`Fold::system`).
+    #[serde(rename = "system")]
+    System(SystemRecord),
     /// Records that say nothing about what the session did, changed or cost:
     /// the name the CLI gives a sub-agent's session (`agent-name`), the prompt it offers to repeat
     /// (`last-prompt`), the file snapshots a rewind would restore (`file-history-snapshot`,
     /// `file-history-delta`), its queue (`queue-operation`), its editing mode
-    /// (`mode`, which is not the permission mode), its own notes to the screen
-    /// (`system`), its latched status line (`atis-latch`), the pull request it
+    /// (`mode`, which is not the permission mode), its latched status line (`atis-latch`), the pull request it
     /// opened from the session (`pr-link`) and the handle its own service
     /// holds the session under (`bridge-session`).
     ///
     /// Read off every record type present across the transcripts on the
     /// machine this was written on — sixteen in all — rather than off the
-    /// types one session happened to produce. Six of them are read
+    /// types one session happened to produce. Seven of them are read
     /// (`assistant`, `user`, `cost-state`, `permission-mode`, `ai-title`,
-    /// `attachment`) and the other ten are here. A type left out is a warning entry per record in front
+    /// `attachment`, `system`) and the other nine are here. A type left out is a warning entry per record in front
     /// of the operator, for a record that says nothing: `bridge-session` alone
     /// stood in fifteen thousand of them.
     #[serde(
-        rename = "system",
-        alias = "agent-name",
+        rename = "agent-name",
         alias = "atis-latch",
         alias = "bridge-session",
         alias = "file-history-delta",
@@ -1053,10 +1555,58 @@ enum Line {
     Unknown,
 }
 
+/// One of the CLI's own notes to the screen.
+#[derive(Debug, Deserialize)]
+struct SystemRecord {
+    subtype: Option<String>,
+    /// On `compact_boundary`: what started the compaction and what the
+    /// conversation held before it.
+    #[serde(rename = "compactMetadata")]
+    compact_metadata: Option<wire::CompactMetadata>,
+    /// On `informational`, `local_command` and `scheduled_task_fire`: what
+    /// the CLI showed. Held as any value so that a subtype whose `content`
+    /// has another shape does not cost the record.
+    content: Option<serde_json::Value>,
+    /// On `informational`: the level the CLI shows `content` at.
+    level: Option<String>,
+    /// On `api_error`: the failure, and which retry of it the CLI made.
+    error: Option<ApiErrorRecord>,
+    #[serde(rename = "retryAttempt")]
+    retry_attempt: Option<u64>,
+    #[serde(rename = "maxRetries")]
+    max_retries: Option<u64>,
+    #[serde(rename = "retryInMs")]
+    retry_in_ms: Option<u64>,
+    /// On `model_refusal_no_fallback`: the model that declined and why.
+    #[serde(rename = "originalModel")]
+    original_model: Option<String>,
+    #[serde(rename = "apiRefusalCategory")]
+    api_refusal_category: Option<String>,
+    #[serde(rename = "apiRefusalExplanation")]
+    api_refusal_explanation: Option<String>,
+}
+
+/// A failed request, as an `api_error` record holds it.
+#[derive(Debug, Default, Deserialize)]
+struct ApiErrorRecord {
+    /// The sentence the CLI shows for the failure: `529 Overloaded`.
+    formatted: Option<String>,
+    /// The failure as the API client put it, for a record with no sentence.
+    message: Option<String>,
+}
+
 /// A message from the model, as the transcript wraps it.
 #[derive(Debug, Deserialize)]
 struct Assistant {
     message: AssistantBody,
+    /// Set on a message the CLI wrote itself after a request failed: the kind
+    /// of failure, `rate_limit` for a plan's usage limit.
+    #[serde(default)]
+    error: Option<String>,
+    /// The API's name for that failure, `usage_limit_reached` for a spent
+    /// window.
+    #[serde(rename = "apiError", default)]
+    api_error: Option<String>,
 }
 
 /// The message itself: the same API message the live stream carries, with the
@@ -1078,6 +1628,14 @@ struct User {
     /// operator sent.
     #[serde(rename = "isMeta", default)]
     is_meta: bool,
+    /// Set on the summary the CLI continues a compacted session from, which
+    /// is written as a user turn and is not one.
+    #[serde(rename = "isCompactSummary", default)]
+    is_compact_summary: bool,
+    /// Set on a turn the CLI keeps for its own transcript view and never sent
+    /// as the operator's; it comes with the compaction summary.
+    #[serde(rename = "isVisibleInTranscriptOnly", default)]
+    transcript_only: bool,
     /// Where the turn came from. The CLI writes it both as a bare word
     /// (`"cli"`) and as an object with a `kind`, so it is read as a value: a
     /// shape this cannot type would otherwise lose the turn it is on.
@@ -1087,6 +1645,49 @@ struct User {
     /// the live stream's `tool_use_result`, under the transcript's spelling.
     #[serde(rename = "toolUseResult", default)]
     tool_use_result: Option<serde_json::Value>,
+    /// How the CLI settled whether the call whose result this record carries
+    /// could run, kept in transcripts from 2.1.309: what the live stream says
+    /// in `tool_result_meta`, and the only note a transcript keeps of a call
+    /// refused over the control channel.
+    #[serde(rename = "permissionDecision", default)]
+    permission_decision: Option<wire::PermissionDecision>,
+}
+
+impl User {
+    /// The live stream's note beside this record's result, made of what the
+    /// transcript keeps of it. Only for a record carrying exactly one result:
+    /// the decision is of one call, and no key on the record says which of
+    /// several it was.
+    fn result_meta(&self) -> Vec<wire::ResultMeta> {
+        let Some(settled) = &self.permission_decision else {
+            return Vec::new();
+        };
+        let Some(wire::Content::Blocks(blocks)) = &self.message.content else {
+            return Vec::new();
+        };
+        let mut results = blocks.iter().filter_map(|block| match block {
+            wire::Block::ToolResult { tool_use_id, .. } => Some(tool_use_id.clone()),
+            wire::Block::Text { .. } | wire::Block::ToolUse { .. } | wire::Block::Other => None,
+        });
+        match (results.next(), results.next()) {
+            (Some(id), None) => vec![wire::ResultMeta {
+                id: Some(id),
+                non_execution_kind: None,
+                permission_decision: Some(settled.clone()),
+            }],
+            _ => Vec::new(),
+        }
+    }
+
+    /// Whether this is the turn the CLI writes when background work stops,
+    /// which is the CLI speaking and not the operator.
+    fn notifies(&self) -> bool {
+        self.origin
+            .as_ref()
+            .and_then(|origin| origin.get("kind"))
+            .and_then(serde_json::Value::as_str)
+            == Some(TASK_NOTIFICATION)
+    }
 }
 
 /// The turn itself.
@@ -1271,6 +1872,238 @@ mod tests {
         format!(r#"{{"type":"user","message":{{"role":"user","content":{text:?}}}}}"#)
     }
 
+    /// The record the CLI continues a compacted session from, as it writes
+    /// it: a user turn, marked, holding the CLI's own words.
+    const COMPACT_SUMMARY: &str = r#"{"type":"user","isCompactSummary":true,"isVisibleInTranscriptOnly":true,"message":{"role":"user","content":"This session is being continued from a previous conversation that ran out of context."}}"#;
+
+    /// A session that opened with background work ending, a local command
+    /// and its output, and then two prompts the operator typed, each
+    /// answered.
+    const CLI_TURNS_FIRST: &str = concat!(
+        r#"{"type":"user","message":{"role":"user","content":"<task-notification>\n<task-id>beal33jrc</task-id>\n<status>completed</status>\n</task-notification>"},"origin":{"kind":"task-notification"}}"#,
+        "\n",
+        r#"{"type":"user","message":{"role":"user","content":"<command-name>/model</command-name>\n<command-args>opus</command-args>"}}"#,
+        "\n",
+        r#"{"type":"user","message":{"role":"user","content":"<local-command-stdout>Set model to Opus 5.5</local-command-stdout>"}}"#,
+        "\n",
+        r#"{"type":"user","message":{"role":"user","content":"first real prompt"}}"#,
+        "\n",
+        r#"{"type":"assistant","message":{"id":"msg_1","model":"claude-opus-5","content":[{"type":"text","text":"one"}]}}"#,
+        "\n",
+        r#"{"type":"user","message":{"role":"user","content":"second prompt"}}"#,
+        "\n",
+        r#"{"type":"assistant","message":{"id":"msg_2","model":"claude-opus-5","content":[{"type":"text","text":"two"}]}}"#,
+        "\n",
+    );
+
+    #[test]
+    fn what_the_cli_wrote_is_neither_the_operators_words_nor_the_title_and_turns_end_at_prompts() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        transcript(
+            dir.path(),
+            "cli-first",
+            Duration::from_secs(60),
+            CLI_TURNS_FIRST,
+        );
+
+        let listed = list(dir.path()).expect("the directory lists");
+        assert_eq!(listed[0].first_prompt.as_deref(), Some("first real prompt"));
+
+        let events = events(
+            &dir.path().join("cli-first.jsonl"),
+            "max",
+            Path::new("/repo"),
+        )
+        .expect("the transcript folds");
+        let titles: Vec<&str> = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Titled { title } => Some(title.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(titles, ["first real prompt"]);
+        let said: Vec<&str> = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::UserMessage { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        // A local command makes no request, so what it printed is a note
+        // between turns and the line that asked for it is not something the
+        // operator said.
+        assert_eq!(said, ["first real prompt", "second prompt"]);
+        assert!(
+            events.iter().any(
+                |event| matches!(event, Event::Notice { message } if message == "Set model to Opus 5.5")
+            ),
+            "{events:?}"
+        );
+        let state = niobe_core::SessionState::replay(&events);
+        assert_eq!(state.turns().len(), 1, "the first answered turn ended");
+        assert!(
+            state.turn_running(),
+            "the second is the one the record stops in"
+        );
+    }
+
+    /// A session left with `/exit` ends on a command the CLI answered itself.
+    const LEFT_WITH_EXIT: &str = concat!(
+        r#"{"type":"user","message":{"role":"user","content":"a real prompt"}}"#,
+        "\n",
+        r#"{"type":"assistant","message":{"id":"msg_1","model":"claude-opus-5","content":[{"type":"text","text":"an answer"}]}}"#,
+        "\n",
+        r#"{"type":"user","message":{"role":"user","content":"<command-name>/exit</command-name>\n<command-args></command-args>"}}"#,
+        "\n",
+        r#"{"type":"user","message":{"role":"user","content":"<local-command-stdout>Catch you later!</local-command-stdout>"}}"#,
+        "\n",
+    );
+
+    #[test]
+    fn a_session_left_with_exit_ends_on_a_note_and_not_on_a_turn_the_operator_took() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        transcript(dir.path(), "left", Duration::from_secs(60), LEFT_WITH_EXIT);
+
+        let events = events(&dir.path().join("left.jsonl"), "max", Path::new("/repo"))
+            .expect("the transcript folds");
+
+        let said: Vec<&str> = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::UserMessage { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(said, ["a real prompt"], "/exit is not a prompt");
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                Event::Notice { message } if message == "Catch you later!"
+            )),
+            "{events:?}"
+        );
+        let state = niobe_core::SessionState::replay(&events);
+        assert_eq!(
+            state.turns().len() + usize::from(state.turn_running()),
+            1,
+            "the command opened no turn of its own"
+        );
+    }
+
+    #[test]
+    fn a_command_the_model_goes_on_to_answer_is_still_a_prompt() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let expanded = concat!(
+            r#"{"type":"user","message":{"role":"user","content":"<command-name>/review</command-name>\n<command-args>the diff</command-args>"}}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"id":"msg_1","model":"claude-opus-5","content":[{"type":"text","text":"reviewed"}]}}"#,
+            "\n",
+        );
+        transcript(dir.path(), "skill", Duration::from_secs(60), expanded);
+
+        let events = events(&dir.path().join("skill.jsonl"), "max", Path::new("/repo"))
+            .expect("the transcript folds");
+
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                Event::UserMessage { text } if text == "/review the diff"
+            )),
+            "{events:?}"
+        );
+    }
+
+    #[test]
+    fn a_session_a_program_started_over_the_sdk_is_told_from_one_typed_at_a_terminal() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let entered = |entrypoint: &str, text: &str| {
+            format!(
+                r#"{{"type":"user","entrypoint":"{entrypoint}","message":{{"role":"user","content":{text:?}}}}}"#
+            )
+        };
+        transcript(
+            dir.path(),
+            "typed",
+            Duration::from_secs(60),
+            &entered("cli", "rename the crate"),
+        );
+        transcript(
+            dir.path(),
+            "scripted",
+            Duration::from_secs(120),
+            &entered("sdk-cli", "Commit it now"),
+        );
+        transcript(
+            dir.path(),
+            "unsaid",
+            Duration::from_secs(180),
+            &prompt("an older release wrote no entrypoint"),
+        );
+
+        let listed = list(dir.path()).expect("the directory lists");
+        let scripted: Vec<(&str, bool)> =
+            listed.iter().map(|t| (t.id.as_str(), t.scripted)).collect();
+        assert_eq!(
+            scripted,
+            [("typed", false), ("scripted", true), ("unsaid", false)],
+            "only a record that says it came over the SDK marks a session scripted"
+        );
+    }
+
+    #[test]
+    fn a_transcript_the_operator_typed_nothing_in_has_no_first_prompt() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let text = CLI_TURNS_FIRST
+            .lines()
+            .take(3)
+            .collect::<Vec<_>>()
+            .join("\n");
+        transcript(dir.path(), "nothing-typed", Duration::from_secs(60), &text);
+
+        let listed = list(dir.path()).expect("the directory lists");
+        assert_eq!(listed[0].first_prompt, None);
+    }
+
+    #[test]
+    fn a_compaction_summary_is_neither_the_first_prompt_nor_the_title() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let text = format!("{COMPACT_SUMMARY}\n{}", prompt("now fix the bug"));
+        transcript(dir.path(), "compacted", Duration::from_secs(60), &text);
+
+        let listed = list(dir.path()).expect("the directory lists");
+        assert_eq!(listed[0].first_prompt.as_deref(), Some("now fix the bug"));
+
+        let events = events(
+            &dir.path().join("compacted.jsonl"),
+            "max",
+            Path::new("/repo"),
+        )
+        .expect("the transcript folds");
+        let titles: Vec<&str> = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Titled { title } => Some(title.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(titles, ["now fix the bug"]);
+        let said: Vec<&str> = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::UserMessage { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(said, ["now fix the bug"]);
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, Event::Compacted { .. })),
+            "{events:?}"
+        );
+    }
+
     #[test]
     fn sessions_are_listed_newest_first_with_what_they_were_asked() {
         let dir = tempfile::tempdir().expect("a temporary directory can be created");
@@ -1304,6 +2137,74 @@ mod tests {
         );
     }
 
+    /// What `read` returns, or a failure where it has not returned within a
+    /// couple of seconds: long enough for a loaded machine, far shorter than
+    /// waiting on a FIFO or reading a file past [`LIMIT`] into memory.
+    fn promptly<T: Send + 'static>(read: impl FnOnce() -> T + Send + 'static) -> T {
+        let (sender, received) = std::sync::mpsc::channel();
+        std::thread::spawn(move || sender.send(read()));
+        received
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the read returns without waiting on the file")
+    }
+
+    /// Lists `dir`, and reads the transcript named `id` in it every other way,
+    /// each of which has to return promptly; the listing's prompt for `id`,
+    /// and what reading its events and its spend said.
+    fn read_every_way(dir: &Path, id: &str) -> (Option<String>, String, String) {
+        let path = dir.join(format!("{id}.{EXTENSION}"));
+        let listed = promptly({
+            let dir = dir.to_path_buf();
+            move || list(&dir).expect("the directory lists")
+        });
+        let named = listed
+            .iter()
+            .find(|transcript| transcript.id == id)
+            .expect("the file is still listed");
+        let events = promptly({
+            let path = path.clone();
+            move || {
+                events(&path, "max", Path::new("/repo"))
+                    .expect_err("the file is refused")
+                    .to_string()
+            }
+        });
+        let spent = promptly(move || spent(&path).expect_err("the file is refused").to_string());
+        (named.first_prompt.clone(), events, spent)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_named_as_a_transcript_is_refused_without_waiting_for_a_writer() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let made = std::process::Command::new("mkfifo")
+            .arg(dir.path().join(format!("stuck.{EXTENSION}")))
+            .status()
+            .expect("mkfifo runs");
+        assert!(made.success(), "the FIFO is made");
+
+        let (first_prompt, events, spent) = read_every_way(dir.path(), "stuck");
+
+        assert_eq!(first_prompt, None);
+        assert!(events.ends_with("not a regular file"), "{events}");
+        assert!(spent.ends_with("not a regular file"), "{spent}");
+    }
+
+    #[test]
+    fn a_transcript_past_the_limit_is_refused_without_reading_it() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        File::create(dir.path().join(format!("vast.{EXTENSION}")))
+            .expect("the file is made")
+            .set_len(LIMIT + 1)
+            .expect("the file is sized");
+
+        let (first_prompt, events, spent) = read_every_way(dir.path(), "vast");
+
+        assert_eq!(first_prompt, None);
+        assert!(events.ends_with("larger than 256 MiB"), "{events}");
+        assert!(spent.ends_with("larger than 256 MiB"), "{spent}");
+    }
+
     #[test]
     fn a_directory_the_cli_has_never_written_to_holds_no_sessions() {
         let dir = tempfile::tempdir().expect("a temporary directory can be created");
@@ -1327,7 +2228,7 @@ mod tests {
         let path = transcript(dir.path(), "s", Duration::ZERO, &lines.join("\n"));
 
         assert_eq!(
-            first_prompt(&path).as_deref(),
+            opening(&path).first_prompt.as_deref(),
             Some("what changed in the last commit?")
         );
     }
@@ -1342,7 +2243,57 @@ mod tests {
             r#"{"type":"mode","mode":"normal"}"#,
         );
 
-        assert_eq!(first_prompt(&path), None);
+        assert_eq!(opening(&path).first_prompt, None);
+    }
+
+    /// How each call `lines` ended, in order.
+    fn outcomes(lines: &[&str]) -> Vec<niobe_core::event::ToolOutcome> {
+        folded(lines)
+            .into_iter()
+            .filter_map(|event| match event {
+                Event::ToolCallEnd { outcome, .. } => Some(outcome),
+                _ => None,
+            })
+            .collect()
+    }
+
+    const SHELL_CALL: &str = r#"{"type":"assistant","message":{"id":"msg_1","model":"claude-opus-5-5","content":[{"type":"tool_use","id":"toolu_t","name":"Bash","input":{"command":"touch a.txt"}}]}}"#;
+
+    /// The result of [`SHELL_CALL`] as Claude Code 2.1.309 writes it, with
+    /// the `permissionDecision` it records beside it.
+    fn shell_result(content: &str, decision: &str) -> String {
+        format!(
+            r#"{{"type":"user","message":{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"toolu_t","content":"{content}","is_error":true}}]}},"toolUseResult":"Error: {content}","permissionDecision":{decision}}}"#
+        )
+    }
+
+    #[test]
+    fn a_read_back_call_the_cli_recorded_as_rejected_is_a_refusal() {
+        for decision in [
+            r#"{"decision":"reject","source":"user_reject","reasonCode":"unknown"}"#,
+            r#"{"decision":"reject","source":"hook","reasonType":"hook","reasonCode":"hook:PreToolUse"}"#,
+        ] {
+            let result = shell_result("The operator denied this call in Niobe.", decision);
+
+            assert_eq!(
+                outcomes(&[SHELL_CALL, &result]),
+                [niobe_core::event::ToolOutcome::Denied],
+                "{decision}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_read_back_call_that_was_allowed_and_broke_is_a_failure() {
+        let result = shell_result(
+            "Exit code 1",
+            r#"{"decision":"accept","source":"config","reasonType":"mode"}"#,
+        );
+
+        assert_eq!(
+            outcomes(&[SHELL_CALL, &result]),
+            [niobe_core::event::ToolOutcome::Failed]
+        );
     }
 
     /// Folds `lines` as the transcript of a session in `/repo`.
@@ -1353,12 +2304,19 @@ mod tests {
     /// Folds `lines` as the transcript of a session in `/repo` whose
     /// sub-agents' own transcripts say `agents`.
     fn folded_knowing(lines: &[&str], agents: BTreeMap<String, RecordedAgent>) -> Vec<Event> {
-        let priced = lines
+        let accountings = lines
             .iter()
-            .any(|line| line.contains(r#""type":"cost-state""#));
-        let mut fold = Fold::new("max", Path::new("/repo"), "s-1".to_owned(), priced, agents);
+            .filter(|line| line.contains(r#""type":"cost-state""#))
+            .count();
+        let mut fold = Fold::new(
+            "max",
+            Path::new("/repo"),
+            "s-1".to_owned(),
+            accountings,
+            agents,
+        );
         for line in lines {
-            fold.record(line, serde_json::from_str::<Line>(line), None);
+            fold.record(line, serde_json::from_str::<Line>(line), None, None);
         }
         fold.out
     }
@@ -1519,15 +2477,17 @@ mod tests {
             // A description that names no call has no agent to go with.
             ("agent-a2", r#"{"agentType":"quick-lookup"}"#),
         ] {
-            std::fs::write(agents.join(format!("{name}{META}")), meta).expect("written");
-            std::fs::write(agents.join(format!("{name}.{EXTENSION}")), answer).expect("written");
+            std::fs::write(agents.join(format!("{name}{META}")), meta)
+                .expect("the temporary directory is writable");
+            std::fs::write(agents.join(format!("{name}.{EXTENSION}")), answer)
+                .expect("the temporary directory is writable");
         }
         // A description whose transcript is gone.
         std::fs::write(
             agents.join(format!("agent-a3{META}")),
             r#"{"toolUseId":"toolu_c"}"#,
         )
-        .expect("written");
+        .expect("the temporary directory is writable");
 
         let found: Vec<(String, String)> = side_files(&session)
             .into_iter()
@@ -1537,6 +2497,74 @@ mod tests {
         assert!(
             side_files(&dir.path().join("none.jsonl")).is_empty(),
             "a session with no sub-agents"
+        );
+    }
+
+    #[test]
+    fn an_agents_transcript_cut_inside_a_character_is_still_found_and_answers() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let session = dir.path().join("s.jsonl");
+        let agents = dir.path().join("s").join(SUB_AGENTS);
+        std::fs::create_dir_all(&agents).expect("the sub-agents' directory is made");
+        std::fs::write(
+            agents.join(format!("agent-a1{META}")),
+            r#"{"toolUseId":"toolu_a"}"#,
+        )
+        .expect("the temporary directory is writable");
+        let answer = r#"{"type":"assistant","message":{"model":"claude-haiku-4-5","content":[{"type":"text","text":"Done."}]}}"#;
+        let mut bytes = format!("{answer}\n").into_bytes();
+        bytes.extend_from_slice(&"{\"type\":\"assistant\",\"text\":\"—".as_bytes()[..30]);
+        std::fs::write(agents.join(format!("agent-a1.{EXTENSION}")), bytes)
+            .expect("the temporary directory is writable");
+
+        let found = side_files(&session);
+        let [side] = found.as_slice() else {
+            panic!("one agent: {:?}", found.len());
+        };
+        assert_eq!(side.call, "toolu_a");
+        assert_eq!(recorded_agent(&side.text).answer.as_deref(), Some("Done."));
+    }
+
+    #[test]
+    fn the_clis_timing_hooks_recap_and_stopped_agents_are_passed_over_in_silence() {
+        let events = folded(&[
+            r#"{"type":"system","subtype":"turn_duration","durationMs":12}"#,
+            r#"{"type":"system","subtype":"stop_hook_summary","hookCount":1,"hookInfos":[{"command":"echo","durationMs":40}],"hookErrors":[],"preventedContinuation":false,"level":"suggestion"}"#,
+            r#"{"type":"system","subtype":"away_summary","content":"Fixed the parser; the gate is green."}"#,
+            r#"{"type":"system","subtype":"agents_killed"}"#,
+        ]);
+
+        assert!(events.is_empty(), "{events:?}");
+    }
+
+    #[test]
+    fn a_scheduled_prompt_firing_says_why_the_next_turn_began_with_nobody_typing() {
+        let events = folded(&[
+            r#"{"type":"system","subtype":"scheduled_task_fire","content":"Claude resuming /loop wakeup (Oct 3 5:56pm)","taskKind":"loop"}"#,
+        ]);
+
+        assert_eq!(
+            events,
+            [Event::Notice {
+                message: "Claude resuming /loop wakeup (Oct 3 5:56pm)".to_owned()
+            }]
+        );
+    }
+
+    #[test]
+    fn a_retry_recorded_with_no_sentence_of_the_clis_is_said_in_the_api_clients_words() {
+        let events = folded(&[
+            r#"{"type":"system","subtype":"api_error","level":"error","error":{"message":"Connection error."},"retryAttempt":1,"maxRetries":10}"#,
+        ]);
+
+        assert_eq!(
+            events,
+            [Event::Error {
+                message: "a request failed (Connection error.), and the CLI is retrying it: \
+                          attempt 1 of 10"
+                    .to_owned(),
+                fatal: false,
+            }]
         );
     }
 
@@ -1654,6 +2682,92 @@ mod tests {
         events(&path, "max", Path::new("/repo")).expect("the transcript reads")
     }
 
+    /// A session opened while its CLI is still writing it ends in the part of
+    /// a line the CLI has not finished: that is a record on its way, not one
+    /// that could not be read.
+    #[test]
+    fn a_last_line_the_cli_is_still_writing_is_left_for_later_quietly() {
+        let events = imported(&[
+            &prompt("folded"),
+            r#"{"type":"assistant","message":{"id":"m"#,
+        ]);
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Event::Error { .. } | Event::Notice { .. })),
+            "{events:?}"
+        );
+        assert_eq!(
+            events.last(),
+            Some(&Event::UserMessage {
+                text: "folded".to_owned()
+            }),
+        );
+    }
+
+    /// A CLI stopped part-way through a record can leave it cut inside a
+    /// character, which is not text at all. That record is on its way like
+    /// any other, and what the CLI finished writing before it still reads.
+    #[test]
+    fn a_record_cut_inside_a_character_is_left_out_and_the_rest_still_reads() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let cut = prompt("cut — here");
+        let dash = cut.find('—').expect("the prompt holds a dash");
+        let mut bytes = [
+            prompt("folded"),
+            r#"{"type":"cost-state","totalCostUSD":0.01,"modelUsage":{"claude-sonnet-5":{"inputTokens":1,"outputTokens":2,"costUSD":0.01}}}"#.to_owned(),
+            prompt("after"),
+        ]
+        .map(|line| format!("{line}\n"))
+        .concat()
+        .into_bytes();
+        bytes.extend_from_slice(&cut.as_bytes()[..=dash]);
+        let path = dir.path().join(format!("s-1.{EXTENSION}"));
+        std::fs::write(&path, bytes).expect("the transcript is written");
+
+        let spent = spent(&path).expect("the transcript reads");
+        assert_eq!(spent.cost_usd("claude-sonnet-5"), Some(0.01));
+        let events = events(&path, "max", Path::new("/repo")).expect("the transcript reads");
+        let prompts: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::UserMessage { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(prompts, ["folded", "after"]);
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Event::Error { .. } | Event::Notice { .. })),
+            "{events:?}"
+        );
+    }
+
+    /// A line the CLI finished, with its line break after it, is a record,
+    /// wherever it is: one that cannot be read says so, last or not.
+    #[test]
+    fn a_finished_line_that_cannot_be_read_says_so_wherever_it_is() {
+        for lines in [
+            vec![
+                prompt("folded"),
+                "{\"type\":\"assi".to_owned(),
+                prompt("after"),
+            ],
+            vec![prompt("folded"), "{\"type\":\"assi\n".to_owned()],
+        ] {
+            let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
+            let events = imported(&lines);
+            assert!(
+                events.iter().any(|event| matches!(
+                    event,
+                    Event::Error { message, fatal: false } if message.contains("could not read")
+                )),
+                "{events:?}"
+            );
+        }
+    }
+
     #[test]
     fn a_session_recorded_by_a_cli_release_nobody_recorded_says_so_once() {
         let events = imported(&[
@@ -1751,12 +2865,12 @@ mod tests {
                 output: 40,
                 cache_read: 0,
                 cache_write: 0,
-                cache_write_1h: 0,
+                cache_write_1h: None,
                 reasoning: 0,
                 model: "claude-opus-5".to_owned(),
                 cost_usd: None,
-                cost_basis: None,
-                settles_model: false,
+                settles_model: Some(false),
+                fast: false,
             })]
         );
     }
@@ -1782,14 +2896,39 @@ mod tests {
                 output: 40,
                 cache_read: 900,
                 cache_write: 80,
-                cache_write_1h: 50,
+                cache_write_1h: Some(50),
                 reasoning: 0,
                 model: "claude-opus-5".to_owned(),
                 cost_usd: None,
-                cost_basis: None,
-                settles_model: false,
+                settles_model: Some(false),
+                fast: false,
             })]
         );
+    }
+
+    /// The CLI writes the speed each request was served at beside its
+    /// counts. A message served in fast mode is owed for at the fast price,
+    /// which the price table knows as a multiple of the standard one; read as
+    /// standard, an unclosed session's estimate would be half of it.
+    #[test]
+    fn a_message_served_in_fast_mode_is_counted_as_fast() {
+        let at = |speed: &str| {
+            format!(
+                r#"{{"type":"assistant","message":{{"id":"msg_1","role":"assistant","model":"claude-opus-5","content":[{{"type":"text","text":"said"}}],"usage":{{"input_tokens":3,"output_tokens":40,"speed":"{speed}"}}}}}}"#
+            )
+        };
+        let fast = |speed: &str| -> Vec<bool> {
+            folded(&[&at(speed)])
+                .iter()
+                .filter_map(|event| match event {
+                    Event::Usage(usage) => Some(usage.fast),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        assert_eq!(fast("fast"), [true]);
+        assert_eq!(fast("standard"), [false]);
     }
 
     #[test]
@@ -1947,12 +3086,12 @@ mod tests {
             sides.join(format!("agent-a1{META}")),
             r#"{"toolUseId":"toolu_a"}"#,
         )
-        .expect("written");
+        .expect("the temporary directory is writable");
         std::fs::write(
             sides.join(format!("agent-a1.{EXTENSION}")),
             agent.join("\n"),
         )
-        .expect("written");
+        .expect("the temporary directory is writable");
         events(&path, "max", Path::new("/repo")).expect("the transcript reads")
     }
 
@@ -2007,6 +3146,22 @@ mod tests {
             [("claude-haiku-4-5".to_owned(), 5)],
             "the agent's tokens are under its own model, and the spawn's record had none"
         );
+    }
+
+    #[test]
+    fn tag_parsing_handles_malformed_and_multibyte_utf8_safely() {
+        assert_eq!(
+            tag("<status>completed</status>", "status"),
+            Some("completed")
+        );
+        assert_eq!(
+            tag("before <status>   running   </status> after", "status"),
+            Some("running")
+        );
+        assert_eq!(tag("no close tag <status>running", "status"), None);
+        assert_eq!(tag("<status></status>", "status"), Some(""));
+        assert_eq!(tag("🦀<status>🎉</status>🔥", "status"), Some("🎉"));
+        assert_eq!(tag("<status>", "status"), None);
     }
 
     #[test]

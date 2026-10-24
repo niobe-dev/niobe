@@ -1,0 +1,113 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/niobe-dev/niobe/blob/main/schema/print.schema.json",
+  "title": "niobe -p --json",
+  "description": "One turn run with no terminal: how it ended, the agent's reply, and what it spent, in the fields cost.schema.json names a session's spend by. Nothing in it is an estimate. A field is added without moving schema_version; it moves when one changes meaning or goes away.",
+  "$ref": "#/$defs/report",
+  "$defs": {
+    "report": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "outcome",
+        "reason",
+        "reply",
+        "session",
+        "terse",
+        "started_at",
+        "billing",
+        "tokens",
+        "models",
+        "cost",
+        "windows"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "description": "The version of this shape.",
+          "const": 1
+        },
+        "outcome": {
+          "description": "How the turn ended. Each has its own exit status: finished 0, failed 1, budget_stopped 3.",
+          "enum": [
+            "finished",
+            "failed",
+            "budget_stopped"
+          ]
+        },
+        "reason": {
+          "description": "Why the turn did not finish, in the backend's words; null where it finished.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reply": {
+          "description": "The session's last reply of its own, as the agent wrote it; empty where it wrote none.",
+          "type": "string"
+        },
+        "session": {
+          "description": "The number `niobe --resume` carries the session on by, or null where the store kept none of it.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "terse": {
+          "description": "Whether the turn's conversation asked the agent for terse replies, by --terse or the config's terse.",
+          "type": "boolean"
+        },
+        "started_at": {
+          "description": "When the prompt was sent, RFC 3339 in UTC to the second.",
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+        },
+        "billing": {
+          "$ref": "cost.schema.json#/$defs/billing"
+        },
+        "tokens": {
+          "$ref": "cost.schema.json#/$defs/tokens"
+        },
+        "models": {
+          "$ref": "cost.schema.json#/$defs/models"
+        },
+        "cost": {
+          "$ref": "cost.schema.json#/$defs/cost"
+        },
+        "windows": {
+          "description": "Where the plan's usage windows stood when the turn ended, as shares used — 0.33 is a third gone — or null where the backend reported none, as a metered profile never does. A window left out of the report is null, never a zero.",
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "required": [
+                "five_hour",
+                "seven_day"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "five_hour": {
+                  "type": [
+                    "number",
+                    "null"
+                  ],
+                  "minimum": 0
+                },
+                "seven_day": {
+                  "type": [
+                    "number",
+                    "null"
+                  ],
+                  "minimum": 0
+                }
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

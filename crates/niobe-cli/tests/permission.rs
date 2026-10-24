@@ -173,6 +173,8 @@ fn a_rule_covers_the_target_it_names_and_nothing_else() {
         tool: "Bash".to_owned(),
         input: r#"{"command":"cargo publish"}"#.to_owned(),
         target: Some("cargo publish".to_owned()),
+        proposal: None,
+        reason: None,
         agent: None,
     });
     app.settle_rules();
@@ -195,6 +197,8 @@ fn always_this_tool_answers_every_call_to_it() {
         tool: "Bash".to_owned(),
         input: r#"{"command":"cargo publish"}"#.to_owned(),
         target: Some("cargo publish".to_owned()),
+        proposal: None,
+        reason: None,
         agent: None,
     });
     app.settle_rules();
@@ -226,5 +230,95 @@ fn an_answer_written_at_the_prompt_is_the_answer_the_call_gets() {
         app.session().user_messages(),
         0,
         "the answer became a new turn"
+    );
+}
+
+/// The recorded turn whose `Write` was refused at the prompt: an `Edit` the
+/// operator allowed, then the `Write`.
+const ANSWERED: &str = include_str!("../../niobe-bridge-claude/tests/fixtures/stdio-answers.jsonl");
+
+/// The recorded turn folded into the shell, each prompt answered with
+/// `answer` as the operator would, and the bridge told of a refusal before the
+/// tool result that carries it arrives, as the driver tells it.
+fn answered_turn(answer: impl Fn(&mut App, &str)) -> App {
+    let mut translator = Translator::new("max");
+    let mut app = App::new(Repo::default()).attached();
+    for line in ANSWERED.lines() {
+        for event in translator.line(line) {
+            app.apply(&event);
+            if let Event::PermissionRequest { tool, .. } = &event {
+                answer(&mut app, tool);
+            }
+            for produced in app.take_produced() {
+                if let Event::PermissionResponse {
+                    id,
+                    decision: PermissionDecision::Deny,
+                    ..
+                } = &produced
+                {
+                    translator.refused(id);
+                }
+            }
+        }
+    }
+    app
+}
+
+/// Allows the `Edit` and refuses the `Write`, with `words` written in place
+/// of it where there are any.
+fn refusing_the_write(words: Option<&'static str>) -> impl Fn(&mut App, &str) {
+    move |app, tool| match (tool, words) {
+        ("Write", Some(words)) => {
+            app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+            for c in words.chars() {
+                app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+            }
+            app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        }
+        ("Write", None) => choose(app, '4'),
+        _ => choose(app, '1'),
+    }
+}
+
+/// How many times the transcript says the call was refused: rows that ended
+/// denied, and entries of their own.
+fn refusals(app: &App) -> usize {
+    let rows = app
+        .entries()
+        .iter()
+        .flat_map(|entry| &entry.calls)
+        .filter(|call| call.outcome == Some(niobe_core::event::ToolOutcome::Denied))
+        .count();
+    let entries = app
+        .entries()
+        .iter()
+        .filter(|entry| entry.head == "denied")
+        .count();
+    rows + entries
+}
+
+#[test]
+fn the_recorded_refusal_reads_as_one_entry() {
+    let mut app = answered_turn(refusing_the_write(None));
+
+    assert_eq!(app.session().permissions_denied(), 1);
+    assert_eq!(refusals(&app), 1, "{:#?}", app.entries());
+    let frame = screen(&mut app);
+    assert!(frame.contains("denied.txt"), "{frame}");
+    assert!(
+        frame.contains("The operator denied this call in Niobe."),
+        "{frame}"
+    );
+}
+
+#[test]
+fn a_refusal_written_at_the_prompt_reads_as_one_entry_that_keeps_the_words() {
+    let mut app = answered_turn(refusing_the_write(Some("Do not create denied.txt.")));
+
+    assert_eq!(refusals(&app), 1, "{:#?}", app.entries());
+    let frame = screen(&mut app);
+    assert!(
+        frame.contains("You answered instead: Do not create denied.txt."),
+        "{frame}"
     );
 }
