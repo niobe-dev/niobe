@@ -18,7 +18,8 @@
 //!
 //! An image larger than a model takes is shrunk on macOS with `sips` — to a
 //! JPEG no longer than the first of [`SHRUNK_EDGES`] on its long side that
-//! brings it under the limit — before it is refused, since a full-screen screenshot on a high-density display is
+//! brings it under the limit, and never enlarged past its own — before it is
+//! refused, since a full-screen screenshot on a high-density display is
 //! routinely over the limit and a screenshot is the image most often pasted.
 
 use std::io::Read;
@@ -29,7 +30,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::time::{Duration, Instant};
 
-use niobe_core::image::{Image, MAX_ENCODED_BYTES, MediaType, encoded_len};
+use niobe_core::image::{Image, MAX_ENCODED_BYTES, MediaType, dimensions, encoded_len};
 use niobe_tui::images::{Fetched, Images, Source};
 
 /// How long a program reading the clipboard, or shrinking an image, is given
@@ -336,15 +337,33 @@ fn read_with(reader: &Reader, patience: Duration) -> Result<Option<Vec<u8>>, Unr
 }
 
 /// `bytes`, an image, as `shrinker` shrinks it to the first of
-/// [`SHRUNK_EDGES`] that brings it within what a model takes; `None` where
+/// [`shrink_edges`] that brings it within what a model takes; `None` where
 /// none does, or it could not be shrunk at all.
 fn shrink(shrinker: &Reader, bytes: &[u8], patience: Duration) -> Option<Vec<u8>> {
     let input = Scratch::new("image");
     std::fs::write(input.path(), bytes).ok()?;
-    SHRUNK_EDGES.iter().find_map(|&edge| {
+    let long_edge = dimensions(bytes).map(|(width, height)| width.max(height));
+    shrink_edges(long_edge).into_iter().find_map(|edge| {
         let shrunk = shrink_to(shrinker, input.path(), edge, patience)?;
         (encoded_len(shrunk.len()) <= MAX_ENCODED_BYTES).then_some(shrunk)
     })
+}
+
+/// The long edges an image whose long side is `long_edge` is shrunk to, in
+/// turn: [`SHRUNK_EDGES`], none past the image's own.
+///
+/// `sips -Z` enlarges an image shorter than the edge it is given, and an
+/// enlarged image is more tokens for pixels nobody took. One the size of the
+/// image is still tried, since a JPEG of the same pixels is what usually
+/// brings a screenshot's PNG under the limit. Where the header does not say
+/// the size, the edges are tried as they are.
+fn shrink_edges(long_edge: Option<u32>) -> Vec<u32> {
+    let mut edges: Vec<u32> = SHRUNK_EDGES
+        .iter()
+        .map(|&edge| long_edge.map_or(edge, |long| edge.min(long)))
+        .collect();
+    edges.dedup();
+    edges
 }
 
 /// The image at `input` as `shrinker` shrinks it to `edge` on its long side.
@@ -822,6 +841,46 @@ mod tests {
         assert_eq!(image.data(), PNG);
         let tried = std::fs::read_to_string(&tried).expect("the edges were recorded");
         assert_eq!(tried.lines().collect::<Vec<_>>(), ["2576", "1568", "1024"]);
+    }
+
+    #[test]
+    fn an_image_shorter_than_an_edge_is_never_enlarged_to_it() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let small = wrote_png(dir.path(), "small.png");
+        // A PNG 2000 pixels wide and 1000 high, its encoding over the limit.
+        let mut data = PNG.to_vec();
+        data.extend_from_slice(&2000_u32.to_be_bytes());
+        data.extend_from_slice(&1000_u32.to_be_bytes());
+        data.resize(MAX_ENCODED_BYTES / 4 * 3 + 1, 0);
+        std::fs::write(dir.path().join("big.png"), data).expect("the image is written");
+        let tried = dir.path().join("tried");
+        let mut fetcher = fetcher(dir.path(), Vec::new());
+        fetcher.shrinker = Some(Reader {
+            program: "sh".to_owned(),
+            args: vec![
+                "-c".to_owned(),
+                format!(
+                    "echo \"$3\" >> '{}'; if [ \"$3\" = 1024 ]; then cp '{}' \"$2\"; \
+                     else cp \"$1\" \"$2\"; fi",
+                    tried.display(),
+                    small.display()
+                ),
+                "sh".to_owned(),
+                INPUT.to_owned(),
+                FILE.to_owned(),
+                EDGE.to_owned(),
+            ],
+            output: Output::File,
+        });
+
+        fetcher
+            .fetch(&Source::File("big.png".to_owned()))
+            .expect("the last edge fits");
+
+        // `sips -Z` enlarges an image shorter than the edge it is given, which
+        // spends tokens on pixels nobody took.
+        let tried = std::fs::read_to_string(&tried).expect("the edges were recorded");
+        assert_eq!(tried.lines().collect::<Vec<_>>(), ["2000", "1568", "1024"]);
     }
 
     #[test]

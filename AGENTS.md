@@ -69,7 +69,8 @@ reviewers that encode both, for an agent working in this tree.
   delegating, an MCP server, housekeeping — from the tool's name or, for a shell call, from the
   whole command the backend reports on the call's end, read with `test_run.rs`'s splitting, and
   names the programs that did it; `image.rs` is an image the operator attached to a
-  prompt — its bytes and the kind they were read as, from their signature, never from a name —
+  prompt — its bytes and the kind they were read as, from their signature, never from a name, and
+  the size its header says —
   refused past the 5 MB a model takes, and the `[Image #N]` placeholder a prompt holds where it
   went; `attention.rs` is how much an event asks of the operator — it needs them, it is notable,
   or it is routine — read from the event alone, never by a model, so the shell's transcript can

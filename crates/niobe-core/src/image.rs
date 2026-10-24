@@ -150,6 +150,91 @@ impl std::fmt::Debug for Image {
     }
 }
 
+/// The width and height in pixels `bytes` say they hold, read from the
+/// header of the kind [`MediaType::sniff`] reads them as, or `None` where the
+/// header is cut short, does not say, or says a side is no pixels long.
+///
+/// Only the header is read: nothing here decodes an image, so a header that
+/// lies is believed. What uses it chooses a size to shrink to, and a wrong
+/// one costs a shrink, never a wrong image.
+pub fn dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    let said = match MediaType::sniff(bytes)? {
+        MediaType::Png => (bytes.get(12..16)? == b"IHDR")
+            .then(|| Some((be32(bytes, 16)?, be32(bytes, 20)?)))
+            .flatten(),
+        MediaType::Gif => Some((u32::from(le16(bytes, 6)?), u32::from(le16(bytes, 8)?))),
+        MediaType::Jpeg => jpeg_dimensions(bytes),
+        MediaType::Webp => webp_dimensions(bytes),
+    };
+    said.filter(|&(width, height)| width > 0 && height > 0)
+}
+
+/// A JPEG's size, from the first start-of-frame segment its markers lead to.
+fn jpeg_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    let mut at = 2;
+    loop {
+        if *bytes.get(at)? != 0xff {
+            return None;
+        }
+        // A marker may be preceded by any number of fill bytes.
+        while *bytes.get(at.checked_add(1)?)? == 0xff {
+            at = at.checked_add(1)?;
+        }
+        let marker = *bytes.get(at.checked_add(1)?)?;
+        if marker == 0x01 || (0xd0..=0xd7).contains(&marker) {
+            at = at.checked_add(2)?;
+            continue;
+        }
+        // Every start-of-frame marker but the three that share its range.
+        if (0xc0..=0xcf).contains(&marker) && ![0xc4, 0xc8, 0xcc].contains(&marker) {
+            let height = be16(bytes, at.checked_add(5)?)?;
+            let width = be16(bytes, at.checked_add(7)?)?;
+            return Some((u32::from(width), u32::from(height)));
+        }
+        let length = usize::from(be16(bytes, at.checked_add(2)?)?);
+        at = at.checked_add(2)?.checked_add(length)?;
+    }
+}
+
+/// A WebP's size, from its first chunk: lossy, lossless or extended.
+fn webp_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    match bytes.get(12..16)? {
+        b"VP8 " => Some((
+            u32::from(le16(bytes, 26)? & 0x3fff),
+            u32::from(le16(bytes, 28)? & 0x3fff),
+        )),
+        b"VP8L" => {
+            let bits = u32::from_le_bytes(bytes.get(21..25)?.try_into().ok()?);
+            Some(((bits & 0x3fff) + 1, ((bits >> 14) & 0x3fff) + 1))
+        }
+        b"VP8X" => Some((le24(bytes, 24)? + 1, le24(bytes, 27)? + 1)),
+        _ => None,
+    }
+}
+
+fn be32(bytes: &[u8], at: usize) -> Option<u32> {
+    Some(u32::from_be_bytes(
+        bytes.get(at..at.checked_add(4)?)?.try_into().ok()?,
+    ))
+}
+
+fn be16(bytes: &[u8], at: usize) -> Option<u16> {
+    Some(u16::from_be_bytes(
+        bytes.get(at..at.checked_add(2)?)?.try_into().ok()?,
+    ))
+}
+
+fn le16(bytes: &[u8], at: usize) -> Option<u16> {
+    Some(u16::from_le_bytes(
+        bytes.get(at..at.checked_add(2)?)?.try_into().ok()?,
+    ))
+}
+
+fn le24(bytes: &[u8], at: usize) -> Option<u32> {
+    let b = bytes.get(at..at.checked_add(3)?)?;
+    Some(u32::from(b[0]) | (u32::from(b[1]) << 8) | (u32::from(b[2]) << 16))
+}
+
 /// How long `len` bytes are once base64-encoded with padding.
 pub fn encoded_len(len: usize) -> usize {
     len.div_ceil(3).saturating_mul(4)
@@ -267,5 +352,40 @@ mod tests {
             placeholder(12)
         );
         assert_eq!(placeholders_in(&text), vec![3, 12]);
+    }
+
+    #[test]
+    fn each_kind_says_its_size_in_its_header() {
+        let mut png = PNG.to_vec();
+        png.extend_from_slice(&[0, 0, 7, 208, 0, 0, 3, 232]);
+        assert_eq!(dimensions(&png), Some((2000, 1000)));
+        assert_eq!(dimensions(b"GIF89a\x20\x03\x58\x02"), Some((800, 600)));
+
+        let jpeg = b"\xff\xd8\xff\xe0\x00\x04JF\xff\xff\xc4\x00\x02\
+                     \xff\xc2\x00\x11\x08\x0b\xb8\x0f\xa0\x03";
+        assert_eq!(dimensions(jpeg), Some((4000, 3000)));
+
+        let lossy = b"RIFF\0\0\0\0WEBPVP8 \0\0\0\0\0\0\0\x9d\x01\x2a\x20\x03\x58\x02";
+        assert_eq!(dimensions(lossy), Some((800, 600)));
+        // 800 and 600, each less one, in fourteen bits apiece.
+        let bits = 799_u32 | 599 << 14;
+        let mut lossless = b"RIFF\0\0\0\0WEBPVP8L\0\0\0\0\x2f".to_vec();
+        lossless.extend_from_slice(&bits.to_le_bytes());
+        assert_eq!(dimensions(&lossless), Some((800, 600)));
+        let extended = b"RIFF\0\0\0\0WEBPVP8X\0\0\0\0\0\0\0\0\x1f\x03\x00\x57\x02\x00";
+        assert_eq!(dimensions(extended), Some((800, 600)));
+    }
+
+    #[test]
+    fn a_header_cut_short_says_no_size() {
+        assert_eq!(dimensions(PNG), None);
+        let mut empty = PNG.to_vec();
+        empty.extend_from_slice(&[0; 8]);
+        assert_eq!(dimensions(&empty), None, "no side is no pixels long");
+        assert_eq!(dimensions(b"GIF89a\x20"), None);
+        assert_eq!(dimensions(b"\xff\xd8\xff\xe0\x00\x10JFIF"), None);
+        assert_eq!(dimensions(b"\xff\xd8\xff\xe0\xff\xff"), None);
+        assert_eq!(dimensions(b"RIFF\0\0\0\0WEBPVP8 \0"), None);
+        assert_eq!(dimensions(b"not an image at all"), None);
     }
 }
