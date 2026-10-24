@@ -35,8 +35,9 @@ pub fn question(untrusted: &Untrusted) -> Question {
 /// it starts the backend with, how it says the account is billed, and whether
 /// it replaces one of `replaces`, the user's profiles. Under a profile's
 /// `settings` row go what the file `attached` holds that is put in front of the
-/// CLI with it — its `env` with values, and the events it has hooks for — and
-/// under its `args` a row for each file they name.
+/// CLI with it — its `env` with values, the events it has hooks for and every
+/// other key it sets, with its value — and under its `args` a row for each
+/// file they name.
 fn grants(config: &Config, replaces: &[String], attached: &[Attached]) -> Vec<(String, String)> {
     let mut rows = Vec::new();
     let rules: Vec<String> = config
@@ -103,7 +104,8 @@ fn grants(config: &Config, replaces: &[String], attached: &[Attached]) -> Vec<(S
 }
 
 /// The rows for a settings file: the environment it sets with its values, the
-/// events it runs hooks on, or why what it holds cannot be shown.
+/// events it runs hooks on and every other key it sets with its value, or why
+/// what it holds cannot be shown.
 ///
 /// What the CLI is started under is what the file says, so a file shown only
 /// by name would be agreed to unread.
@@ -146,6 +148,24 @@ fn settings_rows(profile: &str, file: &Attached) -> Vec<(String, String)> {
         rows.push(row(
             profile,
             format!("settings hooks that run commands on {}", events.join(", ")),
+        ));
+    }
+    // Every other key, value and all — an `env` or `hooks` that is not an
+    // object included, since the rows above passed it over — rather than a
+    // list of the ones thought dangerous: `apiKeyHelper` is a command the CLI
+    // signs in with, `permissions` lets calls through unasked, and the CLI
+    // adds keys of the kind with its releases.
+    for (key, value) in settings
+        .iter()
+        .filter(|(key, value)| !(matches!(key.as_str(), "env" | "hooks") && value.is_object()))
+    {
+        let value = match value {
+            serde_json::Value::String(value) => value.clone(),
+            other => other.to_string(),
+        };
+        rows.push(row(
+            profile,
+            format!("settings {} {}", one_word(key), one_word(&value)),
         ));
     }
     rows
@@ -520,6 +540,31 @@ backend = "claude"
                 "settings ./claude.json",
                 "settings env ANTHROPIC_BASE_URL=https://a.example, N=3",
                 "settings hooks that run commands on PreToolUse",
+            ]
+        );
+    }
+
+    /// `apiKeyHelper` is a shell command whose output the CLI signs in with,
+    /// and `permissions` lets calls through without a question: a file agreed
+    /// to with those left off the question was agreed to unread.
+    #[test]
+    fn a_settings_file_is_shown_with_every_other_key_it_sets_and_its_value() {
+        let untrusted = with_settings_file(Ok(r#"{
+                "apiKeyHelper": "curl -s https://a.example/key",
+                "permissions": {"allow": ["Bash"]},
+                "env": {"A": "1"},
+                "model": "opus"
+            }"#
+        .to_owned()));
+
+        assert_eq!(
+            settings_rows_of(&untrusted),
+            [
+                "settings ./claude.json",
+                "settings env A=1",
+                "settings apiKeyHelper \"curl -s https://a.example/key\"",
+                "settings model opus",
+                r#"settings permissions "{\"allow\":[\"Bash\"]}""#,
             ]
         );
     }
