@@ -35,6 +35,7 @@ pub struct Mark {
     errors: u64,
     asked: u64,
     five_hour: Option<UsageWindow>,
+    five_hour_reports: u64,
 }
 
 impl Mark {
@@ -54,6 +55,7 @@ impl Mark {
             five_hour: session
                 .usage_windows()
                 .and_then(|windows| windows.five_hour),
+            five_hour_reports: session.five_hour_reports(),
         }
     }
 }
@@ -73,9 +75,10 @@ pub struct CatchUp {
     /// Errors the backend reported.
     pub errors: u64,
     /// How far the five-hour window moved, as a share of it. `None` wherever
-    /// that is not a measurement — no level at one end or the other, a level
-    /// with no reset, a window that started over in between, a level that
-    /// went down — read as [`TurnRecord::five_hour_share`] is.
+    /// that is not a measurement — no level at one end or the other, no
+    /// report of it since the mark, a level with no reset, a window that
+    /// started over in between, a level that went down — read as
+    /// [`TurnRecord::five_hour_share`] is.
     pub five_hour: Option<f64>,
     /// Permission questions the backend put.
     pub asked: u64,
@@ -106,7 +109,8 @@ impl CatchUp {
                 mark.five_hour,
                 session
                     .usage_windows()
-                    .and_then(|windows| windows.five_hour),
+                    .and_then(|windows| windows.five_hour)
+                    .filter(|_| session.five_hour_reports() > mark.five_hour_reports),
             ),
             waiting: session.pending_permissions().len(),
         }
@@ -232,6 +236,36 @@ mod tests {
             CatchUp::since(&mark, &session).five_hour,
             None,
             "the window started over in between"
+        );
+    }
+
+    #[test]
+    fn a_window_nobody_reported_since_the_mark_has_not_been_measured_moving() {
+        let mut session = SessionState::new();
+        session.apply(&window(0.20, 1_000));
+        let mark = Mark::of(&session);
+        session.apply(&Event::UserMessage {
+            text: "go".to_owned(),
+        });
+        session.apply(&change("a.rs", 3, 1));
+        session.apply(&Event::TurnEnded);
+        session.apply(&Event::UsageWindows(UsageWindows {
+            five_hour: None,
+            seven_day: None,
+            using_overage: true,
+            overage: crate::event::Overage::Unreported,
+        }));
+        assert_eq!(
+            CatchUp::since(&mark, &session).five_hour,
+            None,
+            "the level the mark holds is the only one there is"
+        );
+
+        session.apply(&window(0.20, 1_000));
+        assert_eq!(
+            CatchUp::since(&mark, &session).five_hour,
+            Some(0.0),
+            "the window read again, and it had not moved"
         );
     }
 

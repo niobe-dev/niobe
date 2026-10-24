@@ -585,6 +585,9 @@ pub struct SessionState {
     turn_last_ended: TurnMark,
     /// Whether a window has been reported since the last turn began or ended.
     window_reported: bool,
+    /// How many reports have given the five-hour window's level, so that a
+    /// level read at one moment can be told from the same level read again.
+    five_hour_reports: u64,
     /// Whether the last event folded ended a turn — its end, or a fatal
     /// error — which an end straight after it repeats rather than closes a
     /// turn of its own.
@@ -858,6 +861,9 @@ impl SessionState {
             // said: silence is not a change of mind.
             Event::UsageWindows(windows) => {
                 let measured = !windows.is_empty();
+                if windows.five_hour.is_some() {
+                    bump(&mut self.five_hour_reports);
+                }
                 let said = match (windows.overage, self.usage_windows) {
                     (crate::event::Overage::Unreported, Some(before)) => before.overage,
                     (overage, _) => overage,
@@ -1344,6 +1350,14 @@ impl SessionState {
     /// all rather than a zero, which would read as a window untouched.
     pub fn usage_windows(&self) -> Option<&UsageWindows> {
         self.usage_windows.as_ref()
+    }
+
+    /// How many reports have given the five-hour window's level. A level
+    /// compared with one read earlier is a measurement of how far the window
+    /// moved only where this has grown in between: otherwise it is the same
+    /// reading, however much was spent since.
+    pub fn five_hour_reports(&self) -> u64 {
+        self.five_hour_reports
     }
 
     /// How the session is billed, as the backend or the profile last said.
