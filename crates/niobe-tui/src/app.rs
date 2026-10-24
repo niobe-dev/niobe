@@ -1761,12 +1761,17 @@ fn changed_outside(
 }
 
 /// Whether the repository's `listed` path and the path an edit call
-/// `named` are one file: the call may name it from the directory the
-/// session runs in, below the repository's root, or absolutely.
+/// `named` are one file.
+///
+/// The backend runs at the repository's root, so a call names a file inside
+/// it by the path the repository lists, or absolutely where the backend could
+/// not take the root off — through a link the root was reached by, say. A
+/// relative `named` is never a tail of a longer `listed`: the root's
+/// `Cargo.toml` is not `crates/net/Cargo.toml`, and matching it as one would
+/// keep a file a shell command changed out of what the turn is said to have
+/// changed.
 fn same_file(listed: &str, named: &str) -> bool {
-    listed == named
-        || named.ends_with(&format!("/{listed}"))
-        || listed.ends_with(&format!("/{named}"))
+    listed == named || (named.starts_with('/') && named.ends_with(&format!("/{listed}")))
 }
 
 /// The share of a budget at which the shell says so.
@@ -12951,6 +12956,43 @@ mod tests {
         assert_eq!(said[0].meta, format!("turn {turns} · 1 file"));
         assert!(
             said[0].body.contains("src/main.rs +2 −2"),
+            "{}",
+            said[0].body
+        );
+    }
+
+    /// The backend runs at the repository's root, so an edit names a file
+    /// by the path the repository lists it under: an edit to the root's
+    /// `Cargo.toml` accounts for that file and not for a crate's own
+    /// `Cargo.toml`, which a shell command changed.
+    #[test]
+    fn an_edit_to_one_file_does_not_account_for_another_whose_path_ends_the_same() {
+        let start = Instant::now();
+        let at = |ms| start + Duration::from_millis(ms);
+        let mut app = app();
+        app.apply(&Event::UserMessage {
+            text: "add the dependency".to_owned(),
+        });
+        app.settle_tree(at(0));
+        app.set_repo(tree_read(at(1), &[]));
+        app.settle_tree(at(2));
+        app.apply(&changed("Cargo.toml"));
+        app.apply(&Event::TurnEnded);
+        app.settle_tree(at(3));
+        app.set_repo(tree_read(
+            at(4),
+            &[
+                file("Cargo.toml", 4, 1),
+                file("crates/net/Cargo.toml", 1, 0),
+            ],
+        ));
+        app.settle_tree(at(5));
+        app.settle_tree(at(6));
+
+        let said = outside(&app);
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(
+            said[0].body.contains("crates/net/Cargo.toml +1 −0"),
             "{}",
             said[0].body
         );
