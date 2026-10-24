@@ -122,7 +122,7 @@ pub fn run(
             pause();
             continue;
         }
-        for event in &events {
+        for (at, event) in events.iter().enumerate() {
             keep(journal, &mut state, event);
             let ending = match event {
                 Event::AssistantMessage { text, agent: None } => {
@@ -131,7 +131,7 @@ pub fn run(
                 }
                 Event::PermissionRequest {
                     id, tool, target, ..
-                } if outcome.is_none() => answered(
+                } if outcome.is_none() && !refused_by_backend(&events[at + 1..], id) => answered(
                     bridge,
                     journal,
                     &mut state,
@@ -178,6 +178,17 @@ pub fn run(
         started_at,
         state,
     }
+}
+
+/// Whether the backend refused call `id` by itself, in the events that
+/// follow its prompt: a call the backend's own rules, hooks or mode refused
+/// arrives as a prompt with its refusal behind it, in the same batch, and
+/// nothing is waiting on an answer to it. Answering it anyway would be
+/// refused as a prompt nobody asked, and record a second decision.
+fn refused_by_backend(after: &[Event], id: &niobe_core::event::ToolCallId) -> bool {
+    after.iter().any(
+        |event| matches!(event, Event::PermissionResponse { id: answered, .. } if answered == id),
+    )
 }
 
 /// Answers the prompt about call `id` by `allowed`, and records the answer.
@@ -390,6 +401,42 @@ mod tests {
             None,
         );
         assert_eq!(turn.reply, "mine");
+    }
+
+    #[test]
+    fn a_call_the_backend_refused_by_itself_is_left_with_the_backends_answer() {
+        let mut allowed = Allowlist::new();
+        allowed.insert(Rule::tool("Bash"));
+        let id = ToolCallId::new("t1");
+        let refused = vec![
+            Event::PermissionRequest {
+                id: id.clone(),
+                tool: "Bash".to_owned(),
+                input: "{}".to_owned(),
+                target: Some("touch b.txt".to_owned()),
+                proposal: None,
+                reason: None,
+                agent: None,
+            },
+            Event::PermissionResponse {
+                id,
+                decision: PermissionDecision::Deny,
+                message: None,
+            },
+        ];
+        let (turn, bridge, journal) = ran(vec![refused, ended_turn("could not")], &allowed, None);
+
+        assert_eq!(turn.outcome, Outcome::Finished);
+        assert!(bridge.answered.is_empty(), "{:?}", bridge.answered);
+        let decisions: Vec<_> = journal
+            .0
+            .iter()
+            .filter_map(|event| match event {
+                Event::PermissionResponse { decision, .. } => Some(*decision),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(decisions, [PermissionDecision::Deny]);
     }
 
     #[test]

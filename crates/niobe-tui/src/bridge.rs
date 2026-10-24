@@ -109,6 +109,11 @@ pub trait Bridge: std::fmt::Debug {
     /// Everything the backend has produced since the last call, oldest first.
     /// Never blocks; an empty answer means nothing has arrived yet, never that
     /// the session is over.
+    ///
+    /// A call the backend refused by itself, without asking, arrives as its
+    /// prompt with the refusal behind it, and the two come in the same drain:
+    /// a caller answering prompts reads a prompt answered later in the batch
+    /// as one nobody is waiting on.
     fn drain(&mut self) -> Vec<Event>;
 }
 

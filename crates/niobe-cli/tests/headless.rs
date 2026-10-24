@@ -290,3 +290,46 @@ fn the_json_carries_the_reply_as_written_and_no_character_that_acts_on_a_termina
         "the reply is the agent's, character for character"
     );
 }
+
+/// A `claude` that refuses a call by a rule of its own, as 2.1.309 does a
+/// command `--disallowedTools` or the user's settings deny: it says so with a
+/// `permission_denied` and asks nothing, then lists the refusal again in the
+/// `result` of a turn that went on to finish.
+const REFUSES_BY_ITSELF_CLAUDE: &str = "#!/bin/sh\n\
+    read -r first\n\
+    read -r turn\n\
+    printf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"model\":\"claude-sonnet-5\",\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"Bash\",\"input\":{\"command\":\"touch b.txt\"}}]}}'\n\
+    printf '%s\\n' '{\"type\":\"system\",\"subtype\":\"permission_denied\",\"tool_name\":\"Bash\",\"tool_use_id\":\"toolu_1\",\"decision_reason_type\":\"rule\",\"message\":\"Permission to use Bash with command touch b.txt has been denied.\"}'\n\
+    printf '%s\\n' '{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"content\":\"Permission to use Bash with command touch b.txt has been denied.\",\"is_error\":true,\"tool_use_id\":\"toolu_1\"}]}}'\n\
+    printf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"model\":\"claude-sonnet-5\",\"id\":\"msg_2\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"I could not run it\"}]}}'\n\
+    printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"I could not run it\",\"total_cost_usd\":0.25,\"usage\":{\"input_tokens\":10,\"output_tokens\":5,\"cache_read_input_tokens\":0,\"cache_creation_input_tokens\":0},\"permission_denials\":[{\"tool_name\":\"Bash\",\"tool_use_id\":\"toolu_1\",\"tool_input\":{\"command\":\"touch b.txt\"}}]}'\n\
+    while read -r line; do printf '%s\\n' \"$line\" >> after.jsonl; done\n";
+
+/// The same refusal, announced only in the closing `result`, as the CLI does
+/// for a call it refused without a `permission_denied`.
+const REFUSES_AT_THE_END_CLAUDE: &str = "#!/bin/sh\n\
+    read -r first\n\
+    read -r turn\n\
+    printf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"model\":\"claude-sonnet-5\",\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"I could not run it\"}]}}'\n\
+    printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"I could not run it\",\"total_cost_usd\":0.25,\"usage\":{\"input_tokens\":10,\"output_tokens\":5,\"cache_read_input_tokens\":0,\"cache_creation_input_tokens\":0},\"permission_denials\":[{\"tool_name\":\"Bash\",\"tool_use_id\":\"toolu_9\",\"tool_input\":{\"command\":\"touch c.txt\"}}]}'\n\
+    while read -r line; do printf '%s\\n' \"$line\" >> after.jsonl; done\n";
+
+#[test]
+fn a_call_the_cli_refused_by_itself_is_not_answered_and_the_turn_still_finishes() {
+    for script in [REFUSES_BY_ITSELF_CLAUDE, REFUSES_AT_THE_END_CLAUDE] {
+        // A rule that covers the call: were the refusal taken for a question,
+        // the run would record the call as allowed after the CLI refused it.
+        let setup = Setup::new(script, METERED);
+        let output = setup.run(&["-p", "touch it", "--allow", "Bash", "--json"]);
+
+        assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+        let printed = json(&output);
+        assert_eq!(printed["outcome"], "finished", "{printed:#}");
+        assert_eq!(printed["reply"], "I could not run it");
+        let after = std::fs::read_to_string(setup.repo().join("after.jsonl")).unwrap_or_default();
+        assert!(
+            !after.contains("control_response"),
+            "nothing is answered for a call the CLI never asked about: {after}"
+        );
+    }
+}

@@ -514,7 +514,7 @@ pub struct Session {
     /// When the write that was last said to be stalled started, so a stall is
     /// said once rather than on every drain.
     said_stalled: Option<Instant>,
-    events: Receiver<Event>,
+    events: Receiver<Vec<Event>>,
     waiting: Waiting,
     refusals: Refusals,
     model_requests: ModelRequests,
@@ -661,7 +661,7 @@ impl Session {
             // with the first turn, and the Usage pane would read "billing not
             // known" until then, for an account the profile says how it is
             // billed.
-            let _ = sender.send(Event::Billing { billing });
+            let _ = sender.send(vec![Event::Billing { billing }]);
         }
         let waiting: Waiting = Arc::new(Mutex::new(BTreeMap::new()));
         let asked = Arc::clone(&waiting);
@@ -690,7 +690,7 @@ impl Session {
                 let (line, decoded) = match output {
                     Output::Line { text, decoded } => (text, decoded),
                     Output::Overlong => {
-                        if sender.send(overlong()).is_err() {
+                        if sender.send(vec![overlong()]).is_err() {
                             return;
                         }
                         continue;
@@ -699,7 +699,7 @@ impl Session {
                 if line.trim().is_empty() {
                     continue;
                 }
-                if !decoded && sender.send(undecodable()).is_err() {
+                if !decoded && sender.send(vec![undecodable()]).is_err() {
                     return;
                 }
                 if let Ok(mut refused) = refused.lock() {
@@ -764,15 +764,16 @@ impl Session {
                         waiting.remove(id.as_str());
                     }
                 }
-                for event in events {
-                    if matches!(event, Event::Cleared) {
-                        was_cleared.store(true, Ordering::Release);
-                    }
-                    // The receiver is gone: the session was dropped, and there
-                    // is no one left to tell.
-                    if sender.send(event).is_err() {
-                        return;
-                    }
+                if events.iter().any(|event| matches!(event, Event::Cleared)) {
+                    was_cleared.store(true, Ordering::Release);
+                }
+                // A line's events go out together, so that no drain takes
+                // the first of them without the rest: a call the CLI refused
+                // by itself is a prompt and its refusal, and a drain that
+                // took the prompt alone would answer it. The receiver gone is
+                // the session dropped, with no one left to tell.
+                if !events.is_empty() && sender.send(events).is_err() {
+                    return;
                 }
             }
         });
@@ -1121,6 +1122,7 @@ impl Session {
     /// its standard output and stayed is stopped, and reported as a failure.
     /// One whose subprocess left while something it started holds its
     /// standard output open has that ended, and is reported like any other.
+    /// The events of one line of the CLI's arrive in the same drain.
     pub fn drain(&mut self) -> Vec<Event> {
         self.settle_the_group();
         let mut events: Vec<Event> = self.unsent.try_iter().collect();
@@ -1146,9 +1148,11 @@ impl Session {
                 // can still deliver a line after the end was reported, and
                 // it is not the CLI's.
                 Ok(_) if self.reported => {}
-                Ok(event) => {
-                    self.heard(&event);
-                    events.push(event);
+                Ok(line) => {
+                    for event in line {
+                        self.heard(&event);
+                        events.push(event);
+                    }
                 }
                 Err(TryRecvError::Empty) => {
                     if let Some(ended) = self.left_holding_output() {
