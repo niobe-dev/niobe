@@ -3545,12 +3545,19 @@ impl App {
     /// a recorded session is folded: a rule that answered prompts again while
     /// a recording was being read would write decisions into a session that
     /// had already made its own.
+    ///
+    /// A covered prompt queued behind one no rule answers is answered too:
+    /// two agents can ask at once, and the call a rule allows would otherwise
+    /// wait on the operator's answer to a question about something else. The
+    /// prompt on screen, and what the operator chose on it, stay as they were.
     pub fn settle_rules(&mut self) {
-        while let Some(ask) = self.asks.front() {
-            if !self.allowed.allows(&ask.tool, ask.target.as_deref()) {
-                return;
-            }
-            let id = ask.id.clone();
+        let covered: Vec<ToolCallId> = self
+            .asks
+            .iter()
+            .filter(|ask| self.allowed.allows(&ask.tool, ask.target.as_deref()))
+            .map(|ask| ask.id.clone())
+            .collect();
+        for id in covered {
             self.produce(Event::PermissionResponse {
                 id,
                 decision: PermissionDecision::AllowByRule,
@@ -12255,6 +12262,50 @@ mod tests {
             }],
             "the call was let through without the backend being told"
         );
+    }
+
+    /// Two agents ask at once: the operator is reading one question no rule
+    /// answers, and the other's call is one a standing rule allows. That call
+    /// goes ahead now rather than waiting on the operator's answer to a
+    /// question about something else, and the question on screen stays as it
+    /// was, with whatever the operator had chosen on it.
+    #[test]
+    fn a_standing_rule_answers_a_prompt_queued_behind_one_it_does_not() {
+        use ratatui::crossterm::event::KeyCode;
+
+        let mut app = app().with_rules([Rule::tool("Read")].into_iter().collect());
+        app.apply(&asked_by("t1", None));
+        app.on_key(key(KeyCode::Down));
+        let chosen = app.ask_selected();
+        assert_ne!(
+            chosen,
+            Answer::Once,
+            "the operator moved off the first answer"
+        );
+        app.apply(&Event::PermissionRequest {
+            id: "t2".into(),
+            tool: "Read".to_owned(),
+            input: r#"{"file_path":"/repo/a.rs"}"#.to_owned(),
+            target: Some("/repo/a.rs".to_owned()),
+            proposal: None,
+            reason: None,
+            agent: Some(AgentId::new("toolu_a")),
+        });
+
+        app.settle_rules();
+
+        assert_eq!(
+            app.said(),
+            [Event::PermissionResponse {
+                id: "t2".into(),
+                decision: PermissionDecision::AllowByRule,
+                message: None,
+            }],
+            "the call a rule allows waited on another question"
+        );
+        assert_eq!(app.asking().map(|ask| ask.id.as_str()), Some("t1"));
+        assert_eq!(app.asks_waiting(), 0);
+        assert_eq!(app.ask_selected(), chosen);
     }
 
     #[test]
