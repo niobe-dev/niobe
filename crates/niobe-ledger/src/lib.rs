@@ -7,12 +7,11 @@
 //! reported by a backend or is labelled with how it was arrived at. An unknown
 //! model is reported as `unpriced`, never guessed at.
 //!
-//! What exists so far is the price table: per-model rates with the date each
-//! came into force, bundled into the binary as `prices.toml` and overridable
-//! by the user, and the API-equivalent cost of a usage record priced against
-//! it. The same file dates each model's context window, which is what a
-//! session's context is measured against where the backend has not said.
-//! Attributing costs to calls, files and sessions is not implemented yet.
+//! The price table holds per-model rates with the date each came into force,
+//! bundled into the binary as `prices.toml` and overridable by the user, and
+//! computes the API-equivalent cost of a usage record priced against it. The
+//! same table dates each model's context window, which is what a session's
+//! context is measured against where the backend has not reported one.
 
 mod date;
 mod error;
