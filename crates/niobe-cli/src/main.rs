@@ -834,6 +834,10 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<Option<
             None => app.apply(event),
         }
     }
+    // Read back from the CLI's record as a resumed session is from the
+    // store's: what it holds was there to read before it was opened, so it
+    // is no news on the catch-up sheet, and any windows it holds are dated.
+    app.resumed();
     let elapsed = started.elapsed();
 
     if piped {

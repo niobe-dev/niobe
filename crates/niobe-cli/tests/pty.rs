@@ -2130,6 +2130,37 @@ fn an_imported_session_starts_its_cli_on_its_transcript_and_in_its_mode() {
     assert!(started.contains("--permission-mode plan"), "{started}");
 }
 
+/// A session read in from the CLI's own transcript was there to read before
+/// it was opened, as a session resumed from Niobe's own record is: what
+/// happened since the operator last looked is what happens from here, not
+/// the whole conversation read in.
+#[test]
+fn an_imported_session_counts_nothing_it_read_in_as_news() {
+    let repo = repo();
+    let home = stand_in(repo.path(), WRITES_DOWN_ITS_ARGUMENTS_CLAUDE);
+    let claude = claude_config_with_the_transcript(repo.path());
+    let (terminal, slave) = Terminal::open();
+    // Wide enough for the side panes to be drawn, which Tab walks.
+    rustix::termios::tcsetwinsize(&slave, WIDE).expect("the pty can be resized");
+    let mut shell = shell_driving_the_stand_in(&slave, repo.path(), home.path())
+        .env("CLAUDE_CONFIG_DIR", claude.path())
+        .args(["--resume", TRANSCRIPT_SESSION])
+        .spawn()
+        .expect("the niobe binary runs");
+
+    terminal.shows("Done: the catalog response carries an etag.");
+    written(&repo.path().join("args.log"));
+    // Tab gives the keyboard to a side pane, where `c` asks what happened.
+    terminal.typed(b"\t");
+    let asked = terminal.mark();
+    terminal.typed(b"c");
+    terminal.shows_since(asked, "nothing has happened since");
+    terminal.typed(CTRL_Q);
+    let (_, status) = ended(&mut shell);
+    let (drawn, _) = released(terminal, slave);
+    assert!(status.success(), "{drawn}");
+}
+
 /// A `claude` that writes down the directory it was started in, then every
 /// turn it is sent, and answers each with the same reply.
 const WRITES_DOWN_WHERE_IT_RUNS_CLAUDE: &str = "#!/bin/sh\n\
