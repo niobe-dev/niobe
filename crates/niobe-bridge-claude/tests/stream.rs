@@ -1627,6 +1627,48 @@ fn a_cleared_conversation_is_the_one_a_resume_carries_on() {
     );
 }
 
+/// The conversation after a clear is stored as a session of its own, which
+/// opens on the reset: the prompt that typed `/clear` is the last of the
+/// session before it. Read back from there, it must hold the turns the shell
+/// showed live — the clear's own end is no turn of either — or `--resume` and
+/// `niobe cost --by-turn` number its turns one off from what the operator saw.
+#[test]
+fn a_cleared_conversation_read_back_from_its_own_record_has_the_turns_it_had_live() {
+    let events = translate(CLEAR_COMMAND);
+    let cleared = events
+        .iter()
+        .position(|event| matches!(event, Event::Cleared))
+        .expect("the reset is reported");
+    // What the shell adds: the prompt of each of the three turns, each
+    // before the line the CLI answered it with.
+    let said = |text: &str| Event::UserMessage {
+        text: text.to_owned(),
+    };
+    let second_turn = cleared
+        + events[cleared..]
+            .iter()
+            .position(|event| matches!(event, Event::TurnEnded))
+            .expect("the clear's turn ends")
+        + 1;
+    let mut live = vec![said("say apple")];
+    live.extend_from_slice(&events[..cleared]);
+    live.push(said("/clear"));
+    let stored_from = live.len();
+    live.extend_from_slice(&events[cleared..second_turn]);
+    live.push(said("say none"));
+    live.extend_from_slice(&events[second_turn..]);
+
+    let shown = SessionState::replay(&live);
+    let read_back = SessionState::replay(&live[stored_from..]);
+
+    let tokens = |state: &SessionState| -> Vec<Option<u64>> {
+        state.turns().iter().map(|turn| turn.tokens).collect()
+    };
+    // The second turn's `result`: 2 in, 3 out, 13,412 read and 9,916 written.
+    assert_eq!(tokens(&shown), [Some(2 + 3 + 13_412 + 9_916)]);
+    assert_eq!(tokens(&read_back), tokens(&shown));
+}
+
 /// `/fast` is listed and then refused headless: the answer to `initialize`
 /// says why, and the command is not offered.
 #[test]

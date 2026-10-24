@@ -635,8 +635,10 @@ pub struct SessionState {
     models: Vec<ModelOption>,
     /// The MCP servers the backend last said it has configured.
     mcp_servers: Vec<McpServer>,
-    /// Whether the turn that typed a clear has not ended: its end belongs to
-    /// the conversation that was cleared, and is not a turn of the new one.
+    /// Whether the turn that typed a clear has not ended — or, for a
+    /// conversation read back from the clear it opens on, may not have: its
+    /// end belongs to the conversation that was cleared, and is not a turn of
+    /// the new one.
     clear_open: bool,
 }
 
@@ -1177,7 +1179,12 @@ impl SessionState {
             in_flight_tools,
             agent_calls,
             turn_running: self.turn_running,
-            clear_open: self.turn_running,
+            // Open whether or not a turn was seen running: a conversation
+            // read back from its own record opens on the clear, and the
+            // prompt that typed it is the last of the session before. Its
+            // turn's end is no turn of this conversation either way, and
+            // `end_clear` still counts a turn that sent a prompt or spent.
+            clear_open: true,
             ..Self::default()
         }
     }
@@ -2696,6 +2703,26 @@ mod tests {
         }
 
         assert!(state.turns().is_empty());
+    }
+
+    /// The store keeps the conversation after a clear as a session of its
+    /// own that opens on the clear, without the prompt that typed it.
+    #[test]
+    fn a_conversation_read_back_from_its_clear_counts_the_turns_it_counted_live() {
+        let read_back = SessionState::replay(&[
+            Event::Cleared,
+            Event::TurnEnded,
+            Event::UserMessage {
+                text: "next".to_owned(),
+            },
+            usage(5, 4, None),
+            Event::TurnEnded,
+        ]);
+
+        let turns = read_back.turns();
+        assert_eq!(turns.len(), 1, "{turns:?}");
+        assert_eq!(turns[0].number, 1);
+        assert_eq!(turns[0].tokens, Some(9));
     }
 
     /// A call counted as cut short whose end then comes is one call, and
