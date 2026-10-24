@@ -2312,7 +2312,8 @@ impl Translator {
     /// What a call to the CLI's tool `tool` would do, read from its `input`,
     /// for the tools whose arguments are known here: `Edit`, `Write`, `Bash`
     /// and `ExitPlanMode`. `None` for any other tool, and for arguments not of the shape
-    /// the tool takes, which the question then shows as they are.
+    /// the tool takes, which the question then shows as they are — but for
+    /// `ExitPlanMode`, which is a plan however its arguments are shaped.
     fn proposal_of(&self, tool: &str, input: &serde_json::Value) -> Option<Proposal> {
         let text = |key: &str| input.get(key)?.as_str().map(str::to_owned);
         match tool {
@@ -2347,12 +2348,19 @@ impl Translator {
                 },
                 ["command"],
             )),
-            "ExitPlanMode" => Some(Proposal::new(
-                Action::Plan {
-                    plan: text("plan")?,
-                },
-                ["plan"],
-            )),
+            // The CLI fills `plan` in from the plan file and asks without it
+            // where the agent wrote none. That is still a plan going ahead,
+            // with nothing to read: proposed as one, so that no standing
+            // answer is offered that would let every later plan through.
+            "ExitPlanMode" => Some(match text("plan") {
+                Some(plan) => Proposal::new(Action::Plan { plan }, ["plan"]),
+                None => Proposal::new(
+                    Action::Plan {
+                        plan: String::new(),
+                    },
+                    [] as [&str; 0],
+                ),
+            }),
             _ => None,
         }
     }
@@ -6069,6 +6077,33 @@ mod tests {
         assert!(!proposal.covers("planFilePath"));
     }
 
+    /// Claude Code 2.1.310 fills `plan` in from the plan file before it asks,
+    /// and leaves the call's own arguments as they were where there is no
+    /// such file: the prompt is still a plan going ahead, with nothing to
+    /// read, and is never one a standing answer may approve.
+    #[test]
+    fn leaving_plan_mode_with_no_plan_written_is_still_a_plan() {
+        for input in [
+            "{}",
+            r#"{"planFilePath":"/p.md"}"#,
+            r#"{"plan":7,"allowedPrompts":[]}"#,
+        ] {
+            let line = format!(
+                r#"{{"type":"control_request","request_id":"c1","request":{{"subtype":"can_use_tool","tool_name":"ExitPlanMode","input":{input},"tool_use_id":"toolu_1"}}}}"#
+            );
+            let proposal = proposal_asked(&line, &mut translator()).expect("a plan is proposed");
+            assert_eq!(
+                proposal.action(),
+                &Action::Plan {
+                    plan: String::new()
+                },
+                "{input}"
+            );
+            assert!(!proposal.covers("plan"), "{input}");
+            assert!(!proposal.covers("planFilePath"), "{input}");
+        }
+    }
+
     /// Arguments of another shape than the tool's are not read as the tool's:
     /// the question shows them as they are.
     #[test]
@@ -6081,7 +6116,6 @@ mod tests {
             ),
             ("Write", r#"{"file_path":"/f"}"#),
             ("Bash", r#"{"cmd":"ls"}"#),
-            ("ExitPlanMode", r#"{"planFilePath":"/p.md"}"#),
             ("Read", r#"{"file_path":"/f"}"#),
             ("mcp__notion__search", r#"{"command":"ls"}"#),
         ] {

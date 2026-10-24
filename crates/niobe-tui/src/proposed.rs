@@ -127,8 +127,17 @@ impl Proposed {
         let mut markers = Vec::new();
         if let Action::Plan { plan } = self.proposal.action() {
             // A plan is what is being approved, so it is drawn whole, as the
-            // markdown the agent wrote it in, and never cut.
-            rows.extend(markdown::render(plan, width, theme));
+            // markdown the agent wrote it in, and never cut. One the backend
+            // asked about with no text is said to have none, rather than left
+            // a question with nothing above its answers.
+            match plan.trim().is_empty() {
+                true => rows.extend(
+                    text::wrap(NO_PLAN, width)
+                        .into_iter()
+                        .map(|row| Line::from(row).style(dim)),
+                ),
+                false => rows.extend(markdown::render(plan, width, theme)),
+            }
             self.others_under(input, width, theme, &mut rows, &mut markers);
             return Some(Call { rows, markers });
         }
@@ -202,6 +211,9 @@ impl Proposed {
         }
     }
 }
+
+/// What a plan the backend asked about with no text of its own shows instead.
+const NO_PLAN: &str = "No plan came with this question.";
 
 /// What a write does to the file beyond the lines it writes: a file that was
 /// there loses everything it held, which the call does not carry, so nothing
@@ -345,6 +357,26 @@ mod tests {
                 "2. Run it.",
                 "3. Say so.",
                 "4. Stop.",
+                "",
+                "planFilePath: /p.md"
+            ]
+        );
+    }
+
+    /// A plan asked about with nothing written says so rather than draw an
+    /// empty question: what goes ahead is the agent's word that it planned.
+    #[test]
+    fn a_plan_with_no_text_says_none_came_with_it() {
+        let proposal = Proposal::new(
+            Action::Plan {
+                plan: String::new(),
+            },
+            [] as [&str; 0],
+        );
+        assert_eq!(
+            drawn(proposal, r#"{"planFilePath":"/p.md"}"#, 60, false),
+            [
+                "No plan came with this question.",
                 "",
                 "planFilePath: /p.md"
             ]

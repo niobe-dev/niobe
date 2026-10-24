@@ -11580,6 +11580,30 @@ mod tests {
         assert_eq!(app.ask_options(), [Answer::Once, Answer::No]);
     }
 
+    /// A plan the backend asked about with no text is still a plan: the
+    /// "always" it would offer for any other call would approve every plan
+    /// after it unread.
+    #[test]
+    fn a_plan_with_no_text_offers_no_standing_answer() {
+        let mut app = app();
+        app.apply(&Event::PermissionRequest {
+            id: "t1".into(),
+            tool: "ExitPlanMode".to_owned(),
+            input: "{}".to_owned(),
+            target: None,
+            proposal: Some(niobe_core::Proposal::new(
+                niobe_core::Action::Plan {
+                    plan: String::new(),
+                },
+                [] as [&str; 0],
+            )),
+            reason: None,
+            agent: None,
+        });
+
+        assert_eq!(app.ask_options(), [Answer::Once, Answer::No]);
+    }
+
     #[test]
     fn a_refusal_is_visible_in_the_transcript() {
         use ratatui::crossterm::event::KeyCode;
