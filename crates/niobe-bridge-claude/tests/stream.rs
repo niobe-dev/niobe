@@ -2516,6 +2516,37 @@ fn a_recorded_banner_at_the_notice_level_is_a_notice_in_the_clis_words() {
     );
 }
 
+/// The stand-in API closes each message with a `message_delta` that counts
+/// its output alone, and the CLI passes it on so: the prompt is counted only
+/// in the `message_start`. The CLI's `result` still bills the prompt — 10
+/// input tokens a message, by `jq` in `tests/fixtures/README.md` — and the
+/// context the session's meter reads is that prompt, not nothing.
+#[test]
+fn a_message_delta_that_counts_only_the_output_keeps_the_prompt_its_start_counted() {
+    let events = translate(API_ERRORS);
+
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::TurnTotalDiffers { .. })),
+        "{events:#?}"
+    );
+    let contexts: Vec<u64> = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Context(context) => Some(context.tokens),
+            _ => None,
+        })
+        .collect();
+    assert!(!contexts.is_empty(), "{events:#?}");
+    assert!(contexts.iter().all(|tokens| *tokens == 10), "{contexts:?}");
+    let first = usage_records(&events)
+        .into_iter()
+        .find(|usage| usage.settles_model == Some(false))
+        .expect("the recording streams a message");
+    assert_eq!((first.input, first.output), (10, 5));
+}
+
 /// `background-commands.jsonl`: two shell commands the model put in the
 /// background, one that exited 0 and one that exited 3, each ending in a
 /// `task_notification` after the turn that started them.

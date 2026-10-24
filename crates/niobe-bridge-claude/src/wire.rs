@@ -653,6 +653,42 @@ impl Usage {
     pub(crate) fn fast(&self) -> bool {
         self.speed.as_deref() == Some("fast")
     }
+
+    /// The counts of a message whose `message_start` said `self` and whose
+    /// `message_delta` says `delta`: the delta's, but for a prompt count it
+    /// gives as nothing, which is the start's.
+    ///
+    /// The API counts the prompt when the message starts and the output as
+    /// it ends, and a `message_delta` is not bound to repeat the prompt: the
+    /// stand-in API `api-errors.jsonl` was recorded against sent
+    /// `{"output_tokens":5}` alone, the CLI passed it on so, and its `result`
+    /// still billed the 10 input tokens the start had counted. The CLI keeps
+    /// a start's count where the delta's is zero, so the same is done here;
+    /// the output, which only the end knows whole, is always the delta's.
+    pub(crate) fn completed_by(&self, delta: &Usage) -> Usage {
+        let either = |end: u64, start: u64| if end > 0 { end } else { start };
+        Usage {
+            input_tokens: either(delta.input_tokens, self.input_tokens),
+            output_tokens: delta.output_tokens,
+            cache_read_input_tokens: either(
+                delta.cache_read_input_tokens,
+                self.cache_read_input_tokens,
+            ),
+            cache_creation_input_tokens: either(
+                delta.cache_creation_input_tokens,
+                self.cache_creation_input_tokens,
+            ),
+            cache_creation: delta
+                .cache_creation
+                .clone()
+                .or_else(|| self.cache_creation.clone()),
+            iterations: match delta.iterations.is_empty() {
+                true => self.iterations.clone(),
+                false => delta.iterations.clone(),
+            },
+            speed: delta.speed.clone().or_else(|| self.speed.clone()),
+        }
+    }
 }
 
 /// A list the CLI writes as `null` where it has nothing in it.
@@ -1035,6 +1071,49 @@ pub(crate) struct Denial {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn usage(json: &str) -> Usage {
+        serde_json::from_str(json).expect("the usage is written as the CLI writes it")
+    }
+
+    #[test]
+    fn a_message_delta_counting_only_the_output_keeps_the_prompt_the_start_counted() {
+        let start = usage(
+            r#"{"input_tokens":10,"output_tokens":1,"cache_read_input_tokens":300,"cache_creation_input_tokens":40,"speed":"fast"}"#,
+        );
+
+        let whole = start.completed_by(&usage(r#"{"output_tokens":5}"#));
+
+        assert_eq!(
+            (
+                whole.input_tokens,
+                whole.output_tokens,
+                whole.cache_read_input_tokens,
+                whole.cache_creation_input_tokens,
+            ),
+            (10, 5, 300, 40)
+        );
+        assert!(whole.fast());
+        assert_eq!(whole.last_prompt(), 350);
+    }
+
+    #[test]
+    fn a_message_delta_that_counts_the_prompt_is_taken_over_the_start() {
+        let start = usage(r#"{"input_tokens":10,"output_tokens":1,"cache_read_input_tokens":300}"#);
+
+        let whole = start.completed_by(&usage(
+            r#"{"input_tokens":12,"output_tokens":5,"cache_read_input_tokens":310}"#,
+        ));
+
+        assert_eq!(
+            (
+                whole.input_tokens,
+                whole.output_tokens,
+                whole.cache_read_input_tokens
+            ),
+            (12, 5, 310)
+        );
+    }
 
     #[test]
     fn a_type_this_bridge_does_not_know_parses_as_unknown() {

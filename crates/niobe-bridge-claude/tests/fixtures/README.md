@@ -1607,3 +1607,26 @@ entries, the refusal of `claude-sonnet-5`, the banner as a notice, and no
 notice that a subtype could not be read; `tests/transcript.rs` folds the
 transcript and asserts the same entries in the CLI's sentence, and that its
 only notices are the banner and the output of `/context`.
+
+The stand-in closed every message with a `message_delta` that counts the
+output alone, and the CLI passed it on as it came; the prompt is counted
+only in the `message_start`, and the CLI's `result` bills it all the same:
+
+```sh
+jq -c 'select(.event.type == "message_start") | .event.message.usage.input_tokens' api-errors.jsonl
+# 10   (each of the four messages)
+jq -c 'select(.event.type == "message_delta") | .event.usage' api-errors.jsonl
+# {"output_tokens":5}   (each of the four)
+jq -c 'select(.type == "result") | [.usage.input_tokens, .usage.output_tokens]' api-errors.jsonl
+# [10,5]
+# [10,5]
+# [20,10]
+# [0,0]
+# [0,0]
+# [0,0]
+```
+
+So `tests/stream.rs` asserts that the messages add up to every `result`'s
+`usage` with no `TurnTotalDiffers`, that each message is filed at 10 input
+and 5 output tokens, and that the context the meter reads after each is the
+10-token prompt rather than nothing.

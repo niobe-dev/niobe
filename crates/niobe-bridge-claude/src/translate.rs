@@ -227,6 +227,9 @@ struct InFlight {
     model: String,
     /// Whether it is served in fast mode.
     fast: bool,
+    /// The counts its `message_start` carried: the prompt, where the
+    /// `message_delta` that ends it counts only the output.
+    opened: Option<wire::Usage>,
     /// The API's id for the message, where its `message_start` named one.
     id: Option<String>,
     /// The id of the request the message answers, off its `assistant` line.
@@ -2100,6 +2103,7 @@ impl Translator {
                     InFlight {
                         model: billed,
                         fast,
+                        opened: message.usage,
                         id: message.id,
                         request: None,
                         snapshot: None,
@@ -2116,6 +2120,10 @@ impl Translator {
                 if started.as_ref().is_some_and(|message| message.aborted) {
                     return;
                 }
+                let usage = match started.as_ref().and_then(|message| message.opened.as_ref()) {
+                    Some(opened) => opened.completed_by(&usage),
+                    None => usage,
+                };
                 self.count_message(&stream, started, &usage, out);
             }
 
