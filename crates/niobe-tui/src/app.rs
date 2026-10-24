@@ -2239,9 +2239,13 @@ impl App {
         // The entry a refusal was counted on is gone, and an index into the
         // entries that replace it would rewrite whichever one is there.
         self.unsaved = None;
-        // A mark holds the figures of the conversation that ended.
-        self.looked = Mark::default();
-        self.caught_up = Mark::default();
+        // A mark holds the figures of the conversation that ended. The fold
+        // has already started this one over, carrying into it the sub-agents
+        // still running, the questions still waiting and the plan's windows:
+        // those were there before it began, and are no news of it, while how
+        // far the window moves from here is.
+        self.looked = Mark::of(&self.session);
+        self.caught_up = self.looked.clone();
         // The watch counts turns of the conversation that ended, and the new
         // one numbers its turns from nothing: kept, it would wait for a turn
         // count this conversation reaches only after as many turns, saying
@@ -9802,6 +9806,59 @@ mod tests {
         assert!(
             app.sheet().is_some(),
             "the same file changed once in each conversation is news in the new one"
+        );
+    }
+
+    #[test]
+    fn what_a_conversation_started_over_carries_is_not_news_and_the_window_is_measured_across_it() {
+        let five_hour = |utilization: f64| {
+            Event::UsageWindows(niobe_core::event::UsageWindows {
+                five_hour: Some(niobe_core::event::UsageWindow {
+                    utilization,
+                    resets_at: Some(1_000),
+                }),
+                seven_day: None,
+                using_overage: false,
+                overage: niobe_core::event::Overage::Unreported,
+            })
+        };
+        let mut app = laid_out();
+        let at = Instant::now();
+        app.tick(at, None);
+        app.apply(&five_hour(0.20));
+        app.apply(&Event::AgentSpawn {
+            id: AgentId::from("a1"),
+            parent: None,
+            kind: None,
+            label: "look".to_owned(),
+        });
+        app.on_key(key(KeyCode::Char('x')));
+        app.apply(&Event::Cleared);
+
+        app.on_key(key(KeyCode::Tab));
+        app.on_key(key(KeyCode::Char('c')));
+        assert!(
+            app.sheet().is_none(),
+            "the sub-agent was running before the clear: {:?}",
+            app.sheet().map(|sheet| &sheet.rows)
+        );
+        app.on_key(key(KeyCode::Tab));
+
+        app.apply(&five_hour(0.35));
+        app.apply(&Event::AgentExit {
+            id: AgentId::from("a1"),
+            outcome: AgentOutcome::Completed,
+        });
+        app.tick(at + AWAY, None);
+        app.on_key(key(KeyCode::Char('y')));
+        let rows = &app.sheet().expect("the sub-agent finished while away").rows;
+        assert_eq!(
+            rows[..2],
+            [
+                "the five-hour window moved 15 points",
+                "sub-agents: 0 started, 1 finished",
+            ],
+            "{rows:?}"
         );
     }
 

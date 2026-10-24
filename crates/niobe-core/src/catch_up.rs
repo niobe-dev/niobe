@@ -21,7 +21,11 @@ use crate::session::{FileChanges, SessionState, TurnRecord};
 ///
 /// A conversation started over ([`crate::Event::Cleared`]) begins its figures
 /// from nothing, so a mark of the one before it means nothing in it: whoever
-/// keeps a mark starts it over there, at [`Mark::default`].
+/// keeps a mark takes it again there, of the session just started over. Not
+/// [`Mark::default`]: the fold carries the sub-agents still running, the
+/// questions still waiting and the plan's windows into the new conversation,
+/// and counted from nothing they would read as started, asked and unmeasured
+/// since.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Mark {
     turns: usize,
