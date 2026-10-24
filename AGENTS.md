@@ -289,7 +289,8 @@ reviewers that encode both, for an agent working in this tree.
   preview, and the file under `.niobe/trim/` Niobe's hook wrote an output it trimmed to, which the
   call's end carries as its `untrimmed` output, and both the driver and the transcript reader hand it to the translator;
   `memory.rs` finds the files the CLI gives the agent as memory by the CLI's documented lookup —
-  the user's, every directory's from the root down, their `@` imports and the CLI's
+  the user's, every directory's from the root down, the rules under each one's `rules`
+  directory that name no `paths`, their `@` imports and the CLI's
   auto-memory index and its notes — since the CLI does not say which it loaded;
   `transcript.rs` reads the session files the CLI keeps for
   itself, so a session started in plain Claude Code can be listed and carried on — it writes

@@ -16,6 +16,13 @@
 //!   runs: its `CLAUDE.md`, its `.claude/CLAUDE.md` and its `CLAUDE.local.md`
 //!   — the last of those directories is the project, the ones above it its
 //!   parents;
+//! * after the managed file, the user's and each directory's `.claude`
+//!   one, the markdown rules beside it — every `.md` under the managed
+//!   directory's `.claude/rules`, the configuration directory's `rules` or
+//!   the directory's `.claude/rules`, nested directories included — but for
+//!   a rule whose `paths` frontmatter names files, which the CLI gives only
+//!   once the agent reads one of them. The CLI takes a directory's rules in
+//!   the order the filesystem lists them; they are listed here by name;
 //! * under each of those, the files it imports with `@path`, relative to the
 //!   importing file, from `~` or absolute, at most [`IMPORT_DEPTH`] deep, and
 //!   not inside a code span or a fenced block;
@@ -138,6 +145,10 @@ pub const LOOKUPS: usize = 1024;
 const MEMORY: &str = "CLAUDE.md";
 const LOCAL: &str = "CLAUDE.local.md";
 
+/// The directory of rules beside a memory file: `.claude/rules` under a
+/// directory, `rules` under the configuration directory.
+const RULES: &str = "rules";
+
 /// The auto-memory index's name, and the directory it is kept in under the
 /// project's directory in the CLI's configuration directory.
 const INDEX: &str = "MEMORY.md";
@@ -162,11 +173,16 @@ pub fn sources(lookup: &Lookup<'_>) -> Vec<Source> {
         read: 0,
         full: false,
     };
-    if let Some(managed) = MANAGED {
-        found.loaded(Scope::Managed, Path::new(managed), lookup);
+    if let Some(managed) = MANAGED.map(Path::new) {
+        found.loaded(Scope::Managed, managed, lookup);
+        if let Some(dir) = managed.parent() {
+            let rules = dir.join(".claude").join(RULES);
+            found.rules(Scope::Managed, &rules, &rules, lookup);
+        }
     }
     if let Some(config) = lookup.config {
         found.loaded(Scope::User, &config.join(MEMORY), lookup);
+        found.rules(Scope::User, config, &config.join(RULES), lookup);
     }
     let above: Vec<&Path> = lookup.cwd.ancestors().collect();
     for (i, dir) in above.iter().rev().enumerate() {
@@ -176,6 +192,7 @@ pub fn sources(lookup: &Lookup<'_>) -> Vec<Source> {
         };
         found.loaded_under(scope, dir, &dir.join(MEMORY), lookup);
         found.loaded_under(scope, dir, &dir.join(".claude").join(MEMORY), lookup);
+        found.rules(scope, dir, &dir.join(".claude").join(RULES), lookup);
         found.loaded_under(local, dir, &dir.join(LOCAL), lookup);
     }
     if let Some(config) = lookup.config {
@@ -233,6 +250,73 @@ impl Found {
     }
 
     fn add(&mut self, scope: Scope, path: &Path, depth: usize, held: &Held, lookup: &Lookup<'_>) {
+        self.add_if(scope, path, depth, held, lookup, |_| true);
+    }
+
+    /// Every rule under `rules`, named under the directory `dir`, each in
+    /// `scope` with what it imports: the files whose names end in `.md`,
+    /// directories followed, all in order of name. A rule whose frontmatter
+    /// limits it to some `paths` is passed over, as the CLI does until the
+    /// agent reads one of them. A directory is followed once, and not at all
+    /// where it resolves somewhere its files would be withheld.
+    fn rules(&mut self, scope: Scope, dir: &Path, rules: &Path, lookup: &Lookup<'_>) {
+        let held = Held::to_repository(self.places.in_repository(&canonical(dir)));
+        let mut visited = BTreeSet::new();
+        self.rules_in(scope, rules, &held, &mut visited, lookup);
+    }
+
+    fn rules_in(
+        &mut self,
+        scope: Scope,
+        rules: &Path,
+        held: &Held,
+        visited: &mut BTreeSet<PathBuf>,
+        lookup: &Lookup<'_>,
+    ) {
+        let Some(real) = std::fs::canonicalize(rules).ok() else {
+            return;
+        };
+        // Judged as a rule in it would be, since the configuration
+        // directory's markdown is read where nothing else in it is.
+        let withheld = self.places.withholds(&real.join("rule.md"), held);
+        if withheld.is_some() || !visited.insert(real.clone()) {
+            return;
+        }
+        let Ok(listing) = std::fs::read_dir(&real) else {
+            return;
+        };
+        let mut names = Vec::new();
+        for entry in listing {
+            let Some(lookups) = self.lookups.checked_sub(1) else {
+                break;
+            };
+            self.lookups = lookups;
+            if let Ok(entry) = entry {
+                names.push(entry.file_name());
+            }
+        }
+        names.sort();
+        for name in names {
+            let path = rules.join(&name);
+            if std::fs::metadata(&path).is_ok_and(|meta| meta.is_dir()) {
+                self.rules_in(scope, &path, held, visited, lookup);
+            } else if Path::new(&name).extension().is_some_and(|ext| ext == "md") {
+                self.add_if(scope, &path, 0, held, lookup, |text| !conditional(text));
+            }
+        }
+    }
+
+    /// [`Found::add`] for a file listed only where what it holds is
+    /// `wanted`; one that is not is still counted as seen, as the CLI does.
+    fn add_if(
+        &mut self,
+        scope: Scope,
+        path: &Path,
+        depth: usize,
+        held: &Held,
+        lookup: &Lookup<'_>,
+        wanted: impl Fn(&str) -> bool,
+    ) {
         let (real, text, bytes) = match self.open(path, held) {
             None => return,
             Some(Opened::Withheld(withheld)) => {
@@ -247,6 +331,9 @@ impl Found {
             }
             Some(Opened::Read { real, text, bytes }) => (real, text, bytes),
         };
+        if !wanted(&text) {
+            return;
+        }
         let imports = match depth < IMPORT_DEPTH {
             true => imports(&text),
             false => Vec::new(),
@@ -600,6 +687,60 @@ fn contents(bytes: &[u8]) -> Contents {
         return Contents::TooLarge(size);
     }
     Contents::Text(String::from_utf8_lossy(bytes).into_owned(), size)
+}
+
+/// Whether the rule `text` holds applies only to some files: its frontmatter
+/// names `paths`, as a string, a flow list or a block list, and one of them,
+/// a trailing `/**` taken off, is more than `**`.
+fn conditional(text: &str) -> bool {
+    let mut lines = text.lines();
+    if lines.next().map(str::trim_end) != Some("---") {
+        return false;
+    }
+    let front: Vec<&str> = lines.take_while(|line| line.trim_end() != "---").collect();
+    let Some(at) = front.iter().position(|line| line.starts_with("paths:")) else {
+        return false;
+    };
+    let inline = front[at].trim_start_matches("paths:").trim();
+    let mut globs = globs(inline.trim_start_matches('[').trim_end_matches(']'));
+    if inline.is_empty() {
+        for line in &front[at + 1..] {
+            let Some(item) = line.trim_start().strip_prefix('-') else {
+                break;
+            };
+            globs.extend(self::globs(item));
+        }
+    }
+    globs
+        .iter()
+        .map(|glob| glob.strip_suffix("/**").unwrap_or(glob))
+        .any(|glob| !glob.is_empty() && glob != "**")
+}
+
+/// The globs in `list`: separated by commas outside braces, each trimmed of
+/// space and quotes.
+fn globs(list: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut depth = 0usize;
+    let mut current = String::new();
+    for c in list.chars() {
+        match c {
+            '{' => depth = depth.saturating_add(1),
+            '}' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                found.push(std::mem::take(&mut current));
+                continue;
+            }
+            _ => {}
+        }
+        current.push(c);
+    }
+    found.push(current);
+    found
+        .iter()
+        .map(|glob| glob.trim().trim_matches(['"', '\'']).trim().to_owned())
+        .filter(|glob| !glob.is_empty())
+        .collect()
 }
 
 /// Every `@path` in `text` that is an import: a word that starts with `@`,
@@ -1381,6 +1522,109 @@ mod tests {
                 (Scope::Local, Some("mine\n")),
             ]
         );
+    }
+
+    /// The CLI gives the agent every markdown file under the user's `rules`
+    /// directory after the user's `CLAUDE.md`, and every one under a
+    /// directory's `.claude/rules` after its `.claude/CLAUDE.md`, nested
+    /// directories included — but not a rule whose `paths` frontmatter names
+    /// files, which it gives only once the agent reads one of them.
+    #[test]
+    fn the_rules_the_cli_loads_are_listed_after_the_memory_file_beside_them() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be made");
+        let home = dir.path().join("home");
+        let config = home.join(".claude");
+        let repo = home.join("work").join("repo");
+        write(&config.join("CLAUDE.md"), "user\n");
+        write(&config.join("rules").join("prefs.md"), "prefs\n");
+        write(&repo.join(".claude").join("CLAUDE.md"), "dot\n");
+        let rules = repo.join(".claude").join("rules");
+        write(&rules.join("style.md"), "style\n");
+        write(&rules.join("front").join("react.md"), "react\n");
+        write(
+            &rules.join("api.md"),
+            "---\npaths:\n  - \"src/api/**/*.ts\"\n---\napi\n",
+        );
+        write(
+            &rules.join("everywhere.md"),
+            "---\npaths: \"**\"\n---\nall\n",
+        );
+        write(&rules.join("notes.txt"), "not markdown\n");
+        write(&repo.join(LOCAL), "mine\n");
+        let found = sources(&Lookup {
+            cwd: &repo,
+            config: Some(&config),
+            home: Some(&home),
+        });
+        let listed: Vec<(Scope, String)> = found
+            .iter()
+            .filter_map(|source| {
+                let path = source.path.strip_prefix(&home).ok()?;
+                Some((source.scope, path.display().to_string()))
+            })
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                (Scope::User, ".claude/CLAUDE.md".to_owned()),
+                (Scope::User, ".claude/rules/prefs.md".to_owned()),
+                (Scope::Project, "work/repo/.claude/CLAUDE.md".to_owned()),
+                (
+                    Scope::Project,
+                    "work/repo/.claude/rules/everywhere.md".to_owned()
+                ),
+                (
+                    Scope::Project,
+                    "work/repo/.claude/rules/front/react.md".to_owned()
+                ),
+                (
+                    Scope::Project,
+                    "work/repo/.claude/rules/style.md".to_owned()
+                ),
+                (Scope::Local, "work/repo/CLAUDE.local.md".to_owned()),
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_repositorys_rules_linked_out_of_it_or_to_the_sign_in_are_not_read() {
+        let (dir, home, config, repo) = signed_in();
+        let outside = dir.path().join("Documents");
+        write(&outside.join("taxes.md"), "TAXES\n");
+        let rules = repo.join(".claude").join(RULES);
+        std::fs::create_dir_all(&rules).expect("the temporary directory is writable");
+        std::os::unix::fs::symlink(&outside, rules.join("docs")).expect("a link can be made");
+        std::os::unix::fs::symlink(config.join(credentials_name()), rules.join("token.md"))
+            .expect("a link can be made");
+        std::os::unix::fs::symlink(&rules, rules.join("again")).expect("a link can be made");
+
+        let found = found_in(&home, &config, &repo);
+
+        assert!(
+            !found.iter().any(|source| source
+                .text
+                .as_deref()
+                .is_some_and(|text| text.contains("TAXES") || text.contains("SECRET"))),
+            "{found:#?}"
+        );
+        assert_eq!(
+            listed(&found, &rules.join("token.md")).withheld,
+            Some(Withheld::Private)
+        );
+    }
+
+    #[test]
+    fn a_rule_is_conditional_only_where_its_paths_name_some_files() {
+        assert!(conditional("---\npaths: src/**/*.rs\n---\nx"));
+        assert!(conditional("---\npaths: [\"**\", \"docs/**\"]\n---\n"));
+        assert!(conditional(
+            "---\ndescription: d\npaths:\n  - \"a/{b,c}.ts\"\n---\n"
+        ));
+        assert!(!conditional("---\npaths: \"**\"\n---\n"));
+        assert!(!conditional("---\npaths:\n---\n"));
+        assert!(!conditional("---\ndescription: d\n---\npaths: src/x\n"));
+        assert!(!conditional("paths: src/x\n"));
     }
 
     /// A git worktree's `.git` is a file pointing into the main checkout's
