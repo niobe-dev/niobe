@@ -8864,8 +8864,9 @@ impl App {
     /// composer wraps, and its end is on a later row, so the cursor goes to
     /// its start instead.
     ///
-    /// A `/` or `@` it opens with is not offered a list: the arrows would go
-    /// to the list, and the walk would stop on the first such prompt.
+    /// A `/` or `@` word the cursor is left at the end of is not offered a
+    /// list, wherever in the prompt it is: the arrows would go to the list,
+    /// and the walk would stop on the first such prompt.
     fn show_in_composer(&mut self, text: &str, at_top: bool) {
         use ratatui_textarea::CursorMove;
 
@@ -8883,8 +8884,8 @@ impl App {
         self.offer_closed = None;
         if let Some(mention) = self.mention() {
             self.offer_closed = Some((mention.row, mention.at));
-        } else if self.slash().is_some() {
-            self.offer_closed = Some((0, 0));
+        } else if let Some(slash) = self.slash() {
+            self.offer_closed = Some((slash.row, slash.at));
         }
     }
 }
@@ -17710,6 +17711,51 @@ mod tests {
             app.composed(),
             "newest",
             "and on the last row going the other way"
+        );
+    }
+
+    /// A skill the backend takes anywhere in a prompt opens a list where a
+    /// `/` word names it, and the list takes the arrows. A recalled prompt
+    /// that ends in one is not being typed, so the walk goes on past it.
+    #[test]
+    fn a_recalled_prompt_that_ends_in_a_skill_does_not_stop_the_walk() {
+        let mut app = remembering(
+            &[
+                ("newest", "3"),
+                ("check it with /review", "3"),
+                ("first\nthen /review", "3"),
+                ("oldest", "3"),
+            ],
+            &["3"],
+        );
+        app.apply(&Event::Commands {
+            commands: vec![niobe_core::event::SlashCommand {
+                name: "review".to_owned(),
+                description: "Review the diff".to_owned(),
+                argument_hint: None,
+                mid_prompt: true,
+            }],
+        });
+
+        app.on_key(key(KeyCode::Up));
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(app.composed(), "check it with /review");
+        assert!(
+            app.offered_commands().0.is_empty(),
+            "no list is open over a recalled prompt"
+        );
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(app.composed(), "first\nthen /review");
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(app.composed(), "oldest");
+        app.on_key(key(KeyCode::Down));
+        assert_eq!(app.composed(), "first\nthen /review");
+        assert!(app.offered_commands().0.is_empty());
+        app.on_key(key(KeyCode::Down));
+        assert_eq!(
+            app.composed(),
+            "check it with /review",
+            "Down walks on from the last row of a prompt ending in a skill"
         );
     }
 
