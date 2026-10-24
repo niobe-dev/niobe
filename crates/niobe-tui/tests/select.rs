@@ -394,3 +394,27 @@ fn a_drag_copies_only_what_was_drawn_and_none_of_the_controls_the_reply_hid() {
     assert!(frame.contains(seen), "{frame}");
     assert_eq!(app.take_handoffs(), vec![Handoff::Copy(seen.to_owned())]);
 }
+
+#[test]
+fn a_click_on_a_window_too_small_to_draw_the_shell_presses_nothing_the_last_frame_drew() {
+    let mut app = running_session();
+    let frame = screen(&mut app, 80, 24);
+    let quit = cell_of(&frame, "Quit");
+    let menu = cell_of(&frame, "Niobe");
+
+    // Narrowed by a column, the window shows only that it is too small: the
+    // F-key bar and the menus the last full frame drew are not on it.
+    let frame = screen(&mut app, 79, 24);
+    assert!(!frame.contains("Quit"), "{frame}");
+    click(&mut app, quit);
+    click(&mut app, menu);
+
+    assert!(
+        !app.should_quit(),
+        "a click on a blank window quit the session"
+    );
+    assert!(
+        app.menu().is_none(),
+        "a click on a blank window opened a menu"
+    );
+}

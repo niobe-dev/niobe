@@ -7133,6 +7133,15 @@ impl App {
     fn on_mouse_under(&mut self, mouse: ratatui::crossterm::event::MouseEvent) {
         use ratatui::crossterm::event::{MouseButton, MouseEventKind};
 
+        // Below the smallest window the frame says only that it is too small.
+        // Where the bars, a menu's list and the transcript were is what the
+        // last full frame drew, and a click there would press a key or a link
+        // the operator cannot see — the F-key bar's Quit among them.
+        if self.too_small {
+            self.pressed = None;
+            return;
+        }
+
         // The wheel goes to whatever the pointer is over, and takes the focus
         // there with it: a notch that moved one pane while another stayed
         // marked as the one the keys move would make the mark a lie. Over
