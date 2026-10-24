@@ -6109,7 +6109,8 @@ impl App {
 
     /// One key, while a right-hand pane has the keyboard: the arrows walk its
     /// section headers, Enter folds the one under the cursor, and Esc gives
-    /// the keyboard back to the session. Returns whether the pane took it.
+    /// the keyboard back to the session — or, with a turn running, is left to
+    /// the session, where it stops the turn. Returns whether the pane took it.
     fn on_pane_key(&mut self, pane: Pane, key: ratatui::crossterm::event::KeyEvent) -> bool {
         use ratatui::crossterm::event::{KeyCode, KeyModifiers};
 
@@ -6127,6 +6128,11 @@ impl App {
             KeyCode::Char('s') => self.pick_agent(),
             KeyCode::Char('o') => self.open_overview(),
             KeyCode::Char('t') if pane == Pane::Activity => self.count_tools_by_name(),
+            // With a turn running, Esc is the bar's stop wherever the keyboard
+            // is: a wheel notch over a pane gives it the keys unnoticed, and a
+            // stop spent on moving the focus is a turn left running. The
+            // session's own Esc stops it and gives the keyboard back.
+            KeyCode::Esc if self.working() => return false,
             KeyCode::Esc => self.focus = Focus::Session,
             _ => return false,
         }
@@ -13515,6 +13521,45 @@ mod tests {
         assert!(
             !app.escaped,
             "the next digit would press an F-key rather than type"
+        );
+    }
+
+    /// A notch of the wheel over a side pane gives it the keyboard, which the
+    /// operator watching a turn run need not notice: Esc, the key the bar
+    /// names for stopping, still stops the turn there, and gives the keyboard
+    /// back as well.
+    #[test]
+    fn esc_stops_a_running_turn_while_a_side_pane_has_the_keyboard() {
+        use ratatui::crossterm::event::{KeyCode, KeyModifiers, MouseEvent, MouseEventKind};
+        let mut app = sent(laid_out().attached(), "go");
+        app.said();
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 70,
+            row: 22,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(app.focus(), Focus::Pane(Pane::Activity));
+
+        app.on_key(key(KeyCode::Esc));
+
+        assert!(app.take_interrupt(), "Esc did not ask the turn to stop");
+        assert_eq!(app.focus(), Focus::Session);
+    }
+
+    #[test]
+    fn esc_with_no_turn_running_on_a_side_pane_only_gives_the_keyboard_back() {
+        let mut app = laid_out().attached();
+        app.on_key(key(ratatui::crossterm::event::KeyCode::Tab));
+        assert_eq!(app.focus(), Focus::Pane(Pane::Changes));
+
+        app.on_key(key(ratatui::crossterm::event::KeyCode::Esc));
+
+        assert!(!app.take_interrupt());
+        assert_eq!(app.focus(), Focus::Session);
+        assert!(
+            !app.escaped,
+            "the pane took the Esc, so no digit follows it"
         );
     }
 
