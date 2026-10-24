@@ -2861,8 +2861,11 @@ impl Translator {
             output: tokens.output,
             cache_read: tokens.cache_read,
             cache_write: tokens.cache_write,
-            // `modelUsage` reports no lifetime split for its cache writes.
-            cache_write_1h: Some(0),
+            // `modelUsage` reports no lifetime split for its cache writes, so
+            // writes counted only there were bought for a lifetime nobody
+            // said: none for the hour would read them all as five-minute
+            // ones. A record with no writes splits nothing it could misstate.
+            cache_write_1h: (tokens.cache_write == 0).then_some(0),
             reasoning: 0,
             model,
             // A difference of zero is not a report that the turn was free.

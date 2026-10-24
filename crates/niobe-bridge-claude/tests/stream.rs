@@ -1547,6 +1547,39 @@ mod shell {
              names a status"
         );
     }
+
+    /// The recording's stream events were left out, so every token of the
+    /// turn reaches the fold through the CLI's per-model bill, `modelUsage`,
+    /// which counts cache writes and says nothing of how long they were bought
+    /// for. The turn's own `usage` bought all 18112 for the hour
+    /// (`jq 'select(.type == "result") | .usage.cache_creation' shell.jsonl`),
+    /// so a record reading them as zero for the hour would state a split the
+    /// bill never gave and that the CLI contradicts.
+    #[test]
+    fn writes_only_the_bill_counted_are_not_read_as_bought_for_five_minutes() {
+        let mut translator = Translator::new("max").in_dir("/repo");
+        let events: Vec<Event> = SHELL
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .flat_map(|line| translator.line(line))
+            .collect();
+        let billed: Vec<(u64, Option<u64>)> = usage_records(&events)
+            .into_iter()
+            .map(|usage| (usage.cache_write, usage.cache_write_1h))
+            .collect();
+        assert_eq!(billed, [(18_112, None)]);
+
+        let totals = SessionState::replay(&events).totals().clone();
+        assert_eq!(
+            (
+                totals.cache_write,
+                totals.cache_write_1h,
+                totals.cache_write_unsplit
+            ),
+            (18_112, 0, 18_112),
+            "every write is one nothing split"
+        );
+    }
 }
 
 const CLEAR_COMMAND: &str = include_str!("fixtures/clear-command.jsonl");
