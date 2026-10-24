@@ -49,9 +49,11 @@ jobs:
         run: cargo xtask ci
 
   # The crates that hold no process or terminal of their own, tested on
-  # Windows. The binary is not: its `!` commands, its reaper and its pty
-  # tests stand on Unix process groups, and a native Windows build has
-  # none, so it is built and tested on macOS and Linux only.
+  # Windows. The binary and the claude bridge are not: the bridge starts the
+  # CLI in a process group and its tests drive a stand-in `sh`, the binary's
+  # `!` commands, reaper and pty tests stand on Unix process groups, and a
+  # native Windows build has none, so both are tested on macOS and Linux
+  # only.
   windows:
     name: windows-latest
     runs-on: windows-latest
@@ -68,7 +70,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
       - name: Test the crates without a process of their own
-        run: cargo test -p niobe-core -p niobe-ledger -p niobe-config -p niobe-store -p niobe-tui -p niobe-bridge-claude
+        run: cargo test --no-fail-fast -p niobe-core -p niobe-ledger -p niobe-config -p niobe-store -p niobe-tui
 
   # The manifest's `rust-version` is a promise to anyone building from
   # source: the oldest compiler the workspace builds on. The gate builds on
