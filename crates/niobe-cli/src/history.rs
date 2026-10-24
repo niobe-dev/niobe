@@ -28,6 +28,10 @@ pub struct StoreHistory {
     transcripts: Option<PathBuf>,
     clock: Clock,
     reading: Option<Receiver<Past>>,
+    /// Whether a load was asked for while `reading` was under way or not yet
+    /// handed over: that read began too early to see what the request is
+    /// for, so another starts once it is handed over.
+    again: bool,
 }
 
 impl StoreHistory {
@@ -39,6 +43,7 @@ impl StoreHistory {
             transcripts,
             clock,
             reading: None,
+            again: false,
         }
     }
 }
@@ -46,6 +51,7 @@ impl StoreHistory {
 impl History for StoreHistory {
     fn load(&mut self) {
         if self.reading.is_some() {
+            self.again = true;
             return;
         }
         let (sent, received) = mpsc::channel();
@@ -83,6 +89,9 @@ impl History for StoreHistory {
             },
         };
         self.reading = None;
+        if std::mem::take(&mut self.again) {
+            self.load();
+        }
         Some(received)
     }
 }
@@ -393,25 +402,60 @@ mod tests {
         assert!(past.unread.is_some());
     }
 
-    #[test]
-    fn a_load_arrives_through_drain_once_and_a_second_load_waits_on_the_first() {
-        let (root, _claude, dir) = repository();
-        let mut history = StoreHistory::new(root.path(), Some(dir), clock());
-
-        history.load();
-        history.load();
+    /// What `history` hands back within ten seconds, or a failure saying it
+    /// never did.
+    fn landed(history: &mut StoreHistory) -> Past {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        let past = loop {
+        loop {
             if let Some(past) = history.drain() {
-                break past;
+                return past;
             }
             assert!(
                 std::time::Instant::now() < deadline,
                 "the load never landed"
             );
             std::thread::sleep(std::time::Duration::from_millis(5));
-        };
+        }
+    }
+
+    #[test]
+    fn a_load_arrives_through_drain_once() {
+        let (root, _claude, dir) = repository();
+        let mut history = StoreHistory::new(root.path(), Some(dir), clock());
+
+        history.load();
+        let past = landed(&mut history);
         assert_eq!(past.prompts.len(), 2);
+        std::thread::sleep(std::time::Duration::from_millis(100));
         assert_eq!(history.drain(), None, "one load, one answer");
+    }
+
+    /// The history dialog asks for a read each time it opens, so that a
+    /// session another shell recorded since is in it. Asked while the read
+    /// the shell made as it opened is still under way, that request is the
+    /// one that would see the new session, and it is read once the first is
+    /// handed over rather than dropped.
+    #[test]
+    fn a_load_asked_for_while_one_is_unread_is_read_again_after_it() {
+        let (root, _claude, dir) = repository();
+        let mut history = StoreHistory::new(root.path(), Some(dir), clock());
+
+        history.load();
+        let store = repo::open_or_create_store(root.path()).expect("the store opens");
+        let since = store.create_session().expect("a session is created");
+        store
+            .append(since, &user("recorded since"))
+            .expect("a session in a temporary store takes an event");
+        history.load();
+
+        let _first = landed(&mut history);
+        let second = landed(&mut history);
+        assert!(
+            second.prompts.iter().any(|p| p.text == "recorded since"),
+            "{:?}",
+            second.prompts
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert_eq!(history.drain(), None, "two loads, two answers");
     }
 }

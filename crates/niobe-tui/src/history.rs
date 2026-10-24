@@ -106,8 +106,9 @@ pub struct Past {
 /// Something that reads the repository's earlier sessions for the shell.
 pub trait History: std::fmt::Debug {
     /// Starts reading them again. Returns at once; what was read arrives
-    /// through [`History::drain`]. A load asked for while one is under way is
-    /// that one.
+    /// through [`History::drain`]. A load asked for while one is under way
+    /// starts once that one is drained, since the first began too early to
+    /// see what the second was asked for; two never run at once.
     fn load(&mut self);
 
     /// What the newest load that has finished found, once. Never blocks.
