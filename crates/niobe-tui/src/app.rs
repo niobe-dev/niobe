@@ -5108,6 +5108,14 @@ impl App {
             ("Alt+letter", "open a menu".to_owned()),
             ("Enter", "send the prompt".to_owned()),
             (self.newline_key(), "a new line in the prompt".to_owned()),
+        ];
+        if self.sends_enter_for_shift_enter() {
+            keys.push((
+                "Shift+Enter",
+                "sends here; under tmux, set -s extended-keys on".to_owned(),
+            ));
+        }
+        keys.extend([
             ("Ctrl+W", "delete the word before the cursor".to_owned()),
             ("Ctrl+U", "delete to the start of the line".to_owned()),
             ("Ctrl+K", "delete to the end of the line".to_owned()),
@@ -5123,7 +5131,7 @@ impl App {
                 crate::history::SEARCH_KEY,
                 "earlier prompts and sessions".to_owned(),
             ),
-        ];
+        ]);
         if self.runs_commands {
             keys.push(("!", "a command for your own shell".to_owned()));
             keys.push((crate::shell::STOP_KEY, "stop that command".to_owned()));
@@ -10744,6 +10752,23 @@ mod tests {
             "a backend command is the backend's:\n{rows}"
         );
         assert!(rows.contains("Enter again"), "{rows}");
+    }
+
+    #[test]
+    fn the_shortcuts_say_how_tmux_tells_shift_enter_apart_only_while_it_is_not() {
+        let rows = |mut app: App| {
+            app.perform(crate::menu::Action::Shortcuts);
+            app.sheet().expect("F1 opens the sheet").rows.join("\n")
+        };
+
+        let unreported = rows(app());
+        assert!(
+            unreported.contains("set -s extended-keys on"),
+            "{unreported}"
+        );
+
+        let reported = rows(app().reports_shift_enter());
+        assert!(!reported.contains("extended-keys"), "{reported}");
     }
 
     #[test]
