@@ -1106,6 +1106,7 @@ fn run_bench(
     asked: &Asked,
 ) -> Result<u8, String> {
     let tasks = bench::tasks(suite)?;
+    bench_runs_turns(profile)?;
     let exe = std::env::current_exe()
         .map_err(|e| format!("cannot find the niobe binary to run each task with: {e}"))?;
     let timeout = timeout.unwrap_or(bench::TURN_TIMEOUT);
@@ -1179,6 +1180,31 @@ fn run_bench(
         }
     }
     Ok(0)
+}
+
+/// Refuses a bench whose turns could not run: one under a profile nobody
+/// defined, or one whose backend niobe cannot start.
+///
+/// Each task's `niobe -p` would refuse it the same way, and the suite would
+/// then report every task failed — a pass rate of nothing, read as the
+/// agent's. The profile is selected from the user's config alone, which is
+/// the config each turn runs under in its copy outside any repository.
+fn bench_runs_turns(profile: Option<&str>) -> Result<(), String> {
+    let config = config::load_user()?;
+    let selected = config.select(profile).map_err(|e| e.to_string())?;
+    match selected {
+        Some(selected) if backend::starts(selected.profile.backend()) => Ok(()),
+        Some(selected) => Err(format!(
+            "the profile `{}` runs the {} backend, which niobe cannot start yet, so no task's \
+             turn would run; `niobe profiles` lists the profiles",
+            selected.name,
+            selected.profile.backend()
+        )),
+        None => Err(
+            "no profile is selected, so no task's turn would run; name one with `--profile`"
+                .to_owned(),
+        ),
+    }
 }
 
 /// Every task of a suite, run in turn with `flags`, each saying on standard

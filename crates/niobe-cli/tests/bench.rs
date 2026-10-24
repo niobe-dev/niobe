@@ -366,6 +366,47 @@ fn a_directory_with_no_task_is_refused() {
     assert!(text(&output.stderr).contains("holds no task"));
 }
 
+/// A profile whose backend niobe cannot start runs no turn, so a pass rate
+/// read off its suite would be a measure of nothing: the bench is refused
+/// before any task's copy is laid out, rather than reporting every task failed.
+#[test]
+fn a_profile_whose_backend_cannot_start_runs_no_task() {
+    let setup = Setup::new(DOES_IT_CLAUDE);
+    setup.task("one", "done.txt");
+    setup.task("two", "done.txt");
+    std::fs::write(
+        setup
+            .dir
+            .path()
+            .join("config")
+            .join("niobe")
+            .join("config.toml"),
+        format!("{METERED}\n[profiles.cx]\nbackend = \"codex\"\n"),
+    )
+    .expect("the user config is written");
+    for args in [&["--profile", "cx"][..], &["--profile", "cx", "--json"][..]] {
+        let output = setup.bench(args);
+        let said = text(&output.stderr);
+        assert_eq!(output.status.code(), Some(1), "{said}");
+        assert!(text(&output.stdout).is_empty(), "{}", text(&output.stdout));
+        assert!(!said.contains("task 1 of"), "{said}");
+        assert!(said.contains("`cx`") && said.contains("codex"), "{said}");
+    }
+}
+
+/// A profile nobody defined is refused before any task runs too, as `niobe
+/// -p` would refuse each of them.
+#[test]
+fn a_profile_nobody_defined_runs_no_task() {
+    let setup = Setup::new(DOES_IT_CLAUDE);
+    setup.task("one", "done.txt");
+    let output = setup.bench(&["--profile", "nosuch"]);
+    let said = text(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{said}");
+    assert!(!said.contains("task 1 of"), "{said}");
+    assert!(said.contains("nosuch"), "{said}");
+}
+
 /// The repository's own suite: every task fails as it is laid out — so a
 /// pass is the turn's doing — and passes with `solution/` laid over it, so a
 /// failure is the turn's too.

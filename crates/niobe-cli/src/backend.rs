@@ -202,6 +202,16 @@ pub fn attach(
     }
 }
 
+/// Whether [`attach`] starts anything for a profile that runs `backend`:
+/// only the `claude` bridge spawns its CLI; the others are attached to
+/// nothing.
+pub fn starts(backend: Backend) -> bool {
+    match backend {
+        Backend::Claude => true,
+        Backend::Codex | Backend::Native => false,
+    }
+}
+
 /// One session a backend recorded for itself, as the session list shows it.
 ///
 /// The bridge's own type does not leave this module. A session list is drawn

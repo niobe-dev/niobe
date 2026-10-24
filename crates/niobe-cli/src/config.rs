@@ -184,6 +184,24 @@ pub fn load(root: &Path) -> Result<Loaded, String> {
     load_from(user, root)
 }
 
+/// The config a session runs under in a repository with no config of its
+/// own: the user's file, or the implied profile where there is none — what
+/// `niobe bench` runs each task's turn under, since each runs in a copy made
+/// outside any repository.
+pub fn load_user() -> Result<Config, String> {
+    let user = user_path(
+        std::env::var_os("XDG_CONFIG_HOME"),
+        std::env::var_os("HOME"),
+    );
+    let present = user
+        .as_deref()
+        .is_some_and(|path| std::fs::symlink_metadata(path).is_ok());
+    match present {
+        true => user_config(user.as_deref()),
+        false => Ok(Config::implied()),
+    }
+}
+
 /// [`load`], with the user's config file handed in rather than found.
 fn load_from(user: Option<PathBuf>, root: &Path) -> Result<Loaded, String> {
     load_with(user, root, trust_path(), std::env::var_os("HOME"))
