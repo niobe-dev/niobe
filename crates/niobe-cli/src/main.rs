@@ -1033,7 +1033,7 @@ fn print_turn(
 
     let session = finished.session.map(SessionId::get);
     match json {
-        true => say!("{}", print_json(&turn, session, terse)),
+        true => say!("{}", printable::json(&print_json(&turn, session, terse))),
         false if !turn.reply.is_empty() => say!("{}", turn.reply),
         false => {}
     }
@@ -1138,7 +1138,10 @@ fn run_bench(
         let started_at = SystemTime::now();
         let ran = run_suite(&exe, &tasks, &flags, timeout, "");
         match json {
-            true => say!("{}", bench::document(&name, started_at, &ran, timeout)),
+            true => say!(
+                "{}",
+                printable::json(&bench::document(&name, started_at, &ran, timeout))
+            ),
             false => {
                 for line in bench::table(&ran, timeout) {
                     say!("{line}");
@@ -1159,11 +1162,11 @@ fn run_bench(
     match json {
         true => say!(
             "{}",
-            bench::ab_document(
+            printable::json(&bench::ab_document(
                 technique,
                 bench::document(&name, started_without, &without, timeout),
                 bench::document(&name, started_with, &with, timeout),
-            )
+            ))
         ),
         false => {
             for line in bench::ab_table(technique, &without, &with, timeout) {
@@ -1597,7 +1600,7 @@ fn run_doctor(json: bool) -> Result<(), String> {
     let facts = doctor::gather(&loaded, &root, backend::claude_release_recorded);
     let rows = doctor::rows(&facts);
     if json {
-        say!("{}", doctor::json(&rows, &facts));
+        say!("{}", printable::json(&doctor::json(&rows, &facts)));
     } else {
         for line in doctor::text(&rows) {
             say!("{line}");

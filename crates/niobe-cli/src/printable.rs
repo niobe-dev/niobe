@@ -39,6 +39,29 @@ pub fn on_one_line(text: &str) -> Cow<'_, str> {
     Cow::Owned(text.chars().map(picture).collect())
 }
 
+/// `value` as compact JSON in which every character that would act on the
+/// terminal is written as a `\u` escape, so that the document both prints
+/// safely and still says what it held.
+///
+/// The JSON printers escape the C0 controls and no more, so DEL, a C1
+/// control or a direction mark inside a string reaches the output as it is,
+/// where [`printable`] would put a stand-in in its place: safe on a terminal,
+/// but a reply holding a right-to-left mark, as Hebrew or Arabic prose does,
+/// would then be read back by a script as other text than the agent wrote.
+/// Every such character lies inside a string, since nothing else in a JSON
+/// document is outside ASCII, and is in the Basic Multilingual Plane, so one
+/// escape is the character itself to any reader.
+pub fn json(value: &serde_json::Value) -> String {
+    let mut out = String::new();
+    for c in value.to_string().chars() {
+        match acts(c) {
+            true => out.push_str(&format!("\\u{:04x}", u32::from(c))),
+            false => out.push(c),
+        }
+    }
+    out
+}
+
 /// Whether `c` does something to the terminal rather than show.
 fn acts(c: char) -> bool {
     match c {
@@ -97,6 +120,21 @@ mod tests {
     fn a_value_on_one_line_shows_its_line_breaks_and_tabs_too() {
         assert!(matches!(on_one_line("--model opus"), Cow::Borrowed(_)));
         assert_eq!(on_one_line("a\nb\tc\u{1b}[2J"), "a␤b␉c␛[2J");
+    }
+
+    #[test]
+    fn json_escapes_what_would_act_on_a_terminal_and_reads_back_the_same() {
+        let value = serde_json::json!({"reply": "\u{5e9}\u{200f} ok \u{7f}\u{9b}2J\u{1b}[2J"});
+        let printed = json(&value);
+        assert_eq!(
+            printed,
+            "{\"reply\":\"\u{5e9}\\u200f ok \\u007f\\u009b2J\\u001b[2J\"}"
+        );
+        assert!(matches!(printable(&printed), Cow::Borrowed(_)));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&printed).ok(),
+            Some(value)
+        );
     }
 
     #[test]

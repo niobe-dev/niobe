@@ -262,3 +262,31 @@ fn a_budget_on_a_plan_is_refused_before_anything_starts() {
     assert_eq!(output.status.code(), Some(1));
     assert!(!Path::new(&setup.repo().join(".niobe").join("sessions.db")).exists());
 }
+
+/// A `claude` whose reply holds a right-to-left mark, as Hebrew or Arabic
+/// prose does, a DEL and a C1 control.
+const MARKED_CLAUDE: &str = "#!/bin/sh\n\
+    read -r first\n\
+    read -r turn\n\
+    printf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"model\":\"claude-sonnet-5\",\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"\\u05e9\\u05dc\\u05d5\\u05dd\\u200f ok \\u007f\\u009b2J\"}]}}'\n\
+    printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"done\",\"total_cost_usd\":0.25,\"usage\":{\"input_tokens\":10,\"output_tokens\":5,\"cache_read_input_tokens\":0,\"cache_creation_input_tokens\":0}}'\n\
+    while read -r line; do :; done\n";
+
+#[test]
+fn the_json_carries_the_reply_as_written_and_no_character_that_acts_on_a_terminal() {
+    let setup = Setup::new(MARKED_CLAUDE, METERED);
+    let output = setup.run(&["-p", "say hello", "--json"]);
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+
+    let printed = text(&output.stdout);
+    let acting = printed
+        .chars()
+        .filter(|c| matches!(c, '\u{7f}'..='\u{9f}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{61c}'))
+        .count();
+    assert_eq!(acting, 0, "printed raw: {printed:?}");
+    assert_eq!(
+        json(&output)["reply"],
+        "\u{5e9}\u{5dc}\u{5d5}\u{5dd}\u{200f} ok \u{7f}\u{9b}2J",
+        "the reply is the agent's, character for character"
+    );
+}

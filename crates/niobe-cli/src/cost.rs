@@ -59,7 +59,7 @@ pub fn lines(repository: &str, sessions: &[Folded], format: Format) -> Vec<Strin
         Format::Table => table(sessions),
         Format::Days => days(sessions),
         Format::Turns => turns(sessions),
-        Format::Json => vec![document(repository, sessions).to_string()],
+        Format::Json => vec![crate::printable::json(&document(repository, sessions))],
         Format::Csv => std::iter::once(CSV_HEADER.to_owned())
             .chain(sessions.iter().map(csv_row))
             .collect(),
