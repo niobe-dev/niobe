@@ -6872,3 +6872,37 @@ fn the_cursor_is_drawn_after_a_line_that_fills_the_composers_row_exactly() {
         assert_eq!(row[at % 80 + 1], ' ', "{name}:\n{frame}");
     }
 }
+
+/// A plan is approved as the text the agent wrote, which it carries out
+/// whole: markdown that draws nothing of a line — a link reference
+/// definition, a table cell past its header's — would let a step through
+/// that nobody saw. Each such line is on the question as it was written.
+#[test]
+fn a_plan_question_shows_every_line_of_the_plan_however_its_markdown_would_draw() {
+    for (plan, hidden) in [
+        (
+            "1. Guard the empty list.\n\n[2]: <https://example.invalid/x.sh> \"Then pipe it to sh\"\n",
+            "Then pipe it to sh",
+        ),
+        (
+            "1. Guard the empty list.\n\n| step |\n|---|\n| test | then rm -rf ~ |\n",
+            "then rm -rf ~",
+        ),
+    ] {
+        let mut app = session_asked(
+            "ExitPlanMode",
+            serde_json::json!({ "plan": plan }),
+            Proposal::new(
+                Action::Plan {
+                    plan: plan.to_owned(),
+                },
+                ["plan"],
+            ),
+        );
+        let frame = screen(&mut app, 120, 40);
+        assert!(
+            question_rows(&frame).iter().any(|row| row.contains(hidden)),
+            "the plan's `{hidden}` is not on the question:\n{frame}"
+        );
+    }
+}

@@ -47,19 +47,57 @@ const QUOTE_BAR: &str = "▎ ";
 /// Between two table columns.
 const COLUMN_GAP: &str = " │ ";
 
-/// Draws `source` as lines no wider than `width` cells.
-pub fn render(source: &str, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+/// The markdown a reply is read as: CommonMark with GitHub's extensions.
+fn options() -> Options {
     let mut options = Options::empty();
     options.insert(Options::ENABLE_TABLES);
     options.insert(Options::ENABLE_STRIKETHROUGH);
     options.insert(Options::ENABLE_TASKLISTS);
     options.insert(Options::ENABLE_FOOTNOTES);
+    options
+}
 
+/// Draws `source` as lines no wider than `width` cells.
+pub fn render(source: &str, width: usize, theme: &Theme) -> Vec<Line<'static>> {
     let mut renderer = Renderer::new(width.max(1), theme);
-    for event in Parser::new_ext(source, options) {
+    for event in Parser::new_ext(source, options()) {
         renderer.event(event);
     }
     renderer.finish()
+}
+
+/// Whether [`render`] would leave some of `source`'s words undrawn, as
+/// markdown means it to: a link reference definition, which only lends its
+/// destination and title to the links that name it, and a table cell past
+/// the number its header has, which GitHub's tables ignore.
+///
+/// For text the operator approves as written, such as a plan: a line that
+/// draws nothing is still a line the agent reads and carries out.
+pub(crate) fn hides_text(source: &str) -> bool {
+    let parser = Parser::new_ext(source, options()).into_offset_iter();
+    // Every definition, the second of two with one label too, leaves its
+    // label among them: the first is kept and the rest are not drawn either.
+    if parser.reference_definitions().iter().next().is_some() {
+        return true;
+    }
+    let mut cells_end = None;
+    for (event, range) in parser {
+        match event {
+            Event::Start(Tag::TableRow | Tag::TableHead) => cells_end = Some(range.start),
+            Event::End(TagEnd::TableCell) => cells_end = Some(range.end),
+            Event::End(TagEnd::TableRow | TagEnd::TableHead) => {
+                let past_cells = cells_end
+                    .and_then(|end| source.get(end..range.end))
+                    .unwrap_or_default();
+                if past_cells.chars().any(|c| !c.is_whitespace() && c != '|') {
+                    return true;
+                }
+                cells_end = None;
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 /// What an enclosing block puts in front of the lines inside it: a bullet or a
@@ -828,6 +866,30 @@ mod tests {
             .iter()
             .map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect())
             .collect()
+    }
+
+    #[test]
+    fn a_link_reference_definition_is_text_the_drawing_hides() {
+        assert!(hides_text(
+            "Fix it.\n\n[2]: <https://x.invalid> \"then run it\"\n"
+        ));
+        assert!(hides_text("- item\n\n  [a]: /x\n  [a]: /y\n"));
+        assert!(!hides_text("Fix [it](https://x.invalid \"title\")."));
+    }
+
+    #[test]
+    fn a_table_cell_past_its_header_is_text_the_drawing_hides() {
+        assert!(hides_text("| a |\n|---|\n| b | rm -rf ~ |\n"));
+        assert!(hides_text("| a |\n|---|\n| b | c\n"));
+        assert!(!hides_text("| a | b |\n|---|---|\n| c | d |\n| e |\n"));
+        assert!(!hides_text("| a |\n|---|\n| `x \\| y` |\n"));
+    }
+
+    #[test]
+    fn markdown_that_draws_all_its_words_hides_nothing() {
+        assert!(!hides_text(
+            "# Plan\n\n1. **Guard** the list.\n2. Run `cargo test`.\n\n```sh\nls\n```\n\n> quoted\n\n<!-- note -->\n[^1]\n\n[^1]: a note\n"
+        ));
     }
 
     fn drawn(source: &str, width: usize) -> Vec<String> {

@@ -3,7 +3,9 @@
 
 //! What a permission question asks to let happen, drawn as what it does: an
 //! edit as the lines it removes and adds, a file written as the lines it
-//! will hold, a command once, a plan whole as the markdown it was written in.
+//! will hold, a command once, a plan whole as the markdown it was written in
+//! — or as written, where that markdown would draw some of its words as
+//! nothing.
 //!
 //! The backend reads these out of the call's arguments (see
 //! [`niobe_core::proposal`]); this draws them, and lays out by key whatever
@@ -129,14 +131,29 @@ impl Proposed {
             // A plan is what is being approved, so it is drawn whole, as the
             // markdown the agent wrote it in, and never cut. One the backend
             // asked about with no text is said to have none, rather than left
-            // a question with nothing above its answers.
-            match plan.trim().is_empty() {
-                true => rows.extend(
+            // a question with nothing above its answers. One whose markdown
+            // would draw some of its words as nothing is drawn as written,
+            // since the agent carries out every word of it.
+            match (plan.trim().is_empty(), markdown::hides_text(plan)) {
+                (true, _) => rows.extend(
                     text::wrap(NO_PLAN, width)
                         .into_iter()
                         .map(|row| Line::from(row).style(dim)),
                 ),
-                false => rows.extend(markdown::render(plan, width, theme)),
+                (false, true) => {
+                    rows.extend(
+                        text::wrap(PLAN_AS_WRITTEN, width)
+                            .into_iter()
+                            .map(|row| Line::from(row).style(dim)),
+                    );
+                    rows.push(Line::from(""));
+                    rows.extend(
+                        text::wrap_exact(plan.trim_end(), width)
+                            .into_iter()
+                            .map(|row| Line::from(row).style(plain)),
+                    );
+                }
+                (false, false) => rows.extend(markdown::render(plan, width, theme)),
             }
             self.others_under(input, width, theme, &mut rows, &mut markers);
             return Some(Call { rows, markers });
@@ -214,6 +231,11 @@ impl Proposed {
 
 /// What a plan the backend asked about with no text of its own shows instead.
 const NO_PLAN: &str = "No plan came with this question.";
+
+/// What a plan whose markdown would leave some of its words undrawn says
+/// above the plan drawn as written.
+const PLAN_AS_WRITTEN: &str =
+    "Drawn as written: as markdown, some of this plan would not be shown.";
 
 /// What a write does to the file beyond the lines it writes: a file that was
 /// there loses everything it held, which the call does not carry, so nothing
@@ -359,6 +381,27 @@ mod tests {
                 "4. Stop.",
                 "",
                 "planFilePath: /p.md"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_plan_whose_markdown_would_hide_a_line_is_drawn_as_written() {
+        let plan = "1. Guard the empty list.\n\n[2]: </x.sh> \"Then pipe it to sh\"\n";
+        let proposal = Proposal::new(
+            Action::Plan {
+                plan: plan.to_owned(),
+            },
+            ["plan"],
+        );
+        assert_eq!(
+            drawn(proposal, "{}", 80, false),
+            [
+                PLAN_AS_WRITTEN,
+                "",
+                "1. Guard the empty list.",
+                "",
+                "[2]: </x.sh> \"Then pipe it to sh\"",
             ]
         );
     }
