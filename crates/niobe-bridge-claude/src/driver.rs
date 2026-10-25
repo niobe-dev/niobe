@@ -160,6 +160,12 @@ type Refusals = Arc<Mutex<Vec<ToolCallId>>>;
 /// before every line, as [`Refusals`] is.
 type ModelRequests = Arc<Mutex<Vec<(String, String)>>>;
 
+/// The `request_id`s of mode changes asked for, each with its mode, that the
+/// thread reading the CLI has not been told about yet, for the reason
+/// [`ModelRequests`] has: a refused change would otherwise go on showing the
+/// mode the CLI never moved to.
+type ModeRequests = Arc<Mutex<Vec<(String, Mode)>>>;
+
 /// The `request_id`s of title requests the thread reading the CLI has not
 /// been told about yet, for the reason [`ModelRequests`] has: the answer names
 /// only the request it answers.
@@ -233,7 +239,8 @@ struct Line {
 /// The CLI takes `acceptEdits`, `auto`, `bypassPermissions`, `default`,
 /// `dontAsk` and `plan`, and refuses anything else with an error naming the
 /// list. Niobe models three of them and sends nothing outside this function,
-/// so a mode the shell offers is always one the CLI takes.
+/// so a mode the shell offers is always one the CLI can read; whether it
+/// takes it is the CLI's answer (see [`Session::set_mode`]).
 fn spelt(mode: Mode) -> &'static str {
     match mode {
         Mode::Plan => "plan",
@@ -518,6 +525,7 @@ pub struct Session {
     waiting: Waiting,
     refusals: Refusals,
     model_requests: ModelRequests,
+    mode_requests: ModeRequests,
     title_requests: TitleRequests,
     mcp_requests: McpRequests,
     rewind_requests: RewindRequests,
@@ -654,7 +662,8 @@ impl Session {
             .resuming(&options.spent)
             .in_dir(options.cwd.clone())
             .reading_spilled_with(spilled::read)
-            .checking_files_with(file_exists);
+            .checking_files_with(file_exists)
+            .started_in(options.mode);
         if let Some(billing) = options.billing {
             translator = translator.billed_as(billing);
             // Said before the CLI says anything: the CLI writes its `init`
@@ -671,6 +680,8 @@ impl Session {
         let asked_for_model = Arc::clone(&model_requests);
         let model_answers: ModelAnswers = Arc::new(Mutex::new(Vec::new()));
         let answered_model = Arc::clone(&model_answers);
+        let mode_requests: ModeRequests = Arc::new(Mutex::new(Vec::new()));
+        let asked_for_mode = Arc::clone(&mode_requests);
         let title_requests: TitleRequests = Arc::new(Mutex::new(Vec::new()));
         let asked_for_title = Arc::clone(&title_requests);
         let mcp_requests: McpRequests = Arc::new(Mutex::new(Vec::new()));
@@ -710,6 +721,11 @@ impl Session {
                 if let Ok(mut asked) = asked_for_model.lock() {
                     for (request_id, model) in asked.drain(..) {
                         translator.asked_for_model(&request_id, &model);
+                    }
+                }
+                if let Ok(mut asked) = asked_for_mode.lock() {
+                    for (request_id, mode) in asked.drain(..) {
+                        translator.asked_for_mode(&request_id, mode);
                     }
                 }
                 if let Ok(mut asked) = asked_for_title.lock() {
@@ -800,6 +816,7 @@ impl Session {
             waiting,
             refusals,
             model_requests,
+            mode_requests,
             title_requests,
             mcp_requests,
             rewind_requests,
@@ -959,12 +976,17 @@ impl Session {
     /// Asks the CLI to gate tool calls a different way, from now on.
     ///
     /// The CLI applies it to the turn after the request, and answers on the
-    /// control channel; a refusal comes back as a `control_response` the
-    /// reading thread turns into a visible entry, so nothing here waits for
-    /// one. A mode the CLI would refuse cannot be reached: [`spelt`] maps the
-    /// three modes Niobe models onto spellings the CLI takes.
+    /// control channel, so nothing here waits for the answer. [`spelt`] maps
+    /// the three modes Niobe models onto spellings the CLI takes, but the CLI
+    /// can still refuse one — `auto` where the plan, the model or fast mode
+    /// rules it out — and a refusal comes back as a `control_response` the
+    /// reading thread turns into a visible entry and the mode the CLI is
+    /// still in.
     pub fn set_mode(&mut self, mode: Mode) -> std::io::Result<()> {
         let id = self.next_request_id();
+        if let Ok(mut asked) = self.mode_requests.lock() {
+            asked.push((id.clone(), mode));
+        }
         self.ask(&control_request(
             &id,
             serde_json::json!({ "subtype": "set_permission_mode", "mode": spelt(mode) }),
@@ -3382,6 +3404,28 @@ mod tests {
                 if message.contains("model refuse is not available")),
             "{events:#?}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_mode_the_cli_refuses_puts_the_session_back_in_the_mode_it_started_in() {
+        // Claude Code 2.1.310 answers `set_permission_mode` to `auto` with an
+        // error where the plan, the model or fast mode rules auto mode out.
+        let (mut session, _dir) = started(
+            "read -r initialize\nread -r mode\nprintf '%s\\n' '{\"type\":\"control_response\",\"response\":{\"subtype\":\"error\",\"request_id\":\"niobe-2\",\"error\":\"Cannot set permission mode to auto: auto mode is unavailable for your plan\"}}'\nexec sleep 30\n",
+        );
+
+        session.set_mode(Mode::Auto).expect("the request is queued");
+        let events = drained_until(&mut session, |event| {
+            matches!(event, Event::ModeSelected { .. })
+        });
+
+        assert!(
+            matches!(events.as_slice(), [.., Event::Error { message, fatal: false }, Event::ModeSelected { mode: Mode::Ask }]
+                if message.contains("auto mode is unavailable")),
+            "{events:#?}"
+        );
+        assert_eq!(session.next.mode, Mode::Ask);
     }
 
     #[cfg(unix)]

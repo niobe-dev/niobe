@@ -482,6 +482,15 @@ pub struct Translator {
     /// not answered yet: a refusal of one of those is what puts the session
     /// back on the model it last reported.
     model_requests: BTreeMap<String, String>,
+    /// The `request_id`s of the mode changes Niobe asked for that the CLI has
+    /// not answered yet, each with the mode it asks for.
+    mode_requests: BTreeMap<String, Mode>,
+    /// The mode the last mode change the CLI took asked for, until the CLI
+    /// reports the mode it is in.
+    taken_mode: Option<Mode>,
+    /// The mode the CLI was started in, for a refusal that comes before the
+    /// CLI has reported one.
+    started_in: Option<Mode>,
     /// The model the last model change the CLI took asked for, until an
     /// `init` says what the CLI resolved it to.
     taken_model: Option<String>,
@@ -637,6 +646,9 @@ impl Translator {
             recorded_agents: BTreeMap::new(),
             denied: BTreeMap::new(),
             model_requests: BTreeMap::new(),
+            mode_requests: BTreeMap::new(),
+            taken_mode: None,
+            started_in: None,
             taken_model: None,
             model_answers: Vec::new(),
             title_requests: BTreeSet::new(),
@@ -701,6 +713,15 @@ impl Translator {
     #[must_use]
     pub fn billed_as(mut self, billing: Billing) -> Self {
         self.billed_as = Some(billing);
+        self
+    }
+
+    /// The same translator, told the mode the CLI was started in, which is
+    /// what a mode change refused before the CLI reports a mode of its own
+    /// goes back to.
+    #[must_use]
+    pub fn started_in(mut self, mode: Mode) -> Self {
+        self.started_in = Some(mode);
         self
     }
 
@@ -796,6 +817,18 @@ impl Translator {
     pub fn asked_for_model(&mut self, request_id: &str, model: &str) {
         self.model_requests
             .insert(request_id.to_owned(), model.to_owned());
+    }
+
+    /// Records that the control request `request_id` asks the CLI to gate
+    /// tool calls in `mode`.
+    ///
+    /// The CLI refuses some changes — `auto` where the plan, the model or
+    /// fast mode rules it out — and its answer names only the request, so
+    /// only this says a refusal is of a mode: told it, the translator follows
+    /// the refusal's warning with the mode the CLI is still in, and the
+    /// session stops showing the one it never moved to.
+    pub fn asked_for_mode(&mut self, request_id: &str, mode: Mode) {
+        self.mode_requests.insert(request_id.to_owned(), mode);
     }
 
     /// Records that the control request `request_id` asks the CLI to title
@@ -1017,6 +1050,14 @@ impl Translator {
             self.answered_rewind(rewind, outcome, out);
             return;
         }
+        if let Some(mode) = outcome
+            .request_id
+            .as_deref()
+            .and_then(|id| self.mode_requests.remove(id))
+        {
+            self.answered_mode(mode, &outcome, out);
+            return;
+        }
         let asked_model = outcome
             .request_id
             .as_deref()
@@ -1065,15 +1106,36 @@ impl Translator {
             }
             return;
         }
-        out.push(warn(format!(
-            "the CLI refused a change Niobe asked for, so the session is running as it was: {}",
-            outcome.error.as_deref().unwrap_or("the CLI gave no reason")
-        )));
+        out.push(refused_change(&outcome));
         if of_model {
             out.push(Event::ModelRefused {
                 back_to: self.taken_model.clone().or_else(|| self.model.clone()),
             });
         }
+    }
+
+    /// Reads the answer to a request to gate calls in `mode`. One the CLI took
+    /// is what a later refusal goes back to; one it refused puts the session
+    /// back in the mode the CLI is still in — unless a later change is still
+    /// unanswered, which is then what the session shows until its own answer.
+    fn answered_mode(&mut self, mode: Mode, outcome: &wire::ControlOutcome, out: &mut Vec<Event>) {
+        if outcome.subtype.as_deref() == Some("success") {
+            self.taken_mode = Some(mode);
+            return;
+        }
+        out.push(refused_change(outcome));
+        if !self.mode_requests.is_empty() {
+            return;
+        }
+        let still = match (self.taken_mode, self.mode.as_deref()) {
+            (Some(taken), _) => Some(Event::ModeSelected { mode: taken }),
+            (None, Some(spelt)) => Some(match read_mode(spelt) {
+                Some(mode) => Event::ModeSelected { mode },
+                None => Event::ModeUnknown,
+            }),
+            (None, None) => self.started_in.map(|mode| Event::ModeSelected { mode }),
+        };
+        out.extend(still);
     }
 
     /// Reads an answer to one of a rewind's two requests. A dry run that
@@ -1220,6 +1282,7 @@ impl Translator {
             }
         }
         self.mode = Some(spelt);
+        self.taken_mode = None;
     }
 
     fn system(&mut self, system: wire::System, out: &mut Vec<Event>) {
@@ -3241,6 +3304,14 @@ fn lines_kept_where(plain: bool, text: String) -> String {
         kept.push('\n');
     }
     kept
+}
+
+/// The warning that a change Niobe asked for was refused, in the CLI's words.
+fn refused_change(outcome: &wire::ControlOutcome) -> Event {
+    warn(format!(
+        "the CLI refused a change Niobe asked for, so the session is running as it was: {}",
+        outcome.error.as_deref().unwrap_or("the CLI gave no reason")
+    ))
 }
 
 pub(crate) fn read_mode(mode: &str) -> Option<Mode> {
@@ -6840,6 +6911,63 @@ mod tests {
                 back_to: Some("claude-opus-4-8".to_owned())
             }
         );
+    }
+
+    const REFUSED_AUTO: &str = r#"{"type":"control_response","response":{"subtype":"error","request_id":"niobe-2","error":"Cannot set permission mode to auto: auto mode is unavailable for your plan"}}"#;
+
+    #[test]
+    fn a_refused_mode_change_puts_the_session_back_in_the_mode_the_cli_reported() {
+        let mut translator = Translator::new("max");
+        translator.line(
+            r#"{"type":"system","subtype":"init","session_id":"s","model":"opus-5","permissionMode":"default"}"#,
+        );
+        translator.asked_for_mode("niobe-2", Mode::Auto);
+
+        let refused = translator.line(REFUSED_AUTO);
+
+        assert_eq!(warnings(&refused).len(), 1, "{refused:?}");
+        assert!(
+            warnings(&refused)[0].contains("auto mode is unavailable for your plan"),
+            "{refused:?}"
+        );
+        assert_eq!(refused[1], Event::ModeSelected { mode: Mode::Ask });
+    }
+
+    #[test]
+    fn a_mode_change_refused_before_the_cli_reported_a_mode_goes_back_to_the_one_it_started_in() {
+        let mut translator = Translator::new("max").started_in(Mode::Plan);
+        translator.asked_for_mode("niobe-2", Mode::Auto);
+
+        let refused = translator.line(REFUSED_AUTO);
+
+        assert_eq!(refused[1], Event::ModeSelected { mode: Mode::Plan });
+    }
+
+    #[test]
+    fn a_refused_mode_change_goes_back_to_the_mode_a_taken_change_put_the_cli_in() {
+        let mut translator = Translator::new("max").started_in(Mode::Ask);
+        translator.asked_for_mode("niobe-1", Mode::Plan);
+        translator.asked_for_mode("niobe-2", Mode::Auto);
+
+        let taken = translator.line(
+            r#"{"type":"control_response","response":{"subtype":"success","request_id":"niobe-1","response":{"mode":"plan"}}}"#,
+        );
+        let refused = translator.line(REFUSED_AUTO);
+
+        assert!(taken.is_empty(), "{taken:?}");
+        assert_eq!(refused[1], Event::ModeSelected { mode: Mode::Plan });
+    }
+
+    #[test]
+    fn a_refused_mode_change_with_a_later_one_still_unanswered_leaves_the_session_on_the_later() {
+        let mut translator = Translator::new("max").started_in(Mode::Ask);
+        translator.asked_for_mode("niobe-2", Mode::Auto);
+        translator.asked_for_mode("niobe-3", Mode::Plan);
+
+        let refused = translator.line(REFUSED_AUTO);
+
+        assert_eq!(refused.len(), 1, "{refused:?}");
+        assert_eq!(warnings(&refused).len(), 1, "{refused:?}");
     }
 
     #[test]
