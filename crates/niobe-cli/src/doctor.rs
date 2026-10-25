@@ -146,8 +146,11 @@ pub struct Facts {
     pub tmux: bool,
     /// Whether the session is over SSH.
     pub ssh: bool,
-    /// The home directory, which no path is shown under.
-    pub home: Option<PathBuf>,
+    /// The home directory, which no path is shown under: as `HOME` spells
+    /// it, and as it resolves where that is another path. A path read back
+    /// from the system, as the working directory is, names the home directory
+    /// the second way where `HOME` goes through a link.
+    pub homes: Vec<PathBuf>,
     /// The operating system and architecture this binary was built for.
     pub target: String,
     /// What each config file sets, by key and never by value.
@@ -256,7 +259,7 @@ fn claude_rows(facts: &Facts) -> Vec<Row> {
             ),
         )];
     };
-    let shown = shown_path(&tool.path, facts.home.as_deref());
+    let shown = shown_path(&tool.path, &facts.homes);
     let mut rows = Vec::new();
     match &tool.version {
         Ok(version) => {
@@ -291,7 +294,7 @@ fn codex_rows(facts: &Facts) -> Vec<Row> {
             "not on PATH; only the codex backend needs it",
         )];
     };
-    let shown = shown_path(&tool.path, facts.home.as_deref());
+    let shown = shown_path(&tool.path, &facts.homes);
     let version = tool.version.clone().unwrap_or_else(|why| why);
     vec![
         Row::ok("codex", format!("{shown} {version}")),
@@ -332,7 +335,7 @@ fn config_rows(facts: &Facts) -> Vec<Row> {
         .config
         .iter()
         .map(|file| {
-            let shown = shown_path(&file.path, facts.home.as_deref());
+            let shown = shown_path(&file.path, &facts.homes);
             let detail = match file.exists {
                 true => shown,
                 false => format!("{shown} (not there)"),
@@ -352,7 +355,7 @@ fn config_rows(facts: &Facts) -> Vec<Row> {
             Status::Warn,
             format!(
                 "{} sets what only a trusted file may, and is not trusted",
-                shown_path(path, facts.home.as_deref())
+                shown_path(path, &facts.homes)
             ),
             "`niobe trust` shows what it sets, values included, and asks before it puts it in force",
         ));
@@ -387,16 +390,30 @@ fn terminal_row(facts: &Facts) -> Row {
     }
 }
 
-/// `path`, with the home directory it is under written as `~`.
-fn shown_path(path: &Path, home: Option<&Path>) -> String {
-    match home.filter(|home| !home.as_os_str().is_empty()) {
-        Some(home) => match path.strip_prefix(home) {
-            Ok(rest) if rest.as_os_str().is_empty() => "~".to_owned(),
-            Ok(rest) => format!("~/{}", rest.display()),
-            Err(_) => path.display().to_string(),
-        },
+/// `path`, with the home directory it is under, by any of the spellings in
+/// `homes`, written as `~`.
+fn shown_path(path: &Path, homes: &[PathBuf]) -> String {
+    let under = homes
+        .iter()
+        .filter(|home| !home.as_os_str().is_empty())
+        .find_map(|home| path.strip_prefix(home).ok());
+    match under {
+        Some(rest) if rest.as_os_str().is_empty() => "~".to_owned(),
+        Some(rest) => format!("~/{}", rest.display()),
         None => path.display().to_string(),
     }
+}
+
+/// The home directory `home` names, as written and, where it goes through a
+/// link, as it resolves.
+fn homes(home: Option<PathBuf>) -> Vec<PathBuf> {
+    let Some(home) = home.filter(|home| !home.as_os_str().is_empty()) else {
+        return Vec::new();
+    };
+    let resolved = std::fs::canonicalize(&home)
+        .ok()
+        .filter(|resolved| *resolved != home);
+    std::iter::once(home).chain(resolved).collect()
 }
 
 /// The report as the terminal reads it: a row each, the fix under the row it
@@ -422,12 +439,12 @@ pub fn text(rows: &[Row]) -> Vec<String> {
 /// would otherwise ask for — the target, the shapes of the config files and
 /// how the newest session fared.
 pub fn json(rows: &[Row], facts: &Facts) -> Value {
-    let home = facts.home.as_deref();
+    let homes = &facts.homes;
     let shapes: Vec<Value> = facts
         .shapes
         .iter()
         .map(|shape| {
-            let path = shown_path(&shape.path, home);
+            let path = shown_path(&shape.path, homes);
             match &shape.state {
                 ShapeState::Absent => json!({"path": path, "state": "absent"}),
                 ShapeState::Unreadable => json!({"path": path, "state": "does not parse"}),
@@ -605,7 +622,7 @@ pub fn gather(
         size: terminal_size(),
         tmux: std::env::var_os("TMUX").is_some(),
         ssh: std::env::var_os("SSH_CONNECTION").is_some() || std::env::var_os("SSH_TTY").is_some(),
-        home: std::env::var_os("HOME").map(PathBuf::from),
+        homes: homes(std::env::var_os("HOME").map(PathBuf::from)),
         target: format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS),
         shapes: config
             .searched
@@ -694,7 +711,7 @@ mod tests {
             size: Some((120, 40)),
             tmux: false,
             ssh: false,
-            home: Some(PathBuf::from("/home/me")),
+            homes: vec![PathBuf::from("/home/me")],
             target: "aarch64-macos".to_owned(),
             shapes: Vec::new(),
             newest_session_errors: None,
@@ -856,6 +873,37 @@ mod tests {
         assert!(!report.contains("/home/me"), "{report}");
         assert!(report.contains("~/.local/bin/claude"), "{report}");
         assert!(report.contains("~/.config/niobe/config.toml"), "{report}");
+    }
+
+    #[test]
+    fn a_path_under_either_spelling_of_the_home_directory_is_shown_under_a_tilde() {
+        let homes = [PathBuf::from("/home/me"), PathBuf::from("/usr/home/me")];
+        assert_eq!(
+            shown_path(Path::new("/usr/home/me/repo/.niobe/config.toml"), &homes),
+            "~/repo/.niobe/config.toml"
+        );
+        assert_eq!(
+            shown_path(Path::new("/home/me/bin/claude"), &homes),
+            "~/bin/claude"
+        );
+        assert_eq!(shown_path(Path::new("/usr/home/me"), &homes), "~");
+        assert_eq!(shown_path(Path::new("/opt/claude"), &homes), "/opt/claude");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_home_directory_through_a_link_is_known_by_where_it_leads_too() {
+        let scratch = tempfile::tempdir().expect("a temporary directory can be created");
+        let real = std::fs::canonicalize(scratch.path()).expect("the directory resolves");
+        let home = real.join("home");
+        std::fs::create_dir(&home).expect("a home directory");
+        let link = real.join("link");
+        std::os::unix::fs::symlink(&home, &link).expect("a link to it");
+
+        assert_eq!(homes(Some(link.clone())), vec![link, home.clone()]);
+        assert_eq!(homes(Some(home.clone())), vec![home]);
+        assert_eq!(homes(Some(PathBuf::new())), Vec::<PathBuf>::new());
+        assert_eq!(homes(None), Vec::<PathBuf>::new());
     }
 
     #[test]

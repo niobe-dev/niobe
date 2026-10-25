@@ -1319,6 +1319,40 @@ fn doctor_without_claude_on_path_fails_with_the_fix_and_the_json_says_the_same()
     assert_eq!(claude["status"], serde_json::json!("fail"));
 }
 
+/// `HOME` spelled through a link, as `/home` is on FreeBSD and on hosts that
+/// mount home directories elsewhere, while the working directory is read
+/// back as the path the link resolves to: the repository is still under the
+/// home directory, and the report pasted into an issue still shows it as `~`.
+#[cfg(unix)]
+#[test]
+fn doctor_shows_a_repository_under_a_linked_home_as_under_a_tilde() {
+    let scratch = tempfile::tempdir().expect("a temporary directory can be created");
+    let real = std::fs::canonicalize(scratch.path()).expect("the directory resolves");
+    let home = real.join("usr-home").join("someone");
+    let repo = home.join("repo");
+    std::fs::create_dir_all(repo.join(".git")).expect("a .git directory can be made");
+    let linked = real.join("home-link");
+    std::os::unix::fs::symlink(&home, &linked).expect("a link to the home directory");
+
+    let output = niobe_command(
+        &repo,
+        &real.join("no-config"),
+        &real.join("no-claude"),
+        &["doctor", "--json"],
+    )
+    .env("HOME", &linked)
+    .env("PATH", real.join("nothing-here"))
+    .output()
+    .expect("the niobe binary runs");
+
+    let said = stdout(&output);
+    assert!(
+        !said.contains(&*home.to_string_lossy()),
+        "the home directory is shown: {said}"
+    );
+    assert!(said.contains("~/repo/.niobe/config.toml"), "{said}");
+}
+
 #[test]
 fn a_key_that_cannot_be_bound_is_reported_at_its_key_and_its_line() {
     let setup = Configured::new("[keys]\nmcp = \"ctrl+c\"\n", "");
