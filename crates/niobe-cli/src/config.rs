@@ -110,10 +110,13 @@ pub fn named(selected: Selected<'_>) -> SelectedProfile {
 /// path only some shells would resolve is a path that runs a session on
 /// credentials nobody chose.
 ///
-/// A path that is still relative is the repository's: the CLI is started in
-/// `base`, the root, and reads it from there whichever directory niobe was
-/// started in. It is resolved against `base` once, here, so the file that is
-/// checked is the file that is passed.
+/// A path that is still relative is read from beside the file that wrote it:
+/// the user's own config directory for a profile of the user's file, and the
+/// repository's root, `root`, for a profile of the repository's, which the CLI
+/// is started in and which that file was trusted with. A user's profile never
+/// reads one from the root: that is a file the clone supplies, and the user's
+/// profile is never asked about. It is resolved once, here, so the file that
+/// is checked is the file that is passed.
 ///
 /// The file has to be there, and this is looked at before a backend is
 /// spawned. The `claude` CLI started without the settings a profile named
@@ -123,7 +126,7 @@ pub fn named(selected: Selected<'_>) -> SelectedProfile {
 pub fn settings_path(
     selected: &Selected<'_>,
     home: Option<OsString>,
-    base: &Path,
+    root: &Path,
 ) -> Result<Option<String>, String> {
     let Some(settings) = selected.profile.settings() else {
         return Ok(None);
@@ -137,7 +140,10 @@ pub fn settings_path(
     })?;
     let path = match Path::new(&path).is_absolute() {
         true => path,
-        false => base.join(&path).display().to_string(),
+        false => relative_base(selected, root)
+            .join(&path)
+            .display()
+            .to_string(),
     };
 
     if !Path::new(&path).is_file() {
@@ -148,6 +154,65 @@ pub fn settings_path(
         return Err(said(format!("{problem}: {path}")));
     }
     Ok(Some(path))
+}
+
+/// Whether `selected` is a profile of the repository's own config, rooted at
+/// `root`, rather than of the user's.
+fn from_repository(selected: &Selected<'_>, root: &Path) -> bool {
+    selected.profile.source() == repo::config_path(root)
+}
+
+/// The directory a relative path `selected` names is read from: the root for
+/// a profile of the repository's config, and the directory of the file that
+/// wrote it for any other.
+fn relative_base(selected: &Selected<'_>, root: &Path) -> PathBuf {
+    match from_repository(selected, root) {
+        true => root.to_path_buf(),
+        false => selected
+            .profile
+            .source()
+            .parent()
+            .map_or_else(PathBuf::new, Path::to_path_buf),
+    }
+}
+
+/// Refuses a profile of the user's whose `args` name, by a relative path, a
+/// file the repository rooted at `root` holds.
+///
+/// The CLI reads a relative path among its arguments from the root it is
+/// started in, so such an argument hands it a file the clone supplies — an
+/// `--mcp-config` that runs a server of the repository's choosing — under a
+/// profile nobody was asked about. Niobe cannot rewrite an argument it does
+/// not know is a path, so it refuses to start and says how to write it. A
+/// repository's own profile is let through: the files its arguments name are
+/// trusted with it (see [`attached`]).
+pub fn args_checked(selected: &Selected<'_>, root: &Path) -> Result<(), String> {
+    if from_repository(selected, root) {
+        return Ok(());
+    }
+    for arg in selected.profile.args() {
+        if let Some(path) = path_candidates(arg)
+            .filter(|candidate| Path::new(candidate).is_relative())
+            .map(|candidate| root.join(candidate))
+            .find(|path| path.is_file())
+        {
+            return Err(selected.args_invalid(&format!(
+                "`{arg}` is read by the CLI from the repository, as {}, a file the \
+                 repository supplies; write it as an absolute path",
+                path.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// What in an `args` entry could name a file: the entry, and what follows its
+/// `=`, where neither is empty or a flag.
+fn path_candidates(arg: &str) -> impl Iterator<Item = &str> {
+    let value = arg.split_once('=').map_or(arg, |(_, value)| value);
+    [arg, value]
+        .into_iter()
+        .filter(|candidate| !candidate.is_empty() && !candidate.starts_with('-'))
 }
 
 /// `settings` as a path, with a leading `~` replaced by `home`.
@@ -406,11 +471,7 @@ pub fn attached(config: &Config, root: &Path, home: Option<&OsStr>) -> Vec<Attac
             add(root.join(written), name, true);
         }
         for arg in profile.args() {
-            let value = arg.split_once('=').map_or(arg.as_str(), |(_, value)| value);
-            for candidate in [arg.as_str(), value] {
-                if candidate.is_empty() || candidate.starts_with('-') {
-                    continue;
-                }
+            for candidate in path_candidates(arg) {
                 add(root.join(candidate), name, false);
             }
         }
@@ -548,9 +609,9 @@ mod tests {
     }
 
     /// The CLI is started in the repository's root and reads a relative path
-    /// from there, so that is where it is looked for, whichever directory
-    /// niobe itself was started in; and the path handed on is the one looked
-    /// at.
+    /// in the repository's config from there, so that is where it is looked
+    /// for, whichever directory niobe itself was started in; and the path
+    /// handed on is the one looked at.
     #[test]
     fn a_relative_settings_path_is_the_repositorys_and_not_the_working_directorys() {
         let dir = tempfile::tempdir().expect("a temporary directory can be created");
@@ -558,7 +619,11 @@ mod tests {
         std::fs::create_dir_all(&root).expect("the temporary directory is writable");
         let real = root.join("claude.json");
         std::fs::write(&real, "{}").expect("the temporary directory is writable");
-        let config = with_settings("claude.json");
+        let config = niobe_config::Config::parse(
+            "[profiles.max]\nbackend = \"claude\"\nsettings = \"claude.json\"\n",
+            &repo::config_path(&root),
+        )
+        .expect("the config is valid");
 
         assert_eq!(
             settings_path(&max(&config), os("/home/me"), &root),

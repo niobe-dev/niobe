@@ -562,6 +562,7 @@ fn claude_options(
     options.args = appended(with)
         .map(|prompt| vec!["--append-system-prompt".to_owned(), prompt])
         .unwrap_or_default();
+    crate::config::args_checked(profile, root)?;
     options.args.extend_from_slice(profile.profile.args());
     options.billing = profile.profile.billing();
     options.settings = crate::config::settings_path(profile, home, root)?;
@@ -1239,6 +1240,142 @@ mod tests {
                 missing.display()
             )
         );
+    }
+
+    /// A user's config and a cloned repository laid out side by side: the
+    /// user's file in `user/`, the repository at `repo/`.
+    fn user_and_repository() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let user = dir.path().join("user");
+        let root = dir.path().join("repo");
+        std::fs::create_dir_all(&user).expect("the temporary directory is writable");
+        std::fs::create_dir_all(root.join(".niobe")).expect("the temporary directory is writable");
+        (dir, user, root)
+    }
+
+    /// A relative `settings` in the operator's own file was the repository's
+    /// file: the clone chose the hooks, environment and permissions the CLI
+    /// ran under, and nobody was asked. It is the file beside the user's.
+    #[test]
+    fn a_relative_settings_path_in_the_users_file_never_names_the_repositorys_file() {
+        let (_dir, user, root) = user_and_repository();
+        std::fs::write(
+            root.join("claude-settings.json"),
+            r#"{"permissions":{"allow":["Bash(*)"]}}"#,
+        )
+        .expect("the repository is writable");
+        let config = Config::parse(
+            "[profiles.max]\nbackend = \"claude\"\nsettings = \"claude-settings.json\"\n",
+            &user.join("config.toml"),
+        )
+        .expect("the config parses");
+        let selected = config
+            .select(Some("max"))
+            .expect("the profile is defined")
+            .expect("a profile was selected");
+
+        let error = claude_options(&root, &selected, &Attach::default(), NO_HOME)
+            .expect_err("the user's directory holds no such file");
+        assert!(
+            error.contains(&format!(
+                "no such file: {}",
+                user.join("claude-settings.json").display()
+            )),
+            "{error}"
+        );
+
+        let own = user.join("claude-settings.json");
+        std::fs::write(&own, "{}").expect("the user's directory is writable");
+        let options = claude_options(&root, &selected, &Attach::default(), NO_HOME)
+            .expect("the user's own file is there");
+        assert_eq!(options.settings, Some(own.display().to_string()));
+    }
+
+    /// A repository's own profile, once trusted, still reads a relative
+    /// `settings` from the root, where its file was trusted with it.
+    #[test]
+    fn a_relative_settings_path_in_the_repositorys_file_is_read_from_its_root() {
+        let (_dir, _user, root) = user_and_repository();
+        let file = root.join("claude-settings.json");
+        std::fs::write(&file, "{}").expect("the repository is writable");
+        let config = Config::parse(
+            "[profiles.max]\nbackend = \"claude\"\nsettings = \"claude-settings.json\"\n",
+            &crate::repo::config_path(&root),
+        )
+        .expect("the config parses");
+        let selected = config
+            .select(Some("max"))
+            .expect("the profile is defined")
+            .expect("a profile was selected");
+
+        let options = claude_options(&root, &selected, &Attach::default(), NO_HOME)
+            .expect("the repository's file is there");
+        assert_eq!(options.settings, Some(file.display().to_string()));
+    }
+
+    /// The CLI reads a relative path among its arguments from the root it is
+    /// started in, so a user's profile naming one hands the CLI whatever file
+    /// the clone committed there. Niobe cannot rewrite an argument it does
+    /// not know is a path, so it refuses to start rather than pass it.
+    #[test]
+    fn a_relative_path_in_the_users_args_that_the_repository_supplies_is_refused() {
+        let (_dir, user, root) = user_and_repository();
+        std::fs::write(root.join("mcp.json"), r#"{"mcpServers":{}}"#)
+            .expect("the repository is writable");
+        for args in [
+            r#"["--mcp-config", "mcp.json"]"#,
+            r#"["--mcp-config=mcp.json"]"#,
+            r#"["--mcp-config", "./mcp.json"]"#,
+        ] {
+            let config = Config::parse(
+                &format!("[profiles.max]\nbackend = \"claude\"\nargs = {args}\n"),
+                &user.join("config.toml"),
+            )
+            .expect("the config parses");
+            let selected = config
+                .select(Some("max"))
+                .expect("the profile is defined")
+                .expect("a profile was selected");
+
+            let error = claude_options(&root, &selected, &Attach::default(), NO_HOME)
+                .expect_err("the repository supplies the file");
+            assert!(error.contains("profiles.max.args"), "{args}: {error}");
+            assert!(error.contains("absolute path"), "{args}: {error}");
+        }
+    }
+
+    /// What the refusal leaves alone: a value the repository holds no file
+    /// for, an absolute path the operator wrote, and a repository's own
+    /// profile, whose files were trusted with it.
+    #[test]
+    fn a_users_args_that_name_no_repository_file_and_a_repositorys_own_are_passed_on() {
+        let (_dir, user, root) = user_and_repository();
+        std::fs::write(root.join("mcp.json"), "{}").expect("the repository is writable");
+        let absolute = root.join("mcp.json").display().to_string();
+        let user_args = format!(
+            "[profiles.max]\nbackend = \"claude\"\nargs = [\"--model\", \"opus\", \"--mcp-config\", \"{absolute}\"]\n"
+        );
+        let config = Config::parse(&user_args, &user.join("config.toml")).expect("parses");
+        let selected = config
+            .select(Some("max"))
+            .expect("the profile is defined")
+            .expect("a profile was selected");
+        let options = claude_options(&root, &selected, &Attach::default(), NO_HOME)
+            .expect("nothing relative names a repository file");
+        assert_eq!(options.args, ["--model", "opus", "--mcp-config", &absolute]);
+
+        let config = Config::parse(
+            "[profiles.max]\nbackend = \"claude\"\nargs = [\"--mcp-config\", \"mcp.json\"]\n",
+            &crate::repo::config_path(&root),
+        )
+        .expect("the config parses");
+        let selected = config
+            .select(Some("max"))
+            .expect("the profile is defined")
+            .expect("a profile was selected");
+        let options = claude_options(&root, &selected, &Attach::default(), NO_HOME)
+            .expect("the repository's own profile names its own file");
+        assert_eq!(options.args, ["--mcp-config", "mcp.json"]);
     }
 
     #[test]

@@ -1960,9 +1960,14 @@ PROFILES:
     wins over the environment a process is started with, so a profile's env
     cannot take back what that file sets, and a file of your own can. Niobe
     merges nothing and rewrites nothing: the path is passed on, the CLI reads
-    it. A ~ at the front is your home directory; the file has to be there, and
-    a path that is not is reported at its line in the config before anything
-    is started. niobe profiles shows which profiles name one — and, where this
+    it. A ~ at the front is your home directory, and a relative path is read
+    from beside the config that names it: your config's directory, or a
+    repository's root for its own .niobe/config.toml. The file has to be
+    there, and a path that is not is reported at its line in the config
+    before anything is started. args are passed as written, and the CLI reads
+    a relative path among them from the repository's root, so one in your own
+    profile that names a file the repository holds is refused: write it as an
+    absolute path. niobe profiles shows which profiles name one — and, where this
     machine's own claude settings set CLAUDE_CODE_USE_BEDROCK, which do not.
 
     auth_refresh names the command that renews a backend's credentials, such

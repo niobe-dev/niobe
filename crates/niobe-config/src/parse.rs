@@ -532,6 +532,11 @@ pub(crate) fn settings_key(profile: &str) -> String {
     Key::root("profiles").child(profile).child("settings").0
 }
 
+/// The dotted key of a profile's `args`, the way the config file spells it.
+pub(crate) fn args_key(profile: &str) -> String {
+    Key::root("profiles").child(profile).child("args").0
+}
+
 /// A key as TOML would need it written: bare when it can be, quoted when not.
 fn quoted(name: &str) -> String {
     let bare = !name.is_empty()

@@ -535,6 +535,17 @@ impl Selected<'_> {
             message: message.to_owned(),
         }
     }
+
+    /// Reports `message` against this profile's `args`, at the file and the
+    /// key that name them. The arguments are kept as strings, with no line of
+    /// their own to report, so the key is what says where in the file.
+    pub fn args_invalid(&self, message: &str) -> String {
+        format!(
+            "{}: {}: {message}",
+            self.profile.source.display(),
+            parse::args_key(self.name)
+        )
+    }
 }
 
 impl Config {
