@@ -902,12 +902,43 @@ impl Translator {
                 .collect()
             }
             Ok(message) => self.message(message),
-            Err(error) => vec![warn(format!(
-                "the CLI sent a `{}` message this version of Niobe could not read, so it was \
-                 not counted: {error}",
-                kind_of(line)
-            ))],
+            Err(error) => self.without_figures(line, &error),
         });
+        out
+    }
+
+    /// A line that did not read as a message, read again without its token
+    /// counts and costs, where those are what kept it from reading.
+    ///
+    /// A count the protocol cannot mean — negative, fractional, a string, past
+    /// what a counter holds — is one figure; refusing the whole line over it
+    /// lost a reply the operator never saw, or a `result` and with it the end
+    /// of the turn, which left the shell working on a turn that was over.
+    /// The figures are left out rather than read as something, so nothing
+    /// drawn is a number the CLI did not say; the CLI's per-model bill is a
+    /// running total, so the next `result` still carries what this one's held.
+    fn without_figures(&mut self, line: &str, error: &serde_json::Error) -> Vec<Event> {
+        let kind = kind_of(line);
+        let unreadable = || {
+            vec![warn(format!(
+                "the CLI sent a `{kind}` message this version of Niobe could not read, so it \
+                 was not counted: {error}"
+            ))]
+        };
+        let Ok(mut value) = serde_json::from_str::<serde_json::Value>(line) else {
+            return unreadable();
+        };
+        if !strip_figures(&mut value) {
+            return unreadable();
+        }
+        let Ok(message) = serde_json::from_value::<wire::Message>(value) else {
+            return unreadable();
+        };
+        let mut out = vec![warn(format!(
+            "the CLI sent a `{kind}` message whose token counts or cost this version of Niobe \
+             could not read ({error}), so none of its figures were counted; the rest of it was."
+        ))];
+        out.extend(self.message(message));
         out
     }
 
@@ -3271,6 +3302,34 @@ pub(crate) fn declined(
 /// not say that anything failed.
 pub(crate) fn unread(message: String) -> Event {
     Event::Notice { message }
+}
+
+/// Takes the token counts and costs out of a message, at every place the
+/// CLI puts them: a `result`'s bill, an `assistant` line's `message.usage`, a
+/// `message_start`'s and a `message_delta`'s. Whether there were any.
+///
+/// Only those places: a tool call's arguments may hold a key of the same
+/// name, and they are shown as the model wrote them.
+fn strip_figures(message: &mut serde_json::Value) -> bool {
+    const BILL: [&str; 3] = ["usage", "modelUsage", "total_cost_usd"];
+    let mut removed = false;
+    let mut take = |object: Option<&mut serde_json::Value>, keys: &[&str]| {
+        if let Some(object) = object.and_then(serde_json::Value::as_object_mut) {
+            for key in keys {
+                removed |= object.remove(*key).is_some();
+            }
+        }
+    };
+    take(Some(&mut *message), &BILL);
+    take(message.get_mut("message"), &["usage"]);
+    take(message.get_mut("event"), &["usage"]);
+    take(
+        message
+            .get_mut("event")
+            .and_then(|event| event.get_mut("message")),
+        &["usage"],
+    );
+    removed
 }
 
 /// The `type` of a line, for a message that could not be read as one. Read
@@ -8873,5 +8932,58 @@ error: could not compile `demo` (lib test) due to 1 previous error";
         assert_eq!(events, []);
         assert!(translator.take_mcp_status_wanted());
         assert!(!translator.take_mcp_status_wanted(), "asked about twice");
+    }
+
+    /// A token count the API's own schema lets be `null`, as a gateway in
+    /// front of it writes one, is a count that was not reported.
+    #[test]
+    fn a_token_count_written_as_null_still_ends_the_turn_and_counts_the_rest() {
+        let mut translator = translator();
+        let events = translator.line(
+            r#"{"type":"result","subtype":"success","usage":{"input_tokens":5,"output_tokens":7,"cache_read_input_tokens":null,"cache_creation_input_tokens":null},"modelUsage":{"opus-5":{"inputTokens":5,"outputTokens":7,"cacheReadInputTokens":null,"costUSD":0.1}},"total_cost_usd":0.1}"#,
+        );
+        assert_eq!(events.last(), Some(&Event::TurnEnded), "{events:?}");
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Event::Error { .. })),
+            "{events:?}"
+        );
+        assert!((cost_reported(&events) - 0.1).abs() < 1e-9, "{events:?}");
+    }
+
+    #[test]
+    fn a_count_the_protocol_cannot_mean_still_ends_the_turn_and_counts_none_of_its_figures() {
+        for odd in ["-3", "1.5", "\"12\"", "18446744073709551616"] {
+            let mut translator = translator();
+            let events = translator.line(&format!(
+                r#"{{"type":"result","subtype":"success","usage":{{"input_tokens":{odd},"output_tokens":7}},"modelUsage":{{"opus-5":{{"inputTokens":5,"outputTokens":7,"costUSD":0.1}}}},"total_cost_usd":0.1}}"#
+            ));
+            assert_eq!(events.last(), Some(&Event::TurnEnded), "{odd}: {events:?}");
+            assert!(
+                !events.iter().any(|event| matches!(event, Event::Usage(_))),
+                "{odd}: a figure was counted from an unreadable bill: {events:?}"
+            );
+            assert!(
+                events
+                    .iter()
+                    .any(|event| matches!(event, Event::Error { fatal: false, .. })),
+                "{odd}: nothing said the figures were not read: {events:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_reply_whose_usage_cannot_be_read_is_still_shown() {
+        let mut translator = translator();
+        let events = translator.line(
+            r#"{"type":"assistant","message":{"model":"opus-5","id":"msg_1","content":[{"type":"text","text":"Done."}],"usage":{"input_tokens":1,"output_tokens":-1}}}"#,
+        );
+        assert!(
+            events.iter().any(
+                |event| matches!(event, Event::AssistantMessage { text, .. } if text == "Done.")
+            ),
+            "{events:?}"
+        );
     }
 }

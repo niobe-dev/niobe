@@ -620,13 +620,13 @@ pub(crate) enum Delta {
 /// Token counts, as every message and every turn reports them.
 #[derive(Debug, Default, Clone, Deserialize)]
 pub(crate) struct Usage {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "count")]
     pub(crate) input_tokens: u64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "count")]
     pub(crate) output_tokens: u64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "count")]
     pub(crate) cache_read_input_tokens: u64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "count")]
     pub(crate) cache_creation_input_tokens: u64,
     pub(crate) cache_creation: Option<CacheCreation>,
     /// The API requests the message took, each with its own counts. Read for
@@ -691,6 +691,18 @@ impl Usage {
     }
 }
 
+/// A token count, where `null` is one nobody reported: the API's schema
+/// lets a count be `null`, and a gateway in front of it writes one so. Read
+/// as an error, it lost the whole message — a reply the operator never saw,
+/// or a `result` and with it the end of the turn — over one figure. A count
+/// left out is read the same way already.
+fn count<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<u64>::deserialize(deserializer)?.unwrap_or_default())
+}
+
 /// A list the CLI writes as `null` where it has nothing in it.
 fn none_as_empty<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
 where
@@ -751,11 +763,11 @@ impl Usage {
 /// One API request of a message, as its `usage` lists them.
 #[derive(Debug, Default, Clone, Deserialize)]
 pub(crate) struct Iteration {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "count")]
     pub(crate) input_tokens: u64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "count")]
     pub(crate) cache_read_input_tokens: u64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "count")]
     pub(crate) cache_creation_input_tokens: u64,
     pub(crate) cache_creation: Option<CacheCreation>,
 }
@@ -763,7 +775,7 @@ pub(crate) struct Iteration {
 /// How the cache writes of a message split by lifetime.
 #[derive(Debug, Default, Clone, Deserialize)]
 pub(crate) struct CacheCreation {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "count")]
     pub(crate) ephemeral_1h_input_tokens: u64,
 }
 
@@ -1031,13 +1043,17 @@ impl Outcome {
 /// What one model has cost the session so far.
 #[derive(Debug, Deserialize)]
 pub(crate) struct ModelUsage {
-    #[serde(rename = "inputTokens", default)]
+    #[serde(rename = "inputTokens", default, deserialize_with = "count")]
     pub(crate) input_tokens: u64,
-    #[serde(rename = "outputTokens", default)]
+    #[serde(rename = "outputTokens", default, deserialize_with = "count")]
     pub(crate) output_tokens: u64,
-    #[serde(rename = "cacheReadInputTokens", default)]
+    #[serde(rename = "cacheReadInputTokens", default, deserialize_with = "count")]
     pub(crate) cache_read_input_tokens: u64,
-    #[serde(rename = "cacheCreationInputTokens", default)]
+    #[serde(
+        rename = "cacheCreationInputTokens",
+        default,
+        deserialize_with = "count"
+    )]
     pub(crate) cache_creation_input_tokens: u64,
     #[serde(rename = "costUSD")]
     pub(crate) cost_usd: Option<f64>,
