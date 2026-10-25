@@ -89,6 +89,19 @@ fn a_drag_over_the_transcript_copies_what_it_covers_when_let_go() {
 }
 
 #[test]
+fn a_drag_over_inline_code_copies_its_spaces_as_the_agent_wrote_them() {
+    let code = "sed 's/  / /;s/^   //' notes.txt";
+    let mut app = replied(&format!("Squeeze them with `{code}` and check."));
+    let frame = screen(&mut app, WIDTH, HEIGHT);
+    let (column, row) = cell_of(&frame, "sed '");
+    let last = u16::try_from(code.chars().count()).expect("the code is short") - 1;
+
+    drag(&mut app, (column, row), (column + last, row));
+
+    assert_eq!(app.take_handoffs(), vec![Handoff::Copy(code.to_owned())]);
+}
+
+#[test]
 fn a_drag_across_lines_copies_them_without_the_gutter_they_are_drawn_in() {
     let mut app = replied("First line of the answer.\n\nSecond paragraph here.");
     let frame = screen(&mut app, WIDTH, HEIGHT);

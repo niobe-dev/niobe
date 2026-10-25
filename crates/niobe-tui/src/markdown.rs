@@ -18,6 +18,8 @@
 //! not closed yet reads as the characters typed so far, and becomes styled
 //! when its closing mark arrives.
 
+use std::borrow::Cow;
+
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -32,8 +34,19 @@ use crate::theme::Theme;
 /// of line with the cells the shell counted for it.
 const IMAGE_MARK: &str = "\u{29c9} ";
 
-/// A piece of text in one style.
-type Run = (String, Style);
+/// A piece of text in one style, and how the whitespace in it is drawn.
+type Run = (String, Style, Spacing);
+
+/// How a run's whitespace is drawn between its words.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Spacing {
+    /// A run of it is one space, as prose reads: where the source broke a
+    /// line or put two spaces is not part of what it says.
+    Collapsed,
+    /// Every space as written, as inside a code span: `sed 's/  / /'` says
+    /// what it does with how many spaces it holds.
+    Kept,
+}
 
 /// What a table cell holds: its runs.
 type Cell = Vec<Run>;
@@ -206,7 +219,7 @@ impl<'t> Renderer<'t> {
             },
             Event::Code(code) => {
                 let style = self.style().fg(self.theme.code);
-                self.text(&code, style);
+                self.run(&text::expand_tabs(&code), style, Spacing::Kept);
             }
             Event::SoftBreak => self.text(" ", self.style()),
             Event::HardBreak => self.flush(),
@@ -419,7 +432,7 @@ impl<'t> Renderer<'t> {
 
     /// How much text has been gathered for the block being drawn.
     fn gathered(&self) -> usize {
-        self.runs.iter().map(|(text, _)| text.len()).sum()
+        self.runs.iter().map(|(text, _, _)| text.len()).sum()
     }
 
     fn open_destination(&mut self, destination: &str) {
@@ -434,7 +447,7 @@ impl<'t> Renderer<'t> {
         let Some((destination, at)) = self.destinations.pop() else {
             return;
         };
-        let said: String = self.runs.iter().map(|(text, _)| text.as_str()).collect();
+        let said: String = self.runs.iter().map(|(text, _, _)| text.as_str()).collect();
         let own = said
             .get(at..)
             .unwrap_or_default()
@@ -447,9 +460,17 @@ impl<'t> Renderer<'t> {
     }
 
     fn text(&mut self, text: &str, style: Style) {
+        self.run(text, style, Spacing::Collapsed);
+    }
+
+    fn run(&mut self, text: &str, style: Style, spacing: Spacing) {
         match self.runs.last_mut() {
-            Some((last, last_style)) if *last_style == style => last.push_str(text),
-            _ => self.runs.push((text.to_owned(), style)),
+            Some((last, last_style, last_spacing))
+                if *last_style == style && *last_spacing == spacing =>
+            {
+                last.push_str(text);
+            }
+            _ => self.runs.push((text.to_owned(), style, spacing)),
         }
     }
 
@@ -577,7 +598,7 @@ impl<'t> Renderer<'t> {
                 std::iter::once(&table.header)
                     .chain(&table.rows)
                     .filter_map(|row| row.get(column))
-                    .map(|cell| cell.iter().map(|(text, _)| text::width(text)).sum())
+                    .map(|cell| cell.iter().map(|(text, _, _)| text::width(text)).sum())
                     .max()
                     .unwrap_or(0)
                     .max(1)
@@ -620,7 +641,7 @@ impl<'t> Renderer<'t> {
             for (column, cell) in row.iter().enumerate() {
                 let mut runs: Vec<Run> = table.header.get(column).cloned().unwrap_or_default();
                 if !runs.is_empty() {
-                    runs.push((": ".to_owned(), label));
+                    runs.push((": ".to_owned(), label, Spacing::Collapsed));
                 }
                 runs.extend(cell.iter().cloned());
                 for line in wrap_runs(&runs, self.room()) {
@@ -770,9 +791,15 @@ fn wrap_runs(runs: &[Run], width: usize) -> Vec<Vec<Span<'static>>> {
     let mut line: Vec<Span<'static>> = Vec::new();
     let mut used = 0;
 
-    for (word, space_style) in words {
+    for Word {
+        parts: word,
+        gap,
+        gap_style,
+    } in words
+    {
         let word_width: usize = word.iter().map(|(text, _)| text::width(text)).sum();
-        if used > 0 && used + 1 + word_width > width {
+        let gap_width = text::width(&gap);
+        if used > 0 && used + gap_width + word_width > width {
             lines.push(std::mem::take(&mut line));
             used = 0;
         }
@@ -788,8 +815,8 @@ fn wrap_runs(runs: &[Run], width: usize) -> Vec<Vec<Span<'static>>> {
             continue;
         }
         if used > 0 {
-            push_span(&mut line, " ", space_style);
-            used += 1;
+            push_span(&mut line, &gap, gap_style);
+            used += gap_width;
         }
         used += word_width;
         for (text, style) in word {
@@ -826,35 +853,99 @@ fn push_spans(line: &mut Vec<Span<'static>>, pieces: Vec<Span<'static>>) {
     }
 }
 
-/// The runs cut into words, each a list of styled fragments, with the style
-/// of the space before it, so an underlined link keeps its underline across
-/// the spaces inside it.
-fn words<'a>(runs: &'a [Run]) -> Vec<(Vec<(&'a str, Style)>, Style)> {
-    let mut words: Vec<(Vec<(&'a str, Style)>, Style)> = Vec::new();
-    let mut word: Vec<(&'a str, Style)> = Vec::new();
-    let mut space = Style::default();
-    for (text, style) in runs {
+/// A word of the runs: its styled fragments, and the whitespace drawn
+/// before it where it does not start a line, in the style of the run that
+/// whitespace was in, so an underlined link keeps its underline across the
+/// spaces inside it.
+struct Word<'a> {
+    parts: Vec<(&'a str, Style)>,
+    gap: Cow<'a, str>,
+    gap_style: Style,
+}
+
+/// The whitespace between two words as it builds up across runs: each
+/// stretch of it from a [`Spacing::Collapsed`] run is one space, and a
+/// [`Spacing::Kept`] run's is kept as written.
+#[derive(Default)]
+struct Gap<'a> {
+    text: Cow<'a, str>,
+    style: Style,
+    collapsing: bool,
+}
+
+impl Gap<'_> {
+    /// Adds the whitespace character a run of `spacing` held, drawn as a
+    /// space whatever it was: a code span's line break is one, as CommonMark
+    /// reads it, and its tabs were expanded before it was gathered.
+    fn add(&mut self, style: Style, spacing: Spacing) {
+        self.style = style;
+        match spacing {
+            Spacing::Collapsed if self.collapsing => return,
+            Spacing::Collapsed => self.collapsing = true,
+            Spacing::Kept => self.collapsing = false,
+        }
+        // One space, the gap almost every word has, is borrowed rather than
+        // allocated.
+        if self.text.is_empty() {
+            self.text = Cow::Borrowed(" ");
+        } else {
+            self.text.to_mut().push(' ');
+        }
+    }
+}
+
+/// The runs cut into words at their whitespace.
+fn words<'a>(runs: &'a [Run]) -> Vec<Word<'a>> {
+    let mut words = Words::default();
+    for (text, style, spacing) in runs {
         let mut start_idx = 0;
         for (idx, c) in text.char_indices() {
             if c.is_whitespace() {
                 if idx > start_idx {
-                    word.push((&text[start_idx..idx], *style));
+                    words.part(&text[start_idx..idx], *style);
                 }
-                if !word.is_empty() {
-                    words.push((std::mem::take(&mut word), space));
-                }
-                space = *style;
+                words.end_word();
+                words.gap.add(*style, *spacing);
                 start_idx = idx + c.len_utf8();
             }
         }
         if start_idx < text.len() {
-            word.push((&text[start_idx..], *style));
+            words.part(&text[start_idx..], *style);
         }
     }
-    if !word.is_empty() {
-        words.push((word, space));
+    words.end_word();
+    words.done
+}
+
+/// The words cut so far, the one being gathered, the whitespace before it
+/// and the whitespace after the last.
+#[derive(Default)]
+struct Words<'a> {
+    done: Vec<Word<'a>>,
+    word: Vec<(&'a str, Style)>,
+    before: Gap<'a>,
+    gap: Gap<'a>,
+}
+
+impl<'a> Words<'a> {
+    fn part(&mut self, text: &'a str, style: Style) {
+        if self.word.is_empty() {
+            self.before = std::mem::take(&mut self.gap);
+        }
+        self.word.push((text, style));
     }
-    words
+
+    fn end_word(&mut self) {
+        if self.word.is_empty() {
+            return;
+        }
+        let before = std::mem::take(&mut self.before);
+        self.done.push(Word {
+            parts: std::mem::take(&mut self.word),
+            gap: before.text,
+            gap_style: before.style,
+        });
+    }
 }
 
 /// A word wider than the line, cut into line-wide pieces with their styles.
@@ -947,6 +1038,22 @@ mod tests {
                 .add_modifier
                 .contains(Modifier::ITALIC)
         );
+    }
+
+    #[test]
+    fn inline_code_keeps_its_spaces_and_draws_a_tab_as_spaces_to_the_next_stop() {
+        assert_eq!(
+            drawn("run `a  b` then `x\ty` and `  lead` or `trail  ` now", 80),
+            ["run a  b then x   y and   lead or trail   now"]
+        );
+    }
+
+    #[test]
+    fn inline_code_with_its_spaces_kept_still_wraps_inside_the_width() {
+        let lines = drawn("say `one   two   three   four` again", 14);
+        assert_eq!(lines, ["say one   two", "three   four", "again"]);
+        let lines = drawn(&format!("x `a{}b` y", " ".repeat(40)), 10);
+        assert_eq!(lines, ["x a", "b y"]);
     }
 
     #[test]
