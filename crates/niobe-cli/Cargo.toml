@@ -29,6 +29,9 @@ niobe-bridge-codex.workspace = true
 serde_json.workspace = true
 # A user's theme file, walked for the line each colour is on.
 toml.workspace = true
+# SIGTERM and SIGINT caught while `niobe -p` runs a turn, so that a job's
+# timeout or Ctrl+C stops the turn and the run still saves and reports it.
+signal-hook.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 # Stopping a command the operator ran with `!`, and everything it started, as

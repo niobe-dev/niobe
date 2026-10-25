@@ -100,7 +100,9 @@ make the implied one explicit.
 prints the reply. The `[permissions]` rules answer the calls they allow and every other call is
 refused, and the session is saved like any other. It exits 0 when the turn finished, 1 when it
 failed and 3 when it stopped on its `--budget`, so a job can tell "this cost too much" from "this
-did not work". `--json` prints the outcome, the reply and the spend in the shape
+did not work". Stopped by SIGTERM, as a job's timeout does, or by Ctrl+C, it asks the agent to
+stop the turn, saves what the turn spent, reports the turn as failed and then ends by that
+signal, which a shell reads as 143 or 130. `--json` prints the outcome, the reply and the spend in the shape
 [`schema/print.schema.json`](schema/print.schema.json) publishes. A GitHub Actions step that puts
 the cost in the job summary:
 

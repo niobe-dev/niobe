@@ -378,7 +378,8 @@ reviewers that encode both, for an agent working in this tree.
   `--allow` gave for that run alone, which nothing writes down — and every other refused with
   words that tell the agent no one is there, and an outcome — finished, failed, or stopped on the
   budget, read off the figures rather than the backend's wording — that the binary exits 0, 1 or
-  3 on, with `--json` in the shape `schema/print.schema.json` publishes, where the plan's windows
+  3 on, and a turn stopped by SIGTERM or SIGINT, which `signals.rs` catches, asked to stop and
+  given three seconds to close, saved and reported as failed before the run ends by that signal, with `--json` in the shape `schema/print.schema.json` publishes, where the plan's windows
   stood when it ended included; `bench.rs` is `niobe bench` — each task of a suite (`bench/` at
   the repository's root holds twenty, each with its prompt, its files, a `check.sh` with hidden
   tests beside it and a reference solution) run as its own `niobe -p` in a copy of the task's

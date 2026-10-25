@@ -17,8 +17,12 @@
 //! fail it. A budget stop is read off the figures — the turn ended in an
 //! error with as much spent as the budget allowed — rather than off the
 //! backend's wording of it.
+//!
+//! A run asked to stop while the turn is under way — a CI job's timeout, or
+//! Ctrl+C — asks the backend to stop the turn and gives it [`STOP_GRACE`] to
+//! close it, so the turn's last figures are recorded; such a turn failed.
 
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
 use niobe_core::event::{Event, PermissionDecision};
 use niobe_core::permission::Allowlist;
@@ -31,6 +35,13 @@ use niobe_tui::journal::Journal;
 /// budget `--budget` gave it. Apart from the failure status, so that a job can
 /// tell "this cost too much" from "this did not work".
 pub const BUDGET_STOPPED: u8 = 3;
+
+/// How long a backend asked to stop the turn is given to close it before
+/// the run ends without its close. Short of the grace a job runner gives
+/// between the signal that asks and the kill — seven and a half seconds on
+/// GitHub Actions, ten under `docker stop` — and long past the moment the CLI
+/// was recorded taking to close a turn it was asked to stop.
+pub const STOP_GRACE: Duration = Duration::from_secs(3);
 
 /// What a prompt no rule allows is refused with. The backend hands it to the
 /// agent, which can then say what it could not do rather than retry it.
@@ -47,6 +58,8 @@ pub enum Outcome {
     Budget(String),
     /// The turn, or the backend running it, failed, in the backend's words.
     Failed(String),
+    /// The run was asked to stop before the turn ended, and why.
+    Stopped(String),
 }
 
 impl Outcome {
@@ -55,7 +68,10 @@ impl Outcome {
         match self {
             Outcome::Finished => "finished",
             Outcome::Budget(_) => "budget_stopped",
-            Outcome::Failed(_) => "failed",
+            // The published shape has no word of its own for a run stopped
+            // from outside, and a turn that did not end did not finish: it
+            // failed, and the exit status says it was stopped.
+            Outcome::Failed(_) | Outcome::Stopped(_) => "failed",
         }
     }
 
@@ -63,7 +79,7 @@ impl Outcome {
     pub fn reason(&self) -> Option<&str> {
         match self {
             Outcome::Finished => None,
-            Outcome::Budget(why) | Outcome::Failed(why) => Some(why),
+            Outcome::Budget(why) | Outcome::Failed(why) | Outcome::Stopped(why) => Some(why),
         }
     }
 }
@@ -85,7 +101,9 @@ pub struct Turn {
 /// Sends `prompt` to `bridge` and waits for its turn to end, handing every
 /// event to `journal` in the order it happened and answering each permission
 /// prompt by `allowed`. `pause` is called whenever the backend has nothing
-/// new, so that waiting does not spin.
+/// new, so that waiting does not spin. `stopping` says why the run has been
+/// asked to stop, once it has: the backend is then asked to stop the turn
+/// and given [`STOP_GRACE`] to close it.
 pub fn run(
     bridge: &mut dyn Bridge,
     journal: &mut dyn Journal,
@@ -93,6 +111,7 @@ pub fn run(
     prompt: &str,
     budget: Option<f64>,
     pause: &mut dyn FnMut(),
+    stopping: &mut dyn FnMut() -> Option<String>,
 ) -> Turn {
     let started_at = SystemTime::now();
     let mut state = SessionState::new();
@@ -116,7 +135,19 @@ pub fn run(
     // turn included, so the store holds all the backend said; the first
     // ending is the outcome.
     let mut outcome: Option<Outcome> = None;
+    let mut stopped: Option<(String, Instant)> = None;
     while outcome.is_none() {
+        if stopped.is_none()
+            && let Some(why) = stopping()
+        {
+            stopped = Some(asked_to_stop(bridge, journal, &mut state, why));
+        }
+        if let Some((why, by)) = &stopped
+            && Instant::now() >= *by
+        {
+            outcome = Some(Outcome::Stopped(why.clone()));
+            break;
+        }
         let events = bridge.drain();
         if events.is_empty() {
             pause();
@@ -170,7 +201,10 @@ pub fn run(
             }
         }
     }
-    let outcome = outcome.unwrap_or(Outcome::Finished);
+    let outcome = match (stopped, outcome) {
+        (Some((why, _)), _) => Outcome::Stopped(why),
+        (None, outcome) => outcome.unwrap_or(Outcome::Finished),
+    };
 
     Turn {
         outcome,
@@ -178,6 +212,29 @@ pub fn run(
         started_at,
         state,
     }
+}
+
+/// Records why the run is stopping and asks the backend to stop the turn,
+/// returning why and the moment the run ends whether the turn has closed or
+/// not. A backend that cannot be asked is not waited on.
+fn asked_to_stop(
+    bridge: &mut dyn Bridge,
+    journal: &mut dyn Journal,
+    state: &mut SessionState,
+    why: String,
+) -> (String, Instant) {
+    keep(
+        journal,
+        state,
+        &Event::Notice {
+            message: format!("niobe -p was stopped: {why}"),
+        },
+    );
+    let grace = match bridge.interrupt() {
+        Ok(()) => STOP_GRACE,
+        Err(_) => Duration::ZERO,
+    };
+    (why, Instant::now() + grace)
 }
 
 /// Whether the backend refused call `id` by itself, in the events that
@@ -266,6 +323,9 @@ mod tests {
         batches: VecDeque<Vec<Event>>,
         sent: Vec<String>,
         answered: Vec<(ToolCallId, PermissionDecision, Option<String>)>,
+        /// Whether it can be asked to stop a turn, and how often it was.
+        stoppable: bool,
+        interrupted: usize,
     }
 
     impl Bridge for Scripted {
@@ -291,6 +351,14 @@ mod tests {
 
         fn drain(&mut self) -> Vec<Event> {
             self.batches.pop_front().unwrap_or_default()
+        }
+
+        fn interrupt(&mut self) -> Result<(), BridgeError> {
+            self.interrupted += 1;
+            match self.stoppable {
+                true => Ok(()),
+                false => Err("cannot be asked".into()),
+            }
         }
     }
 
@@ -349,6 +417,28 @@ mod tests {
                 idle += 1;
                 assert!(idle < 100, "the turn never ended");
             },
+            &mut || None,
+        );
+        (turn, bridge, journal)
+    }
+
+    /// Runs the batches against a backend that `stoppable` says can be
+    /// asked to stop, with the run asked to stop before the first drain.
+    fn stopped(batches: Vec<Vec<Event>>, stoppable: bool) -> (Turn, Scripted, Kept) {
+        let mut bridge = Scripted {
+            batches: batches.into(),
+            stoppable,
+            ..Scripted::default()
+        };
+        let mut journal = Kept::default();
+        let turn = run(
+            &mut bridge,
+            &mut journal,
+            &Allowlist::new(),
+            "fix the test",
+            None,
+            &mut || std::thread::sleep(std::time::Duration::from_millis(1)),
+            &mut || Some("SIGTERM asked the run to stop".to_owned()),
         );
         (turn, bridge, journal)
     }
@@ -603,12 +693,56 @@ mod tests {
     }
 
     #[test]
-    fn each_outcome_has_its_own_name() {
+    fn each_outcome_has_a_name_the_published_schema_allows() {
         let names = [
             Outcome::Finished.name(),
             Outcome::Budget(String::new()).name(),
             Outcome::Failed(String::new()).name(),
+            Outcome::Stopped(String::new()).name(),
         ];
-        assert_eq!(names, ["finished", "budget_stopped", "failed"]);
+        assert_eq!(names, ["finished", "budget_stopped", "failed", "failed"]);
+    }
+
+    #[test]
+    fn a_run_asked_to_stop_asks_the_backend_to_stop_and_records_the_turns_close() {
+        let closed = vec![
+            vec![],
+            vec![
+                metered(),
+                cost(0.25),
+                warning("the turn ended as `error_during_execution`"),
+                Event::TurnEnded,
+            ],
+        ];
+        let (turn, bridge, journal) = stopped(closed, true);
+
+        assert_eq!(bridge.interrupted, 1, "asked once, however long it waits");
+        assert_eq!(
+            turn.outcome,
+            Outcome::Stopped("SIGTERM asked the run to stop".to_owned())
+        );
+        assert_eq!(journal.0.last(), Some(&Event::TurnEnded));
+        assert!(
+            journal.0.iter().any(|event| matches!(
+                event,
+                Event::Notice { message } if message.contains("SIGTERM")
+            )),
+            "the session says why it stopped: {:?}",
+            journal.0
+        );
+        assert_eq!(turn.state.totals().reported_cost_usd, 0.25);
+    }
+
+    #[test]
+    fn a_backend_that_cannot_be_asked_to_stop_is_not_waited_on() {
+        let started = std::time::Instant::now();
+        let (turn, bridge, _) = stopped(Vec::new(), false);
+        assert_eq!(bridge.interrupted, 1);
+        assert!(matches!(turn.outcome, Outcome::Stopped(_)));
+        assert!(
+            started.elapsed() < STOP_GRACE,
+            "waited {:?} on a close nobody asked for",
+            started.elapsed()
+        );
     }
 }

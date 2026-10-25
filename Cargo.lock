@@ -825,6 +825,7 @@ dependencies = [
  "rustix",
  "serde_json",
  "sha2",
+ "signal-hook 0.4.4",
  "tempfile",
  "toml",
 ]

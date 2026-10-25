@@ -38,6 +38,7 @@ mod reaper;
 mod repo;
 mod rules;
 mod sessions;
+mod signals;
 mod stdout;
 mod summary;
 mod themes;
@@ -1020,6 +1021,10 @@ fn print_turn(
     // deadline — so that what the agent started is not left running with
     // nobody to see it. Each pause lets go of a group the CLI left empty.
     let mut reaped = commands_for(&root, &mut backend);
+    // Caught from here, so that a CI job's timeout or Ctrl+C stops the turn
+    // and the run still records, prints and reports it; see `signals`.
+    let signals = signals::Signals::watch()
+        .map_err(|error| format!("the signals that stop a run could not be caught: {error}"))?;
     let mut journal = StoreJournal::pending(root.clone());
     let turn = headless::run(
         backend.bridge(),
@@ -1030,6 +1035,11 @@ fn print_turn(
         &mut || {
             let _ = niobe_tui::shell::Shell::drain(&mut reaped);
             std::thread::sleep(Duration::from_millis(10));
+        },
+        &mut || {
+            signals
+                .received()
+                .map(|signal| format!("{} asked the run to stop", signal.name()))
         },
     );
     // The backend is ended before the journal is closed, so that nothing it
@@ -1067,6 +1077,12 @@ fn print_turn(
             Ok(headless::BUDGET_STOPPED)
         }
         headless::Outcome::Failed(why) => Err(format!("the turn failed: {why}")),
+        headless::Outcome::Stopped(why) => {
+            note(&format!("the turn was stopped before it ended: {why}"));
+            let signal = signals.received().unwrap_or(signals::Stopping::Terminated);
+            signals::end_by(signal);
+            Ok(signal.status())
+        }
     }
 }
 

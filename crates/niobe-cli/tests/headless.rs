@@ -408,3 +408,92 @@ fn what_the_cli_started_ends_when_its_niobe_is_killed() {
         }
     }
 }
+
+/// A `claude` that writes half a reply, with the tokens it took, says it is
+/// waiting in `waiting`, and closes the turn as the CLI does a turn it was
+/// asked to stop — a `result` the CLI marks an error, with what it spent —
+/// once it reads an `interrupt`, which it records in `interrupted`.
+const INTERRUPTIBLE_CLAUDE: &str = "#!/bin/sh\n\
+    read -r first\n\
+    read -r turn\n\
+    printf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"model\":\"claude-sonnet-5\",\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"half way there\"}]}}'\n\
+    : > waiting\n\
+    while read -r line; do\n\
+    case \"$line\" in *'\"interrupt\"'*)\n\
+    : > interrupted\n\
+    printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"is_error\":true,\"terminal_reason\":\"aborted_streaming\",\"errors\":[\"aborted\"],\"total_cost_usd\":0.25,\"usage\":{\"input_tokens\":10,\"output_tokens\":5,\"cache_read_input_tokens\":0,\"cache_creation_input_tokens\":0}}' ;;\n\
+    esac\n\
+    done\n";
+
+#[test]
+fn a_run_stopped_by_a_ci_timeout_or_ctrl_c_stops_the_turn_saves_it_and_says_so() {
+    use std::os::unix::process::ExitStatusExt;
+    for (signal, number) in [("TERM", 15), ("INT", 2)] {
+        let setup = Setup::new(INTERRUPTIBLE_CLAUDE, METERED);
+        let niobe = Command::new(env!("CARGO_BIN_EXE_niobe"))
+            .args(["-p", "fix the failing test", "--json"])
+            .current_dir(setup.repo())
+            .env("XDG_CONFIG_HOME", setup.dir.path().join("config"))
+            .env("CLAUDE_CONFIG_DIR", setup.dir.path().join("no-claude-here"))
+            .env_remove("HOME")
+            .env(
+                "PATH",
+                format!("{}:/bin:/usr/bin", setup.dir.path().join("bin").display()),
+            )
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("the niobe binary runs");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while !setup.repo().join("waiting").exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the stand-in claude never reached its turn"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        // The reply niobe has read is past the stand-in's file: give the
+        // reader a moment to hand it on, as a turn under way would have.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+
+        let sent = Command::new("kill")
+            .args([&format!("-{signal}"), &niobe.id().to_string()])
+            .status()
+            .expect("kill runs");
+        assert!(sent.success());
+        let output = niobe.wait_with_output().expect("niobe can be waited on");
+        let stderr = text(&output.stderr);
+
+        assert_eq!(
+            output.status.signal(),
+            Some(number),
+            "ended by SIG{signal}, as the shell that sent it expects: {:?}\n{stderr}",
+            output.status
+        );
+        assert!(
+            setup.repo().join("interrupted").exists(),
+            "the CLI was asked to stop the turn: {stderr}"
+        );
+        let printed = json(&output);
+        let refused = schema::refusals("print.schema.json", &printed);
+        assert!(refused.is_empty(), "{refused:#?}\n{printed:#}");
+        assert_eq!(printed["outcome"], "failed", "{printed:#}");
+        assert!(
+            printed["reason"]
+                .as_str()
+                .is_some_and(|why| why.contains(&format!("SIG{signal}"))),
+            "{printed:#}"
+        );
+        assert_eq!(printed["reply"], "half way there");
+        assert_eq!(printed["cost"]["reported_usd"], 0.25, "{printed:#}");
+        assert_eq!(printed["session"], 1);
+        assert!(stderr.contains("session 1 saved"), "{stderr}");
+
+        let listed = setup.run(&["cost", "--json"]);
+        let sessions = json(&listed)["sessions"].clone();
+        assert_eq!(
+            sessions[0]["cost"]["reported_usd"], 0.25,
+            "what the stopped turn spent is in the store: {sessions}"
+        );
+    }
+}
