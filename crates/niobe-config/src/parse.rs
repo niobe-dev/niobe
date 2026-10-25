@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use std::ops::Range;
 use std::path::Path;
 
-use niobe_core::keys::{Bindable, Chord, Keymap};
+use niobe_core::keys::{Bindable, Chord, Keymap, KeymapError};
 use niobe_core::permission::{Allowlist, Rule};
 use niobe_core::{Backend, Billing};
 use toml::Spanned;
@@ -123,6 +123,7 @@ impl File<'_> {
     /// dropped quietly is a key that does nothing when pressed.
     fn keys(&self, value: &Spanned<DeValue<'_>>, at: &Key) -> Result<Keymap, ConfigError> {
         let mut bindings: Vec<(Bindable, Chord)> = Vec::new();
+        let mut made_at: Vec<(Bindable, Range<usize>, Key)> = Vec::new();
         for (name, chord) in in_file_order(self.table(value, at)?) {
             let at = at.child(name.get_ref());
             let Some(action) = Bindable::from_name(name.get_ref()) else {
@@ -137,12 +138,25 @@ impl File<'_> {
             let chord_value =
                 Chord::parse(text).map_err(|error| self.invalid(&chord.span(), &at, &error))?;
             bindings.push((action, chord_value));
-            // Checked as each is made, so the error names the line that
-            // made the clash and not the first line of the table.
-            Keymap::new(bindings.iter().copied())
-                .map_err(|error| self.invalid(&chord.span(), &at, &error.to_string()))?;
+            // Two actions on one key are checked as each is made, so the
+            // error names the second line and not the first of the table.
+            // Taking another action's own F-key is not: a later line may
+            // move that action off it, as the error for it advises.
+            if let Err(error @ KeymapError::Same { .. }) = Keymap::new(bindings.iter().copied()) {
+                return Err(self.invalid(&chord.span(), &at, &error.to_string()));
+            }
+            made_at.push((action, chord.span(), at));
         }
-        Keymap::new(bindings).map_err(|error| self.invalid(&value.span(), at, &error.to_string()))
+        Keymap::new(bindings).map_err(|error| {
+            let action = match &error {
+                KeymapError::Same { second, .. } => *second,
+                KeymapError::Takes { bound, .. } => *bound,
+            };
+            match made_at.iter().find(|(made, _, _)| *made == action) {
+                Some((_, span, key)) => self.invalid(span, key, &error.to_string()),
+                None => self.invalid(&value.span(), at, &error.to_string()),
+            }
+        })
     }
 
     fn profiles(

@@ -964,6 +964,32 @@ args = ["--model", "gpt-4"]
     }
 
     #[test]
+    fn an_action_moved_onto_a_key_whose_own_action_moves_on_a_later_line_is_kept() {
+        use niobe_core::keys::{Bindable, Chord};
+
+        let swapped = parsed("[keys]\nmcp = \"F8\"\nmemory = \"F7\"\n");
+        assert_eq!(swapped.keys().chord_of(Bindable::Mcp), Some(Chord::F(8)));
+        assert_eq!(swapped.keys().chord_of(Bindable::Memory), Some(Chord::F(7)));
+
+        let moved_after = parsed("[keys]\nmcp = \"F8\"\nmemory = \"ctrl+s\"\n");
+        assert_eq!(
+            moved_after.keys().chord_of(Bindable::Mcp),
+            Some(Chord::F(8))
+        );
+        assert_eq!(
+            moved_after.keys().chord_of(Bindable::Memory),
+            Some(Chord::Ctrl('s'))
+        );
+
+        let takes = invalid("[keys]\nhelp = \"F11\"\nmcp = \"F8\"\nquit = \"ctrl+l\"\n");
+        assert!(
+            takes.starts_with("/configs/user/config.toml:3: keys.mcp: "),
+            "the line that took the key: {takes}"
+        );
+        assert!(takes.contains("memory"), "{takes}");
+    }
+
+    #[test]
     fn the_implied_config_selects_a_claude_profile_with_nothing_set() {
         let config = Config::implied();
 
