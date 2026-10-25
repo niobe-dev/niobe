@@ -833,7 +833,8 @@ pub struct Call {
     /// Whether the session, or the turn it ran in, ended while the call was
     /// running, so that no end will arrive for it. It is not running, and it
     /// did not fail: the backend that was running it is gone, or has said the
-    /// turn is over without reporting it.
+    /// turn is over without reporting it. An end that arrives after all, as
+    /// a sub-agent's late records can carry, clears it.
     pub interrupted: bool,
     /// Who let it through, where this shell can say; `None` while it runs
     /// and where it cannot.
@@ -892,8 +893,10 @@ impl Call {
         }
     }
 
-    /// Records how the call ended, at `at`.
+    /// Records how the call ended, at `at`: one cut short whose end came
+    /// after all is no longer cut short.
     fn ended(&mut self, ending: Ending, at: Option<Stamp>) {
+        self.interrupted = false;
         self.outcome = Some(ending.outcome);
         self.bytes = Some(ending.bytes);
         self.exit_code = ending.exit_code;
@@ -1318,6 +1321,11 @@ pub struct App {
     /// Where each running call is drawn: its entry, and its place among the
     /// entry's calls.
     tool_entries: BTreeMap<ToolCallId, (usize, usize)>,
+    /// Where each call the fold cut short is drawn, until its end arrives:
+    /// a sub-agent's records are folded in by their stamps, so the end of a
+    /// call it made can follow the exit that cut it, and that end is the
+    /// call's own, which the fold counts as finishing it.
+    cut_entries: BTreeMap<ToolCallId, (usize, usize)>,
     /// Which sub-agent each entry of a sub-agent's is, by the entry's place:
     /// what renames the entry when another agent's name makes its own
     /// ambiguous, and what keeps two agents' calls out of one run.
@@ -1984,6 +1992,7 @@ impl App {
             session: SessionState::new(),
             entries: Vec::new(),
             tool_entries: BTreeMap::new(),
+            cut_entries: BTreeMap::new(),
             agent_entries: BTreeMap::new(),
             run: None,
             reply: None,
@@ -2355,6 +2364,7 @@ impl App {
         self.cleared_prompts.extend(sent);
         self.entries.clear();
         self.tool_entries.clear();
+        self.cut_entries.clear();
         self.recorded.clear();
         self.call_at.clear();
         self.only_agent = None;
@@ -2710,14 +2720,17 @@ impl App {
                     untrimmed.as_deref(),
                 );
                 let gate = self.gate(id);
-                let started = self.tool_entries.remove(id);
+                // An end that came after its call was cut short ends the call
+                // on its own row, as the fold counts it finished.
+                let started = self
+                    .tool_entries
+                    .remove(id)
+                    .or_else(|| self.cut_entries.remove(id));
                 let ended = match started {
                     Some((at, index)) => self.end_call(at, index, ending),
                     // An end whose start never arrived is shown, not dropped:
                     // the session fold counts it too, and a gap the operator
-                    // cannot see is a gap nobody reports. Nor is one whose
-                    // row was cut short before it came: its row opens it,
-                    // though calls started after it are newer in `recorded`.
+                    // cannot see is a gap nobody reports.
                     None => {
                         let mut call = Call::started(what_it_does(summary.as_deref(), input), None);
                         call.ended(ending, None);
@@ -3290,14 +3303,15 @@ impl App {
     /// and a sub-agent working in the background outlives the turn.
     fn interrupt_what_the_fold_stopped(&mut self) {
         let running = self.session.in_flight_tools();
-        let cut: Vec<(usize, usize)> = self
+        let cut: Vec<(ToolCallId, (usize, usize))> = self
             .tool_entries
             .iter()
             .filter(|(id, _)| !running.contains_key(*id))
-            .map(|(_, place)| *place)
+            .map(|(id, place)| (id.clone(), *place))
             .collect();
         self.tool_entries.retain(|id, _| running.contains_key(id));
-        for (at, index) in cut {
+        self.cut_entries.extend(cut.iter().cloned());
+        for (_, (at, index)) in cut {
             if let Some(entry) = self.entries.get_mut(at) {
                 // A call refused at the prompt ended there, though the fold
                 // still waits on the backend to report it.
@@ -12011,6 +12025,57 @@ mod tests {
             .collect();
         assert_eq!(calls, [("cargo test", false, true)]);
         assert!(app.entries().iter().all(|entry| !entry.streaming));
+    }
+
+    /// A sub-agent's records are folded in by their stamps, so the end of a
+    /// call it made can come after its exit cut the call short. The fold
+    /// counts that as one call that finished; the transcript draws it so, on
+    /// the agent's own row, rather than as a cut-short row of the agent's and
+    /// a second row of the session's.
+    #[test]
+    fn a_sub_agents_call_that_ends_after_its_exit_ends_on_the_agents_own_row() {
+        let mut app = app();
+        app.apply(&Event::UserMessage {
+            text: "review it".to_owned(),
+        });
+        app.apply(&Event::AgentSpawn {
+            id: "a1".into(),
+            parent: None,
+            kind: Some("Explore".to_owned()),
+            label: "Review fetch".to_owned(),
+        });
+        app.apply(&Event::ToolCallStart {
+            id: "t1".into(),
+            name: "Bash".to_owned(),
+            input: "cargo test".to_owned(),
+            summary: None,
+            agent: Some("a1".into()),
+        });
+        app.apply(&Event::AgentExit {
+            id: "a1".into(),
+            outcome: AgentOutcome::Completed,
+        });
+
+        app.apply(&ended("t1", "Bash", ToolOutcome::Ok, 12));
+
+        let rows: Vec<(Option<&str>, &Call)> = app
+            .entries()
+            .iter()
+            .flat_map(|entry| {
+                entry
+                    .calls
+                    .iter()
+                    .map(|call| (entry.agent.as_deref(), call))
+            })
+            .collect();
+        let [(agent, call)] = rows.as_slice() else {
+            panic!("one row for the one call: {rows:?}");
+        };
+        assert_eq!(*agent, Some("explore"), "the agent's own row");
+        assert_eq!(call.what, "cargo test");
+        assert_eq!(call.outcome, Some(ToolOutcome::Ok));
+        assert!(!call.interrupted, "the end came after all");
+        assert_eq!(app.session().tools().interrupted, 0);
     }
 
     #[test]

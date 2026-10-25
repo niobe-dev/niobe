@@ -377,7 +377,7 @@ fn call_events(id: &str, name: &str, input: &str, output: &str) -> (Event, Event
 fn a_click_on_a_call_that_ended_after_it_was_cut_short_opens_that_call() {
     // The turn ends with the build still running, and the fold cuts it; a
     // later call starts and ends; then the build's end arrives late, as a
-    // sub-agent's records can, and is drawn as a row of its own.
+    // sub-agent's records can, and ends the build on its own row.
     let mut app = running_session();
     let (build, built) = call_events("b1", "Bash", "{\"command\":\"make\"}", "built ok");
     let (grep, grepped) = call_events("g2", "Grep", "{\"pattern\":\"etag\"}", "fetch.ts:41");
