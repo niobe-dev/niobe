@@ -98,19 +98,26 @@ pub(crate) fn named(
                 .iter()
                 .filter(|command| opening || command.mid_prompt)
                 .map(|command| command.name.as_str())
-                .filter(|name| {
-                    !name.is_empty()
-                        && rest.starts_with(name)
-                        && rest[name.len()..]
-                            .chars()
-                            .next()
-                            .is_none_or(char::is_whitespace)
-                })
+                .filter(|name| opens_with(rest, name))
                 .map(str::len)
                 .max()?;
             Some(at..at + 1 + length)
         })
         .collect()
+}
+
+/// Whether `text`, what follows a `/`, opens with the command `name` whole:
+/// the name, then a blank or nothing. A name can hold a blank itself, as an
+/// MCP server's prompt is listed as `server:prompt (MCP)` and read typed with
+/// that suffix, so the name is matched as it is listed rather than as the
+/// first word.
+pub(crate) fn opens_with(text: &str, name: &str) -> bool {
+    !name.is_empty()
+        && text.starts_with(name)
+        && text[name.len()..]
+            .chars()
+            .next()
+            .is_none_or(char::is_whitespace)
 }
 
 /// Where `prompt`, as sent, names a command the backend read: [`named`] for

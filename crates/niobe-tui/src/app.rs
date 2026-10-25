@@ -553,22 +553,24 @@ fn typed_rows() -> [String; 3] {
     ]
 }
 
-/// The command `text` opens with where it is a word the backend did not
-/// list among `listed`, which must not be empty. A word with a `/` inside it
-/// is a path, not a command.
+/// The command `text` opens with where it is a word and no command among
+/// `listed`, which must not be empty, opens `text` whole: a listed name can
+/// hold a blank, as an MCP server's prompt does, so it is matched as listed
+/// rather than against the first word. A word with a `/` inside it is a
+/// path, not a command.
 fn unlisted_command<'a>(text: &'a str, listed: &[SlashCommand]) -> Option<&'a str> {
     if listed.is_empty() {
         return None;
     }
-    let word = text
-        .trim_start()
-        .strip_prefix('/')?
-        .split_whitespace()
-        .next()?;
+    let typed = text.trim_start().strip_prefix('/')?;
+    let word = typed.split_whitespace().next()?;
     let command_like = word
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ':'));
-    (command_like && !listed.iter().any(|command| command.name == word)).then_some(word)
+    let listed = listed
+        .iter()
+        .any(|command| crate::slash::opens_with(typed, &command.name));
+    (command_like && !listed).then_some(word)
 }
 
 /// The most characters of a prompt the rewind list names it by.
@@ -10980,6 +10982,27 @@ mod tests {
 
         app.submit();
         assert_eq!(app.said().len(), 1, "sent the second time");
+    }
+
+    /// The `claude` CLI lists an MCP server's prompt as `<server>:<prompt>
+    /// (MCP)` and reads it typed with that name whole, the suffix included,
+    /// which is what picking it from the list puts in the prompt.
+    #[test]
+    fn a_listed_command_whose_name_holds_a_space_is_sent_at_once() {
+        let mut app = offering(&["compact", "code-review-graph:review_changes (MCP)"]);
+
+        assert_eq!(
+            submitted(&mut app, "/code-review-graph:review_changes (MCP) the diff").len(),
+            1,
+            "held with the hint {:?}",
+            app.hint()
+        );
+        assert_eq!(
+            submitted(&mut app, "/code-review-graph:review_changes (MCP)").len(),
+            1,
+            "held with the hint {:?}",
+            app.hint()
+        );
     }
 
     #[test]
