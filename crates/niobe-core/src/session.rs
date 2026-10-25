@@ -633,6 +633,10 @@ pub struct SessionState {
     /// list that reorders itself under the operator is a list nobody can read.
     files: Vec<FileChanges>,
     files_at: BTreeMap<String, usize>,
+    /// The agent's own notes the session changed, by the path the backend
+    /// named each with: out of [`SessionState::files`] and its figures, and
+    /// still a file the agent is given as memory that changed.
+    notes: BTreeSet<String>,
     /// Every decision the session's replies stated, in the order they were
     /// stated.
     decisions: Vec<DecisionRecord>,
@@ -955,7 +959,9 @@ impl SessionState {
                 ChangeScope::Project => self.change_file(path, *added, *removed),
                 // The agent's own notes are not what is being built: the
                 // session's files and their line counts are the project's.
-                ChangeScope::AgentMemory => {}
+                ChangeScope::AgentMemory => {
+                    self.notes.insert(path.clone());
+                }
             },
 
             Event::TestRun {
@@ -1359,6 +1365,13 @@ impl SessionState {
     /// The files the session changed, in the order it first changed them.
     pub fn files(&self) -> &[FileChanges] {
         &self.files
+    }
+
+    /// The agent's own notes the session changed, each by the path the
+    /// backend named it with, in order of path. None of them is among
+    /// [`SessionState::files`].
+    pub fn notes_changed(&self) -> impl Iterator<Item = &String> {
+        self.notes.iter()
     }
 
     /// What is running, once the backend has said.
@@ -3274,6 +3287,40 @@ mod tests {
             .map(|file| (file.path.as_str(), file.added, file.removed))
             .collect();
         assert_eq!(files, [("src/lib.rs", 3, 1)]);
+    }
+
+    #[test]
+    fn the_agents_own_notes_it_changed_are_kept_apart_by_the_path_the_backend_named() {
+        let note = "/home/me/.claude/projects/-w-app/memory/MEMORY.md";
+        let mut state = SessionState::new();
+        state.apply(&changed("src/lib.rs", Some(3), Some(1)));
+        for _ in 0..2 {
+            state.apply(&Event::FileChange {
+                path: note.to_owned(),
+                added: Some(2),
+                removed: Some(1),
+                hunks: Vec::new(),
+                scope: ChangeScope::AgentMemory,
+            });
+        }
+
+        let notes: Vec<&str> = state.notes_changed().map(String::as_str).collect();
+        assert_eq!(notes, [note]);
+    }
+
+    #[test]
+    fn the_notes_a_conversation_changed_go_with_it_when_it_starts_over() {
+        let mut state = SessionState::new();
+        state.apply(&Event::FileChange {
+            path: "/home/me/.claude/projects/-w-app/memory/MEMORY.md".to_owned(),
+            added: Some(2),
+            removed: Some(1),
+            hunks: Vec::new(),
+            scope: ChangeScope::AgentMemory,
+        });
+        state.apply(&Event::Cleared);
+
+        assert_eq!(state.notes_changed().count(), 0);
     }
 
     fn tested(counts: Option<TestCounts>, exit_code: Option<i32>) -> Event {

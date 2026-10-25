@@ -8674,9 +8674,12 @@ impl App {
         self.memory.as_ref()
     }
 
-    /// Whether the session changed the file a backend names `path`.
+    /// Whether the session changed the file a backend names `path`: one of
+    /// the project's, or one of the agent's own notes, which the Memory view
+    /// lists too.
     pub(crate) fn changed_in_session(&self, path: &str) -> bool {
         self.session.files().iter().any(|file| file.path == path)
+            || self.session.notes_changed().any(|note| note == path)
     }
 
     /// Whether the backend runs `command` from a prompt, as `/command`.
@@ -18264,6 +18267,25 @@ mod tests {
         });
         assert!(app.changed_in_session("AGENTS.md"));
         assert!(!app.changed_in_session("CLAUDE.md"));
+    }
+
+    #[test]
+    fn an_auto_memory_file_the_agent_changed_is_known_as_changed() {
+        let index = "/home/me/.claude/projects/-w-app/memory/MEMORY.md";
+        let mut app = app();
+        assert!(!app.changed_in_session(index));
+        app.apply(&Event::FileChange {
+            path: index.to_owned(),
+            added: Some(1),
+            removed: Some(0),
+            hunks: Vec::new(),
+            scope: niobe_core::event::ChangeScope::AgentMemory,
+        });
+        assert!(app.changed_in_session(index));
+        assert!(
+            app.session().files().is_empty(),
+            "notes stay out of the files"
+        );
     }
 
     #[test]
