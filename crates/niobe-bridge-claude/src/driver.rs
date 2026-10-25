@@ -260,7 +260,11 @@ pub struct Options {
     /// Passed through exactly as the profile wrote them.
     pub env: BTreeMap<String, String>,
     /// Arguments appended after the ones this bridge passes, so that a profile
-    /// can reach a flag Niobe does not model.
+    /// can reach a flag Niobe does not model. A `--model` among them is left
+    /// out where [`Options::model`] names one, and a `--permission-mode`
+    /// where [`Options::resume`] carries a conversation on in
+    /// [`Options::mode`]: those are the session's, which the profile's would
+    /// undo.
     pub args: Vec<String>,
     /// The profile the session runs under, for [`Event::SessionMeta`].
     pub profile: String,
@@ -405,9 +409,59 @@ impl Options {
                 argv.push(value.clone());
             }
         }
-        argv.extend(self.args.iter().cloned());
+        argv.extend(self.own_args());
         argv
     }
+
+    /// The profile's arguments, less each flag this session already holds a
+    /// value for that came from the conversation rather than the profile.
+    ///
+    /// The CLI takes the last of a flag given twice, so a profile's
+    /// `--model` or `--permission-mode`, coming last, would otherwise undo
+    /// what the operator chose: a model picked in the session, or a mode a
+    /// conversation carried on was left in — plan undone into a mode that
+    /// edits without asking, after the CLI is started again on the
+    /// conversation. Where the session holds nothing of its own, the
+    /// profile's flag is the one the CLI starts with.
+    fn own_args(&self) -> Vec<String> {
+        let mut overridden = Vec::new();
+        if self.model.is_some() {
+            overridden.push("--model");
+        }
+        if self.resume.is_some() {
+            overridden.push("--permission-mode");
+        }
+        without(&self.args, &overridden)
+    }
+}
+
+/// `args` without each of `flags` — given as `--flag value` or as
+/// `--flag=value` — and its value. Whatever follows a `--` is an operand and
+/// kept as it is.
+fn without(args: &[String], flags: &[&str]) -> Vec<String> {
+    let mut kept = Vec::with_capacity(args.len());
+    let mut at = args.iter();
+    while let Some(arg) = at.next() {
+        if arg == "--" {
+            kept.push(arg.clone());
+            kept.extend(at.by_ref().cloned());
+            break;
+        }
+        let named = flags.iter().find(|flag| {
+            arg == *flag
+                || arg
+                    .strip_prefix(**flag)
+                    .is_some_and(|rest| rest.starts_with('='))
+        });
+        match named {
+            Some(flag) if arg == *flag => {
+                at.next();
+            }
+            Some(_) => {}
+            None => kept.push(arg.clone()),
+        }
+    }
+    kept
 }
 
 /// Why a session could not be started.
@@ -2145,6 +2199,65 @@ mod tests {
         let model = argv.iter().position(|a| a == "--model").expect("the model");
         assert_eq!(argv[model + 1], "claude-sonnet-5");
         assert_eq!(&argv[argv.len() - 2..], ["--add-dir", "/other"]);
+    }
+
+    /// The value the CLI takes for `flag` in `argv`: the last one given, as
+    /// its option parser does with a flag given twice.
+    fn taken<'a>(argv: &'a [String], flag: &str) -> Option<&'a str> {
+        let mut value = None;
+        let mut at = argv.iter();
+        while let Some(arg) = at.next() {
+            if arg == flag {
+                value = at.next().map(String::as_str);
+            } else if let Some(given) = arg.strip_prefix(&format!("{flag}=")) {
+                value = Some(given);
+            }
+        }
+        value
+    }
+
+    #[test]
+    fn a_model_chosen_in_the_session_is_the_one_a_cli_started_again_takes_over_the_profiles() {
+        let mut options = options();
+        options.args = ["--model", "opus", "--add-dir", "/other", "--model=opus"]
+            .map(str::to_owned)
+            .to_vec();
+        assert_eq!(taken(&options.argv(), "--model"), Some("opus"));
+
+        options.model = Some("haiku".to_owned());
+        let argv = options.argv();
+
+        assert_eq!(taken(&argv, "--model"), Some("haiku"), "{argv:?}");
+        assert_eq!(&argv[argv.len() - 2..], ["--add-dir", "/other"]);
+    }
+
+    #[test]
+    fn a_flag_left_out_of_a_profiles_arguments_takes_its_value_and_nothing_after_a_double_dash() {
+        let args = ["--model", "opus", "--models", "x", "--", "--model", "y"].map(str::to_owned);
+
+        assert_eq!(
+            without(&args, &["--model"]),
+            ["--models", "x", "--", "--model", "y"]
+        );
+    }
+
+    #[test]
+    fn a_conversation_carried_on_keeps_its_mode_over_the_one_the_profile_starts_in() {
+        let mut options = options();
+        options.args = ["--permission-mode", "acceptEdits"]
+            .map(str::to_owned)
+            .to_vec();
+        assert_eq!(
+            taken(&options.argv(), "--permission-mode"),
+            Some("acceptEdits"),
+            "a new conversation starts where the profile says"
+        );
+
+        options.resume = Some("s-9".to_owned());
+        options.mode = Mode::Plan;
+        let argv = options.argv();
+
+        assert_eq!(taken(&argv, "--permission-mode"), Some("plan"), "{argv:?}");
     }
 
     #[test]
