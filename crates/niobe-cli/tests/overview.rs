@@ -279,3 +279,68 @@ fn each_decision_a_reply_stated_is_listed_at_the_time_its_reply_was_stored() {
         "{page}"
     );
 }
+
+/// A clear starts a session of its own in the store, and the prompt that typed
+/// it is the last event of the session before: that session's turn ended in
+/// the next one, so it is not left open. Another shell's session in between,
+/// which did stop in the middle of a turn, still is.
+#[test]
+fn a_session_that_ended_on_a_clear_is_not_left_open_in_the_middle_of_a_turn() {
+    use niobe_core::Event;
+
+    let dir = tempfile::tempdir().expect("a temporary directory can be created");
+    let root = dir.path().join("catalog");
+    std::fs::create_dir_all(root.join(".git")).expect("a .git directory can be made");
+    std::fs::create_dir(root.join(".niobe")).expect("a .niobe directory can be made");
+    let store = Store::open(&root.join(".niobe").join("sessions.db"))
+        .expect("a store opens in a temporary directory");
+    let prompt = |text: &str| Event::UserMessage {
+        text: text.to_owned(),
+    };
+    let said = |text: &str| Event::AssistantMessage {
+        text: text.to_owned(),
+        agent: None,
+    };
+    let at = |minutes: u64| UNIX_EPOCH + Duration::from_millis(RECORDED_ON_MS + minutes * 60_000);
+    let cleared = store.create_session().expect("a session is created");
+    let stopped = store.create_session().expect("a session is created");
+    let after = store.create_session().expect("a session is created");
+    let record = |session, events: Vec<(Event, u64)>| {
+        for (event, minutes) in events {
+            store
+                .append_at(session, &event, at(minutes))
+                .expect("an append succeeds");
+        }
+    };
+    record(
+        cleared,
+        vec![
+            (prompt("add etags"), 0),
+            (said("Done."), 1),
+            (Event::TurnEnded, 1),
+            (prompt("/clear"), 3),
+        ],
+    );
+    record(stopped, vec![(prompt("rename the module"), 2)]);
+    record(
+        after,
+        vec![
+            (Event::Cleared, 3),
+            (Event::TurnEnded, 3),
+            (prompt("now the docs"), 4),
+            (said("Done."), 5),
+            (Event::TurnEnded, 5),
+        ],
+    );
+
+    let page = printed(&root);
+
+    assert!(
+        page.contains(
+            "## Left open\n\n\
+             - Session 2: stopped in the middle of a turn — `niobe --resume 2`\n\
+             - Whether what the sessions changed is committed could not be read from git.\n"
+        ),
+        "{page}"
+    );
+}

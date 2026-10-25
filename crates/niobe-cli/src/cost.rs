@@ -367,6 +367,7 @@ mod tests {
             started_at: UNIX_EPOCH + Duration::from_secs(started),
             state,
             decided_at: Vec::new(),
+            cleared: false,
         }
     }
 
@@ -489,6 +490,7 @@ mod tests {
             started_at: UNIX_EPOCH + Duration::from_secs(started),
             state: SessionState::new(),
             decided_at: Vec::new(),
+            cleared: false,
         }
     }
 

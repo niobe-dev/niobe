@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::SystemTime;
 
+use niobe_core::event::Event;
 use niobe_core::session::SessionState;
 use niobe_store::SessionId;
 
@@ -39,6 +40,11 @@ pub struct Folded {
     /// When each of [`SessionState::decisions`] was stated, in the same
     /// order: the fold carries no times, and the store does.
     pub decided_at: Vec<SystemTime>,
+    /// Whether its last turn went on in a session a clear opened: the prompt
+    /// that typed the clear is the last of this session's record, and the
+    /// turn's end is the first of the next one's, so the turn this fold
+    /// leaves running did not stop.
+    pub cleared: bool,
 }
 
 /// Every session the store at `root` holds, folded, oldest first; none where
@@ -48,6 +54,7 @@ pub fn read(root: &Path) -> Result<Vec<Folded>, String> {
         return Ok(Vec::new());
     };
     let mut folded = Vec::new();
+    let mut bounds = Vec::new();
     for summary in store.sessions().map_err(|e| e.to_string())? {
         let stored = store.events(summary.id).map_err(|e| e.to_string())?;
         let mut state = SessionState::new();
@@ -56,6 +63,12 @@ pub fn read(root: &Path) -> Result<Vec<Folded>, String> {
             state.apply(&event.event);
             decided_at.resize(state.decisions().len(), event.at);
         }
+        bounds.push(Bounds {
+            first: stored
+                .first()
+                .map(|event| (event.at, matches!(event.event, Event::Cleared))),
+            last: stored.last().map(|event| event.at),
+        });
         folded.push(Folded {
             id: summary.id,
             // When its first event happened, which an imported session dates
@@ -63,12 +76,59 @@ pub fn read(root: &Path) -> Result<Vec<Folded>, String> {
             started_at: stored.first().map_or(summary.started_at, |event| event.at),
             state,
             decided_at,
+            cleared: false,
         });
     }
+    mark_cleared(&mut folded, &bounds);
     // The store lists the newest first; a record of what was built reads
     // from the start.
     folded.sort_by_key(|session| session.id);
     Ok(folded)
+}
+
+/// When a stored session's first and last events happened, and whether the
+/// first was a clear.
+struct Bounds {
+    first: Option<(SystemTime, bool)>,
+    last: Option<SystemTime>,
+}
+
+/// Marks each session whose running turn a later session's clear went on
+/// with, `bounds[i]` being `folded[i]`'s.
+///
+/// The store keeps no link between the two: the journal starts a session at
+/// the clear and nothing else. So each session that opens on a clear is
+/// matched to the session with a turn still running whose record ended last
+/// before the clear, of those created before it and not matched already:
+/// another shell's session can come between the two in the store's
+/// numbering, but not between the prompt that typed a clear and the clear.
+fn mark_cleared(folded: &mut [Folded], bounds: &[Bounds]) {
+    let mut clears: Vec<(SystemTime, SessionId)> = folded
+        .iter()
+        .zip(bounds)
+        .filter_map(|(session, bounds)| match bounds.first {
+            Some((at, true)) => Some((at, session.id)),
+            Some((_, false)) | None => None,
+        })
+        .collect();
+    clears.sort_unstable();
+    for (cleared_at, clearing) in clears {
+        let before = folded
+            .iter()
+            .zip(bounds)
+            .enumerate()
+            .filter(|(_, (session, bounds))| {
+                session.id < clearing
+                    && !session.cleared
+                    && session.state.turn_running()
+                    && bounds.last.is_some_and(|last| last <= cleared_at)
+            })
+            .max_by_key(|(_, (session, bounds))| (bounds.last, session.id))
+            .map(|(index, _)| index);
+        if let Some(session) = before.and_then(|index| folded.get_mut(index)) {
+            session.cleared = true;
+        }
+    }
 }
 
 /// The page, for the shell's overview: written on a thread of its own each
@@ -351,7 +411,7 @@ fn left_open(sessions: &[Folded], uncommitted: Option<&[String]>) -> Vec<String>
                         "questions"
                     )
                 ));
-            } else if s.turn_running() {
+            } else if s.turn_running() && !session.cleared {
                 what.push("stopped in the middle of a turn".to_owned());
             }
             if s.test_run().is_some_and(|run| run.failed) {
@@ -635,6 +695,7 @@ mod tests {
                 state.decisions().len()
             ],
             state,
+            cleared: false,
         }
     }
 
@@ -689,6 +750,41 @@ mod tests {
             markdown("catalog", &[], Narrowing::default(), None).join("\n")
         );
         assert_eq!(page.drain(), None, "handed over once");
+    }
+
+    /// Two clears in a row: each session's running turn is the one the next
+    /// clear went on with, and a session whose turn ended is matched to none.
+    #[test]
+    fn each_clear_is_matched_to_the_running_turn_that_ended_last_before_it() {
+        let prompt = || Event::UserMessage {
+            text: "/clear".to_owned(),
+        };
+        let at = |minute: u64| UNIX_EPOCH + Duration::from_secs(1_789_732_800 + minute * 60);
+        let bounds = |first: u64, clear: bool, last: u64| Bounds {
+            first: Some((at(first), clear)),
+            last: Some(at(last)),
+        };
+        let mut sessions = [
+            folded(1, &[prompt(), Event::TurnEnded]),
+            folded(2, &[prompt()]),
+            folded(3, &[Event::Cleared, Event::TurnEnded, prompt()]),
+            folded(4, &[Event::Cleared, Event::TurnEnded]),
+            folded(5, &[Event::Cleared, Event::TurnEnded]),
+        ];
+        let stored = [
+            bounds(0, false, 1),
+            bounds(2, false, 3),
+            bounds(3, true, 6),
+            bounds(6, true, 7),
+            bounds(9, true, 9),
+        ];
+
+        mark_cleared(&mut sessions, &stored);
+
+        assert_eq!(
+            sessions.iter().map(|s| s.cleared).collect::<Vec<_>>(),
+            [false, true, true, false, false]
+        );
     }
 
     #[test]
