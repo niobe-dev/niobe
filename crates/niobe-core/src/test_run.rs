@@ -649,7 +649,9 @@ pub(crate) fn is_assignment(word: &str) -> bool {
 /// build finished before the first binary ran, a binary that started and did
 /// not report, a summary whose counts do not add up to the tests it said it
 /// was running, a summary with no binary above it, or no binary at all. A
-/// build that failed ran no tests, and is `None` too. So is a run whose
+/// build that failed ran no tests, and is `None` too, as is an output in which
+/// any crate could not compile, though another run in the same command passed
+/// after it. So is a run whose
 /// status is not known or disagrees with its counts: `cargo test` exits `0`
 /// where no test failed and `101` where one did, and anything else — a
 /// signal, a status nobody reported — is a run that may have stopped between
@@ -787,7 +789,7 @@ fn tests_started(output: &str) -> bool {
     let mut headed = false;
     let mut started = false;
     for line in output.lines() {
-        if line.trim_start().starts_with("error: could not compile ") {
+        if could_not_compile(line) {
             return false;
         }
         match Line::of(line) {
@@ -827,7 +829,17 @@ fn uncoloured(output: &str) -> std::borrow::Cow<'_, str> {
     std::borrow::Cow::Owned(plain)
 }
 
+/// cargo's `error: could not compile `demo` (lib test) due to 1 previous
+/// error`: a crate that did not build, whose tests did not run.
+fn could_not_compile(line: &str) -> bool {
+    line.trim_start().starts_with("error: could not compile ")
+}
+
 /// The counts in an output that holds a whole run, however it ended.
+///
+/// An output in which a crate could not compile holds no whole run, even
+/// where a whole run follows it: `cargo test -p a; cargo test -p b` exits
+/// with `b`'s status, and `a`'s tests, which never ran, are in no count.
 fn whole_run(output: &str) -> Option<TestCounts> {
     let mut state = Block::Building;
     let mut counts = TestCounts {
@@ -837,6 +849,9 @@ fn whole_run(output: &str) -> Option<TestCounts> {
         suites: 0,
     };
     for line in output.lines() {
+        if could_not_compile(line) {
+            return None;
+        }
         state = match (state, Line::of(line)) {
             (_, Line::Other) => state,
             (Block::Building | Block::Between, Line::Finished) => Block::Between,
@@ -1271,6 +1286,19 @@ error: could not compile `demo` (lib test) due to 1 previous error
     #[test]
     fn a_build_that_failed_ran_no_tests_and_is_not_read() {
         assert_eq!(counts("cargo test", BUILD_FAILED, Some(101)), None);
+    }
+
+    #[test]
+    fn a_run_after_one_that_could_not_compile_is_not_read_as_the_whole_command() {
+        // Two runs on two lines: the first crate did not build and ran none
+        // of its tests, the second passed and its status is the command's.
+        let command = "cargo test -p broken\ncargo test -p demo";
+        let output = format!("{BUILD_FAILED}{PASSED}");
+        assert_eq!(counts(command, &output, Some(0)), None);
+        assert_eq!(
+            counts("cargo test -p demo", PASSED, Some(0)),
+            counted(6, 0, 1, 3)
+        );
     }
 
     #[test]
