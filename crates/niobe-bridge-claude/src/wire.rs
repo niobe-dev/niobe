@@ -1199,6 +1199,23 @@ pub(crate) fn without_lone_surrogates(line: &str) -> Option<String> {
     Some(mended)
 }
 
+/// `line` read as a `T`, and whether it read only once each half of a
+/// surrogate pair it holds alone was written as U+FFFD: see
+/// [`without_lone_surrogates`]. The error is the one `line` gave as written.
+pub(crate) fn from_line<T: serde::de::DeserializeOwned>(
+    line: &str,
+) -> Result<(T, bool), serde_json::Error> {
+    match serde_json::from_str(line) {
+        Ok(read) => Ok((read, false)),
+        Err(error) => match without_lone_surrogates(line)
+            .and_then(|mended| serde_json::from_str(&mended).ok())
+        {
+            Some(read) => Ok((read, true)),
+            None => Err(error),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -3385,7 +3385,7 @@ pub(crate) fn compacted(metadata: wire::CompactMetadata) -> Event {
 
 /// The warning for a line of the CLI's that held half of a character, which
 /// is shown as U+FFFD, as a byte of a line that is not UTF-8 is.
-const HALF_A_CHARACTER: &str = "the CLI sent a line holding half of a character, cut where \
+pub(crate) const HALF_A_CHARACTER: &str = "the CLI sent a line holding half of a character, cut where \
     the CLI cut a string; the half is shown as \u{fffd}.";
 
 /// A non-fatal entry: something the session should show and go on from.

@@ -257,7 +257,8 @@ fn recorded_cwd(path: &Path) -> Option<PathBuf> {
     BufReader::new(open(path).ok()?)
         .lines()
         .map_while(Result::ok)
-        .filter_map(|line| serde_json::from_str::<Placed>(&line).ok())
+        .filter_map(|line| wire::from_line::<Placed>(&line).ok())
+        .map(|(placed, _)| placed)
         .find_map(|placed| placed.cwd)
 }
 
@@ -401,7 +402,7 @@ pub fn spent(path: &Path) -> Result<Spent, TranscriptError> {
         .rev()
         .filter(|line| line.contains(r#""cost-state""#))
     {
-        match serde_json::from_str::<Line>(line) {
+        match wire::from_line::<Line>(line).map(|(record, _)| record) {
             Ok(Line::CostState(record)) => return Ok(Spent::from_model_usage(&record.model_usage)),
             // Another record that happens to name the type, a message that
             // talks about it: not the CLI's accounting.
@@ -421,8 +422,8 @@ pub fn spent(path: &Path) -> Result<Spent, TranscriptError> {
 /// `cost-state` one: its `type` says so, or it was cut off in the middle of
 /// writing what begins by saying so.
 fn is_cost_state(line: &str) -> bool {
-    match serde_json::from_str::<serde_json::Value>(line) {
-        Ok(value) => value.get("type").and_then(|t| t.as_str()) == Some("cost-state"),
+    match wire::from_line::<serde_json::Value>(line) {
+        Ok((value, _)) => value.get("type").and_then(|t| t.as_str()) == Some("cost-state"),
         Err(_) => line.trim_start().starts_with(r#"{"type":"cost-state""#),
     }
 }
@@ -541,7 +542,7 @@ pub fn timed(path: &Path, profile: &str, cwd: &Path) -> Result<Vec<Timed>, Trans
             threads.fold_before(next_stamp.as_deref(), &mut fold);
         }
         threads.spawned_in(&record.record);
-        fold.record(record.line, record.record, record.at.as_deref(), None);
+        fold.record(record, None);
     }
     threads.fold_before(None, &mut fold);
     Ok(fold.timed())
@@ -621,6 +622,9 @@ struct Record<'a> {
     /// agents' files, were written that way.
     at: Option<String>,
     record: Result<Line, serde_json::Error>,
+    /// Whether the record read only once each half of a surrogate pair it
+    /// held alone was read as U+FFFD, which is said where it is folded.
+    mended: bool,
 }
 
 /// Every record of the transcript `text`, in the order it holds them.
@@ -638,12 +642,19 @@ fn records(text: &str) -> Vec<Record<'_>> {
     let mut records: Vec<Record<'_>> = text
         .lines()
         .filter(|line| !line.trim().is_empty())
-        .map(|line| Record {
-            line,
-            at: serde_json::from_str::<Stamp>(line)
-                .ok()
-                .and_then(|stamp| stamp.timestamp),
-            record: serde_json::from_str::<Line>(line),
+        .map(|line| {
+            let (record, mended) = match wire::from_line::<Line>(line) {
+                Ok((record, mended)) => (Ok(record), mended),
+                Err(error) => (Err(error), false),
+            };
+            Record {
+                line,
+                at: wire::from_line::<Stamp>(line)
+                    .ok()
+                    .and_then(|(stamp, _)| stamp.timestamp),
+                record,
+                mended,
+            }
         })
         .collect();
     if !text.ends_with('\n') && records.last().is_some_and(|last| last.record.is_err()) {
@@ -730,12 +741,7 @@ impl<'a> Threads<'a> {
     fn fold_before(&mut self, bound: Option<&str>, fold: &mut Fold) {
         while let Some((call, record)) = self.next_before(bound) {
             self.spawned_in(&record.record);
-            fold.record(
-                record.line,
-                record.record,
-                record.at.as_deref(),
-                Some(&call),
-            );
+            fold.record(record, Some(&call));
         }
     }
 
@@ -799,8 +805,8 @@ fn side_files(path: &Path) -> Vec<SideFile> {
         };
         let Some(call) = read(&entry.path())
             .ok()
-            .and_then(|text| serde_json::from_str::<Meta>(&text).ok())
-            .and_then(|meta| meta.tool_use_id)
+            .and_then(|text| wire::from_line::<Meta>(&text).ok())
+            .and_then(|(meta, _)| meta.tool_use_id)
         else {
             continue;
         };
@@ -830,7 +836,7 @@ fn side_files(path: &Path) -> Vec<SideFile> {
 fn recorded_agent(text: &str) -> RecordedAgent {
     let mut agent = RecordedAgent::default();
     for line in text.lines() {
-        let Ok(Line::Assistant(Assistant { message, .. })) = serde_json::from_str::<Line>(line)
+        let Ok((Line::Assistant(Assistant { message, .. }), _)) = wire::from_line::<Line>(line)
         else {
             continue;
         };
@@ -861,8 +867,8 @@ fn release_of(text: &str) -> Option<String> {
     }
 
     text.lines()
-        .filter_map(|line| serde_json::from_str::<Stamp>(line).ok())
-        .find_map(|stamp| stamp.version)
+        .filter_map(|line| wire::from_line::<Stamp>(line).ok())
+        .find_map(|(stamp, _)| stamp.version)
 }
 
 /// What a list says of a transcript, read from its first records.
@@ -896,14 +902,14 @@ fn opening(path: &Path) -> Opening {
             break;
         };
         if opening.entrypoint.is_none() || opening.cwd.is_none() {
-            let entered = serde_json::from_str::<Entered>(&line).ok();
-            if let Some(entered) = entered {
+            let entered = wire::from_line::<Entered>(&line).ok();
+            if let Some((entered, _)) = entered {
                 opening.entrypoint = opening.entrypoint.or(entered.entrypoint);
                 opening.cwd = opening.cwd.or(entered.cwd);
             }
         }
         if opening.first_prompt.is_none()
-            && let Ok(record) = serde_json::from_str::<Line>(&line)
+            && let Ok((record, _)) = wire::from_line::<Line>(&line)
         {
             opening.first_prompt = prompt(&record);
         }
@@ -1031,17 +1037,19 @@ impl Fold {
     /// Folds one record of the session's own file, where `agent` is `None`,
     /// or of the file of the sub-agent spawned by call `agent`, every event it
     /// folds to at the moment `at` names.
-    fn record(
-        &mut self,
-        line: &str,
-        record: Result<Line, serde_json::Error>,
-        at: Option<&str>,
-        agent: Option<&str>,
-    ) {
+    ///
+    /// A record that read only once a half of a surrogate pair in it was read
+    /// as U+FFFD is said to have, with the warning the live stream gives.
+    fn record(&mut self, record: Record<'_>, agent: Option<&str>) {
         let start = self.out.len();
-        self.fold_record(line, record, agent);
+        if record.mended {
+            self.out
+                .push(translate::warn(translate::HALF_A_CHARACTER.to_owned()));
+        }
+        self.fold_record(record.line, record.record, agent);
         self.times.resize(start, None);
-        self.times.resize(self.out.len(), at.and_then(stamp::parse));
+        self.times
+            .resize(self.out.len(), record.at.as_deref().and_then(stamp::parse));
     }
 
     fn fold_record(
@@ -2481,7 +2489,13 @@ mod tests {
             agents,
         );
         for line in lines {
-            fold.record(line, serde_json::from_str::<Line>(line), None, None);
+            let record = Record {
+                line,
+                at: None,
+                record: serde_json::from_str::<Line>(line),
+                mended: false,
+            };
+            fold.record(record, None);
         }
         fold.out
     }
@@ -3400,6 +3414,65 @@ mod tests {
             events
                 .iter()
                 .all(|event| !matches!(event, Event::ToolCallStart { .. } | Event::Usage(_))),
+            "{events:?}"
+        );
+    }
+
+    #[test]
+    fn records_holding_half_of_a_surrogate_pair_read_as_the_live_stream_reads_them() {
+        // The CLI cuts a string by UTF-16 units and writes a half left alone
+        // as an escape of its own, in its transcripts as on its stream.
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let session = dir.path().join("s.jsonl");
+        let agents = dir.path().join("s").join(SUB_AGENTS);
+        std::fs::create_dir_all(&agents).expect("the sub-agents' directory is made");
+        std::fs::write(
+            &session,
+            [
+                r#"{"type":"assistant","timestamp":"2026-10-25T10:00:00.000Z","message":{"model":"claude-opus-5","id":"m1","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"cargo test"}},{"type":"tool_use","id":"toolu_a","name":"Agent","input":{"subagent_type":"quick-lookup","prompt":"look"}}]}}"#,
+                r#"{"type":"user","timestamp":"2026-10-25T10:00:01.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"ok \ud83d"}]}}"#,
+                r#"{"type":"user","timestamp":"2026-10-25T10:00:09.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_a","content":"Done."}]}}"#,
+            ]
+            .join("\n")
+                + "\n",
+        )
+        .expect("the temporary directory is writable");
+        std::fs::write(
+            agents.join(format!("agent-a1{META}")),
+            r#"{"toolUseId":"toolu_a"}"#,
+        )
+        .expect("the temporary directory is writable");
+        std::fs::write(
+            agents.join(format!("agent-a1.{EXTENSION}")),
+            "{\"type\":\"assistant\",\"timestamp\":\"2026-10-25T10:00:05.000Z\",\"message\":{\"model\":\"claude-haiku-4-5\",\"id\":\"m2\",\"content\":[{\"type\":\"text\",\"text\":\"Found \\ude00 it.\"}]}}\n",
+        )
+        .expect("the temporary directory is writable");
+
+        let timed = timed(&session, "max", dir.path()).expect("the transcript reads");
+        let events: Vec<&Event> = timed.iter().map(|timed| &timed.event).collect();
+
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                Event::ToolCallEnd { id, output, .. } if id.as_str() == "t1" && output == "ok \u{fffd}"
+            )),
+            "{events:?}"
+        );
+        assert!(
+            timed.iter().any(|timed| matches!(
+                &timed.event,
+                Event::AssistantMessage { text, agent: Some(agent) }
+                    if agent.as_str() == "toolu_a" && text == "Found \u{fffd} it."
+            ) && timed.at.is_some()),
+            "{events:?}"
+        );
+        let halves = events
+            .iter()
+            .filter(|event| matches!(event, Event::Error { message, fatal: false } if message.contains("half of a character")))
+            .count();
+        assert_eq!(halves, 2, "{events:?}");
+        assert!(
+            !events.iter().any(|event| matches!(event, Event::Error { message, .. } if message.contains("could not read"))),
             "{events:?}"
         );
     }
