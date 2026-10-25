@@ -1490,8 +1490,12 @@ pub struct App {
     /// one back from away however soon it comes.
     looked_recorded: bool,
     returned: bool,
-    /// When the operator last pressed a key, or the shell first ticked.
+    /// When the operator last pressed a key, or the shell first ticked, by
+    /// the monotonic clock and by the wall clock. The monotonic clock stands
+    /// still while the machine sleeps, which is how a machine left alone
+    /// usually spends an absence; the wall clock goes on.
     last_key: Option<Instant>,
+    last_key_at: Option<Stamp>,
     /// How long with no key is away, and whether the first key back shows
     /// what happened of itself.
     away_after: Duration,
@@ -2031,6 +2035,7 @@ impl App {
             looked_recorded: false,
             returned: false,
             last_key: None,
+            last_key_at: None,
             away_after: AWAY_AFTER,
             catch_up_automatic: true,
             ask_selected: 0,
@@ -3406,8 +3411,14 @@ impl App {
         let away = std::mem::take(&mut self.returned)
             || self
                 .last_key
-                .is_some_and(|last| now.saturating_duration_since(last) >= self.away_after);
+                .is_some_and(|last| now.saturating_duration_since(last) >= self.away_after)
+            || self
+                .at
+                .zip(self.last_key_at)
+                .and_then(|(at, last)| at.since(last))
+                .is_some_and(|gone| gone >= self.away_after);
         self.last_key = Some(now);
+        self.last_key_at = self.at.or(self.last_key_at);
         if !std::mem::take(&mut self.looked_stale) {
             return false;
         }
@@ -8235,6 +8246,7 @@ impl App {
         self.now = Some(now);
         self.at = at;
         self.last_key = self.last_key.or(Some(now));
+        self.last_key_at = self.last_key_at.or(at);
         self.expire_quit(now);
         // The trust question is up from the first tick, which draws it, and
         // waits from there for a quiet keyboard as a permission question does.
@@ -10076,6 +10088,45 @@ mod tests {
             !rows.iter().any(|row| row.contains("src/seen.rs")),
             "{rows:?}"
         );
+    }
+
+    /// The machine slept while the operator was away: the monotonic clock
+    /// stood still for the hour, and only the wall clock says it passed.
+    #[test]
+    fn an_hour_away_while_the_machine_slept_still_shows_what_happened() {
+        let mut app = laid_out();
+        let left = Instant::now();
+        app.tick(left, Some(at(36_000, 10, 0)));
+        app.apply(&changed("src/lib.rs"));
+        app.tick(
+            left + Duration::from_secs(60),
+            Some(at(36_000 + 3_600, 11, 0)),
+        );
+
+        app.on_key(key(KeyCode::Char('x')));
+        let rows = &app.sheet().expect("a file changed while away").rows;
+        assert!(
+            rows.iter().any(|row| row.contains("src/lib.rs")),
+            "{rows:?}"
+        );
+        assert_eq!(app.composed(), "", "the key went on telling them");
+    }
+
+    #[test]
+    fn a_minute_by_both_clocks_or_a_wall_clock_set_back_is_no_absence() {
+        let mut app = laid_out();
+        let left = Instant::now();
+        app.tick(left, Some(at(36_000, 10, 0)));
+        app.apply(&changed("src/lib.rs"));
+        app.tick(left + Duration::from_secs(60), Some(at(36_060, 10, 1)));
+        app.on_key(key(KeyCode::Char('x')));
+        assert!(app.sheet().is_none(), "a minute is no absence");
+
+        app.apply(&changed("src/main.rs"));
+        app.tick(left + Duration::from_secs(120), Some(at(30_000, 8, 20)));
+        app.on_key(key(KeyCode::Char('y')));
+        assert!(app.sheet().is_none(), "a clock set back measures nothing");
+        assert_eq!(app.composed(), "xy");
     }
 
     #[test]
