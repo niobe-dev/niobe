@@ -556,6 +556,7 @@ fn claude_options(
     home: Option<OsString>,
 ) -> Result<Options, String> {
     let mut options = Options::new(root, profile.name);
+    crate::config::env_checked(profile, root, &[transcript::CONFIG_DIR_VAR])?;
     options.env = profile.profile.env().clone();
     // Before the profile's own arguments, so that a profile appending a
     // system prompt of its own still has the last word.
@@ -1376,6 +1377,121 @@ mod tests {
         let options = claude_options(&root, &selected, &Attach::default(), NO_HOME)
             .expect("the repository's own profile names its own file");
         assert_eq!(options.args, ["--mcp-config", "mcp.json"]);
+    }
+
+    /// The user's profile `max` with `env` written as `env`, from the user's
+    /// own file beside a cloned repository.
+    fn users_env(user: &Path, env: &str) -> Config {
+        Config::parse(
+            &format!("[profiles.max]\nbackend = \"claude\"\nenv = {env}\n"),
+            &user.join("config.toml"),
+        )
+        .expect("the config parses")
+    }
+
+    /// The CLI is found by the `PATH` it is started with, and the spawn looks
+    /// a relative or empty entry up in the root it starts the CLI in, so a
+    /// `claude` the clone committed under it ran on `cd repo && niobe` — and
+    /// `$PATH`, which nothing expands, is such an entry.
+    #[test]
+    fn a_relative_or_empty_path_entry_in_the_users_env_is_refused() {
+        let (_dir, user, root) = user_and_repository();
+        for path in [
+            "node_modules/.bin:/usr/bin:/bin",
+            "/usr/bin:/bin:",
+            "/usr/bin::/bin",
+            "$PATH:/opt/homebrew/bin",
+            "./bin",
+        ] {
+            let config = users_env(&user, &format!("{{ PATH = \"{path}\" }}"));
+            let selected = config
+                .select(Some("max"))
+                .expect("the profile is defined")
+                .expect("a profile was selected");
+
+            let error = claude_options(&root, &selected, &Attach::default(), NO_HOME)
+                .expect_err("an entry would be looked up in the repository");
+            assert!(error.contains("profiles.max.env.PATH"), "{path}: {error}");
+            assert!(error.contains("absolute path"), "{path}: {error}");
+        }
+    }
+
+    /// A relative `CLAUDE_CONFIG_DIR` is a directory inside the repository
+    /// to the CLI, which reads its settings and hooks from there and writes
+    /// its sign-in there, whether or not the clone holds it yet.
+    #[test]
+    fn a_relative_config_directory_in_the_users_env_is_refused() {
+        let (_dir, user, root) = user_and_repository();
+        for dir in ["claude", "~/.claude-work"] {
+            let config = users_env(&user, &format!("{{ CLAUDE_CONFIG_DIR = \"{dir}\" }}"));
+            let selected = config
+                .select(Some("max"))
+                .expect("the profile is defined")
+                .expect("a profile was selected");
+
+            let error = claude_options(&root, &selected, &Attach::default(), NO_HOME)
+                .expect_err("the directory would be the repository's");
+            assert!(
+                error.contains("profiles.max.env.CLAUDE_CONFIG_DIR"),
+                "{dir}: {error}"
+            );
+            assert!(error.contains("absolute path"), "{dir}: {error}");
+        }
+    }
+
+    /// Any other variable whose value names, by a relative path, a file or
+    /// directory the clone holds hands the CLI the clone's — a
+    /// `NODE_OPTIONS` that requires its script runs it in the CLI.
+    #[test]
+    fn a_relative_path_in_the_users_env_that_the_repository_supplies_is_refused() {
+        let (_dir, user, root) = user_and_repository();
+        std::fs::write(root.join("x.js"), "").expect("the repository is writable");
+        for env in [
+            r#"{ NODE_OPTIONS = "--require ./x.js" }"#,
+            r#"{ NODE_OPTIONS = "--require=x.js" }"#,
+            r#"{ XDG_CONFIG_HOME = ".niobe" }"#,
+        ] {
+            let config = users_env(&user, env);
+            let selected = config
+                .select(Some("max"))
+                .expect("the profile is defined")
+                .expect("a profile was selected");
+
+            let error = claude_options(&root, &selected, &Attach::default(), NO_HOME)
+                .expect_err("the repository supplies the file");
+            assert!(error.contains("profiles.max.env."), "{env}: {error}");
+            assert!(error.contains("absolute path"), "{env}: {error}");
+        }
+    }
+
+    /// Values that name nothing in the repository, absolute paths, and a
+    /// repository's own trusted profile are passed on as written.
+    #[test]
+    fn a_users_env_that_names_nothing_in_the_repository_and_a_repositorys_own_are_passed_on() {
+        let (_dir, user, root) = user_and_repository();
+        let env = r#"{ PATH = "/opt/homebrew/bin:/usr/bin", CLAUDE_CONFIG_DIR = "/home/me/.claude-work", ANTHROPIC_MODEL = "opus", DISABLE_AUTOUPDATER = "1" }"#;
+        let config = users_env(&user, env);
+        let selected = config
+            .select(Some("max"))
+            .expect("the profile is defined")
+            .expect("a profile was selected");
+        let options = claude_options(&root, &selected, &Attach::default(), NO_HOME)
+            .expect("nothing names the repository");
+        assert_eq!(options.env["PATH"], "/opt/homebrew/bin:/usr/bin");
+        assert_eq!(options.env["ANTHROPIC_MODEL"], "opus");
+
+        let config = Config::parse(
+            "[profiles.max]\nbackend = \"claude\"\nenv = { PATH = \"bin:/usr/bin\" }\n",
+            &crate::repo::config_path(&root),
+        )
+        .expect("the config parses");
+        let selected = config
+            .select(Some("max"))
+            .expect("the profile is defined")
+            .expect("a profile was selected");
+        let options = claude_options(&root, &selected, &Attach::default(), NO_HOME)
+            .expect("the repository's own profile was trusted with its PATH");
+        assert_eq!(options.env["PATH"], "bin:/usr/bin");
     }
 
     #[test]

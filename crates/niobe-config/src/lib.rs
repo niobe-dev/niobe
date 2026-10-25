@@ -546,6 +546,16 @@ impl Selected<'_> {
             parse::args_key(self.name)
         )
     }
+
+    /// Reports `message` against the variable `name` of this profile's `env`,
+    /// at the file and the key that set it, as [`Self::args_invalid`] does.
+    pub fn env_invalid(&self, name: &str, message: &str) -> String {
+        format!(
+            "{}: {}: {message}",
+            self.profile.source.display(),
+            parse::env_key(self.name, name)
+        )
+    }
 }
 
 impl Config {

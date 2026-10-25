@@ -206,6 +206,72 @@ pub fn args_checked(selected: &Selected<'_>, root: &Path) -> Result<(), String> 
     Ok(())
 }
 
+/// Refuses a profile of the user's whose `env` would have the CLI, started in
+/// the repository rooted at `root`, read something of the repository's by a
+/// relative path.
+///
+/// Three kinds of value are read that way. Every entry of `PATH` is a
+/// directory a program is looked up in, and the spawn looks a relative entry
+/// up — and an empty one, which is the current directory — in the root the
+/// CLI is started in: a `claude` the clone committed there is the program that
+/// runs, as is anything the CLI then runs by name. `$PATH` is such an entry,
+/// since nothing expands it. Each variable in `directories` names a directory
+/// the backend reads its own configuration from, which a relative value puts
+/// inside the repository whether or not the clone holds it yet. Any other value
+/// is refused where a word of it names, by a relative path, a file or directory
+/// the repository holds — a `NODE_OPTIONS` requiring `./x.js` — as
+/// [`args_checked`] refuses an argument. A repository's own profile is let
+/// through: its environment was trusted with it.
+pub fn env_checked(
+    selected: &Selected<'_>,
+    root: &Path,
+    directories: &[&str],
+) -> Result<(), String> {
+    if from_repository(selected, root) {
+        return Ok(());
+    }
+    for (name, value) in selected.profile.env() {
+        let refusal = match name.as_str() {
+            "PATH" => std::env::split_paths(value)
+                .any(|entry| !entry.is_absolute())
+                .then(|| {
+                    format!(
+                        "`{value}` has an empty or relative entry, which the CLI's \
+                         programs are looked up in from the repository, where a clone \
+                         can put a `claude` of its own; write every entry as an \
+                         absolute path"
+                    )
+                }),
+            _ if directories.contains(&name.as_str()) => {
+                Path::new(value).is_relative().then(|| {
+                    format!(
+                        "`{value}` is a directory inside the repository to the CLI, \
+                         which reads its settings from there; write it as an \
+                         absolute path"
+                    )
+                })
+            }
+            _ => value
+                .split_whitespace()
+                .flat_map(path_candidates)
+                .filter(|candidate| Path::new(candidate).is_relative())
+                .map(|candidate| root.join(candidate))
+                .find(|path| std::fs::symlink_metadata(path).is_ok())
+                .map(|path| {
+                    format!(
+                        "`{value}` is read by the CLI from the repository, as {}, which \
+                         the repository supplies; write it as an absolute path",
+                        path.display()
+                    )
+                }),
+        };
+        if let Some(refusal) = refusal {
+            return Err(selected.env_invalid(name, &refusal));
+        }
+    }
+    Ok(())
+}
+
 /// What in an `args` entry could name a file: the entry, and what follows its
 /// `=`, where neither is empty or a flag.
 fn path_candidates(arg: &str) -> impl Iterator<Item = &str> {

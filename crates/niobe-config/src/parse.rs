@@ -551,6 +551,16 @@ pub(crate) fn args_key(profile: &str) -> String {
     Key::root("profiles").child(profile).child("args").0
 }
 
+/// The dotted key of the variable `name` in a profile's `env`, the way the
+/// config file spells it.
+pub(crate) fn env_key(profile: &str, name: &str) -> String {
+    Key::root("profiles")
+        .child(profile)
+        .child("env")
+        .child(name)
+        .0
+}
+
 /// A key as TOML would need it written: bare when it can be, quoted when not.
 fn quoted(name: &str) -> String {
     let bare = !name.is_empty()
