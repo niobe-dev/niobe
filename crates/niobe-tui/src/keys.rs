@@ -19,7 +19,8 @@
 //! the same masks, a lone Esc at the end of a read being the Esc key, and a
 //! sequence nobody recognises passed over whole rather than typed out. Bytes
 //! that are no character part from crossterm: they are passed over without
-//! the key typed after them.
+//! the key typed after them. So does an Esc in front of a whole sequence,
+//! which is that key with Alt rather than the Esc key and the rest typed.
 //!
 //! A bracketed paste, `CSI 200 ~ … CSI 201 ~`, is read as one
 //! [`Event::Paste`] of everything between the two markers, byte for byte: the
@@ -67,6 +68,9 @@ enum Step {
     /// that starts a character the byte after it does not continue. Only they
     /// are passed over; the byte that showed it is read again on its own.
     Invalid(usize),
+    /// The first this many bytes are this key, and the bytes after them are
+    /// read again on their own.
+    Leading(Event, usize),
 }
 
 /// Turns the bytes read from the terminal into events, holding a sequence
@@ -161,6 +165,13 @@ impl Decoder {
                         continue;
                     }
                 }
+                Step::Leading(event, count) => {
+                    events.push(event);
+                    self.pending.drain(..count.min(self.pending.len()));
+                    if !self.pending.is_empty() {
+                        continue;
+                    }
+                }
             }
             return;
         }
@@ -210,9 +221,9 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 impl Decoder {
     /// Says the terminal has nothing more to read for now.
     ///
-    /// An Esc a read ended on was held in case the rest of a sequence was on
-    /// its way; with nothing come, it was the Esc key. Held any longer, it
-    /// would make the next key that key with Alt. A sequence cut part-way is
+    /// An Esc a read ended on, or two, was held in case the rest of a
+    /// sequence was on its way; with nothing come, it was the Esc key. Held
+    /// any longer, it would make the next key that key with Alt. A sequence cut part-way is
     /// still waited on: only its own end says what it was.
     ///
     /// A paste left open for [`PASTE_QUIET`] is handed over as it stands.
@@ -223,7 +234,8 @@ impl Decoder {
     /// [`Decoder::settle`], at `now`.
     fn settle_at(&mut self, now: std::time::Instant, events: &mut Vec<Event>) {
         self.end_a_stalled_paste(now, events);
-        if self.pasting.is_none() && self.pending == [0x1b] {
+        // Two Escs are the one Esc, as when they are read with nothing after.
+        if self.pasting.is_none() && matches!(self.pending[..], [0x1b] | [0x1b, 0x1b]) {
             self.pending.clear();
             events.push(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
         }
@@ -240,7 +252,9 @@ fn step(buffer: &[u8], more: bool) -> Step {
         [0x1b, b'O'] => Step::Wait,
         [0x1b, b'O', last, ..] => ss3(*last),
         [0x1b, b'[', ..] => csi(buffer),
-        [0x1b, 0x1b, ..] => key(KeyCode::Esc, KeyModifiers::NONE),
+        [0x1b, 0x1b] if more => Step::Wait,
+        [0x1b, 0x1b, b'[' | b'O', ..] => escaped_sequence(&buffer[1..], more),
+        [0x1b, 0x1b, ..] => leading_esc(2),
         [0x1b, rest @ ..] => alt(step(rest, more)),
         [b'\r', ..] => key(KeyCode::Enter, KeyModifiers::NONE),
         // Raw mode is on whenever these bytes are read, and a line feed is
@@ -277,6 +291,33 @@ fn alt(inner: Step) -> Step {
         Step::Invalid(count) => Step::Invalid(count.saturating_add(1)),
         // Alt is held on a key only; any other step is what it was.
         other => other,
+    }
+}
+
+/// The Esc key, made of the first `count` bytes: two Escs read together are
+/// the one Esc, as crossterm reads them.
+fn leading_esc(count: usize) -> Step {
+    Step::Leading(
+        Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+        count,
+    )
+}
+
+/// An Esc in front of a whole escape sequence, as urxvt and PuTTY send Alt
+/// with an arrow, a function key or Shift+Tab: that key with Alt held.
+///
+/// crossterm reads the first two bytes as the Esc key and the rest of the
+/// sequence as typed text, so Alt+Up would stop the turn the Esc key stops
+/// and type `[A` into the prompt. In front of anything that is no key — a
+/// paste, a click, a reply — the Esc is the key pressed just before it, and
+/// what follows is read as itself: read as typed, a paste's line breaks
+/// would each be Enter.
+fn escaped_sequence(sequence: &[u8], more: bool) -> Step {
+    match step(sequence, more) {
+        key @ Step::Event(Event::Key(_)) => alt(key),
+        Step::Wait => Step::Wait,
+        Step::Invalid(count) => Step::Invalid(count.saturating_add(1)),
+        Step::Event(_) | Step::Skip | Step::Paste | Step::Leading(..) => leading_esc(1),
     }
 }
 
@@ -724,6 +765,51 @@ mod tests {
     }
 
     #[test]
+    fn an_esc_in_front_of_a_sequence_is_the_sequence_with_alt_held() {
+        // urxvt and PuTTY send Alt with an arrow, a function key or Shift+Tab
+        // as an Esc in front of the key's own sequence.
+        assert_eq!(
+            read(b"\x1b\x1b[A\x1b\x1bOP\x1b\x1b[5~\x1b\x1b[Z"),
+            [
+                pressed(KeyCode::Up, KeyModifiers::ALT),
+                pressed(KeyCode::F(1), KeyModifiers::ALT),
+                pressed(KeyCode::PageUp, KeyModifiers::ALT),
+                pressed(KeyCode::BackTab, KeyModifiers::SHIFT | KeyModifiers::ALT),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_esc_in_front_of_a_sequence_cut_between_two_reads_is_still_alt() {
+        let mut decoder = Decoder::default();
+        let mut events = Vec::new();
+        decoder.feed(b"\x1b\x1b", true, &mut events);
+        assert_eq!(events, []);
+        decoder.feed(b"[D", false, &mut events);
+        assert_eq!(events, [pressed(KeyCode::Left, KeyModifiers::ALT)]);
+    }
+
+    #[test]
+    fn an_esc_in_front_of_a_paste_or_a_click_is_the_esc_key_and_then_that() {
+        assert_eq!(
+            read(b"\x1b\x1b[200~a\rb\x1b[201~\x1b\x1b[<0;3;4M\x1b\x1bx"),
+            [
+                pressed(KeyCode::Esc, KeyModifiers::NONE),
+                Event::Paste("a\rb".to_owned()),
+                pressed(KeyCode::Esc, KeyModifiers::NONE),
+                Event::Mouse(MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: 2,
+                    row: 3,
+                    modifiers: KeyModifiers::NONE,
+                }),
+                pressed(KeyCode::Esc, KeyModifiers::NONE),
+                pressed(KeyCode::Char('x'), KeyModifiers::NONE),
+            ]
+        );
+    }
+
+    #[test]
     fn a_sequence_cut_between_two_reads_is_read_whole() {
         let mut decoder = Decoder::default();
         let mut events = Vec::new();
@@ -906,6 +992,24 @@ mod tests {
             events,
             [
                 pressed(KeyCode::Char('a'), KeyModifiers::NONE),
+                pressed(KeyCode::Esc, KeyModifiers::NONE),
+                pressed(KeyCode::Char('b'), KeyModifiers::NONE),
+            ]
+        );
+    }
+
+    #[test]
+    fn two_escs_held_for_what_never_came_are_the_esc_key_once_the_terminal_is_quiet() {
+        let mut decoder = Decoder::default();
+        let mut events = Vec::new();
+        decoder.feed(b"\x1b\x1b", true, &mut events);
+        assert_eq!(events, []);
+        decoder.settle(&mut events);
+        assert_eq!(events, [pressed(KeyCode::Esc, KeyModifiers::NONE)]);
+        decoder.feed(b"b", false, &mut events);
+        assert_eq!(
+            events,
+            [
                 pressed(KeyCode::Esc, KeyModifiers::NONE),
                 pressed(KeyCode::Char('b'), KeyModifiers::NONE),
             ]
