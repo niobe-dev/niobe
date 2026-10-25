@@ -10,7 +10,10 @@
 //!
 //! Text goes on the clipboard through the program the platform has for it:
 //! `pbcopy` on macOS, `wl-copy`, `xclip` or `xsel` on Linux, the first that is
-//! installed. A link is opened with `open` on macOS and `xdg-open` on Linux.
+//! installed. A link is opened with `open` on macOS and `xdg-open` on Linux,
+//! and only an `http` or `https` one, or a config file that is a regular file
+//! and not a link as it is handed over: the opener runs what a `file:` link
+//! or a script names and mounts what an `smb:` one does.
 //! Each runs with no terminal — its output and errors dropped — so nothing it
 //! says can land on the screen the shell draws on, and in a process group of
 //! its own, so a browser it starts is not ended with the session's terminal.
@@ -126,6 +129,48 @@ fn platform_opener() -> Program {
     }
 }
 
+/// The schemes a link is handed to the opener in. Every other scheme is
+/// refused, because the opener dispatches on it: `file:` runs an application
+/// or a `.command`, `smb:` and `afp:` mount a share and offer it the
+/// operator's credentials, and an application's own scheme does what that
+/// application lets a link do.
+const SCHEMES: [&str; 2] = ["https://", "http://"];
+
+/// The kind of file the opener is handed: a config file, the only file the
+/// shell offers to open. Every other kind is refused, since the opener runs
+/// a `.command`, `.terminal`, `.fileloc` or `.desktop` file rather than
+/// show it.
+const OPENED_FILES: &str = "toml";
+
+/// Whether `link` may go to the opener: a web link with nothing in it that is
+/// not printable ASCII, so what opens is what was drawn, or the whole path of
+/// a config file that is, now, a regular file and not a link.
+///
+/// The shell hands over only such things, but it looked at a file when the
+/// session started, and the repository can have replaced it since — a branch
+/// switched mid-session can make a committed config file a link to a script.
+/// So it is looked at again here, as it is handed over.
+fn may_open(link: &str) -> Result<(), String> {
+    if !link.chars().all(|c| c.is_ascii() && !c.is_ascii_control()) {
+        return Err("it holds characters a link is not drawn with".to_owned());
+    }
+    if SCHEMES.iter().any(|scheme| link.starts_with(scheme)) {
+        return Ok(());
+    }
+    let path = std::path::Path::new(link);
+    if !path.is_absolute() {
+        return Err("only a web link or a config file is opened".to_owned());
+    }
+    if path.extension().and_then(std::ffi::OsStr::to_str) != Some(OPENED_FILES) {
+        return Err("only a config file is opened".to_owned());
+    }
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_file() => Ok(()),
+        Ok(_) => Err("it is no longer a file, but a link or a directory".to_owned()),
+        Err(error) => Err(format!("it cannot be read: {error}")),
+    }
+}
+
 /// The desktop the session runs on.
 #[derive(Debug)]
 pub struct System {
@@ -191,11 +236,7 @@ impl Desktop for System {
     }
 
     fn open(&mut self, link: &str) -> Result<(), String> {
-        // A link is all the shell hands over, but an argument that starts
-        // with a dash would be read as an option, whatever it came from.
-        if link.starts_with('-') {
-            return Err("it is not a link".to_owned());
-        }
+        may_open(link)?;
         let mut child = self
             .opener
             .start(&[link], false)
@@ -335,6 +376,64 @@ mod tests {
             diagnostics: None,
         };
         assert!(desktop.open("--help").is_err());
+    }
+
+    #[test]
+    fn a_link_in_a_scheme_that_runs_a_program_or_mounts_a_share_is_not_opened() {
+        let scratch = Scratch::new("schemes");
+        let out = scratch.0.join("opened");
+        let mut desktop = System {
+            copiers: Vec::new(),
+            opener: sh(&format!("printf '%s' \"$1\" > '{}'", out.display())),
+            editor: sh("true"),
+            diagnostics: None,
+        };
+        for link in [
+            "file:///Applications/Calculator.app",
+            "smb://attacker.example/share",
+            "afp://attacker.example/share",
+            "vscode://file/etc/passwd",
+            "x-apple.systempreferences:com.apple.preference.security",
+            "ssh://attacker.example",
+            "tel:+15555550100",
+            "javascript:alert(1)",
+            "HTTPS://example.com",
+            "https://example.com/\u{1b}]8;;smb://x\u{7}",
+            "https://example.com/\u{202e}gpj.command",
+            "tools/setup.command",
+            "-a Terminal",
+        ] {
+            assert!(desktop.open(link).is_err(), "{link:?} was handed over");
+        }
+        assert!(!out.exists(), "the opener ran");
+    }
+
+    #[test]
+    fn a_file_is_opened_only_where_it_is_a_config_file_and_not_a_link_when_it_is_asked_for() {
+        let scratch = Scratch::new("files");
+        let out = scratch.0.join("opened");
+        let mut desktop = System {
+            copiers: Vec::new(),
+            opener: sh(&format!("printf '%s' \"$1\" > '{}'", out.display())),
+            editor: sh("true"),
+            diagnostics: None,
+        };
+        let script = scratch.0.join("setup.command");
+        std::fs::write(&script, "#!/bin/sh\n").expect("the scratch directory is writable");
+        assert!(desktop.open(&script.display().to_string()).is_err());
+
+        // Looked at when the session started, a regular file; replaced by a
+        // link to something the opener runs by the time the key is pressed,
+        // as a branch switched mid-session can replace it.
+        let config = scratch.0.join("config.toml");
+        std::os::unix::fs::symlink(&script, &config).expect("a link can be made");
+        assert!(desktop.open(&config.display().to_string()).is_err());
+        assert!(!out.exists(), "the opener ran");
+
+        std::fs::remove_file(&config).expect("the link is removed");
+        std::fs::write(&config, "theme = \"cyber\"\n").expect("the scratch directory is writable");
+        assert_eq!(desktop.open(&config.display().to_string()), Ok(()));
+        assert_eq!(written(&out), config.display().to_string());
     }
 
     fn named(program: &Program) -> (String, Vec<String>) {
