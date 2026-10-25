@@ -839,6 +839,72 @@ fn a_claude_session_read_in_is_a_niobe_session_from_then_on() {
     assert!(out.contains("1 changed — +3 −1"), "{out}");
 }
 
+/// A session read in shows the bill its stored copy does once resumed: the
+/// `cost-state` that closes the fixture's process carries no stamp, and is
+/// stored beside the records around it, so it is folded there too.
+#[test]
+fn a_claude_session_read_in_bills_what_its_stored_copy_does() {
+    let repo = repo();
+    let claude = claude_config_with_the_transcript(repo.path());
+    let here = std::fs::canonicalize(repo.path()).expect("the repository resolves");
+    let flattened: String = here
+        .to_string_lossy()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let transcript = claude
+        .path()
+        .join("projects")
+        .join(flattened)
+        .join(format!("{TRANSCRIPT_SESSION}.jsonl"));
+    let cwd = format!("{:?}", here.to_string_lossy());
+    let mut text = std::fs::read_to_string(&transcript).expect("the transcript is read");
+    // A turn the CLI was killed in after its last `cost-state`, which no
+    // accounting covers.
+    text.push_str(&format!(
+        r#"{{"parentUuid":"m2a","isSidechain":false,"promptId":"p9","type":"user","message":{{"role":"user","content":"and a test"}},"uuid":"u9","timestamp":"2026-09-18T10:00:00.000Z","userType":"external","origin":"cli","cwd":{cwd},"sessionId":"{TRANSCRIPT_SESSION}","version":"2.1.277","gitBranch":"main"}}
+{{"parentUuid":"u9","isSidechain":false,"type":"assistant","message":{{"id":"msg_9","type":"message","role":"assistant","model":"claude-sonnet-5","content":[{{"type":"text","text":"Added the test."}}],"stop_reason":"end_turn","usage":{{"input_tokens":10000,"output_tokens":2000,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"cache_creation":{{"ephemeral_1h_input_tokens":0,"ephemeral_5m_input_tokens":0}},"service_tier":"standard"}}}},"requestId":"req_9","uuid":"m9","timestamp":"2026-09-18T10:00:05.000Z","cwd":{cwd},"sessionId":"{TRANSCRIPT_SESSION}","version":"2.1.277","gitBranch":"main"}}
+"#
+    ));
+    std::fs::write(&transcript, text).expect("the transcript is written");
+    let looked = Command::new(env!("CARGO_BIN_EXE_niobe"))
+        .current_dir(repo.path())
+        .env("XDG_CONFIG_HOME", defines_no_profile(repo.path()))
+        .env("CLAUDE_CONFIG_DIR", claude.path())
+        .args(["--resume", TRANSCRIPT_SESSION])
+        .output()
+        .expect("the niobe binary runs");
+    let looked = String::from_utf8(looked.stdout).expect("stdout is UTF-8");
+
+    let (terminal, slave) = Terminal::open();
+    let mut shell = shell_command(&slave, repo.path())
+        .env("CLAUDE_CONFIG_DIR", claude.path())
+        .args(["--resume", TRANSCRIPT_SESSION])
+        .spawn()
+        .expect("the niobe binary runs");
+    terminal.shows("Added the test.");
+    prompt_recorded(repo.path(), "and a test");
+    // The turn the record stops in is cut as the session opens, which the
+    // catch-up sheet counts, so the first key may be spent closing it.
+    terminal.typed(CTRL_Q);
+    terminal.shows("Since you last looked");
+    terminal.typed(CTRL_Q);
+    let (_, status) = ended(&mut shell);
+    drop(slave);
+    assert!(status.success(), "the imported session ended with {status}");
+
+    let resumed = niobe(repo.path(), &["--resume", "1"]);
+    let resumed = String::from_utf8(resumed.stdout).expect("stdout is UTF-8");
+    let cost = |out: &str| {
+        out.lines()
+            .find(|line| line.starts_with("cost "))
+            .map(str::to_owned)
+            .unwrap_or_else(|| panic!("no cost line in:\n{out}"))
+    };
+    assert_eq!(cost(&looked), cost(&resumed));
+    assert!(cost(&resumed).contains("~$0.09"), "{resumed}");
+}
+
 /// The CLI's id run twice is one conversation: the second run opens the Niobe
 /// session the first made rather than reading the same history in again.
 #[test]

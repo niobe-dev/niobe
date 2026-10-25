@@ -745,27 +745,40 @@ fn say_unsaved(finished: &journal::Finished) {
     );
 }
 
-/// The time each of `events` read from a transcript is stored at: the time
+/// The time each of `events` read from a transcript is dated by: the time
 /// its record was written, so that `niobe --resume` shows the session when it
 /// happened rather than when it was imported.
 ///
-/// The store dates every event, and an event the transcript gave no time —
-/// the CLI's bookkeeping records, what the reader says itself — is stored at
-/// the last recorded time before it, or where none comes before it, the first
-/// after it: beside the records it was read among, which keeps the stored
-/// times in the transcript's order. A transcript that records no time at all
-/// is stored at `now`, as it was read.
-fn stored_at(events: &[(Event, Option<SystemTime>)], now: SystemTime) -> Vec<SystemTime> {
-    let first = events.iter().find_map(|(_, at)| *at).unwrap_or(now);
-    let mut last = first;
+/// An event the transcript gave no time — the CLI's bookkeeping records, such
+/// as the `cost-state` whose usage closes a process, and what the reader says
+/// itself — is dated at the last recorded time before it, or where none comes
+/// before it, the first after it: beside the records it was read among, which
+/// keeps the times in the transcript's order. A transcript that records no
+/// time at all leaves every event undated.
+///
+/// The import folds at these times as well as storing them, so what it shows
+/// is what the stored session shows once resumed: one undated usage record
+/// leaves the whole session's tokens unpriced, and an import that read the
+/// `cost-state` undated billed a session its stored copy priced.
+fn read_at(events: &[(Event, Option<SystemTime>)]) -> Vec<Option<SystemTime>> {
+    let mut last = events.iter().find_map(|(_, at)| *at);
     events
         .iter()
         .map(|(_, at)| {
-            if let Some(at) = at {
+            if at.is_some() {
                 last = *at;
             }
             last
         })
+        .collect()
+}
+
+/// The time each of `events` is stored at: [`read_at`]'s, and `now` where the
+/// transcript records no time at all, since the store dates every event.
+fn stored_at(events: &[(Event, Option<SystemTime>)], now: SystemTime) -> Vec<SystemTime> {
+    read_at(events)
+        .into_iter()
+        .map(|at| at.unwrap_or(now))
         .collect()
 }
 
@@ -801,8 +814,22 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<Option<
         std::env::var_os("HOME"),
     )?;
     let piped = !std::io::stdout().is_terminal();
+    // A piped run stores nothing, so what it shows is dated by the transcript
+    // alone; one carried on is stored, and shown at the times it is stored at.
+    let times: Vec<Option<SystemTime>> = match piped {
+        true => read_at(&events),
+        false => stored_at(&events, SystemTime::now())
+            .into_iter()
+            .map(Some)
+            .collect(),
+    };
     let spent = Spent::of(
-        usage_times(events.iter().map(|(event, at)| (event, *at))),
+        usage_times(
+            events
+                .iter()
+                .map(|(event, _)| event)
+                .zip(times.iter().copied()),
+        ),
         (!piped).then(today),
     );
     let mut app = say_untrusted(
@@ -830,9 +857,11 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<Option<
     }
     // At the times the CLI recorded, as a stored session is resumed at the
     // times the store recorded: an entry the transcript gives no time is
-    // shown with none rather than with the moment it was read.
+    // shown beside the records it was read among, as it is stored, and a
+    // piped look at a transcript that records no time shows none rather
+    // than the moment it was read.
     let clock = niobe_tui::clock::Clock::system();
-    for (event, at) in &events {
+    for ((event, _), at) in events.iter().zip(&times) {
         match at {
             Some(at) => app.apply_at(event, clock.at(*at)),
             None => app.apply(event),
@@ -887,7 +916,8 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<Option<
     let store = repo::open_or_create_store(&root)?;
     app = carry_windows(app, Some(&store), selected.as_ref());
     let mut recorder = Recorder::new(store);
-    for ((event, _), at) in events.iter().zip(stored_at(&events, SystemTime::now())) {
+    for ((event, _), at) in events.iter().zip(&times) {
+        let at = at.unwrap_or_else(SystemTime::now);
         recorder.record_at(event, at).map_err(|e| e.to_string())?;
     }
     // A transcript can stop in the middle of a turn — the CLI was quit or
@@ -2368,6 +2398,26 @@ mod tests {
             stored_at(&events, second(99)),
             vec![second(10), second(10), second(10), second(12), second(12)]
         );
+    }
+
+    #[test]
+    fn an_imported_event_with_no_time_is_read_where_it_is_stored_and_none_is_made_up() {
+        let second = |s: u64| SystemTime::UNIX_EPOCH + Duration::from_secs(s);
+        let dated = vec![
+            (Event::TurnEnded, None),
+            (Event::TurnEnded, Some(second(10))),
+            (Event::TurnEnded, None),
+        ];
+        assert_eq!(
+            read_at(&dated),
+            stored_at(&dated, second(99))
+                .into_iter()
+                .map(Some)
+                .collect::<Vec<_>>()
+        );
+
+        let undated = vec![(Event::TurnEnded, None), (Event::TurnEnded, None)];
+        assert_eq!(read_at(&undated), vec![None, None]);
     }
 
     #[test]

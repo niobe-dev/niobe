@@ -641,6 +641,55 @@ fn a_claude_session_folds_into_the_history_and_the_bill_the_cli_recorded() {
     assert!(!setup.repo.path().join(".niobe").exists());
 }
 
+/// A turn the CLI was killed in, after the fixture's last `cost-state`: no
+/// accounting covers it, so its tokens are valued at the table's rates.
+fn an_unaccounted_turn(cwd: &Path) -> String {
+    let cwd = format!("{:?}", cwd.to_string_lossy());
+    format!(
+        r#"{{"parentUuid":"m2a","isSidechain":false,"promptId":"p9","type":"user","message":{{"role":"user","content":"and a test"}},"uuid":"u9","timestamp":"2026-09-18T10:00:00.000Z","userType":"external","origin":"cli","cwd":{cwd},"sessionId":"{TRANSCRIPT_SESSION}","version":"2.1.277","gitBranch":"main"}}
+{{"parentUuid":"u9","isSidechain":false,"type":"assistant","message":{{"id":"msg_9","type":"message","role":"assistant","model":"claude-sonnet-5","content":[{{"type":"text","text":"Added."}}],"stop_reason":"end_turn","usage":{{"input_tokens":10000,"output_tokens":2000,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"cache_creation":{{"ephemeral_1h_input_tokens":0,"ephemeral_5m_input_tokens":0}},"service_tier":"standard"}}}},"requestId":"req_9","uuid":"m9","timestamp":"2026-09-18T10:00:05.000Z","cwd":{cwd},"sessionId":"{TRANSCRIPT_SESSION}","version":"2.1.277","gitBranch":"main"}}
+"#
+    )
+}
+
+/// The `cost-state` record carries no stamp, and the usage it reports for a
+/// model no message named — the small model the CLI titles with — is read
+/// beside the records it was written among, as the store keeps it once the
+/// session is read in. Read as undated, it made the whole session undated, so
+/// a turn no accounting covers went unpriced on the import and was priced
+/// once the stored session was resumed: one session, two bills.
+#[test]
+fn a_claude_session_values_what_no_accounting_covers_as_its_stored_copy_does() {
+    let setup = Configured::new("", "");
+    let claude = claude_config_with_the_transcript(setup.repo.path());
+    let here = std::fs::canonicalize(setup.repo.path()).expect("the repository resolves");
+    let flattened: String = here
+        .to_string_lossy()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let transcript = claude
+        .path()
+        .join("projects")
+        .join(flattened)
+        .join(format!("{TRANSCRIPT_SESSION}.jsonl"));
+    let mut text = std::fs::read_to_string(&transcript).expect("the transcript is read");
+    text.push_str(&an_unaccounted_turn(&here));
+    std::fs::write(&transcript, text).expect("the transcript is written");
+
+    let output = setup.run_with_claude_sessions(claude.path(), &["--resume", TRANSCRIPT_SESSION]);
+    let out = stdout(&output);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    // The CLI's $0.051, and the unaccounted turn at claude-sonnet-5's rates
+    // from 30 June 2026, $2.00 in and $10.00 out per million: 10,000 in is
+    // $0.02 and 2,000 out is $0.02, so $0.091 in all.
+    assert!(
+        out.contains("cost        ~$0.09 — 1 of 3 usage records no reported cost covers"),
+        "the unaccounted turn was not valued:\n{out}"
+    );
+}
+
 #[test]
 fn a_claude_session_another_directory_ran_is_neither_listed_nor_carried_on_here() {
     let setup = Configured::new("", "");
