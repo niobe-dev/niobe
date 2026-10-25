@@ -397,6 +397,17 @@ impl Store {
         Ok(Self { conn })
     }
 
+    /// Opens a transaction holding the store's write lock, which what is
+    /// written through this store until it commits joins, and which a drop
+    /// before then rolls back. Immediate, so that a store another process
+    /// holds is waited out, and refused, before anything is written.
+    pub(crate) fn transaction(&self) -> Result<rusqlite::Transaction<'_>, StoreError> {
+        Ok(rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            TransactionBehavior::Immediate,
+        )?)
+    }
+
     /// Starts a new, empty session.
     pub fn create_session(&self) -> Result<SessionId, StoreError> {
         self.conn.execute(
@@ -846,6 +857,73 @@ mod tests {
             .map(|stored| stored.seq)
             .collect();
         assert_eq!(seqs, (1..=next).collect::<Vec<_>>());
+    }
+
+    /// A session read in whole — an import of a transcript — that the store
+    /// stops taking part way leaves nothing behind: kept, the part would be
+    /// the session the conversation is carried on in from then on, its first
+    /// prompts and their tokens gone from every figure it shows.
+    #[test]
+    fn events_recorded_together_that_the_store_stops_taking_leave_no_session_behind() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let path = dir.path().join("sessions.db");
+        let store = Store::open(&path).expect("a store opens");
+        let pages: i64 = store
+            .conn
+            .pragma_query_value(None, "page_count", |row| row.get(0))
+            .expect("the page count reads");
+        store
+            .conn
+            .pragma_update(None, "max_page_count", pages)
+            .expect("the page limit is set");
+        let events: Vec<Event> = (0..100)
+            .map(|i| Event::UserMessage {
+                text: format!("{i} {}", "x".repeat(2_000)),
+            })
+            .collect();
+
+        let mut recorder = crate::Recorder::new(store);
+        let refused = recorder.record_all_at(events.iter().map(|e| (e, SystemTime::now())));
+
+        assert!(
+            matches!(&refused, Err(StoreError::Sqlite(e)) if e.sqlite_error_code() == Some(rusqlite::ErrorCode::DiskFull)),
+            "{refused:?}"
+        );
+        assert_eq!(recorder.session(), None);
+        let sessions = recorder.store().sessions().expect("the sessions list");
+        assert!(sessions.is_empty(), "{sessions:?}");
+        let left: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("the directory lists")
+            .map(|entry| entry.expect("an entry reads").file_name())
+            .filter(|name| name.to_string_lossy().contains("-open-"))
+            .collect();
+        assert!(left.is_empty(), "a hold was left behind: {left:?}");
+
+        recorder
+            .store()
+            .conn
+            .pragma_update(None, "max_page_count", 1_000_000)
+            .expect("the page limit is lifted");
+        recorder
+            .record_all_at(events.iter().map(|e| (e, SystemTime::now())))
+            .expect("the events are taken once there is room");
+        let session = recorder.session().expect("a session was opened");
+        assert_eq!(
+            recorder
+                .store()
+                .events(session)
+                .expect("the session loads")
+                .len(),
+            events.len()
+        );
+        assert_eq!(
+            recorder
+                .store()
+                .sessions()
+                .expect("the sessions list")
+                .len(),
+            1
+        );
     }
 
     /// Every step of how SQLite plans `sql`, as `EXPLAIN QUERY PLAN` words it.

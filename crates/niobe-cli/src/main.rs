@@ -916,10 +916,14 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<Option<
     let store = repo::open_or_create_store(&root)?;
     app = carry_windows(app, Some(&store), selected.as_ref());
     let mut recorder = Recorder::new(store);
-    for ((event, _), at) in events.iter().zip(&times) {
-        let at = at.unwrap_or_else(SystemTime::now);
-        recorder.record_at(event, at).map_err(|e| e.to_string())?;
-    }
+    recorder
+        .record_all_at(
+            events
+                .iter()
+                .zip(&times)
+                .map(|((event, _), at)| (event, at.unwrap_or_else(SystemTime::now))),
+        )
+        .map_err(|e| e.to_string())?;
     // A transcript can stop in the middle of a turn — the CLI was quit or
     // killed under it — and the turn is closed there, as a resumed one is.
     app.leave();

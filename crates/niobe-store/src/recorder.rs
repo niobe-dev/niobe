@@ -86,6 +86,39 @@ impl Recorder {
         self.store.append_at(session, event, at)
     }
 
+    /// Appends `events`, each dated as it says, all of them or none: a
+    /// session read in whole, as an import of a transcript is.
+    ///
+    /// One by one, a store that stopped taking them part way — full, or held
+    /// by another process past the busy timeout — would keep the first part
+    /// as a session of its own, and that part is then the one the
+    /// conversation is carried on in, short of everything after it. Where
+    /// this opens the session, a refusal leaves no session either, and no
+    /// hold: the next try opens one afresh.
+    pub fn record_all_at<'a>(
+        &mut self,
+        events: impl IntoIterator<Item = (&'a Event, SystemTime)>,
+    ) -> Result<(), StoreError> {
+        let transaction = self.store.transaction()?;
+        let session = match self.session {
+            Some(session) => session,
+            None => self.store.create_session()?,
+        };
+        let held = match self.held {
+            Some(_) => None,
+            None => Some(Held::take(&self.store, session)?),
+        };
+        for (event, at) in events {
+            self.store.append_at(session, event, at)?;
+        }
+        transaction.commit()?;
+        self.session = Some(session);
+        if held.is_some() {
+            self.held = held;
+        }
+        Ok(())
+    }
+
     /// The session, opened if it is not yet and held if it is not yet.
     fn held_session(&mut self) -> Result<SessionId, StoreError> {
         let session = match self.session {
