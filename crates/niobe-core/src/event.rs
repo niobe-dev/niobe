@@ -1238,6 +1238,17 @@ pub enum Event {
         message: String,
     },
 
+    /// The plan's usage limit refused the session's request, in the backend's
+    /// words, which say when the window starts over. Shown as a notice is:
+    /// the operator did nothing wrong and the session goes on once the window
+    /// does. Apart from [`Event::Notice`] because the turn it ends did not do
+    /// its work, which is what a caller of a headless turn has to be told,
+    /// and a notice's words are no way to tell it.
+    LimitReached {
+        /// The line, as it will be shown.
+        message: String,
+    },
+
     /// The operator pressed a key after something a catch-up counts had
     /// happened: what the next one is counted from ([`crate::catch_up`]),
     /// kept with the session so that one taken up again tells them what

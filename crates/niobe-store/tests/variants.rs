@@ -254,6 +254,9 @@ fn one_of_each() -> Vec<Event> {
         Event::Notice {
             message: text("retrying"),
         },
+        Event::LimitReached {
+            message: text("You've hit your session limit · resets 11:10pm"),
+        },
         Event::Looked,
         Event::Error {
             message: text("gone"),
@@ -302,13 +305,14 @@ fn every_variant_is_listed() {
             Event::Models { .. } => "models",
             Event::TurnTotalDiffers { .. } => "turn_total_differs",
             Event::Notice { .. } => "notice",
+            Event::LimitReached { .. } => "limit_reached",
             Event::Looked => "looked",
             Event::Error { .. } => "error",
         };
         assert!(!seen.contains(&name), "{name} is listed twice");
         seen.push(name);
     }
-    assert_eq!(seen.len(), 37, "every variant has one value: {seen:?}");
+    assert_eq!(seen.len(), 38, "every variant has one value: {seen:?}");
 }
 
 #[test]

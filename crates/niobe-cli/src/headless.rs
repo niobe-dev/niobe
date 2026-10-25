@@ -12,9 +12,10 @@
 //!
 //! What a caller needs is whether to trust the run, so the outcome is one of
 //! three, each with its own exit status: the turn finished, it stopped on the
-//! budget, or it failed. A turn failed where it ended on an error; a warning
-//! the turn went on from, such as a request the backend retried, does not
-//! fail it. A budget stop is read off the figures — the turn ended in an
+//! budget, or it failed. A turn failed where it ended on an error, or where
+//! the plan's usage limit refused its request, which the shell shows as a
+//! notice rather than an error; a warning the turn went on from, such as a
+//! request the backend retried, does not fail it. A budget stop is read off the figures — the turn ended in an
 //! error with as much spent as the budget allowed — rather than off the
 //! backend's wording of it.
 //!
@@ -117,6 +118,7 @@ pub fn run(
     let mut state = SessionState::new();
     let mut reply = String::new();
     let mut failure: Option<String> = None;
+    let mut limited: Option<String> = None;
 
     let asked = Event::UserMessage {
         text: prompt.to_owned(),
@@ -182,10 +184,19 @@ pub fn run(
                     failure = Some(message.clone());
                     None
                 }
+                // The plan refused the request: whatever the turn does after,
+                // it did not do what it was asked, however it ends.
+                Event::LimitReached { message } => {
+                    limited.get_or_insert_with(|| message.clone());
+                    None
+                }
                 Event::SessionLeft => Some(Outcome::Failed(
                     "the backend left before the turn ended".to_owned(),
                 )),
-                Event::TurnEnded => Some(ended(failure.take(), &state, budget)),
+                Event::TurnEnded => Some(match limited.take() {
+                    Some(why) => Outcome::Failed(why),
+                    None => ended(failure.take(), &state, budget),
+                }),
                 _ => None,
             };
             // A warning is the turn's failure only where the turn ends on it:
@@ -644,6 +655,22 @@ mod tests {
             turn.outcome,
             Outcome::Failed("the turn ended as `error_during_execution`: overloaded".to_owned())
         );
+    }
+
+    #[test]
+    fn a_turn_the_plans_usage_limit_refused_failed_in_the_backends_words() {
+        let words = "You've hit your session limit · resets 11:10pm (Europe/Berlin)";
+        let (turn, ..) = ran(
+            vec![
+                vec![Event::LimitReached {
+                    message: words.to_owned(),
+                }],
+                vec![cost(0.0), Event::TurnEnded],
+            ],
+            &Allowlist::new(),
+            None,
+        );
+        assert_eq!(turn.outcome, Outcome::Failed(words.to_owned()));
     }
 
     #[test]

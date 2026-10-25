@@ -2312,6 +2312,7 @@ impl App {
             | Event::TurnTotalDiffers { .. }
             | Event::Looked
             | Event::Notice { .. }
+            | Event::LimitReached { .. }
             | Event::Error { .. } => None,
         }
     }
@@ -2826,7 +2827,9 @@ impl App {
                 });
             }
 
-            Event::Notice { message } => self.push(Entry {
+            // The plan's limit reads as any other notice: the operator did
+            // nothing wrong, and the session goes on once the window does.
+            Event::Notice { message } | Event::LimitReached { message } => self.push(Entry {
                 attention: Attention::Routine,
                 kind: EntryKind::Notice,
                 head: self.agent_name(),
@@ -11271,6 +11274,22 @@ mod tests {
         assert!(only.body.contains("new session"), "{}", only.body);
         assert_eq!(app.session().errors(), 0);
         assert!(app.session().turns().is_empty());
+    }
+
+    #[test]
+    fn the_plans_usage_limit_reads_as_a_notice_and_counts_as_no_error() {
+        let mut app = app();
+        app.apply(&Event::LimitReached {
+            message: "You've hit your session limit · resets 11:10pm".to_owned(),
+        });
+
+        let [only] = app.entries() else {
+            panic!("the limit is one entry: {:?}", app.entries());
+        };
+        assert_eq!(only.kind, EntryKind::Notice);
+        assert_eq!(only.attention, Attention::Routine);
+        assert_eq!(only.body, "You've hit your session limit · resets 11:10pm");
+        assert_eq!(app.session().errors(), 0);
     }
 
     #[test]

@@ -80,6 +80,7 @@ impl Attention {
             | Event::McpServers { .. }
             | Event::Models { .. }
             | Event::Notice { .. }
+            | Event::LimitReached { .. }
             | Event::Looked => Self::Routine,
         }
     }

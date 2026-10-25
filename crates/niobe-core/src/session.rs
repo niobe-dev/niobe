@@ -1015,7 +1015,7 @@ impl SessionState {
 
             // A notice changes nothing that is counted: it explains the
             // numbers around it, and the transcript is where it is read.
-            Event::Notice { .. } => {}
+            Event::Notice { .. } | Event::LimitReached { .. } => {}
             // Passed over in `apply`, before the fold.
             Event::Looked => {}
             // Kept apart rather than added to the totals: where the backend

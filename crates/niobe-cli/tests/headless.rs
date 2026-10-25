@@ -263,6 +263,40 @@ fn a_budget_on_a_plan_is_refused_before_anything_starts() {
     assert!(!Path::new(&setup.repo().join(".niobe").join("sessions.db")).exists());
 }
 
+/// A `claude` on a plan whose window is spent: the request is refused with
+/// the CLI's own message, and the turn's `result` repeats the words, as the
+/// transcripts of 2.1.292 hold them.
+const LIMITED_CLAUDE: &str = "#!/bin/sh\n\
+    read -r first\n\
+    read -r turn\n\
+    printf '%s\\n' '{\"type\":\"assistant\",\"parent_tool_use_id\":null,\"error\":\"rate_limit\",\"apiError\":\"usage_limit_reached\",\"message\":{\"model\":\"<synthetic>\",\"id\":\"m-limit\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"You\\u0027ve hit your session limit \\u00b7 resets 11:10pm (Europe/Berlin)\"}],\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}}'\n\
+    printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"result\":\"You\\u0027ve hit your session limit \\u00b7 resets 11:10pm (Europe/Berlin)\",\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}'\n\
+    while read -r line; do :; done\n";
+
+#[test]
+fn a_turn_the_plans_usage_limit_refused_fails_with_the_clis_words() {
+    let plan =
+        "default_profile = \"max\"\n\n[profiles.max]\nbackend = \"claude\"\nbilling = \"plan\"\n";
+    let setup = Setup::new(LIMITED_CLAUDE, plan);
+    let output = setup.run(&["-p", "fix the failing test", "--json"]);
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "a turn the plan refused did no work: {}",
+        text(&output.stderr)
+    );
+    let printed = json(&output);
+    assert_eq!(printed["outcome"], "failed", "{printed:#}");
+    assert!(
+        printed["reason"]
+            .as_str()
+            .is_some_and(|why| why.contains("hit your session limit")),
+        "{printed:#}"
+    );
+    assert!(schema::refusals("print.schema.json", &printed).is_empty());
+}
+
 /// A `claude` whose reply holds a right-to-left mark, as Hebrew or Arabic
 /// prose does, a DEL and a C1 control.
 const MARKED_CLAUDE: &str = "#!/bin/sh\n\

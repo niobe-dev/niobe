@@ -716,6 +716,7 @@ fn send_produced(
             | SessionEvent::Models { .. }
             | SessionEvent::TurnTotalDiffers { .. }
             | SessionEvent::Notice { .. }
+            | SessionEvent::LimitReached { .. }
             | SessionEvent::Error { .. } => {}
         }
     }

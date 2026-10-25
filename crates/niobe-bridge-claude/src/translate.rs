@@ -1826,7 +1826,7 @@ impl Translator {
         if self.usage_limit.is_some() {
             return;
         }
-        out.push(Event::Notice {
+        out.push(Event::LimitReached {
             message: words.clone(),
         });
         self.usage_limit = Some(words);
@@ -2583,7 +2583,7 @@ impl Translator {
             // so already when the CLI sent the message; a result that repeats
             // it as a failure would show the same event as an error.
             if shown_limit.is_none() {
-                out.push(Event::Notice { message: words });
+                out.push(Event::LimitReached { message: words });
             }
         } else if outcome.is_error || outcome.subtype.as_deref() != Some("success") {
             // `result` carries the reason for most failures and `errors` for
@@ -5985,6 +5985,16 @@ mod tests {
             .collect()
     }
 
+    fn limits(events: &[Event]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                Event::LimitReached { message } => Some(message.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
     #[test]
     fn a_system_subtype_the_bridge_does_not_know_is_a_notice_and_not_an_error() {
         let mut translator = translator();
@@ -7272,17 +7282,19 @@ mod tests {
     }
 
     #[test]
-    fn a_usage_limit_hit_is_one_notice_and_no_error() {
+    fn a_usage_limit_hit_is_said_once_and_is_no_error() {
         let mut translator = translator();
 
         let mut events = translator.line(&limit_message(None));
         events.extend(translator.line(&limit_result()));
 
-        let said: Vec<_> = notices(&events)
-            .into_iter()
-            .filter(|message| message.contains("session limit"))
-            .collect();
-        assert_eq!(said, [LIMIT_WORDS.to_owned()], "{events:?}");
+        assert_eq!(limits(&events), [LIMIT_WORDS.to_owned()], "{events:?}");
+        assert!(
+            !notices(&events)
+                .iter()
+                .any(|message| message.contains("session limit")),
+            "the limit was said again as a notice: {events:?}"
+        );
         assert!(warnings(&events).is_empty(), "{events:?}");
         assert!(
             !events
@@ -7297,12 +7309,13 @@ mod tests {
     }
 
     #[test]
-    fn a_limit_hit_the_cli_names_only_in_the_result_is_still_one_notice() {
+    fn a_limit_hit_the_cli_names_only_in_the_result_is_still_said_once() {
         let mut translator = translator();
 
         let events = translator.line(&limit_result());
 
-        assert_eq!(notices(&events), [LIMIT_WORDS.to_owned()], "{events:?}");
+        assert_eq!(limits(&events), [LIMIT_WORDS.to_owned()], "{events:?}");
+        assert!(notices(&events).is_empty(), "{events:?}");
         assert!(warnings(&events).is_empty(), "{events:?}");
     }
 
@@ -7315,6 +7328,7 @@ mod tests {
         events.extend(translator.line(&result("toolu_a", &format!("\"{LIMIT_WORDS}\""), true)));
 
         assert!(notices(&events).is_empty(), "{events:?}");
+        assert!(limits(&events).is_empty(), "{events:?}");
         assert!(
             !events
                 .iter()
