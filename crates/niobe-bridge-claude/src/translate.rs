@@ -1274,6 +1274,18 @@ impl Translator {
         Event::McpServers { servers: listed }
     }
 
+    /// Whether `spelt` is the mode the CLI is already known to be in: the one
+    /// a change it took put it in, or else the one it last reported. A change
+    /// taken since the last report is what the CLI is in, so a `status`
+    /// naming the mode of that report again — the one a plan approved after
+    /// a switch to plan goes back to — is a move, not a repeat.
+    fn in_mode(&self, spelt: &str) -> bool {
+        match self.taken_mode {
+            Some(taken) => read_mode(spelt) == Some(taken),
+            None => self.mode.as_deref() == Some(spelt),
+        }
+    }
+
     /// Reports `spelt`, the mode the CLI says it now gates calls in.
     fn reported_mode(&mut self, spelt: String, out: &mut Vec<Event>) {
         match read_mode(&spelt) {
@@ -1353,7 +1365,7 @@ impl Translator {
                 // approves a plan, back to the mode it was in before, and a
                 // `status` mid-turn is the only place it says so.
                 if let Some(mode) = system.permission_mode
-                    && self.mode.as_ref() != Some(&mode)
+                    && !self.in_mode(&mode)
                 {
                     self.reported_mode(mode, out);
                 }
@@ -6944,6 +6956,35 @@ mod tests {
             .line(r#"{"type":"system","subtype":"status","status":null,"permissionMode":"auto"}"#);
 
         assert_eq!(events, [Event::ModeSelected { mode: Mode::Auto }]);
+    }
+
+    #[test]
+    fn a_plan_approved_after_a_mid_turn_switch_to_plan_takes_the_session_out_of_plan() {
+        let mut translator = Translator::new("max");
+        let mut events =
+            translator.line(r#"{"type":"system","subtype":"init","permissionMode":"auto"}"#);
+        // The operator moves the session to plan while the turn runs, and the
+        // CLI takes it: no `init` comes before the turn ends to say so.
+        translator.asked_for_mode("niobe-1", Mode::Plan);
+        events.push(Event::ModeSelected { mode: Mode::Plan });
+        events.extend(translator.line(
+            r#"{"type":"control_response","response":{"subtype":"success","request_id":"niobe-1","response":{"mode":"plan"}}}"#,
+        ));
+
+        // The plan is approved, and the CLI goes back to the mode it was in
+        // before plan, which is the one its last `init` named.
+        events.extend(
+            translator.line(
+                r#"{"type":"system","subtype":"status","status":null,"permissionMode":"auto"}"#,
+            ),
+        );
+
+        let state = niobe_core::session::SessionState::replay(&events);
+        assert_eq!(
+            state.mode(),
+            Some(Mode::Auto),
+            "the shell still shows plan while the CLI runs calls unasked: {events:?}"
+        );
     }
 
     #[test]
