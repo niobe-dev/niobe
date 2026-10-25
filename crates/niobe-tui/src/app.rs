@@ -1780,10 +1780,16 @@ enum Outside {
     Changed(WorkingFile),
     /// Put back as the last commit holds it.
     Restored(String),
+    /// Gone from the tree, where the last commit holds no such file to put
+    /// back: a file git did not track, or any file of a repository with no
+    /// commit yet. A tracked file that is deleted stays on the list, with its
+    /// lines removed, so it is never this.
+    Deleted(String),
 }
 
 /// The files whose counts differ between `before` and `after` — changed,
-/// newly changed, or put back as committed — that no path in `edited` names.
+/// newly changed, put back as committed, or deleted where nothing was
+/// committed to put back — that no path in `edited` names.
 fn changed_outside(
     before: &[WorkingFile],
     after: &[WorkingFile],
@@ -1802,11 +1808,14 @@ fn changed_outside(
         .filter(|file| unedited(&file.path))
         .cloned()
         .map(Outside::Changed);
-    let restored = before
+    let left = before
         .iter()
         .filter(|file| !now.contains(file.path.as_str()) && unedited(&file.path))
-        .map(|file| Outside::Restored(file.path.clone()));
-    moved.chain(restored).collect()
+        .map(|file| match file.new {
+            true => Outside::Deleted(file.path.clone()),
+            false => Outside::Restored(file.path.clone()),
+        });
+    moved.chain(left).collect()
 }
 
 /// Whether the repository's `listed` path and the path an edit call
@@ -4155,6 +4164,7 @@ impl App {
                     )
                 }
                 Outside::Restored(path) => format!("{path} (put back as committed)"),
+                Outside::Deleted(path) => format!("{path} (deleted)"),
             })
             .collect();
         let rest = changed.len().saturating_sub(OUTSIDE_LISTED);
@@ -13557,6 +13567,44 @@ mod tests {
         assert_eq!(said.len(), 1, "{said:?}");
         assert!(
             said[0].body.contains("crates/net/Cargo.toml +1 −0"),
+            "{}",
+            said[0].body
+        );
+    }
+
+    /// A file the last commit does not hold cannot be put back as it holds
+    /// it: gone from the tree, it was deleted. A tracked file that left the
+    /// list was put back; one that was deleted stays on it, as git counts it.
+    #[test]
+    fn a_new_file_a_shell_command_removed_is_named_deleted_not_put_back() {
+        let start = Instant::now();
+        let at = |ms| start + Duration::from_millis(ms);
+        let mut app = app();
+        app.apply(&Event::UserMessage {
+            text: "tidy up".to_owned(),
+        });
+        app.settle_tree(at(0));
+        let scratch = WorkingFile {
+            new: true,
+            ..file("scratch.txt", 12, 0)
+        };
+        app.set_repo(tree_read(at(1), &[scratch, file("src/lib.rs", 3, 1)]));
+        app.settle_tree(at(2));
+        app.apply(&Event::TurnEnded);
+        app.settle_tree(at(3));
+        app.set_repo(tree_read(at(4), &[]));
+        app.settle_tree(at(5));
+        app.settle_tree(at(6));
+
+        let said = outside(&app);
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(
+            said[0].body.contains("scratch.txt (deleted)"),
+            "{}",
+            said[0].body
+        );
+        assert!(
+            said[0].body.contains("src/lib.rs (put back as committed)"),
             "{}",
             said[0].body
         );
