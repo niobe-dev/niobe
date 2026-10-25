@@ -1938,13 +1938,6 @@ const UNATTACHED_ANSWER_HINT: &str = "Not answered: this session is not attached
 const LEFT_BANG_FOR_HISTORY_HINT: &str =
     "Left ! mode: a prompt from the history goes to the agent, not to sh";
 
-/// What the bar says when the model was asked to change, with the picker or
-/// as `/model` and a name, in a session no backend is attached to: a
-/// replayed record lists the models and the commands its backend offered,
-/// and nothing now would take a choice among them.
-const NO_MODEL_TO_CHANGE_HINT: &str =
-    "F4 Model — this session is not attached to a backend, so there is no model to change";
-
 /// What the bar says when Enter was refused because an image for the prompt
 /// is still being read.
 const IMAGE_STILL_READING_HINT: &str =
@@ -4447,15 +4440,15 @@ impl App {
         // The models a replayed record lists are the ones its backend offered,
         // and nothing now would take a choice among them.
         if !self.attached {
-            self.hint = Some(NO_MODEL_TO_CHANGE_HINT.to_owned());
+            self.hint = Some(self.no_model_to_change_hint());
             return;
         }
         if options.is_empty() {
-            self.hint = Some(
-                "F4 Model — the backend has not listed its models yet, and this profile names \
-                 none; add `models = [\"…\"]` to it in the config"
-                    .to_owned(),
-            );
+            self.hint = Some(format!(
+                "{} Model — the backend has not listed its models yet, and this profile names \
+                 none; add `models = [\"…\"]` to it in the config",
+                self.key_for(niobe_core::Bindable::Model)
+            ));
             return;
         }
 
@@ -5693,11 +5686,11 @@ impl App {
         let before = self.session.mode();
         let mode = before.unwrap_or(Mode::Ask).next();
         if mode == Mode::Auto && self.model_cannot_run_auto() {
-            self.hint = Some(
-                "Shift+Tab — this model cannot run auto mode; pick another with F8 or stay \
-                 in this mode"
-                    .to_owned(),
-            );
+            self.hint = Some(format!(
+                "Shift+Tab — this model cannot run auto mode; pick another with {} or stay \
+                 in this mode",
+                self.key_for(niobe_core::Bindable::Model)
+            ));
             return;
         }
         if self.attached {
@@ -5996,6 +5989,25 @@ impl App {
             })
             .collect::<Vec<_>>()
             .join("  ")
+    }
+
+    /// What the bar says when the model was asked to change, with the picker
+    /// or as `/model` and a name, in a session no backend is attached to: a
+    /// replayed record lists the models and the commands its backend offered,
+    /// and nothing now would take a choice among them.
+    fn no_model_to_change_hint(&self) -> String {
+        format!(
+            "{} Model — this session is not attached to a backend, so there is no model to change",
+            self.key_for(niobe_core::Bindable::Model)
+        )
+    }
+
+    /// The key that does `action`, as a hint names it: the chord a config
+    /// gave it, or else its own F-key.
+    fn key_for(&self, action: niobe_core::Bindable) -> String {
+        self.keymap
+            .chord_of(action)
+            .map_or_else(|| format!("F{}", action.slot()), |chord| chord.to_string())
     }
 
     /// The key as the action it is bound to, where it is a chord that was
@@ -8488,7 +8500,7 @@ impl App {
         }
         if let Some(model) = crate::slash::model_named(&text, self.session.commands()) {
             if !self.attached {
-                self.hint = Some(NO_MODEL_TO_CHANGE_HINT.to_owned());
+                self.hint = Some(self.no_model_to_change_hint());
                 return;
             }
             let draft = self.take_composer_for_the_shell();
@@ -13315,6 +13327,40 @@ mod tests {
             "{:?}",
             app.hint()
         );
+    }
+
+    #[test]
+    fn the_key_a_refused_auto_mode_names_opens_the_model_list() {
+        use niobe_core::{Bindable, Chord, Keymap};
+        for (keymap, named, pressed) in [
+            (Keymap::default(), "F4", key(KeyCode::F(4))),
+            (
+                Keymap::new([(Bindable::Model, Chord::Ctrl('l'))]).expect("ctrl+l is free"),
+                "ctrl+l",
+                KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL),
+            ),
+        ] {
+            let mut app = under_a_profile(&[]).attached().with_keymap(keymap);
+            app.apply(&without_auto("opus"));
+            app.apply(&Event::ModelSelected {
+                model: "opus".to_owned(),
+            });
+            app.apply(&Event::ModeSelected { mode: Mode::Ask });
+
+            app.on_key(back_tab());
+
+            let hint = app.hint().unwrap_or_default().to_owned();
+            assert!(
+                hint.contains(&format!("pick another with {named} ")),
+                "{named}: {hint}"
+            );
+            app.on_key(pressed);
+            assert_eq!(
+                app.picking().map(|picker| picker.purpose),
+                Some(Purpose::Model),
+                "{named} did not open the model list"
+            );
+        }
     }
 
     #[test]
