@@ -7774,6 +7774,51 @@ mod tests {
         );
     }
 
+    /// A plan's windows are the account's, and the profile names the account:
+    /// a session recorded under one profile and resumed under another runs on
+    /// another account, whose levels its record says nothing of.
+    #[test]
+    fn a_session_resumed_under_another_profile_draws_none_of_the_windows_it_recorded() {
+        let under = |name: &str| crate::app::SelectedProfile {
+            name: name.to_owned(),
+            backend: Backend::Claude,
+            models: Vec::new(),
+            billing: None,
+        };
+        let recorded = |profile: &str| {
+            let clock = crate::clock::Clock::fixed(0).expect("UTC is an offset");
+            let mut app = App::new(crate::app::Repo {
+                name: "niobe".to_owned(),
+                branch: None,
+                ..Default::default()
+            })
+            .with_clock(clock.clone());
+            let at = clock.at(std::time::UNIX_EPOCH + std::time::Duration::from_secs(A_FRIDAY));
+            let meta = niobe_core::event::Event::SessionMeta(SessionMeta {
+                backend: Backend::Claude,
+                profile: "max".to_owned(),
+                model: "claude-opus-5".to_owned(),
+                backend_session: None,
+            });
+            let windows = niobe_core::event::Event::UsageWindows(UsageWindows {
+                five_hour: Some(window(0.83, None)),
+                seven_day: None,
+                using_overage: false,
+                overage: niobe_core::event::Overage::Unreported,
+            });
+            app.extend_at([(&meta, at), (&windows, at)]);
+            app.resumed();
+            app.with_profile(under(profile)).attached()
+        };
+
+        assert_eq!(recorded("company").plan_windows(), PlanWindows::Awaited);
+        assert!(
+            matches!(recorded("max").plan_windows(), PlanWindows::Carried { .. }),
+            "{:?}",
+            recorded("max").plan_windows()
+        );
+    }
+
     /// Nothing recorded and nothing reported yet: the rows are there, with no
     /// figure, and say when one comes rather than leaving the pane blank.
     #[test]

@@ -1311,6 +1311,10 @@ pub struct App {
     /// record rather than reported since it was taken up again: a level from
     /// days ago, which is drawn dated as a carried one is.
     windows_recorded: bool,
+    /// The profile in force when the windows the fold holds were reported,
+    /// where the session had named one: a plan's windows are the account's,
+    /// and a session resumed under another profile runs on another account.
+    windows_profile: Option<String>,
     theme: Theme,
     /// How many colours the terminal draws, which every theme is drawn at.
     depth: Depth,
@@ -1991,6 +1995,7 @@ impl App {
             carried_windows: None,
             windows_at: None,
             windows_recorded: false,
+            windows_profile: None,
             theme,
             depth: Depth::default(),
             keymap: niobe_core::Keymap::default(),
@@ -2172,6 +2177,11 @@ impl App {
         if matches!(event, Event::UsageWindows(_)) {
             self.windows_at = self.at;
             self.windows_recorded = false;
+            self.windows_profile = self
+                .session
+                .meta()
+                .map(|meta| meta.profile.clone())
+                .filter(|profile| !profile.is_empty());
         }
         // A session left is recorded when the process stopped, or when the
         // session is taken up again after one was killed: the turn it cuts
@@ -5776,6 +5786,16 @@ impl App {
         self
     }
 
+    /// Whether the windows this session's record holds were reported under a
+    /// profile other than the one it was taken up again under, both being
+    /// known: those are another account's levels.
+    fn windows_of_another_profile(&self) -> bool {
+        match (&self.windows_profile, &self.profile) {
+            (Some(recorded), Some(selected)) => *recorded != selected.name,
+            _ => false,
+        }
+    }
+
     /// The plan's windows as the Usage pane draws them.
     ///
     /// What this session's backend reported, where it has since the session
@@ -5783,8 +5803,8 @@ impl App {
     /// has come around since holding a level nothing measured: a limited
     /// session hears no more from its backend, so the draw clock is what ends
     /// a level. Before then, the newer of what
-    /// an earlier session recorded and what this session's own record held,
-    /// dated, with each window whose reset has come around since holding a
+    /// an earlier session recorded and what this session's own record held
+    /// under the profile it is taken up under, dated, with each window whose reset has come around since holding a
     /// level nothing measured and its next reset where the window has a fixed
     /// one; or,
     /// where nothing was ever recorded and the first reply has not come in,
@@ -5796,6 +5816,7 @@ impl App {
             (Some(windows), false) => {
                 return PlanWindows::Reported(since_reset(windows, self.read_at()));
             }
+            (Some(_), true) if self.windows_of_another_profile() => None,
             (Some(windows), true) => self.windows_at.map(|at| (windows, at)),
             (None, _) => None,
         };
