@@ -5228,8 +5228,9 @@ impl App {
             self.hint = Some("There is no transcript to export yet".to_owned());
             return;
         }
+        let mut shown = self.drawn.plain_lines();
         let text: Vec<String> = (0..lines)
-            .map(|line| self.drawn.plain_line(line).unwrap_or_default())
+            .map(|_| shown.next().unwrap_or_default())
             .collect();
         self.handoffs
             .push(crate::desktop::Handoff::Copy(text.join("\n")));
@@ -7485,8 +7486,7 @@ impl App {
         };
         let handoff = match self.selection {
             Some(selection) => {
-                let drawn = &self.drawn;
-                let copied = selection.text(|line| drawn.plain_line(line));
+                let copied = self.selected_text(selection);
                 (!copied.is_empty()).then_some(crate::desktop::Handoff::Copy(copied))
             }
             None => {
@@ -7501,6 +7501,22 @@ impl App {
             }
         };
         self.handoffs.extend(handoff);
+    }
+
+    /// The text `selection` covers, from the lines it covers read in one
+    /// walk: asking for each by its number walks every entry above it, which
+    /// across a long transcript is seconds' worth of frames.
+    fn selected_text(&self, selection: crate::select::Selection) -> String {
+        let covered = selection.lines();
+        let first = *covered.start();
+        let mut lines: Vec<String> = self
+            .drawn
+            .plain_lines_from(first)
+            .take(covered.count())
+            .collect();
+        // Each line is asked for once, in order, so it is handed over rather
+        // than copied.
+        selection.text(|line| lines.get_mut(line.checked_sub(first)?).map(std::mem::take))
     }
 
     /// Opens the call drawn on transcript line `line` whole, where a call is
@@ -18773,6 +18789,82 @@ mod tests {
         );
         let said = app.hint().expect("the bar says why nothing was reported");
         assert!(said.starts_with("Nothing reported"), "{said}");
+    }
+
+    #[test]
+    fn an_export_copies_every_line_of_the_transcript_as_each_is_shown() {
+        let mut app = app();
+        for turn in 0..12 {
+            app.apply(&Event::UserMessage {
+                text: format!("Prompt {turn}: what changed in \u{1b}[31mred\u{1b}[0m?"),
+            });
+            app.apply(&Event::AssistantMessage {
+                text: format!(
+                    "## Turn {turn}\n\n- a **bold** item\n- 漢字 wide {}\n\n```rust\nfn f() {{}}\n```\n",
+                    "word ".repeat(40)
+                ),
+                agent: None,
+            });
+        }
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(90, 30))
+            .expect("a test terminal");
+        terminal
+            .draw(|frame| crate::ui::draw(frame, &mut app))
+            .expect("drawing never fails on a test backend");
+        let (_, lines) = app.transcript_drawn.expect("the transcript was drawn");
+        assert!(
+            lines > 30,
+            "the transcript is longer than the screen: {lines}"
+        );
+        let each: Vec<String> = (0..lines)
+            .map(|line| app.drawn.plain_line(line).unwrap_or_default())
+            .collect();
+
+        app.perform(crate::menu::Action::Export);
+
+        assert_eq!(
+            app.take_handoffs(),
+            vec![crate::desktop::Handoff::Copy(each.join("\n"))]
+        );
+    }
+
+    #[test]
+    fn a_selection_copies_what_it_covers_as_each_line_is_shown() {
+        let mut app = app();
+        for turn in 0..12 {
+            app.apply(&Event::UserMessage {
+                text: format!("Prompt {turn}: what changed in \u{1b}[31mred\u{1b}[0m?"),
+            });
+            app.apply(&Event::AssistantMessage {
+                text: format!(
+                    "## Turn {turn}\n\n- a **bold** item\n- 漢字 wide {}\n\n```rust\nfn f() {{}}\n```\n",
+                    "word ".repeat(40)
+                ),
+                agent: None,
+            });
+        }
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(90, 30))
+            .expect("a test terminal");
+        terminal
+            .draw(|frame| crate::ui::draw(frame, &mut app))
+            .expect("drawing never fails on a test backend");
+        let (_, lines) = app.transcript_drawn.expect("the transcript was drawn");
+        let at = |line, column| crate::select::Point { line, column };
+        for selection in [
+            // Most of the transcript, from part way along its second line to
+            // part way along its last but one, dragged upwards.
+            crate::select::Selection::new(at(lines - 2, 17), at(1, 3)),
+            // Part of one line in the middle.
+            crate::select::Selection::new(at(lines / 2, 4), at(lines / 2, 30)),
+            // Running on past the transcript's end.
+            crate::select::Selection::new(at(lines - 3, 0), at(lines + 5, 80)),
+        ] {
+            let drawn = &app.drawn;
+            let each = selection.text(|line| drawn.plain_line(line));
+            assert!(!each.is_empty(), "{selection:?} covers something");
+
+            assert_eq!(app.selected_text(selection), each, "{selection:?}");
+        }
     }
 
     #[test]

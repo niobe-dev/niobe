@@ -2510,9 +2510,29 @@ impl DrawnEntries {
     }
 
     /// Line `line` of the whole transcript as the terminal shows it: see
-    /// [`crate::select::shown`].
+    /// [`crate::select::shown`]. It walks every entry above the line, so
+    /// what reads many lines reads them with [`DrawnEntries::plain_lines`];
+    /// the tests hold that walk to what this says of each line.
+    #[cfg(test)]
     pub(crate) fn plain_line(&self, line: usize) -> Option<String> {
         self.lines(line, 1).first().map(crate::select::shown)
+    }
+
+    /// Every line of the whole transcript as the terminal shows it, top to
+    /// bottom: [`DrawnEntries::plain_line`] of each in turn, in one walk,
+    /// where asking for each by its number walks every entry above it.
+    pub(crate) fn plain_lines(&self) -> impl Iterator<Item = String> + '_ {
+        self.plain_lines_from(0)
+    }
+
+    /// [`DrawnEntries::plain_lines`] from line `start` of the whole
+    /// transcript on.
+    pub(crate) fn plain_lines_from(&self, start: usize) -> impl Iterator<Item = String> + '_ {
+        self.drawn
+            .iter()
+            .flat_map(|drawn| &drawn.lines)
+            .skip(start)
+            .map(crate::select::shown)
     }
 
     /// The link at `point` of the transcript as drawn `width` cells wide, if

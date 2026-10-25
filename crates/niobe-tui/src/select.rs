@@ -76,7 +76,7 @@ impl Selection {
     /// share is taken off them all: the transcript draws a gutter before every
     /// line of a message, and copied text is wanted without it. A first line
     /// that starts part way along has no indent of its own to share.
-    pub(crate) fn text(&self, line_at: impl Fn(usize) -> Option<String>) -> String {
+    pub(crate) fn text(&self, mut line_at: impl FnMut(usize) -> Option<String>) -> String {
         let (start, _) = self.ends();
         let pieces: Vec<String> = self
             .lines()
@@ -126,16 +126,44 @@ pub(crate) fn plain(line: &Line<'_>) -> String {
 /// first. Every character dropped here draws in no cell, so the columns of
 /// what is left are the columns it was drawn in.
 pub(crate) fn shown(line: &Line<'_>) -> String {
-    line.spans
-        .iter()
-        .flat_map(|span| span.content.chars())
-        .filter(|c| !c.is_control() && !crate::ui::is_direction_mark(*c))
-        .collect()
+    let drawn = |c: &char| !c.is_control() && !crate::ui::is_direction_mark(*c);
+    let mut shown = String::new();
+    for span in &line.spans {
+        // Most spans hold nothing to drop, and are copied whole rather than
+        // a character at a time.
+        match span.content.chars().all(|c| drawn(&c)) {
+            true => shown.push_str(&span.content),
+            false => shown.extend(span.content.chars().filter(drawn)),
+        }
+    }
+    shown
 }
 
 /// The part of `drawn` in the cells from `from` up to `to`. A character two
 /// cells wide is in it where either of its cells is.
-fn cells(drawn: &str, from: usize, to: usize) -> String {
+fn cells(drawn: &str, from: usize, to: usize) -> std::borrow::Cow<'_, str> {
+    // Printable ASCII is a cell a byte, which spares a long selection the
+    // grapheme walk of every line it covers: the lines reach here as the
+    // terminal shows them, with their control characters gone.
+    if drawn
+        .bytes()
+        .all(|byte| byte.is_ascii_graphic() || byte == b' ')
+    {
+        let end = to.min(drawn.len());
+        return drawn.get(from.min(end)..end).unwrap_or_default().into();
+    }
+    // A line covered whole, as every line but a selection's first and last
+    // is, keeps everything from its first grapheme that takes a cell.
+    if from == 0 && to == usize::MAX {
+        let mut skipped = 0;
+        for (grapheme, width) in text::graphemes(drawn) {
+            if width > 0 {
+                break;
+            }
+            skipped += grapheme.len();
+        }
+        return drawn.get(skipped..).unwrap_or_default().into();
+    }
     let mut at = 0;
     let mut kept = String::new();
     for (grapheme, width) in text::graphemes(drawn) {
@@ -145,7 +173,7 @@ fn cells(drawn: &str, from: usize, to: usize) -> String {
         }
         at = end;
     }
-    kept
+    kept.into()
 }
 
 /// The characters of `drawn` in the cells from `from` up to `to`, as a first
@@ -378,6 +406,36 @@ mod tests {
             selection.text(drawn(&lines)),
             "fn main() {\n    run();\n}\n"
         );
+    }
+
+    #[test]
+    fn the_cells_of_a_line_read_the_same_by_every_path_to_them() {
+        let walked = |drawn: &str, from: usize, to: usize| {
+            let mut at = 0;
+            let mut kept = String::new();
+            for (grapheme, width) in text::graphemes(drawn) {
+                if at + width > from && at < to {
+                    kept.push_str(grapheme);
+                }
+                at += width;
+            }
+            kept
+        };
+        for drawn in [
+            "",
+            "  plain ascii line ",
+            "\u{301}\u{301}e\u{301}x",
+            "a日本b",
+            "│ gutter",
+        ] {
+            for (from, to) in [(0, usize::MAX), (0, 3), (2, 5), (4, usize::MAX), (40, 60)] {
+                assert_eq!(
+                    cells(drawn, from, to),
+                    walked(drawn, from, to),
+                    "{drawn:?} {from}..{to}"
+                );
+            }
+        }
     }
 
     #[test]

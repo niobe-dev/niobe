@@ -1184,3 +1184,140 @@ fn a_megabyte_prompt_under_the_history_dialogs_cursor_draws_inside_a_frame_budge
         }
     }
 }
+
+/// Replies in the transcript [`an_export_of_a_long_session_lands_inside_a_frame_budget`]
+/// copies, each [`MARKDOWN_REPLY`] under a prompt: a working day's session.
+const EXPORTED_REPLIES: usize = 2000;
+
+/// The transcript copied to the clipboard from a long session. It is laid
+/// out already, so the copy costs a walk over its lines; it is made on the
+/// draw path, between two frames, so it has to fit in one.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "a frame is timed in an optimised build")]
+fn an_export_of_a_long_session_lands_inside_a_frame_budget() {
+    let _alone = ALONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut app = running_session();
+    for _ in 0..EXPORTED_REPLIES {
+        app.apply(&Event::UserMessage {
+            text: "What changed?".to_owned(),
+        });
+        app.apply(&Event::AssistantMessage {
+            text: MARKDOWN_REPLY.to_owned(),
+            agent: None,
+        });
+    }
+    let _ = screen(&mut app, 200, 60);
+
+    let mut exports: Vec<Duration> = (0..FRAMES)
+        .map(|_| {
+            let started = Instant::now();
+            app.perform(niobe_tui::menu::Action::Export);
+            let handoffs = app.take_handoffs();
+            let elapsed = started.elapsed();
+            assert!(
+                matches!(handoffs.as_slice(), [niobe_tui::desktop::Handoff::Copy(text)] if text.contains("What changed?")),
+                "the transcript is copied: {handoffs:?}"
+            );
+            elapsed
+        })
+        .collect();
+    exports.sort_unstable();
+    let median = exports[FRAMES / 2];
+
+    assert!(
+        median <= FRAME_BUDGET,
+        "the median export of {EXPORTED_REPLIES} markdown replies took {median:?}, over the \
+         {FRAME_BUDGET:?} budget"
+    );
+}
+
+/// Drag events past an edge of the transcript in
+/// [`a_selection_across_a_long_session_is_copied_inside_a_frame_budget`]:
+/// each scrolls the pane a line, and these are more than the transcript of
+/// [`EXPORTED_REPLIES`] replies has, so the selection runs from one end of it
+/// to the other.
+const DRAGS_PAST_THE_EDGE: usize = 200_000;
+
+/// A drag that selects the whole transcript of a long session, scrolling it
+/// as it goes, let go: the text is copied on the draw path, between two
+/// frames, so it has to fit in one.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "a frame is timed in an optimised build")]
+fn a_selection_across_a_long_session_is_copied_inside_a_frame_budget() {
+    use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+    let _alone = ALONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut app = running_session();
+    for _ in 0..EXPORTED_REPLIES {
+        app.apply(&Event::UserMessage {
+            text: "What changed?".to_owned(),
+        });
+        app.apply(&Event::AssistantMessage {
+            text: MARKDOWN_REPLY.to_owned(),
+            agent: None,
+        });
+    }
+    let mouse = |kind, column, row| MouseEvent {
+        kind,
+        column,
+        row,
+        modifiers: KeyModifiers::NONE,
+    };
+    let mut copies: Vec<Duration> = (0..FRAMES)
+        .map(|copy| {
+            let frame = screen(&mut app, 200, 60);
+            // From the tail up past the top, then from the top down past the
+            // bottom, so each copy runs the length of the transcript.
+            let upwards = copy % 2 == 0;
+            let rows: Vec<(usize, &str)> = frame
+                .lines()
+                .enumerate()
+                .filter(|(_, line)| line.contains("What changed?"))
+                .collect();
+            let (row, line) = match upwards {
+                true => rows.last(),
+                false => rows.first(),
+            }
+            .copied()
+            .expect("a prompt is on screen");
+            let byte = line
+                .find("What changed?")
+                .expect("the line was found by it");
+            let column = u16::try_from(line[..byte].chars().count()).expect("200 wide");
+            let row = u16::try_from(row).expect("60 high");
+            let past = match upwards {
+                true => 0,
+                false => 59,
+            };
+            app.on_mouse(mouse(MouseEventKind::Down(MouseButton::Left), column, row));
+            for _ in 0..DRAGS_PAST_THE_EDGE {
+                app.on_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), column, past));
+            }
+            let started = Instant::now();
+            app.on_mouse(mouse(MouseEventKind::Up(MouseButton::Left), column, past));
+            let handoffs = app.take_handoffs();
+            let elapsed = started.elapsed();
+            assert!(
+                matches!(
+                    handoffs.as_slice(),
+                    [niobe_tui::desktop::Handoff::Copy(text)]
+                        if text.matches("What changed?").count() + 1 >= EXPORTED_REPLIES
+                ),
+                "the whole transcript is copied"
+            );
+            elapsed
+        })
+        .collect();
+    copies.sort_unstable();
+    let median = copies[FRAMES / 2];
+
+    assert!(
+        median <= FRAME_BUDGET,
+        "the median copy of a selection across {EXPORTED_REPLIES} markdown replies took \
+         {median:?}, over the {FRAME_BUDGET:?} budget"
+    );
+}
