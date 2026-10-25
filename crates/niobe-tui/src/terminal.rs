@@ -621,10 +621,18 @@ pub enum Stop {
 /// the loop to hand the terminal back first. SIGCONT says the process ran
 /// again after a stop, including one it could not catch, and that whatever
 /// drew on the terminal meanwhile is on the screen now.
+///
+/// SIGINT and SIGQUIT are kept apart from SIGTERM, though each asks for the
+/// same quit, because they are what the keyboard sends while the terminal is
+/// lent to an editor: it is cooked then, and Ctrl+C or Ctrl+\ typed to give up
+/// on a `code --wait` goes to the whole foreground process group, which the
+/// shell is in. See [`Shutdown::take_keyboard_interrupt`].
 #[derive(Debug, Clone)]
 pub struct Shutdown {
     #[cfg(unix)]
     requested: std::sync::Arc<AtomicBool>,
+    #[cfg(unix)]
+    interrupted: std::sync::Arc<AtomicBool>,
     #[cfg(unix)]
     hung_up: std::sync::Arc<AtomicBool>,
     #[cfg(unix)]
@@ -652,6 +660,10 @@ const STOPPING: [i32; 3] = [
     signal_hook::consts::SIGQUIT,
 ];
 
+/// The signals among [`STOPPING`] that a cooked terminal's keyboard sends.
+#[cfg(unix)]
+const FROM_THE_KEYBOARD: [i32; 2] = [signal_hook::consts::SIGINT, signal_hook::consts::SIGQUIT];
+
 impl Drop for Shutdown {
     fn drop(&mut self) {
         #[cfg(unix)]
@@ -665,9 +677,14 @@ impl Shutdown {
     #[cfg(unix)]
     pub fn install() -> io::Result<Self> {
         let requested = std::sync::Arc::new(AtomicBool::new(false));
+        let interrupted = std::sync::Arc::new(AtomicBool::new(false));
         let hung_up = std::sync::Arc::new(AtomicBool::new(false));
         for asked in STOPPING {
-            signal_hook::flag::register(asked, std::sync::Arc::clone(&requested))?;
+            let flag = match FROM_THE_KEYBOARD.contains(&asked) {
+                true => &interrupted,
+                false => &requested,
+            };
+            signal_hook::flag::register(asked, std::sync::Arc::clone(flag))?;
         }
         signal_hook::flag::register(signal_hook::consts::SIGHUP, std::sync::Arc::clone(&hung_up))?;
         let suspend = std::sync::Arc::new(AtomicBool::new(false));
@@ -682,6 +699,7 @@ impl Shutdown {
         )?;
         Ok(Self {
             requested,
+            interrupted,
             hung_up,
             suspend,
             continued,
@@ -738,7 +756,7 @@ impl Shutdown {
     pub fn requested(&self) -> Option<Stop> {
         if self.hung_up.load(Ordering::SeqCst) {
             Some(Stop::TerminalGone)
-        } else if self.requested.load(Ordering::SeqCst) {
+        } else if self.requested.load(Ordering::SeqCst) || self.interrupted.load(Ordering::SeqCst) {
             Some(Stop::Requested)
         } else {
             None
@@ -761,6 +779,27 @@ impl Shutdown {
     /// Whether a SIGTSTP has asked the process to stop.
     #[cfg(not(unix))]
     pub fn take_suspend(&self) -> bool {
+        false
+    }
+
+    /// Whether a SIGINT or SIGQUIT has arrived since this was last asked, and
+    /// forgets it.
+    ///
+    /// For the end of a lend of the terminal: those signals then came from
+    /// the keyboard, to the program the terminal was lent to, and reached the
+    /// shell only because it is in that program's process group. Left in
+    /// place, the session would quit as soon as it had the terminal back. One
+    /// sent from elsewhere by `kill` in that time is forgotten with them,
+    /// since nothing tells the two apart; SIGTERM, which no keyboard sends,
+    /// is kept.
+    #[cfg(unix)]
+    pub fn take_keyboard_interrupt(&self) -> bool {
+        self.interrupted.swap(false, Ordering::SeqCst)
+    }
+
+    /// Whether a SIGINT or SIGQUIT has arrived.
+    #[cfg(not(unix))]
+    pub fn take_keyboard_interrupt(&self) -> bool {
         false
     }
 
@@ -1093,6 +1132,30 @@ mod tests {
         assert!(shutdown.take_suspend());
         assert!(!shutdown.take_suspend(), "one SIGTSTP is one stop");
         assert_eq!(shutdown.requested(), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_interrupt_from_the_keyboard_can_be_forgotten_and_sigterm_cannot() {
+        let _turn = SIGNALLING.lock().expect("no test panics holding this");
+        let shutdown = Shutdown::install().expect("registering the signals cannot fail here");
+
+        signal_hook::low_level::raise(signal_hook::consts::SIGINT)
+            .expect("raising a signal we handle cannot fail");
+        assert_eq!(shutdown.requested(), Some(Stop::Requested));
+        assert!(shutdown.take_keyboard_interrupt());
+        assert_eq!(shutdown.requested(), None, "the interrupt was forgotten");
+
+        signal_hook::low_level::raise(signal_hook::consts::SIGQUIT)
+            .expect("raising a signal we handle cannot fail");
+        signal_hook::low_level::raise(signal_hook::consts::SIGTERM)
+            .expect("raising a signal we handle cannot fail");
+        assert!(shutdown.take_keyboard_interrupt());
+        assert_eq!(
+            shutdown.requested(),
+            Some(Stop::Requested),
+            "SIGTERM is no keyboard's, and still asks for the quit"
+        );
     }
 
     #[cfg(unix)]

@@ -2626,6 +2626,87 @@ fn an_editor_that_suspends_itself_does_not_stop_the_shell_after_it_ends() {
     );
 }
 
+/// An editor the operator interrupts, as Ctrl+C on the terminal lent to a
+/// `code --wait` does: the terminal is cooked while it is lent, so the
+/// interrupt goes to the whole foreground process group, which the shell is
+/// in. It was the editor's interrupt, not the session's, and the session goes
+/// on once the editor has ended rather than quitting.
+#[test]
+fn an_interrupt_typed_while_an_editor_has_the_terminal_does_not_end_the_session() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo = repo();
+    let home = stand_in(repo.path(), WRITES_DOWN_TURNS_CLAUDE);
+    let elsewhere = tempfile::tempdir().expect("a temporary directory can be created");
+    std::fs::write(repo.path().join("CLAUDE.md"), "@tools/notes.md\n")
+        .expect("the memory file is written");
+    std::fs::create_dir(repo.path().join("tools")).expect("a directory for the notes");
+    std::fs::write(repo.path().join("tools").join("notes.md"), "notes\n")
+        .expect("the imported file is written");
+    let editor = elsewhere.path().join("editor");
+    // Waits, as `code --wait` does, until the operator gives up on it with
+    // Ctrl+C, which the terminal, cooked while it is lent, turns into SIGINT.
+    // It says it is waiting with a builtin rather than `touch`: a `sh`
+    // waiting on a child that ends of its own accord takes no SIGINT that
+    // arrived meanwhile as its own, and would go on to the wait.
+    let waiting = repo.path().join("editor-waiting");
+    std::fs::write(
+        &editor,
+        format!("#!/bin/sh\n: > '{}'\nexec sleep 60\n", waiting.display()),
+    )
+    .expect("the stand-in editor is written");
+    std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o755))
+        .expect("the stand-in editor is made executable");
+
+    let (terminal, slave) = Terminal::open();
+    // In a session of its own, with the pty as its terminal: Ctrl+C typed
+    // there goes to the terminal's foreground group, which is then the
+    // shell's and the editor's.
+    let mut command = shell_driving_the_stand_in(&slave, repo.path(), home.path());
+    command
+        .env("HOME", elsewhere.path())
+        .env("CLAUDE_CONFIG_DIR", elsewhere.path().join("claude"))
+        .env_remove("VISUAL")
+        .env("EDITOR", &editor);
+    in_a_session_of_its_own(&mut command);
+    let mut shell = Reaped(command.spawn().expect("the niobe binary runs"));
+    terminal.shows(OPENING_FRAME);
+
+    terminal.typed(b"\x1b[19~");
+    terminal.shows("notes.md");
+    terminal.typed(b"\x1b[F");
+    let editing = terminal.mark();
+    terminal.typed(b"e");
+    let deadline = Instant::now() + PATIENCE;
+    while !waiting.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(waiting.exists(), "the editor was not started");
+    terminal.typed(b"\x03");
+    terminal.shows_since(editing, "is not edited");
+    // A quit the interrupt asked for would come on the loop's next tick.
+    std::thread::sleep(Duration::from_secs(1));
+    assert!(
+        shell
+            .0
+            .try_wait()
+            .expect("the shell can be waited on")
+            .is_none(),
+        "the session ended on the editor's interrupt: {}",
+        terminal
+            .drawn
+            .lock()
+            .expect("the reader thread did not panic")[editing..]
+            .to_owned()
+    );
+    terminal.typed(CTRL_Q);
+
+    let (_, status) = ended(&mut shell);
+    drop(slave);
+    let drawn = terminal.drained();
+    assert!(status.success(), "the shell ended with {status}: {drawn}");
+}
+
 /// An image file dropped on the terminal — which types its path as a paste —
 /// is attached rather than typed, and goes to the CLI as an image block after
 /// the prompt's text, which keeps the placeholder standing where it went.

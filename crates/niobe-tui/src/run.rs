@@ -240,11 +240,15 @@ fn open(app: App, around: Around<'_>) -> io::Result<(Ended, App)> {
             // is in, reached the shell while the terminal was lent. The editor
             // was stopped and continued by whoever runs the operator's jobs and
             // has ended; stopping the shell now would leave nothing to continue
-            // it, and under a wrapper that waits on it the session hangs.
+            // it, and under a wrapper that waits on it the session hangs. So
+            // did the Ctrl+C or Ctrl+\ typed at the cooked terminal to give up
+            // on the editor: it was the editor's interrupt, and quitting on it
+            // would end a session the operator only meant to leave unedited.
             Hold::Retake => {
                 guard.resume()?;
                 shutdown.take_suspend();
                 shutdown.take_continued();
+                shutdown.take_keyboard_interrupt();
                 Ok(())
             }
         }
