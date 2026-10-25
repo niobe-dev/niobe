@@ -14,7 +14,6 @@
 use std::path::PathBuf;
 
 use niobe_config::Config;
-use niobe_config::trust::Trusted;
 use niobe_tui::trust::Question;
 
 use crate::config::{self, Attached, Untrusted};
@@ -239,28 +238,7 @@ pub fn record(untrusted: &Untrusted) -> Result<(), String> {
     let path = &untrusted.path;
     Config::parse(&untrusted.text, path)
         .map_err(|error| format!("{} is not trusted: {error}", path.display()))?;
-    let mut files = Vec::new();
-    for file in &untrusted.attached {
-        match &file.text {
-            Ok(text) => files.push((&file.path, text)),
-            Err(error) => {
-                return Err(format!(
-                    "{} is not trusted: {} cannot be read: {error}",
-                    path.display(),
-                    file.path.display()
-                ));
-            }
-        }
-    }
-    Trusted::update(&record_path()?, |trusted| {
-        trusted.trust(path, &untrusted.text)?;
-        trusted.trust(&config::replaces_key(path), &untrusted.replaces.join("\n"))?;
-        for (file, text) in &files {
-            trusted.trust(file, text)?;
-        }
-        Ok(())
-    })
-    .map_err(|e| e.to_string())
+    config::record_trust(&record_path()?, untrusted)
 }
 
 /// Where the record of what this machine has trusted is kept.

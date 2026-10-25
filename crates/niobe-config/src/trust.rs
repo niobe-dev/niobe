@@ -31,7 +31,9 @@
 //! What a config names is part of the same decision. A `settings` file or a
 //! file an `args` entry names is read by the CLI when it starts, and a pull
 //! can rewrite it without touching the config, so each is recorded in the same
-//! file beside the config, at the contents the operator was shown, and so are
+//! file beside the config, at the contents the operator was shown — under a
+//! key of its own, since a file a config names can be another repository's
+//! config, which was shown by its path and not read as one — and so are
 //! the names of the user's profiles it replaces: a profile added to the
 //! user's own config later, under a name the file defines, is a replacement
 //! nobody was asked about.
@@ -61,8 +63,8 @@ pub const FILE_NAME: &str = "trusted.list";
 const HEADER: &str = "\
 # Written by niobe. Each line is a repository config this machine has been told
 # it may start a backend with — its profiles' env, args, settings and
-# auth_refresh — or a settings or argument file such a config names, and the
-# SHA-256 of that file's contents when it was told so. Editing the config, or
+# auth_refresh — or a settings or argument file such a config names, marked
+# `#attached`, and the SHA-256 of that file's contents when it was told so. Editing the config, or
 # a file it names, makes it untrusted again. `niobe untrust` removes a line;
 # so does deleting it.
 ";
