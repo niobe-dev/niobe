@@ -1938,6 +1938,13 @@ const UNATTACHED_ANSWER_HINT: &str = "Not answered: this session is not attached
 const LEFT_BANG_FOR_HISTORY_HINT: &str =
     "Left ! mode: a prompt from the history goes to the agent, not to sh";
 
+/// What the bar says when the model was asked to change, with the picker or
+/// as `/model` and a name, in a session no backend is attached to: a
+/// replayed record lists the models and the commands its backend offered,
+/// and nothing now would take a choice among them.
+const NO_MODEL_TO_CHANGE_HINT: &str =
+    "F4 Model — this session is not attached to a backend, so there is no model to change";
+
 /// What the bar says when Enter was refused because an image for the prompt
 /// is still being read.
 const IMAGE_STILL_READING_HINT: &str =
@@ -4440,11 +4447,7 @@ impl App {
         // The models a replayed record lists are the ones its backend offered,
         // and nothing now would take a choice among them.
         if !self.attached {
-            self.hint = Some(
-                "F4 Model — this session is not attached to a backend, so there is no model \
-                 to change"
-                    .to_owned(),
-            );
+            self.hint = Some(NO_MODEL_TO_CHANGE_HINT.to_owned());
             return;
         }
         if options.is_empty() {
@@ -8465,6 +8468,10 @@ impl App {
             return;
         }
         if let Some(model) = crate::slash::model_named(&text, self.session.commands()) {
+            if !self.attached {
+                self.hint = Some(NO_MODEL_TO_CHANGE_HINT.to_owned());
+                return;
+            }
             let draft = self.take_composer_for_the_shell();
             self.produce(Event::ModelSelected { model });
             self.give_back(&draft);
@@ -11193,7 +11200,7 @@ mod tests {
     /// picker asks, the menu row names it at once.
     #[test]
     fn a_model_command_with_a_name_moves_the_model_as_the_picker_does() {
-        let mut app = offering_model(app());
+        let mut app = offering_model(app().attached());
         assert_eq!(
             submitted(&mut app, "/model  haiku "),
             [Event::ModelSelected {
@@ -11203,6 +11210,31 @@ mod tests {
         assert_eq!(app.session().model(), Some("haiku"));
         assert_eq!(app.composed(), "");
         assert_eq!(app.session().user_messages(), 0);
+    }
+
+    /// A session read back with no backend still lists the `/model` its
+    /// backend offered, and nothing would take the change: the menu row
+    /// naming the model anyway, and the record keeping it, would say the
+    /// session moved to a model nothing ever ran.
+    #[test]
+    fn a_model_command_with_a_name_moves_nothing_where_no_backend_is_attached() {
+        let mut app = offering_model(app());
+        app.apply(&Event::SessionMeta(niobe_core::event::SessionMeta {
+            backend: niobe_core::event::Backend::Claude,
+            profile: "max".to_owned(),
+            model: "claude-opus-5".to_owned(),
+            backend_session: None,
+        }));
+
+        assert_eq!(submitted(&mut app, "/model haiku"), []);
+        assert_eq!(app.session().model(), Some("claude-opus-5"));
+        let hint = app.hint().expect("the shell says why nothing moved");
+        assert!(hint.contains("not attached"), "{hint}");
+        assert_eq!(
+            app.composer().lines(),
+            ["/model haiku"],
+            "the prompt is kept"
+        );
     }
 
     #[test]
