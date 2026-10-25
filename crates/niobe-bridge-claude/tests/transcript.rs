@@ -1293,10 +1293,11 @@ fn constructed(session: &[String], sides: &[(&str, Vec<String>)]) -> (tempfile::
     (dir, path)
 }
 
-/// An assistant record saying `text`, stamped `at`.
+/// An assistant record saying `text`, stamped `at`, in a response of its own:
+/// the API never gives two responses one id.
 fn said(text: &str, at: &str) -> String {
     format!(
-        r#"{{"type":"assistant","message":{{"id":"m-{at}","model":"claude-opus-5","role":"assistant","content":[{{"type":"text","text":"{text}"}}],"usage":{{"input_tokens":1,"output_tokens":1}}}},"uuid":"u-{at}","timestamp":"{at}","version":"2.1.277"}}"#
+        r#"{{"type":"assistant","message":{{"id":"m-{at}-{text}","model":"claude-opus-5","role":"assistant","content":[{{"type":"text","text":"{text}"}}],"usage":{{"input_tokens":1,"output_tokens":1}}}},"uuid":"u-{at}","timestamp":"{at}","version":"2.1.277"}}"#
     )
 }
 

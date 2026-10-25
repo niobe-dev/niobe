@@ -954,8 +954,10 @@ struct Fold {
     /// to the next one, which then bills more than the turn it lands in.
     awaited_before: bool,
     /// The `message.id` of every API response whose tokens have been counted,
-    /// so that the records that repeat one are not billed again.
-    counted: BTreeMap<String, ()>,
+    /// so that the records that repeat one are not billed again, beside the
+    /// call that spawned the agent whose file it was first read from — `None`
+    /// for the session's own.
+    counted: BTreeMap<String, Option<String>>,
     /// The usage the last record of each API response carries, which is the
     /// response's own; see [`last_usage`].
     last_usage: BTreeMap<String, wire::Usage>,
@@ -1081,6 +1083,18 @@ impl Fold {
             error,
             api_error,
         } = record;
+        // A forked agent's file opens with a copy of the session's record of
+        // the call that spawned it, which is the session's message and none of
+        // the fork's: read as the fork's, it would spawn the fork again under
+        // itself. Measured on the machine this was written on, 25 October
+        // 2026: all sixteen forks' files opened that way, and no other
+        // agent's file held a response another file had written first.
+        if let Some(id) = &message.id
+            && let Some(first) = self.counted.get(id)
+            && first.as_deref() != agent
+        {
+            return;
+        }
         let parent = agent.map(str::to_owned);
         if agent.is_none() {
             // A command the model went on to answer was a prompt.
@@ -1114,7 +1128,7 @@ impl Fold {
         // already counted; it is counted, because a record with no id is one
         // the CLI wrote once.
         let first_time = match &message.id {
-            Some(id) => self.counted.insert(id.clone(), ()).is_none(),
+            Some(id) => self.counted.insert(id.clone(), parent.clone()).is_none(),
             None => true,
         };
 
@@ -1262,7 +1276,10 @@ impl Fold {
 
     /// A turn of the session's, or where `agent` names a call, of the
     /// conversation the sub-agent that call spawned had with the session.
-    fn user(&mut self, record: User, agent: Option<&str>) {
+    fn user(&mut self, mut record: User, agent: Option<&str>) {
+        if let Some(call) = agent {
+            record.drop_result_of(call);
+        }
         // The CLI writes notes of its own into the transcript as user turns —
         // the caveat that precedes a local command's output, and the like —
         // and marks them. They are not what the operator said.
@@ -1744,6 +1761,29 @@ impl User {
                 permission_decision: Some(settled.clone()),
             }],
             _ => Vec::new(),
+        }
+    }
+
+    /// Leaves out the result of call `id`, and what the record says about
+    /// that result. In the file of the agent call `id` spawned, that result is
+    /// the session's: a fork's file carries it after the copy of the call
+    /// that `Fold::assistant` passes over, and read as the agent's it would
+    /// end the agent as it began.
+    fn drop_result_of(&mut self, id: &str) {
+        let Some(wire::Content::Blocks(blocks)) = &mut self.message.content else {
+            return;
+        };
+        let before = blocks.len();
+        blocks.retain(|block| {
+            !matches!(block, wire::Block::ToolResult { tool_use_id, .. } if tool_use_id == id)
+        });
+        let dropped = blocks.len() != before;
+        let results_left = blocks
+            .iter()
+            .any(|block| matches!(block, wire::Block::ToolResult { .. }));
+        if dropped && !results_left {
+            self.tool_use_result = None;
+            self.permission_decision = None;
         }
     }
 
@@ -3304,6 +3344,50 @@ mod tests {
         assert_eq!(tag("<status></status>", "status"), Some(""));
         assert_eq!(tag("🦀<status>🎉</status>🔥", "status"), Some("🎉"));
         assert_eq!(tag("<status>", "status"), None);
+    }
+
+    /// A forked agent's file, in the shape all sixteen forks on the machine
+    /// this was written on had, 25 October 2026: it opens with a copy of the
+    /// session's record of the call that spawned it, then the result of that
+    /// call beside the fork's directive, and only then the fork's own work.
+    #[test]
+    fn a_forks_copy_of_the_call_that_spawned_it_is_the_sessions_and_not_the_forks() {
+        let spawn = r#"{"type":"assistant","timestamp":"2026-09-19T11:14:44.000Z","message":{"id":"msg_1","model":"claude-opus-5","content":[{"type":"tool_use","id":"toolu_a","name":"Agent","input":{"subagent_type":"fork","description":"Look","prompt":"Look."}}],"usage":{"input_tokens":2,"output_tokens":50}}}"#;
+        let launched = r#"{"type":"user","timestamp":"2026-09-19T11:14:45.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_a","content":[{"type":"text","text":"Async agent launched successfully."}]}]},"toolUseResult":{"isAsync":true,"status":"async_launched","agentId":"a1"}}"#;
+        let fork = r#"{"type":"fork-context-ref","agentId":"a1","parentSessionId":"s","parentLastUuid":"u0","contextLength":3}"#;
+        let started = r#"{"type":"user","isSidechain":true,"timestamp":"2026-09-19T11:14:46.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_a","content":[{"type":"text","text":"Fork started — processing in background"}]},{"type":"text","text":"Your directive: Look."}]}}"#;
+        let own = r#"{"type":"assistant","isSidechain":true,"timestamp":"2026-09-19T11:14:47.000Z","message":{"id":"msg_a","model":"claude-opus-5","content":[{"type":"tool_use","id":"toolu_r","name":"Read","input":{"file_path":"/repo/a.py"}}],"usage":{"input_tokens":1,"output_tokens":5}}}"#;
+
+        let events = with_agent(&[spawn, launched], &[fork, spawn, started, own]);
+
+        let story: Vec<String> = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::AgentSpawn { id, parent, .. } => Some(format!("spawn {id:?} {parent:?}")),
+                Event::AgentExit { id, .. } => Some(format!("exit {id:?}")),
+                Event::ToolCallStart { id, agent, .. } => Some(format!("start {id:?} {agent:?}")),
+                Event::ToolCallEnd { id, .. } => Some(format!("end {id:?}")),
+                Event::Error { message, .. } => Some(format!("error {message}")),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            story,
+            [
+                r#"spawn AgentId("toolu_a") None"#,
+                r#"start ToolCallId("toolu_a") None"#,
+                r#"end ToolCallId("toolu_a")"#,
+                r#"start ToolCallId("toolu_r") Some(AgentId("toolu_a"))"#,
+            ],
+            "{events:?}"
+        );
+        assert_eq!(
+            output_counts(&events),
+            [
+                ("claude-opus-5".to_owned(), 50),
+                ("claude-opus-5".to_owned(), 5)
+            ]
+        );
     }
 
     #[test]
