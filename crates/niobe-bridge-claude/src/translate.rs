@@ -1781,7 +1781,7 @@ impl Translator {
                         Call {
                             name: name.clone(),
                             input: rendered.clone(),
-                            target: target_of(&input),
+                            target: rule_target(&name, &input),
                             summary: summary.clone(),
                             arguments: input.clone(),
                             agent: agent.clone(),
@@ -2427,11 +2427,15 @@ impl Translator {
             .as_ref()
             .and_then(|input| self.proposal_of(&tool, input));
         let reason = asking_reason(body.decision_reason, body.blocked_path);
+        let target = body
+            .input
+            .as_ref()
+            .and_then(|input| rule_target(&tool, input));
         out.push(Event::PermissionRequest {
             id,
             tool,
             input: body.input.as_ref().map(render).unwrap_or_default(),
-            target: body.input.as_ref().and_then(rule_target),
+            target,
             proposal,
             reason,
             agent,
@@ -2545,11 +2549,16 @@ impl Translator {
                 .and_then(|call| call.agent.clone())
                 .or_else(|| self.ended_agents.get(&id).cloned());
             let id = ToolCallId::new(id);
+            let tool = denial.tool_name.unwrap_or_default();
+            let target = denial
+                .tool_input
+                .as_ref()
+                .and_then(|input| rule_target(&tool, input));
             out.push(Event::PermissionRequest {
                 id: id.clone(),
-                tool: denial.tool_name.unwrap_or_default(),
+                tool,
                 input: denial.tool_input.as_ref().map(render).unwrap_or_default(),
-                target: denial.tool_input.as_ref().and_then(rule_target),
+                target,
                 proposal: None,
                 reason: None,
                 agent,
@@ -3833,6 +3842,24 @@ fn string_at<'a>(arguments: &'a serde_json::Value, key: &str) -> Option<&'a str>
 /// them is there the call has no target, and a standing answer about it can
 /// only be about the whole tool — which is the honest answer, because a target
 /// invented here would be one the operator never approved.
+/// The CLI's own tools whose arguments beside the target say how the call
+/// runs rather than what it reaches, read from their schemas: a shell
+/// command's description and timeout, an edit's strings, a read's line
+/// range, a fetch's prompt.
+const CLI_TARGETED_TOOLS: [&str; 11] = [
+    "Bash",
+    "PowerShell",
+    "Read",
+    "Edit",
+    "MultiEdit",
+    "Write",
+    "NotebookEdit",
+    "Glob",
+    "Grep",
+    "LS",
+    "WebFetch",
+];
+
 const TARGET_KEYS: [&str; 6] = [
     "command",
     "file_path",
@@ -3863,10 +3890,18 @@ fn target_of(input: &serde_json::Value) -> Option<String> {
 /// same command inside it cannot, and `Bash(cargo test)` was not written
 /// about that. Such a call has no target, so only a rule for the whole tool
 /// answers it and the operator is asked otherwise.
-fn rule_target(input: &serde_json::Value) -> Option<String> {
+///
+/// The same holds for a tool whose schema is not the CLI's own — an MCP
+/// server's, or one added since — where nothing here knows what the other
+/// arguments do: `{"command":"git","args":["push","--force"]}` is not `git`,
+/// and a `path` beside an `owner` and a `repo` is a file in that repository.
+/// Its target is named only where it is the call's one argument.
+fn rule_target(tool: &str, input: &serde_json::Value) -> Option<String> {
     let unsandboxed =
         input.get("dangerouslyDisableSandbox") == Some(&serde_json::Value::Bool(true));
-    match unsandboxed {
+    let unread = !CLI_TARGETED_TOOLS.contains(&tool)
+        && input.as_object().is_some_and(|fields| fields.len() != 1);
+    match unsandboxed || unread {
         true => None,
         false => target_of(input),
     }
@@ -6158,6 +6193,105 @@ mod tests {
         assert!(rules.allows("Bash", target.as_deref()));
     }
 
+    fn target_asked(tool: &str, input: &str) -> Option<String> {
+        let events = translator().line(&format!(
+            r#"{{"type":"control_request","request_id":"c1","request":{{"subtype":"can_use_tool","tool_name":"{tool}","input":{input},"tool_use_id":"toolu_1"}}}}"#
+        ));
+        let [Event::PermissionRequest { target, .. }] = events.as_slice() else {
+            panic!("one prompt: {events:?}");
+        };
+        target.clone()
+    }
+
+    /// Nothing here knows what an MCP server's tool does with the arguments
+    /// beside the one named like a target: `git` run with `["status"]` and
+    /// with `["push", "--force"]` would both be `git`, and a file path is a
+    /// different file in another owner's repository. A rule about that one
+    /// argument would answer calls the operator never saw, so such a call has
+    /// no target and only a rule for the whole tool answers it.
+    #[test]
+    fn a_tool_nothing_here_knows_has_a_target_only_where_it_is_its_one_argument() {
+        let shell = r#"{"command":"git","args":["push","--force"]}"#;
+        assert_eq!(target_asked("mcp__shell__run", shell), None);
+        let elsewhere = r#"{"owner":"someone","repo":"private","path":"README.md","content":"x"}"#;
+        assert_eq!(
+            target_asked("mcp__github__create_or_update_file", elsewhere),
+            None
+        );
+        let mut rules = niobe_core::permission::Allowlist::new();
+        rules.insert(niobe_core::permission::Rule::targeted(
+            "mcp__shell__run",
+            "git",
+        ));
+        assert!(!rules.allows(
+            "mcp__shell__run",
+            target_asked("mcp__shell__run", shell).as_deref()
+        ));
+
+        assert_eq!(
+            target_asked("mcp__fs__read_file", r#"{"path":"/repo/a.rs"}"#).as_deref(),
+            Some("/repo/a.rs")
+        );
+        assert_eq!(
+            target_asked(
+                "mcp__browser__navigate",
+                r#"{"url":"https://example.test/"}"#
+            )
+            .as_deref(),
+            Some("https://example.test/")
+        );
+    }
+
+    /// The CLI's own tools are read by their schemas, where the arguments
+    /// beside the target say how the call runs, not what it reaches.
+    #[test]
+    fn the_clis_own_tools_keep_their_target_beside_their_other_arguments() {
+        assert_eq!(
+            target_asked(
+                "Bash",
+                r#"{"command":"cargo test","description":"Run the tests","timeout":600000}"#
+            )
+            .as_deref(),
+            Some("cargo test")
+        );
+        assert_eq!(
+            target_asked(
+                "Edit",
+                r#"{"file_path":"/repo/a.rs","old_string":"a","new_string":"b"}"#
+            )
+            .as_deref(),
+            Some("/repo/a.rs")
+        );
+        assert_eq!(
+            target_asked("Write", r#"{"file_path":"/repo/a.rs","content":"x"}"#).as_deref(),
+            Some("/repo/a.rs")
+        );
+        assert_eq!(
+            target_asked(
+                "NotebookEdit",
+                r#"{"notebook_path":"/repo/a.ipynb","new_source":"x"}"#
+            )
+            .as_deref(),
+            Some("/repo/a.ipynb")
+        );
+        assert_eq!(
+            target_asked(
+                "WebFetch",
+                r#"{"url":"https://example.test/","prompt":"Summarise it"}"#
+            )
+            .as_deref(),
+            Some("https://example.test/")
+        );
+        assert_eq!(
+            target_asked(
+                "Read",
+                r#"{"file_path":"/repo/a.rs","offset":10,"limit":5}"#
+            )
+            .as_deref(),
+            Some("/repo/a.rs")
+        );
+    }
+
     fn proposal_asked(line: &str, translator: &mut Translator) -> Option<Proposal> {
         let events = translator.line(line);
         let [Event::PermissionRequest { proposal, .. }] = events.as_slice() else {
@@ -6418,6 +6552,26 @@ mod tests {
 
         assert!(events.is_empty(), "{events:?}");
         assert!(translator.take_asked().is_empty());
+    }
+
+    /// A refusal the CLI announces names the target a prompt about the same
+    /// call would: a rule for `git` is not about `git push --force`.
+    #[test]
+    fn a_refused_call_has_the_target_its_prompt_would_have() {
+        let mut translator = translator();
+        translator.line(
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"mcp__shell__run","input":{"command":"git","args":["push","--force"]}},{"type":"tool_use","id":"toolu_2","name":"Bash","input":{"command":"cargo test","dangerouslyDisableSandbox":true}}]}}"#,
+        );
+
+        for id in ["toolu_1", "toolu_2"] {
+            let announced = translator.line(&format!(
+                r#"{{"type":"system","subtype":"permission_denied","tool_use_id":"{id}"}}"#
+            ));
+            let [Event::PermissionRequest { target, .. }, ..] = announced.as_slice() else {
+                panic!("the refusal: {announced:?}");
+            };
+            assert_eq!(target, &None, "{id}");
+        }
     }
 
     #[test]
