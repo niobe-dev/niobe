@@ -1118,6 +1118,7 @@ impl Fold {
         // the operator was shown, so it is kept, but naming the session after
         // it would put a model that does not exist in front of the operator
         // would overwrite the one the session is really on.
+        let written_by_cli = message.model.as_deref() == Some(NO_MODEL);
         if let Some(model) = message.model.filter(|model| model != NO_MODEL) {
             self.fold(wire::Message::StreamEvent(wire::StreamEvent {
                 event: wire::StreamBody::MessageStart {
@@ -1185,11 +1186,17 @@ impl Fold {
         // What that record covers is counted from it, so an agent's messages
         // add nothing there; an unclosed session's floor without them would
         // leave out most of what it spent.
+        //
+        // A message the CLI wrote itself answers no request: its `usage` of
+        // nothing measured no prompt, so it is not counted, and the context
+        // meter stays at the last request that was sent rather than falling
+        // to a zero nobody measured.
         let usage = message
             .id
             .as_ref()
             .and_then(|id| self.last_usage.get(id).cloned())
-            .or(message.usage);
+            .or(message.usage)
+            .filter(|_| !written_by_cli);
         if usage.is_some() && first_time && self.accountings > 0 {
             self.awaited = true;
         }
@@ -3150,6 +3157,36 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    /// The CLI writes the message it shows for a failed request, or for the
+    /// plan's limit, with a `usage` of nothing: no request was sent, so it
+    /// measured no context. Read as one, the context meter would fall to a
+    /// `0` nobody measured, and a compaction's row would say it shrank the
+    /// conversation to nothing.
+    #[test]
+    fn a_message_the_cli_wrote_itself_leaves_the_context_where_the_last_request_put_it() {
+        let events = folded(&[
+            &response("msg_1", "claude-opus-5", 3, 40),
+            &response("msg_2", NO_MODEL, 0, 0),
+        ]);
+
+        let contexts: Vec<u64> = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Context(context) => Some(context.tokens),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(contexts, [3]);
+        let usage: Vec<u64> = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Usage(usage) => Some(usage.output),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(usage, [40], "a request nobody sent is no usage record");
     }
 
     #[test]
