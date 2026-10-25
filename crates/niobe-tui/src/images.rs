@@ -258,8 +258,8 @@ const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp"];
 /// A dropped file arrives quoted, or with its spaces escaped, or as a
 /// `file://` address, depending on the terminal; each is taken back to the
 /// path. Text with a space no backslash escapes is a sentence, not a path,
-/// however it ends, unless it is quoted whole; and anything with a line break
-/// in it is text.
+/// however it ends, unless it is quoted whole or the space is one that never
+/// breaks between words; and anything with a line break in it is text.
 pub fn image_path(pasted: &str) -> Option<String> {
     let trimmed = pasted.trim();
     if trimmed.is_empty() || trimmed.contains(['\n', '\r']) {
@@ -304,20 +304,25 @@ fn quoted(text: &str) -> Option<&str> {
 }
 
 /// `text` with its backslash escapes taken out, or `None` where it holds
-/// whitespace no backslash escapes, which a terminal never leaves in a path
-/// it types.
+/// whitespace no backslash escapes that breaks between words, which a
+/// terminal never leaves in a path it types.
 fn unescaped(text: &str) -> Option<String> {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars();
     while let Some(c) = chars.next() {
         match c {
             '\\' => out.extend(chars.next()),
-            c if c.is_whitespace() => return None,
+            c if c.is_whitespace() && !NO_BREAK_SPACES.contains(&c) => return None,
             c => out.push(c),
         }
     }
     Some(out)
 }
+
+/// The spaces that never break between words, so a sentence is never split
+/// by one, and that a terminal leaves unescaped in a path it types: macOS
+/// names every screenshot with U+202F before its AM or PM.
+const NO_BREAK_SPACES: &[char] = &['\u{a0}', '\u{2007}', '\u{202f}'];
 
 /// The local path a `file://` address names, given what follows the scheme:
 /// its host empty or `localhost`, and its percent escapes decoded, since a
@@ -410,6 +415,27 @@ mod tests {
         assert_eq!(
             image_path("'rename the logo to logo.png'").as_deref(),
             Some("rename the logo to logo.png")
+        );
+    }
+
+    #[test]
+    fn a_dropped_screenshot_whose_name_holds_a_no_break_space_is_a_path() {
+        // macOS names a screenshot with a narrow no-break space before its
+        // AM or PM, and a terminal escapes the ASCII spaces of a dropped
+        // path but not that one.
+        let dropped = "/Users/me/Desktop/Screenshot\\ 2026-10-25\\ at\\ 10.11.12\u{202f}AM.png";
+        assert_eq!(
+            image_path(dropped).as_deref(),
+            Some("/Users/me/Desktop/Screenshot 2026-10-25 at 10.11.12\u{202f}AM.png")
+        );
+        assert_eq!(
+            image_path("/Users/me/caf\u{e9}\u{a0}shot.png").as_deref(),
+            Some("/Users/me/caf\u{e9}\u{a0}shot.png")
+        );
+        assert_eq!(
+            image_path("see\u{2003}/tmp/a.png"),
+            None,
+            "an em space breaks"
         );
     }
 
