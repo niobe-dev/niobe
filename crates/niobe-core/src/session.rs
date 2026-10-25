@@ -159,6 +159,18 @@ impl Owed {
     pub fn records(&self) -> &[Usage] {
         &self.records
     }
+
+    /// Whether a record owed for carries no tokens at all, so that what it
+    /// is owed for is money no token count measured.
+    ///
+    /// A record of no tokens and no cost is how a backend says a cost it
+    /// could not count is missing — the Claude bridge owes one after each
+    /// settlement of a resumed session whose earlier spend it could not read
+    /// — so pricing the tokens owed for leaves that money out, and a total
+    /// that adds them up is a floor, not an estimate.
+    pub fn unmeasured(&self) -> bool {
+        self.records.iter().any(|record| record.tokens() == 0)
+    }
 }
 
 impl Totals {
@@ -1879,6 +1891,17 @@ mod tests {
         assert_eq!(each, [(100, 10), (200, 20)]);
         assert_eq!((owed.total().input, owed.total().output), (300, 30));
         assert_eq!(owed.total().model, "opus-5");
+    }
+
+    /// A record of no tokens owed for stands for money no count measured,
+    /// and one with tokens does not.
+    #[test]
+    fn what_is_owed_is_unmeasured_once_a_record_of_no_tokens_is_among_it() {
+        let measured = SessionState::replay(&[usage(100, 10, None)]);
+        assert!(!measured.totals().unsettled["opus-5"].unmeasured());
+
+        let short = SessionState::replay(&[usage(100, 10, None), usage(0, 0, None)]);
+        assert!(short.totals().unsettled["opus-5"].unmeasured());
     }
 
     /// What each model was billed is kept apart, so that a pane can price a

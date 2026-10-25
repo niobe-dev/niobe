@@ -39,7 +39,14 @@ pub trait Prices: std::fmt::Debug {
     ///
     /// Never the sum priced as one request: three 90K prompts are not one
     /// 270K prompt, and the difference is a long-context rate on every token.
+    ///
+    /// `None` too where some of what is owed is money no token count measured
+    /// ([`Owed::unmeasured`]): pricing the tokens would value the rest and
+    /// pass the result off as the whole.
     fn estimate_owed(&self, owed: &Owed) -> Option<f64> {
+        if owed.unmeasured() {
+            return None;
+        }
         owed.records()
             .iter()
             .try_fold(0.0, |sum, record| Some(sum + self.estimate(record)?))

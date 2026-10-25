@@ -138,3 +138,37 @@ fn a_request_served_in_fast_mode_is_owed_for_at_the_fast_price() {
     let owed = &unpriced.totals().unsettled["claude-opus-4-7"];
     assert_eq!(niobe_tui::Prices::estimate_owed(&prices, owed), None);
 }
+
+#[test]
+fn a_resumed_session_whose_earlier_spend_is_unknown_stays_a_floor_when_priced() {
+    // The CLI restores what the session had spent and its first bill carries
+    // that with the first turn, so the bridge counts none of it; the second
+    // bill adds $0.05. The session cost $0.05 and the first turn's unknown
+    // share, which no price of the tokens left owed can value: what is shown
+    // is a floor, as it is with no price table at all.
+    let mut translator = niobe_bridge_claude::Translator::new("work").resuming(
+        &niobe_bridge_claude::Spent::unknown("cannot read s-1.jsonl"),
+    );
+    let start = r#"{"type":"stream_event","event":{"type":"message_start","message":{"model":"claude-opus-5"}}}"#;
+    let delta = |input: u64, output: u64| {
+        format!(
+            r#"{{"type":"stream_event","event":{{"type":"message_delta","usage":{{"input_tokens":{input},"output_tokens":{output}}}}}}}"#
+        )
+    };
+    let events: Vec<Event> = [
+        r#"{"type":"system","subtype":"init","session_id":"s-1","model":"claude-opus-5"}"#,
+        start,
+        &delta(40, 4),
+        r#"{"type":"result","subtype":"success","usage":{"input_tokens":40,"output_tokens":4},"modelUsage":{"claude-opus-5":{"inputTokens":140,"outputTokens":14,"costUSD":0.7}},"total_cost_usd":0.7}"#,
+        start,
+        &delta(10, 1),
+        r#"{"type":"result","subtype":"success","usage":{"input_tokens":10,"output_tokens":1},"modelUsage":{"claude-opus-5":{"inputTokens":150,"outputTokens":15,"costUSD":0.75}},"total_cost_usd":0.75}"#,
+    ]
+    .iter()
+    .flat_map(|line| translator.line(line))
+    .collect();
+    let state = SessionState::replay(&events);
+
+    assert_eq!(niobe_tui::session_cost(&state, None), "≥$0.05");
+    assert_eq!(niobe_tui::session_cost(&state, Some(&bundled())), "≥$0.05");
+}

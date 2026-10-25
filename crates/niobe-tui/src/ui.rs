@@ -6368,6 +6368,40 @@ mod tests {
         );
     }
 
+    /// A resumed session whose earlier spend could not be read leaves its
+    /// first turn's money uncounted, and the Claude bridge says so after each
+    /// settlement by owing for a record of no tokens. No price of tokens
+    /// values that record, so the figure stays the floor it is, priced or not:
+    /// `~$0.05` would claim roughly the whole bill while a turn is missing.
+    #[test]
+    fn a_record_owed_for_with_no_tokens_keeps_the_cost_a_floor_with_a_price_sheet() {
+        let mut settled = priced(Some(0.05));
+        let mut shortfall = priced(None);
+        if let (
+            niobe_core::event::Event::Usage(settled),
+            niobe_core::event::Event::Usage(shortfall),
+        ) = (&mut settled, &mut shortfall)
+        {
+            settled.settles_model = Some(true);
+            (shortfall.input, shortfall.output) = (0, 0);
+        }
+        let prices: &dyn Prices = &ATenthOfACentPerThousand;
+
+        let session = SessionState::replay(&[priced(None), settled.clone(), shortfall.clone()]);
+        assert_eq!(session_cost(&session, None), "≥$0.05");
+        assert_eq!(session_cost(&session, Some(prices)), "≥$0.05");
+        assert_eq!(
+            model_cost(session.totals(), "opus-5", Some(prices)),
+            "≥$0.05"
+        );
+
+        // Another model's tokens owed beside it are still valued, and the
+        // figure is an estimated floor: the shortfall is still not in it.
+        let session =
+            SessionState::replay(&[priced(None), settled, shortfall, on("haiku-4-5", None)]);
+        assert_eq!(session_cost(&session, Some(prices)), "≥~$0.05");
+    }
+
     #[test]
     fn an_unstarted_session_names_no_model_it_was_never_told_about() {
         assert_eq!(
