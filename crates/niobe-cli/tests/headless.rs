@@ -333,3 +333,78 @@ fn a_call_the_cli_refused_by_itself_is_not_answered_and_the_turn_still_finishes(
         );
     }
 }
+
+/// A `claude` that, once the turn reaches it, starts a process that outlives
+/// it unless something ends it — as a call to `Bash` running a server or a
+/// watcher does — writes that process's id to `tool.pid` and waits.
+const STARTS_A_TOOL_CLAUDE: &str = "#!/bin/sh\n\
+    read -r first\n\
+    read -r turn\n\
+    sleep 300 &\n\
+    echo $! > tool.pid\n\
+    while read -r line; do :; done\n";
+
+fn alive(pid: &str) -> bool {
+    Command::new("kill")
+        .args(["-0", pid])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+/// Waits for `tool.pid` in the repository, which the stand-in writes only
+/// once the turn has reached it, and so once niobe has said all it is going
+/// to about the CLI's process group.
+fn the_tool_started(setup: &Setup) -> String {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        match std::fs::read_to_string(setup.repo().join("tool.pid")) {
+            Ok(pid) if pid.ends_with('\n') => return pid.trim().to_owned(),
+            _ => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the stand-in claude never started its tool"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+    }
+}
+
+#[test]
+fn what_the_cli_started_ends_when_its_niobe_is_killed() {
+    for signal in ["KILL", "TERM"] {
+        let setup = Setup::new(STARTS_A_TOOL_CLAUDE, METERED);
+        let mut niobe = Command::new(env!("CARGO_BIN_EXE_niobe"))
+            .args(["-p", "start the server"])
+            .current_dir(setup.repo())
+            .env("XDG_CONFIG_HOME", setup.dir.path().join("config"))
+            .env("CLAUDE_CONFIG_DIR", setup.dir.path().join("no-claude-here"))
+            .env_remove("HOME")
+            .env(
+                "PATH",
+                format!("{}:/bin:/usr/bin", setup.dir.path().join("bin").display()),
+            )
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("the niobe binary runs");
+        let tool = the_tool_started(&setup);
+
+        let sent = Command::new("kill")
+            .args([&format!("-{signal}"), &niobe.id().to_string()])
+            .status()
+            .expect("kill runs");
+        assert!(sent.success());
+        niobe.wait().expect("niobe can be waited on");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while alive(&tool) {
+            if std::time::Instant::now() >= deadline {
+                let _ = Command::new("kill").args(["-KILL", &tool]).status();
+                panic!("what the CLI started outlived its niobe, ended by SIG{signal}");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+}

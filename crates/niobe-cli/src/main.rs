@@ -1014,6 +1014,12 @@ fn print_turn(
     for rule in allow {
         allowed.insert(rule.clone());
     }
+    // No `!` command runs here, but the reaper behind the commands is what
+    // ends the CLI's process group when this run is ended by a signal it
+    // never answers — a CI job's timeout, or `niobe bench` at a task's
+    // deadline — so that what the agent started is not left running with
+    // nobody to see it. Each pause lets go of a group the CLI left empty.
+    let mut reaped = commands_for(&root, &mut backend);
     let mut journal = StoreJournal::pending(root.clone());
     let turn = headless::run(
         backend.bridge(),
@@ -1021,11 +1027,16 @@ fn print_turn(
         &allowed,
         prompt,
         asked.budget,
-        &mut || std::thread::sleep(Duration::from_millis(10)),
+        &mut || {
+            let _ = niobe_tui::shell::Shell::drain(&mut reaped);
+            std::thread::sleep(Duration::from_millis(10));
+        },
     );
     // The backend is ended before the journal is closed, so that nothing it
-    // says while going is written into a session the store has finished.
+    // says while going is written into a session the store has finished; it
+    // stops its own group, so the reaper is let go of after it.
     drop(backend);
+    drop(reaped);
     let finished = journal.finish();
     if finished.unsaved > 0 {
         note(&format!(
