@@ -349,6 +349,9 @@ reviewers that encode both, for an agent working in this tree.
   config files, layers them under the trust record and names the selected profile to the shell;
   `repo.rs` is where the session runs — the repository's root, name and branch, the store under
   `.niobe/`, kept to the operator alone and refused where a link would write it elsewhere, and
+  the trim directory beside it kept out of git's reach — excluded whole where a clone's ignore
+  file there would leave the settings copy or an output for a commit, refused where it tracks a
+  file — and
   the `git` reads of the working tree made on a thread of its own as the shell's `Watch`,
   each dated by when it began and, where the shell asked for it, sent though nothing changed;
   `rules.rs` writes a standing answer into the repository's `.niobe/config.toml`, keeping the

@@ -208,13 +208,16 @@ fn open(target: &Target, profile: Option<&str>, asked: &Asked) -> Result<Option<
 /// Where a session started under `trim = true` keeps the outputs it trims,
 /// and the binary that trims them; `None` where the config leaves it off.
 /// Refused where `.niobe/` leads out of the repository, since the whole
-/// outputs would be written wherever it leads.
+/// outputs would be written wherever it leads, and where git would offer what
+/// is written there for a commit.
 fn trim_for(root: &Path, on: bool) -> Result<Option<trim::Trim>, String> {
     if !on {
         return Ok(None);
     }
     let dir = repo::trim_dir(root);
     repo::writes_inside(root, &dir)?;
+    trim::prepare(&dir).map_err(|e| format!("cannot make {}: {e}", dir.display()))?;
+    repo::keep_trim_unpublished(root)?;
     let exe = std::env::current_exe().map_err(|e| {
         format!("`trim = true` runs niobe as a hook, and its path is not known: {e}")
     })?;

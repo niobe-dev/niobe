@@ -265,15 +265,20 @@ fn store_pathspecs(root: &Path) -> Vec<String> {
 /// is tracked nor whether it is ignored. Where the store's place cannot be
 /// put as a path under the root, it is named as it is written.
 fn store_in_tree(root: &Path) -> String {
-    let written = format!("{DIR}/{STORE_FILE}");
-    let store = store_path(root);
-    let Some(existing) = store.ancestors().find(|part| part.exists()) else {
+    in_tree(root, &store_path(root), format!("{DIR}/{STORE_FILE}"))
+}
+
+/// Where `path`, a file of the repository rooted at `root`, is in its tree, as
+/// git names it, for the reason [`store_in_tree`] gives; `written` where it
+/// cannot be put as a path under the root.
+fn in_tree(root: &Path, path: &Path, written: String) -> String {
+    let Some(existing) = path.ancestors().find(|part| part.exists()) else {
         return written;
     };
     let (Ok(real_root), Ok(real), Ok(rest)) = (
         std::fs::canonicalize(root),
         std::fs::canonicalize(existing),
-        store.strip_prefix(existing),
+        path.strip_prefix(existing),
     ) else {
         return written;
     };
@@ -377,6 +382,97 @@ fn keep_store_unpublished(root: &Path) -> Result<(), String> {
         return Err(not_ignored(&store));
     }
     Ok(())
+}
+
+/// Makes sure git offers nothing a session under `trim = true` writes into
+/// the repository rooted at `root` for a commit: the copy of the profile's
+/// settings the CLI is started with, which holds whatever the operator's own
+/// settings file does — an `env` with a key in it, an `apiKeyHelper` — and
+/// the whole outputs of shell commands, which hold whatever a command
+/// printed.
+///
+/// Called once the directory is made. Its ignore file is niobe's where niobe
+/// wrote it, and then ignores everything beside it, which no ignore file
+/// above it can take back. One that arrived with the clone may ignore
+/// nothing, or all but one name, so the directory is to be ignored whole,
+/// and goes into the repository's `info/exclude` where it is not, as the store does ([`keep_store_unpublished`]); where it still is
+/// not ignored, or where the clone tracks a file in it, the session is
+/// refused before anything is written there: a tracked settings copy would
+/// take the operator's settings into the next `git commit -a`.
+pub fn keep_trim_unpublished(root: &Path) -> Result<(), String> {
+    let dir = trim_dir(root);
+    let in_tree = in_tree(root, &dir, format!("{DIR}/{}", crate::trim::DIR));
+    trim_is_not_tracked(root, &in_tree)?;
+    let ours = std::fs::read_to_string(dir.join(".gitignore"))
+        .is_ok_and(|text| text == crate::trim::IGNORE);
+    // The directory itself, and not a name in it: an ignore file in it can
+    // take back any name its own rules or one above them ignore, and none can
+    // take back what is beneath a directory ignored whole. Not through the
+    // index, which answers that a directory holding a tracked file — the
+    // clone's ignore file — is ignored by nothing.
+    let ignored =
+        |root: &Path| git_status(root, &["check-ignore", "-q", "--no-index", "--", &in_tree]);
+    if ours || !matches!(ignored(root), Some((1, _))) {
+        return Ok(());
+    }
+    let refused = || not_ignored_trim(&in_tree);
+    let exclude = git_status(root, &["rev-parse", "--git-path", "info/exclude"])
+        .filter(|(code, _)| *code == 0)
+        .map(|(_, path)| root.join(path.trim_end()))
+        .ok_or_else(refused)?;
+    let written = (|| {
+        if let Some(dir) = exclude.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&exclude)?;
+        use std::io::Write as _;
+        write!(
+            file,
+            "\n# Written by niobe: trimmed outputs and settings copies are not for commits.\n/{}/\n",
+            ignore_rule(&in_tree)
+        )
+    })();
+    if written.is_err() || !matches!(ignored(root), Some((0, _))) {
+        return Err(refused());
+    }
+    Ok(())
+}
+
+/// Refuses a trim directory, named `in_tree` as git names it, holding a file
+/// git tracks other than its ignore file, which is checked for what it
+/// ignores instead.
+fn trim_is_not_tracked(root: &Path, in_tree: &str) -> Result<(), String> {
+    let args = ["--literal-pathspecs", "ls-files", "-z", "--", in_tree];
+    let Some((0, listed)) = git_status(root, &args) else {
+        return Ok(());
+    };
+    let ignore_file = format!("{in_tree}/.gitignore");
+    match listed
+        .split('\0')
+        .find(|name| !name.is_empty() && *name != ignore_file)
+    {
+        None => Ok(()),
+        Some(tracked) => Err(format!(
+            "{tracked} is tracked by git: under `trim = true` niobe writes your profile's \
+             settings and whole command outputs beside it, and the next commit would \
+             publish them. Niobe will not use it; remove it from the repository with \
+             `git rm --cached {tracked}`"
+        )),
+    }
+}
+
+/// The refusal for a trim directory that git does not ignore and niobe could
+/// not make it ignore.
+fn not_ignored_trim(in_tree: &str) -> String {
+    format!(
+        "{in_tree} is not ignored by git, and niobe could not add it to .git/info/exclude: \
+         under `trim = true` your profile's settings and whole command outputs would be \
+         written there, one `git add -A` from being published. Add `{in_tree}/` to an \
+         ignore file of yours and start again"
+    )
 }
 
 /// The refusal for a store that git does not ignore and niobe could not make
@@ -2001,7 +2097,11 @@ mod tests {
         let work = dir.path().join("work");
         std::fs::create_dir_all(work.join(DIR)).expect("the directory is made");
         for (name, text) in files {
-            std::fs::write(work.join(DIR).join(name), text).expect("the file is written");
+            let path = work.join(DIR).join(name);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).expect("the directory is made");
+            }
+            std::fs::write(path, text).expect("the file is written");
             run(&work, &["add", &format!("{DIR}/{name}")]);
         }
         run(&work, &["commit", "-m", "ship niobe files"]);
@@ -2096,6 +2196,78 @@ mod tests {
             "the store is not offered to `git add -A`"
         );
         assert!(work.join("kept").join("sessions.db").exists());
+    }
+
+    /// Writes what a session under `trim = true` writes into `work`: the
+    /// settings copy the CLI is started with, holding the profile's own
+    /// settings, and one whole output the hook kept.
+    fn trim_writes(work: &Path) -> Result<(), String> {
+        let profile_settings = work.join("mine.json");
+        std::fs::write(
+            &profile_settings,
+            r#"{"env":{"ANTHROPIC_API_KEY":"sk-secret"}}"#,
+        )
+        .expect("the file is written");
+        let trim = crate::trim_for(work, true)?.expect("trim is on");
+        crate::trim::settings(&trim, "max", profile_settings.to_str())?;
+        std::fs::remove_file(&profile_settings).expect("the file was just written");
+        std::fs::write(trim.dir.join("toolu_01.txt"), "whole output\n")
+            .expect("the file is written");
+        Ok(())
+    }
+
+    #[test]
+    fn a_committed_trim_ignore_file_that_ignores_nothing_does_not_leave_its_files_for_a_commit() {
+        let (_dir, work) = clone_with(&[("trim/.gitignore", "# nothing is ignored here\n")]);
+
+        trim_writes(&work).expect("the session starts");
+
+        assert_eq!(
+            untracked_or_modified(&work),
+            "",
+            "neither the settings copy nor an output is offered to `git add -A`"
+        );
+    }
+
+    #[test]
+    fn a_committed_trim_ignore_file_that_ignores_only_the_outputs_does_not_leave_the_settings_copy()
+    {
+        let (_dir, work) = clone_with(&[("trim/.gitignore", "*.txt\n")]);
+
+        trim_writes(&work).expect("the session starts");
+
+        assert_eq!(untracked_or_modified(&work), "");
+    }
+
+    #[test]
+    fn a_settings_copy_the_clone_tracks_is_refused_before_it_is_written() {
+        let (_dir, work) = clone_with(&[("trim/claude-settings-max.json", "{}\n")]);
+
+        let said = trim_writes(&work).expect_err("a tracked copy would publish the settings");
+
+        assert!(
+            said.contains(".niobe/trim/claude-settings-max.json"),
+            "{said}"
+        );
+        assert!(said.contains("tracked by git"), "{said}");
+        assert_eq!(
+            std::fs::read_to_string(work.join(".niobe/trim/claude-settings-max.json"))
+                .expect("the tracked file is there"),
+            "{}\n",
+            "the profile's settings were not written into it"
+        );
+    }
+
+    #[test]
+    fn a_trim_directory_niobe_makes_itself_needs_no_exclude_rule() {
+        let dir = repository();
+        let work = dir.path().join("work");
+
+        trim_writes(&work).expect("the session starts");
+
+        assert_eq!(untracked_or_modified(&work), "");
+        let exclude = std::fs::read_to_string(work.join(".git/info/exclude")).unwrap_or_default();
+        assert!(!exclude.contains("trim"), "{exclude}");
     }
 
     #[test]

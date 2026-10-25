@@ -49,7 +49,7 @@ pub const DIR: &str = "trim";
 
 /// The file in [`DIR`] that ignores everything beside it for git, itself
 /// included.
-const IGNORE: &str = "# Written by niobe: the whole outputs of trimmed commands, and the\n\
+pub const IGNORE: &str = "# Written by niobe: the whole outputs of trimmed commands, and the\n\
 # settings the claude CLI is started with. Not meant to be committed.\n*\n";
 
 /// What the copy of a profile's settings, with the hook added, is named in
@@ -172,7 +172,7 @@ fn add_hook(document: &mut Value, command: &str) -> Result<(), &'static str> {
 /// Makes `dir`, readable by the operator alone, and its ignore file, where
 /// they are not there yet. A `dir` that is a link is refused: it would choose
 /// where the outputs go.
-fn prepare(dir: &Path) -> io::Result<()> {
+pub fn prepare(dir: &Path) -> io::Result<()> {
     match std::fs::symlink_metadata(dir) {
         Ok(meta) if meta.is_dir() => {}
         Ok(_) => {
