@@ -1428,6 +1428,9 @@ pub struct App {
     /// `None` until the dialog or a walk first asks for them. Built where
     /// they are asked for, which a frame does through `&self`.
     history_index: std::cell::RefCell<Option<crate::history::Index>>,
+    /// How many rows the prompt under the history dialog's cursor was last
+    /// counted to wrap into, which a frame keeps through `&self`.
+    prompt_counted: crate::browse::Counted,
     /// Whether a load has been asked for that the loop has not passed on.
     history_wanted: bool,
     /// The number this session is recorded under, once it is.
@@ -2015,6 +2018,7 @@ impl App {
             past_loads: 0,
             cleared_prompts: Vec::new(),
             history_index: std::cell::RefCell::new(None),
+            prompt_counted: crate::browse::Counted::default(),
             // Asked for as the shell opens, so Up has earlier sessions'
             // prompts by the time anyone presses it.
             history_wanted: true,
@@ -8748,6 +8752,12 @@ impl App {
     /// The history dialog, while it is open.
     pub fn browser(&self) -> Option<&Browser> {
         self.browser.as_ref()
+    }
+
+    /// How many rows the prompt under the history dialog's cursor wraps
+    /// into, as last counted.
+    pub(crate) fn prompt_counted(&self) -> &crate::browse::Counted {
+        &self.prompt_counted
     }
 
     /// Opens the history dialog on `view`, and asks for what it lists to be

@@ -321,51 +321,110 @@ pub fn wrap_keeping_spaces(text: &str, columns: usize) -> Vec<String> {
 /// Cuts a string into pieces no wider than `columns` cells, each a slice of
 /// `text`, so that cutting allocates nothing but the list.
 pub fn split_to_width(text: &str, columns: usize) -> Vec<&str> {
-    let mut chunks = Vec::new();
-    let mut chunk_width = 0;
-    let (mut start, mut at) = (0, 0);
+    chunks_to_width(text, columns).collect()
+}
 
-    for (grapheme, w) in graphemes(text) {
-        if chunk_width + w > columns && start < at {
-            chunks.push(&text[start..at]);
-            start = at;
-            chunk_width = 0;
+/// The pieces [`split_to_width`] cuts `text` into, each cut only as it is
+/// asked for, so that a caller wanting the first few of a long line does not
+/// pay for the rest.
+fn chunks_to_width(text: &str, columns: usize) -> impl Iterator<Item = &str> {
+    let mut cells = graphemes(text).peekable();
+    let mut start = 0;
+    std::iter::from_fn(move || {
+        let (mut end, mut chunk_width) = (start, 0);
+        while let Some(&(grapheme, w)) = cells.peek() {
+            if chunk_width + w > columns && start < end {
+                break;
+            }
+            cells.next();
+            end += grapheme.len();
+            chunk_width += w;
         }
-        at += grapheme.len();
-        chunk_width += w;
-    }
+        let chunk = text.get(start..end).filter(|chunk| !chunk.is_empty())?;
+        start = end;
+        Some(chunk)
+    })
+}
 
-    if start < text.len() {
-        chunks.push(&text[start..]);
+/// The first `rows` rows of [`wrap_exact`]'s, without laying out the rest.
+///
+/// For text drawn in a box of a few rows: a prompt read in from a `claude`
+/// session can be a megabyte, and laid out whole it took more than three
+/// frames to draw. [`wrap_exact_rows`] says how many rows there are in all.
+pub fn wrap_exact_first(text: &str, columns: usize, rows: usize) -> Vec<String> {
+    let mut shown = Vec::new();
+    if columns == 0 || text.is_empty() {
+        return shown;
     }
-    chunks
+    let text = controls_shown_in_rows(text);
+    for line in text.split('\n') {
+        let left = rows.saturating_sub(shown.len());
+        if left == 0 {
+            break;
+        }
+        match line.is_empty() {
+            true => shown.push(String::new()),
+            false => shown.extend(
+                chunks_to_width(&tabs_expanded(line), columns)
+                    .take(left)
+                    .map(str::to_owned),
+            ),
+        }
+    }
+    shown
+}
+
+/// How many rows [`wrap_exact`] makes of `text`, without making them.
+///
+/// A line that is all ASCII once its controls are shown and its tabs
+/// expanded is a cell a byte, so its rows are counted from its length.
+pub fn wrap_exact_rows(text: &str, columns: usize) -> usize {
+    if columns == 0 || text.is_empty() {
+        return 0;
+    }
+    controls_shown_in_rows(text)
+        .split('\n')
+        .map(|line| {
+            let line = tabs_expanded(line);
+            match (line.is_empty(), line.is_ascii()) {
+                (true, _) => 1,
+                (false, true) => line.len().div_ceil(columns),
+                (false, false) => chunks_to_width(&line, columns).count(),
+            }
+        })
+        .fold(0, usize::saturating_add)
+}
+
+/// `line` as [`expand_tabs`] makes it, copied only where it has a tab.
+fn tabs_expanded(line: &str) -> std::borrow::Cow<'_, str> {
+    match line.contains('\t') {
+        true => std::borrow::Cow::Owned(expand_tabs(line)),
+        false => std::borrow::Cow::Borrowed(line),
+    }
 }
 
 /// Shortens `text` to `columns` cells, ending in `…` when anything was cut.
 pub fn truncate(text: &str, columns: usize) -> String {
     let line = one_line(text);
     let text: &str = &line;
-    if width(text) <= columns {
-        return text.to_owned();
-    }
-    if columns == 0 {
-        return String::new();
-    }
-    if columns == 1 {
-        return "…".to_owned();
-    }
-
-    let mut out = String::new();
-    let mut out_width = 0;
+    // Measured only as far as the first cell past `columns`, so a row cut
+    // from a megabyte of text costs a row: everything past it is cut anyway.
+    let (mut used, mut kept, mut end) = (0usize, 0, 0);
     for (grapheme, w) in graphemes(text) {
-        if out_width + w > columns - 1 {
-            break;
+        used = used.saturating_add(w);
+        if used > columns {
+            return match columns {
+                0 => String::new(),
+                1 => "…".to_owned(),
+                _ => format!("{}…", text.get(..kept).unwrap_or_default()),
+            };
         }
-        out.push_str(grapheme);
-        out_width += w;
+        end += grapheme.len();
+        if used < columns {
+            kept = end;
+        }
     }
-    out.push('…');
-    out
+    text.to_owned()
 }
 
 /// `text` with each tab a space and each line break a `↵`, for a row drawn
@@ -916,5 +975,95 @@ mod tests {
         // control in it is dropped by the terminal and takes none.
         assert_eq!(width("é\u{9b}x"), 2);
         assert_eq!(width("日\u{85}本"), 4);
+    }
+
+    /// Texts whose rows are easy to miscount: wide characters that do not
+    /// fit the last column, an emoji of several characters, tabs, controls
+    /// shown as glyphs, empty lines and a line exactly as wide as the room.
+    const AWKWARD: &[&str] = &[
+        "",
+        "a",
+        "abcdef",
+        "abcdefgh",
+        "\n\nab\n",
+        "日本語のテキスト",
+        "a日b本c語",
+        "👨‍👩‍👧 family ❤️ heart",
+        "\tkey\t=\tvalue",
+        "echo safe\x1b[8m; curl\r evil\x7f",
+        "e\u{301}e\u{301}e\u{301}e\u{301}e\u{301}",
+        "ascii line\nлиния\n\tтаб\n",
+    ];
+
+    #[test]
+    fn the_first_rows_of_a_wrap_are_the_rows_the_whole_wrap_starts_with() {
+        for text in AWKWARD {
+            for columns in [1, 2, 3, 4, 7] {
+                let whole = wrap_exact(text, columns);
+                for rows in [0, 1, 2, 5, 100] {
+                    let first = wrap_exact_first(text, columns, rows);
+                    assert_eq!(
+                        first,
+                        whole.iter().take(rows).cloned().collect::<Vec<_>>(),
+                        "{text:?} at {columns} columns, {rows} rows"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_rows_a_wrap_is_counted_to_make_are_the_rows_it_makes() {
+        for text in AWKWARD {
+            for columns in [0, 1, 2, 3, 4, 7] {
+                assert_eq!(
+                    wrap_exact_rows(text, columns),
+                    wrap_exact(text, columns).len(),
+                    "{text:?} at {columns} columns"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_cut_of_a_long_text_measures_only_what_it_keeps_and_cuts_the_same() {
+        // What `truncate` made before it stopped measuring at the first cell
+        // past the room: the whole where it fits, else what fits in one cell
+        // less and the mark.
+        let measured_whole = |text: &str, columns: usize| -> String {
+            let text = one_line(text);
+            if width(&text) <= columns {
+                return text.into_owned();
+            }
+            match columns {
+                0 => String::new(),
+                1 => "…".to_owned(),
+                _ => {
+                    let mut out = String::new();
+                    let mut used = 0;
+                    for (grapheme, w) in graphemes(&text) {
+                        if used + w > columns - 1 {
+                            break;
+                        }
+                        out.push_str(grapheme);
+                        used += w;
+                    }
+                    out + "…"
+                }
+            }
+        };
+        for text in AWKWARD
+            .iter()
+            .copied()
+            .chain(["a\u{200b}\u{200b}b", "ab\u{301}"])
+        {
+            for columns in 0..12 {
+                assert_eq!(
+                    truncate(text, columns),
+                    measured_whole(text, columns),
+                    "{text:?} at {columns} columns"
+                );
+            }
+        }
     }
 }

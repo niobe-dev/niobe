@@ -1109,3 +1109,78 @@ fn a_call_with_a_megabyte_of_output_opens_and_pages_inside_a_frame_budget() {
         );
     }
 }
+
+/// How large a prompt the history dialog is timed showing: a megabyte, as a
+/// log pasted into a `claude` session read in here is.
+const LARGE_PROMPT: usize = 1 << 20;
+
+/// An earlier session asked a megabyte, and the history dialog's cursor
+/// rests on it, in its prompts and in its sessions: what is wrapped of it is
+/// what fits under the list, so the frame costs a screenful whether the
+/// megabyte is short lines, one line of ASCII or one line of another script.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "a frame is timed in an optimised build")]
+fn a_megabyte_prompt_under_the_history_dialogs_cursor_draws_inside_a_frame_budget() {
+    use niobe_tui::history::{Past, PastPrompt, PastSession, Target};
+
+    let _alone = ALONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let lines = "error: the fetch failed at line 42 of the log\n";
+    let shapes = [
+        ("short lines", lines.repeat(LARGE_PROMPT / lines.len())),
+        ("one line", "word ".repeat(LARGE_PROMPT / 5)),
+        ("one line of Cyrillic", "журнал ".repeat(LARGE_PROMPT / 13)),
+    ];
+    for (shape, body) in shapes {
+        for sessions_view in [false, true] {
+            let mut app = running_session().remembers();
+            let earlier = Target::Recorded("1".to_owned());
+            app.set_past(Past {
+                prompts: vec![PastPrompt {
+                    text: format!("megabyte {body}"),
+                    at: None,
+                    session: earlier.clone(),
+                }],
+                sessions: vec![PastSession {
+                    target: earlier,
+                    last: None,
+                    first_prompt: None,
+                    title: None,
+                    open_elsewhere: false,
+                }],
+                unread: None,
+            });
+            let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+            app.on_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+            if sessions_view {
+                app.on_key(key(KeyCode::Tab));
+            }
+            for c in "megabyte".chars() {
+                app.on_key(key(KeyCode::Char(c)));
+            }
+            let frame = screen(&mut app, 120, 30);
+            assert!(
+                frame.contains("megabyte"),
+                "{shape}: the prompt is under the cursor, or nothing is timed:\n{frame}"
+            );
+
+            let mut frames: Vec<Duration> = (0..FRAMES)
+                .map(|_| {
+                    let started = Instant::now();
+                    let _ = screen(&mut app, 120, 30);
+                    started.elapsed()
+                })
+                .collect();
+            frames.sort_unstable();
+            let median = frames[FRAMES / 2];
+
+            assert!(
+                median <= FRAME_BUDGET,
+                "{shape}, sessions {sessions_view}: the median frame with a {LARGE_PROMPT}-byte \
+                 prompt under the history dialog's cursor took {median:?}, over the \
+                 {FRAME_BUDGET:?} budget"
+            );
+        }
+    }
+}

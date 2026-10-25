@@ -108,7 +108,12 @@ fn prompts(
     pad(&mut lines, HEAD_ROWS + list_rows);
     lines.push(rule(width, theme));
     if let Some(row) = listed.get(browser.at) {
-        lines.extend(prompt_detail(row, width, detail_rows, theme));
+        lines.extend(prompt_detail(
+            row,
+            app.prompt_counted(),
+            (width, detail_rows),
+            theme,
+        ));
     }
     lines
 }
@@ -249,16 +254,65 @@ fn list_row(said: &str, on_it: bool, width: usize, theme: &Theme) -> Line<'stati
 
 /// The prompt under the cursor, whole, wrapped to the dialog with every space
 /// it was sent with, so an indented list or a pasted block reads as sent.
-fn prompt_detail(row: &PromptRow, width: usize, room: usize, theme: &Theme) -> Vec<Line<'static>> {
-    let wrapped: Vec<String> = row
-        .text
-        .lines()
-        .flat_map(|line| match line.is_empty() {
-            true => vec![String::new()],
-            false => text::wrap_exact(line, width),
-        })
-        .collect();
-    cut(wrapped, room, theme)
+///
+/// Only the rows the box can show are laid out, and the rest counted once
+/// for the prompt: one read in from a `claude` session can be a megabyte,
+/// and wrapped whole on every frame it held the shell up for three of them.
+fn prompt_detail(
+    row: &PromptRow,
+    counted: &Counted,
+    (width, room): (usize, usize),
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    // One row past the room, so that `cut` can tell a prompt that fills the
+    // box from one it has to cut.
+    let wanted = room.saturating_add(1);
+    let mut shown = Vec::new();
+    for line in row.text.lines() {
+        let left = wanted.saturating_sub(shown.len());
+        if left == 0 {
+            break;
+        }
+        match line.is_empty() {
+            true => shown.push(String::new()),
+            false => shown.extend(text::wrap_exact_first(line, width, left)),
+        }
+    }
+    cut(shown, counted.rows(&row.text, width), room, theme)
+}
+
+/// How many rows the prompt under the history dialog's cursor wraps into,
+/// kept with the prompt and the width it was counted at.
+///
+/// Counting them measures every character of the prompt, which for a
+/// megabyte in a script other than ASCII takes two frames; the frames after
+/// the first that draw the same prompt compare it instead, which is a copy's
+/// worth of work.
+#[derive(Debug, Default)]
+pub(crate) struct Counted(std::cell::RefCell<Option<(String, usize, usize)>>);
+
+impl Counted {
+    /// The rows `prompt` wraps into at `width`, as [`prompt_detail`] wraps
+    /// it: a row for each empty line, and each other line as
+    /// [`text::wrap_exact`] cuts it.
+    fn rows(&self, prompt: &str, width: usize) -> usize {
+        let mut last = self.0.borrow_mut();
+        if let Some((text, at, rows)) = last.as_ref()
+            && *at == width
+            && text == prompt
+        {
+            return *rows;
+        }
+        let rows = prompt
+            .lines()
+            .map(|line| match line.is_empty() {
+                true => 1,
+                false => text::wrap_exact_rows(line, width),
+            })
+            .fold(0, usize::saturating_add);
+        *last = Some((prompt.to_owned(), width, rows));
+        rows
+    }
 }
 
 /// Every prompt of the session under the cursor, oldest first, one line
@@ -285,12 +339,14 @@ fn session_detail(
         ],
         (true, None) => vec!["nothing asked in it".to_owned()],
     };
-    cut(said, room, theme)
+    let total = said.len();
+    cut(said, total, room, theme)
 }
 
-/// `lines` cut to `room`, saying how many were left out.
-fn cut(lines: Vec<String>, room: usize, theme: &Theme) -> Vec<Line<'static>> {
-    let total = lines.len();
+/// `lines`, the first of `total`, cut to `room`, saying how many were left
+/// out. `lines` holds every one where `total` fits in `room`, and at least
+/// the `room` less one shown where it does not.
+fn cut(lines: Vec<String>, total: usize, room: usize, theme: &Theme) -> Vec<Line<'static>> {
     if total <= room {
         return lines
             .into_iter()
@@ -458,11 +514,11 @@ mod tests {
     fn lines_that_fit_are_shown_whole_and_more_are_cut_with_a_count() {
         let lines = |n: usize| (1..=n).map(|n| format!("line {n}")).collect::<Vec<_>>();
         assert_eq!(
-            said(&cut(lines(3), 3, &Theme::default())),
+            said(&cut(lines(3), 3, 3, &Theme::default())),
             ["line 1", "line 2", "line 3"]
         );
         assert_eq!(
-            said(&cut(lines(4), 3, &Theme::default())),
+            said(&cut(lines(4), 4, 3, &Theme::default())),
             ["line 1", "line 2", "… 2 more"]
         );
     }
@@ -475,8 +531,53 @@ mod tests {
             session: None,
         };
         assert_eq!(
-            said(&prompt_detail(&row, 40, 10, &Theme::default())),
+            said(&prompt_detail(
+                &row,
+                &Counted::default(),
+                (40, 10),
+                &Theme::default()
+            )),
             ["- top", "  - nested item", "    key   =   \"v\"", "    x"]
+        );
+    }
+
+    /// A prompt longer than the box is cut with a count of the rows left out,
+    /// worked out from the prompt and not from the rows laid out, and a
+    /// prompt drawn after it is counted for itself.
+    #[test]
+    fn a_prompt_longer_than_its_box_says_how_many_rows_are_left_out() {
+        let prompt = |text: &str| PromptRow {
+            text: text.to_owned(),
+            at: None,
+            session: None,
+        };
+        let counted = Counted::default();
+        // 26 letters at 10 columns are 3 rows, then an empty line, then 25
+        // characters of which each is two cells: 5 rows of 5. Nine rows.
+        let long = prompt(&format!(
+            "{}\n\n{}",
+            "abcdefghijklmnopqrstuvwxyz",
+            "語".repeat(25)
+        ));
+        assert_eq!(
+            said(&prompt_detail(&long, &counted, (10, 4), &Theme::default())),
+            ["abcdefghij", "klmnopqrst", "uvwxyz", "… 6 more"]
+        );
+        assert_eq!(
+            said(&prompt_detail(&long, &counted, (10, 9), &Theme::default())).len(),
+            9,
+            "nine rows fill a box of nine without a cut"
+        );
+
+        let other = prompt(&format!(
+            "{}\n\n{}",
+            "abcdefghijklmnopqrstuvwxyz",
+            "x".repeat(75)
+        ));
+        assert_eq!(
+            said(&prompt_detail(&other, &counted, (10, 4), &Theme::default())),
+            ["abcdefghij", "klmnopqrst", "uvwxyz", "… 9 more"],
+            "75 cells at 10 columns are 8 rows, not the 5 the prompt before made"
         );
     }
 }
