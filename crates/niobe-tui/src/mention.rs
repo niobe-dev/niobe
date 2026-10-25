@@ -39,14 +39,32 @@ pub(crate) fn at_cursor(lines: &[String], cursor: (usize, usize)) -> Option<Ment
 }
 
 /// A listed path as it goes in after the `@`, in the form Claude Code reads
-/// it: the CLI takes a mention up to the first blank, so a path that holds a
-/// space goes in quoted, `@"dir with space/file.txt"`, as the CLI's own
-/// completion writes it, and every other path goes in as it is.
+/// it: bare where the CLI reads the bare path back whole, and otherwise
+/// quoted, `@"dir with space/file.txt"`, which the CLI reads as it stands.
+///
+/// The CLI's own completion quotes only a path that holds a space, but that
+/// is not all that cuts a bare mention short: the CLI ends one at any blank
+/// JavaScript's `\s` matches and drops every character at its end that is not
+/// an ASCII letter, digit or `_`, so bare, `notes~` would name `notes` and
+/// `docs/café` would name `docs/caf`. A path holding a `"` cannot be quoted,
+/// and goes in bare.
 pub(crate) fn written(path: &str) -> String {
-    match path.contains(' ') {
-        true => format!("\"{path}\""),
-        false => path.to_owned(),
+    match reads_whole_bare(path) || path.contains('"') {
+        true => path.to_owned(),
+        false => format!("\"{path}\""),
     }
+}
+
+/// Whether the CLI reads `@` and `path`, bare, as `path` and nothing less.
+fn reads_whole_bare(path: &str) -> bool {
+    // Rust's whitespace is JavaScript's `\s` but for the byte order mark,
+    // which `\s` takes as a blank too.
+    let blank = |c: char| c.is_whitespace() || c == '\u{feff}';
+    !path.chars().any(blank)
+        && path
+            .chars()
+            .next_back()
+            .is_some_and(|last| last.is_ascii_alphanumeric() || last == '_')
 }
 
 /// Whether a listed path can be named at all. A line break ends a mention in
@@ -281,7 +299,7 @@ mod tests {
 
     /// Claude Code reads a mention up to the first blank unless it is
     /// quoted, and its own completion (2.1.285) quotes a path that holds a
-    /// space as `@"…"` and leaves every other path bare.
+    /// space as `@"…"`.
     #[test]
     fn a_path_with_a_space_is_written_quoted_as_the_cli_writes_it() {
         assert_eq!(
@@ -289,6 +307,29 @@ mod tests {
             r#""dir with space/file name.txt""#
         );
         assert_eq!(written("src/main.rs"), "src/main.rs");
+    }
+
+    /// Claude Code (2.1.310) reads a bare mention up to the first character
+    /// JavaScript's `\s` matches, and then drops every character at its end
+    /// that is not an ASCII letter, digit or `_`: bare, `@notes~` names
+    /// `notes` and `@docs/café` names `docs/caf`. Quoted, it reads the path
+    /// whole.
+    #[test]
+    fn a_path_the_cli_would_cut_short_bare_is_written_quoted() {
+        for path in [
+            "notes~",
+            "docs/café",
+            "draft(1)",
+            "dir\tname/file.rs",
+            "a\u{a0}b.rs",
+            "\u{65e5}\u{3000}\u{8a18}.md",
+            "bom\u{feff}.rs",
+        ] {
+            assert_eq!(written(path), format!("\"{path}\""), "{path:?}");
+        }
+        for path in ["src/main.rs", "Makefile", "a_b/c_", "v2/x9"] {
+            assert_eq!(written(path), path, "{path:?}");
+        }
     }
 
     /// No form of mention carries a line break: the CLI's reads stop at one,
