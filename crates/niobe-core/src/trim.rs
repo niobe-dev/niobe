@@ -51,10 +51,38 @@ const BUILDS: &[&str] = &[
 
 /// The programs that pick lines out of what they read by what the lines say.
 /// Whatever reaches the agent through one is what it asked to read, so a
-/// command that runs one is never trimmed.
+/// command that runs one is never trimmed. `perl` and `ruby` are here for
+/// their `-n` and `-p`, the line filters they are run as in a pipeline.
 const FILTERS: &[&str] = &[
-    "ack", "ag", "awk", "egrep", "fgrep", "gawk", "grep", "gsed", "mawk", "rg", "sed",
+    "ack",
+    "ag",
+    "awk",
+    "egrep",
+    "fgrep",
+    "gawk",
+    "grep",
+    "gsed",
+    "mawk",
+    "pcre2grep",
+    "pcregrep",
+    "perl",
+    "rg",
+    "rga",
+    "ruby",
+    "sed",
+    "ug",
+    "ugrep",
+    "zegrep",
+    "zfgrep",
+    "zgrep",
 ];
+
+/// The programs that run another named among their own words, with its
+/// output as the command's: `stdbuf -oL grep ok`, `xargs -0 grep ok`. A
+/// command that runs one with a [`FILTERS`] program anywhere among its words
+/// is read as running that filter, since which word is the program depends
+/// on options of theirs read nowhere else.
+const RUNNERS: &[&str] = &["stdbuf", "unbuffer", "xargs"];
 
 /// The width cargo right-aligns its status words to, followed by a space.
 const STATUS_WIDTH: usize = 12;
@@ -100,7 +128,8 @@ impl Trimmed {
 /// `output` without cargo's progress and libtest's passing tests, where
 /// `command` runs cargo to build ([`BUILDS`]) and leaving them out saves at
 /// least [`MIN_SAVED`] bytes. `None` for any other command, for one that
-/// also runs one of the [`FILTERS`], and where too little would go.
+/// also runs one of the [`FILTERS`], itself or through one of the
+/// [`RUNNERS`], and where too little would go.
 ///
 /// Passing tests are left out only where `command` is a test run as
 /// [`is_test_run`] reads one, so a `cargo build` keeps whatever its build
@@ -110,9 +139,7 @@ pub fn trim(command: &str, output: &str) -> Option<Trimmed> {
     let builds = commands
         .iter()
         .any(|words| cargo_subcommand(words).is_some_and(|sub| BUILDS.contains(&sub)));
-    let filtered = commands
-        .iter()
-        .any(|words| program(words).is_some_and(|name| FILTERS.contains(&name)));
+    let filtered = commands.iter().any(|words| picks_lines(words));
     if !builds || filtered {
         return None;
     }
@@ -139,6 +166,22 @@ pub fn trim(command: &str, output: &str) -> Option<Trimmed> {
     (saved >= MIN_SAVED).then_some(Trimmed { text, left_out })
 }
 
+/// Whether the simple command `words` runs one of the [`FILTERS`], itself or
+/// through one of the [`RUNNERS`].
+fn picks_lines(words: &[String]) -> bool {
+    let named = |word: &str| FILTERS.contains(&base_name(word));
+    match program(words) {
+        Some(name) if RUNNERS.contains(&name) => words.iter().any(|word| named(word)),
+        Some(name) => named(name),
+        None => false,
+    }
+}
+
+/// `word` without the directory a program was named by.
+fn base_name(word: &str) -> &str {
+    word.rsplit('/').next().unwrap_or(word)
+}
+
 /// The name of the program the simple command `words` runs, read past the
 /// shell's own words, assignments and the wrappers that run the command after
 /// them, without the directory it was named by.
@@ -159,7 +202,7 @@ fn program(words: &[String]) -> Option<&str> {
                     return None;
                 }
             }
-            None => return word.rsplit('/').next(),
+            None => return Some(base_name(word)),
         }
     }
 }
@@ -340,6 +383,29 @@ mod tests {
         assert_eq!(
             trim("cargo test 2>&1 | env LC_ALL=C grep ok", &listed),
             None
+        );
+    }
+
+    #[test]
+    fn a_filter_run_behind_another_program_or_under_another_name_keeps_what_it_picked() {
+        let listed = format!("running 40 tests\n{}", passing_tests(40));
+
+        for command in [
+            "cargo test 2>&1 | stdbuf -oL grep ' ok$'",
+            "cargo test 2>&1 | stdbuf -o 0 grep ' ok$'",
+            "cargo test 2>&1 | unbuffer grep ' ok$'",
+            "cargo test 2>&1 | xargs -0 grep ' ok$'",
+            "cargo test 2>&1 | ugrep ' ok$'",
+            "cargo test 2>&1 | zgrep ' ok$'",
+            "cargo test 2>&1 | pcre2grep ' ok$'",
+            "cargo test 2>&1 | perl -ne 'print if / ok$/'",
+            "cargo test 2>&1 | ruby -ne 'print if / ok$/'",
+        ] {
+            assert_eq!(trim(command, &listed), None, "{command}");
+        }
+        assert!(
+            trim("cargo test 2>&1 | stdbuf -oL tail -n 400", &listed).is_some(),
+            "a program that keeps every line it is given still has its input trimmed"
         );
     }
 

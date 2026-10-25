@@ -33,10 +33,13 @@
 //! shorten, is handed back as it was — and so is every call when anything
 //! goes wrong, since a hook that failed would fail the call.
 //!
-//! A command that fails never reaches it. The CLI runs `PostToolUse` only
-//! after a call succeeds; after one that fails it runs `PostToolUseFailure`,
-//! which takes context to add and no output to replace, so a failing run is
-//! read whole, as the CLI hands it over.
+//! The hook runs only after a shell call succeeds. After one that fails the
+//! CLI runs `PostToolUseFailure`, which takes context to add and no output to
+//! replace, so a call that fails is read whole, as the CLI hands it over. A
+//! call succeeds on the status of its last command, though: a failing test
+//! run piped into `tail`, or followed by `; echo done`, still reaches the
+//! hook and is trimmed. What it leaves out is progress and passing tests
+//! only, so every failure, panic and `test result:` line is still there.
 
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
