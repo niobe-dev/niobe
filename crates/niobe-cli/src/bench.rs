@@ -337,12 +337,17 @@ fn checks(check: &Path, work: &Path) -> bool {
 /// A `niobe` killed here takes its backend with it: the reaper it starts ends
 /// every process group it was told of once the pipe the killed process held
 /// to it closes.
+///
+/// A `timeout` too long for the clock to hold — `--timeout` takes any whole
+/// number of seconds — is no deadline at all, rather than a panic.
 fn ended_by(child: &mut Child, timeout: Duration) -> Option<ExitStatus> {
-    let deadline = Instant::now() + timeout;
+    let deadline = Instant::now().checked_add(timeout);
     loop {
         match child.try_wait() {
             Ok(Some(status)) => return Some(status),
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(POLL),
+            Ok(None) if deadline.is_none_or(|deadline| Instant::now() < deadline) => {
+                std::thread::sleep(POLL)
+            }
             Ok(None) | Err(_) => {
                 let _ = child.kill();
                 let _ = child.wait();
@@ -641,6 +646,15 @@ mod tests {
         let file = "<!--\nSPDX-License-Identifier: Apache-2.0\n-->\n\nFix the bug.\n";
         assert_eq!(prompt_of(file), "Fix the bug.");
         assert_eq!(prompt_of("Just this."), "Just this.");
+    }
+
+    #[test]
+    fn a_deadline_past_what_the_clock_can_hold_is_no_deadline() {
+        let mut child = Command::new("true")
+            .spawn()
+            .expect("`true` is on every unix PATH");
+        let status = ended_by(&mut child, Duration::from_secs(u64::MAX));
+        assert!(status.is_some_and(|status| status.success()), "{status:?}");
     }
 
     #[test]
