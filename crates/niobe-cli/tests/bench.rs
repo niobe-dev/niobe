@@ -13,7 +13,7 @@
 )]
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -267,6 +267,15 @@ fn a_turn_that_never_ends_is_ended_at_its_deadline_and_takes_its_cli_with_it() {
         ),
     );
     setup.task("hangs", "done.txt");
+    // macOS assesses a new script on its first run, which can take longer
+    // than the deadline: the reaper would then end the stand-in before it
+    // wrote its pid. Run once with its input closed, it has been assessed.
+    let warmed = Command::new(setup.dir.path().join("bin").join("claude"))
+        .stdin(Stdio::null())
+        .status()
+        .expect("the stand-in claude runs and ends on its closed input");
+    assert!(warmed.success());
+    std::fs::remove_file(&pid_file).expect("the stand-in wrote its pid");
     let results = results(&setup.bench(&["--json", "--timeout", "2"]));
 
     let task = &results["tasks"][0];
@@ -352,7 +361,7 @@ fn a_turn_may_not_edit_what_the_cli_or_niobe_runs_with() {
 fn alive(pid: &str) -> bool {
     Command::new("kill")
         .args(["-0", pid])
-        .stderr(std::process::Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .is_ok_and(|status| status.success())
 }
@@ -440,7 +449,7 @@ fn checks(task: &Path, work: &Path) -> bool {
         .arg(task.join("check.sh"))
         .current_dir(work)
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .expect("sh runs the check")
         .success()
