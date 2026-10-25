@@ -1248,10 +1248,19 @@ impl SessionState {
     /// than ended by the backend.
     fn end_turn(&mut self, cut: bool) {
         self.clear_open = false;
-        // Nothing more comes until the next prompt, so a question the turn
-        // left open waits on nobody: an answer to it would reach nothing. A
-        // reply it left half-streamed is not the start of the next one.
-        self.pending_permissions.clear();
+        // Nothing more of the turn comes until the next prompt, so a question
+        // it left open waits on nobody: an answer to it would reach nothing.
+        // A sub-agent still running is not the turn: one launched in the
+        // background goes on after it, as its calls do, and the backend still
+        // waits on what it asked. A reply left half-streamed is not the start
+        // of the next one.
+        let agent_calls = &self.agent_calls;
+        let running_agents = &self.running_agents;
+        self.pending_permissions.retain(|id| {
+            agent_calls
+                .get(id)
+                .is_some_and(|agent| running_agents.contains(agent))
+        });
         self.pending_assistant.clear();
         self.interrupt_what_the_turn_left();
         self.compacting = false;
@@ -2297,6 +2306,33 @@ mod tests {
 
         assert!(state.pending_permissions().is_empty());
         assert_eq!(state.permission_requests(), 1);
+    }
+
+    #[test]
+    fn a_prompt_a_running_sub_agent_is_waiting_on_outlives_the_turn_that_launched_it() {
+        // Recorded in the bridge's `sub-agents.jsonl`: an agent launched in
+        // the background asks about its calls after the turn's `result`, so
+        // one it asked about before that is still waited on by the CLI.
+        let mut background = asked("bg");
+        if let Event::PermissionRequest { agent, .. } = &mut background {
+            *agent = Some("a1".into());
+        }
+        let state = SessionState::replay(&[
+            Event::UserMessage {
+                text: "go".to_owned(),
+            },
+            spawn("a1"),
+            start("bg", "Bash", Some("a1")),
+            background,
+            start("own", "Bash", None),
+            asked("own"),
+            Event::TurnEnded,
+        ]);
+
+        assert_eq!(
+            state.pending_permissions().iter().collect::<Vec<_>>(),
+            [&ToolCallId::from("bg")]
+        );
     }
 
     #[test]

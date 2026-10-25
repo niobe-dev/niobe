@@ -2777,13 +2777,14 @@ impl App {
             // The working line reads the end off the fold; the transcript has
             // already shown everything the turn said. A turn's calls are not
             // grouped with the next turn's.
-            // A question still open when the turn ended waits on nobody, a
-            // call it left running will report no end, and a stop asked for
-            // it has nothing left to stop.
+            // A question the turn left open waits on nobody — but one a
+            // sub-agent still running asked, which the fold keeps waiting —
+            // a call it left running will report no end, and a stop asked
+            // for it has nothing left to stop.
             Event::TurnEnded => {
                 self.run = None;
                 self.reply = None;
-                self.forget_asks();
+                self.forget_asks_nobody_waits_on();
                 self.interrupt_what_the_fold_stopped();
                 self.forget_stopping_hint();
             }
@@ -3591,6 +3592,33 @@ impl App {
             calls: Vec::new(),
             agent: None,
         });
+    }
+
+    /// Drops the prompts the fold no longer has waiting, as a turn's end
+    /// leaves them, and keeps the rest where they were: a question a
+    /// sub-agent running in the background asked is still waited on.
+    fn forget_asks_nobody_waits_on(&mut self) {
+        let pending = self.session.pending_permissions();
+        let dropped: Vec<ToolCallId> = self
+            .asks
+            .iter()
+            .filter(|ask| !pending.contains(&ask.id))
+            .map(|ask| ask.id.clone())
+            .collect();
+        if dropped.is_empty() {
+            return;
+        }
+        let front_went = self
+            .asks
+            .front()
+            .is_some_and(|ask| dropped.contains(&ask.id));
+        for id in &dropped {
+            self.unask(id);
+        }
+        self.asks.retain(|ask| !dropped.contains(&ask.id));
+        if front_went {
+            self.front_ask_taken_away();
+        }
     }
 
     fn forget_asks(&mut self) {
@@ -12502,6 +12530,52 @@ mod tests {
             app.activity().map(|a| a.doing).as_deref(),
             Some("waiting on you")
         );
+    }
+
+    #[test]
+    fn a_question_a_background_agent_still_waits_on_stays_up_past_the_turn_end() {
+        // An agent launched in the background goes on after the turn's end
+        // and the backend still waits on what it asked: taken down, the
+        // question could never be answered and the agent would wait forever.
+        let mut app = sent(app().attached(), "go");
+        app.apply(&Event::AgentSpawn {
+            id: "a1".into(),
+            parent: None,
+            kind: None,
+            label: "explorer".to_owned(),
+        });
+        app.apply(&Event::ToolCallStart {
+            id: "bg".into(),
+            name: "Bash".to_owned(),
+            input: r#"{"command":"ls"}"#.to_owned(),
+            summary: None,
+            agent: Some("a1".into()),
+        });
+        app.apply(&Event::PermissionRequest {
+            id: "bg".into(),
+            tool: "Bash".to_owned(),
+            input: r#"{"command":"ls"}"#.to_owned(),
+            target: Some("ls".to_owned()),
+            proposal: None,
+            reason: None,
+            agent: Some("a1".into()),
+        });
+        app.apply(&prompt(Some("rm -rf build")));
+        app.apply(&Event::TurnEnded);
+
+        assert_eq!(
+            app.asking().map(|ask| ask.id.as_str()),
+            Some("bg"),
+            "the agent's question was taken down with the turn"
+        );
+        assert_eq!(app.asks_waiting(), 0, "the turn's own question is still up");
+        app.take_produced();
+        app.answer(Answer::Once);
+        assert!(matches!(
+            app.take_produced().as_slice(),
+            [Event::PermissionResponse { id, decision: PermissionDecision::Allow, .. }]
+                if id.as_str() == "bg"
+        ));
     }
 
     #[test]
