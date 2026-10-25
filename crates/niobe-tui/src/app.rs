@@ -6448,8 +6448,17 @@ impl App {
         };
         // A command already typed in full, as the backend spells it, has
         // nothing left to pick: Enter sends it, as it does in the CLI itself.
+        // So has one of the shell's own typed in full where it opens the
+        // prompt, though the list is open under it for a skill whose name
+        // holds it, as `keybindings-help` holds `help`: Enter is the shell's.
         if (key.code, key.modifiers) == (KeyCode::Enter, KeyModifiers::NONE)
-            && self.slash().is_some_and(|slash| slash.typed == chosen)
+            && self.slash().is_some_and(|slash| {
+                slash.typed == chosen
+                    || (slash.opens_the_prompt()
+                        && crate::menu::TYPED
+                            .iter()
+                            .any(|typed| typed.name == slash.typed))
+            })
         {
             return false;
         }
@@ -17709,6 +17718,36 @@ mod tests {
         let mut typed = offering(&["mcp"]);
         assert_eq!(submitted(&mut typed, "/mcp"), []);
         assert!(typed.mcp().is_some());
+    }
+
+    /// Claude Code 2.1.296 lists its skills `keybindings-help` and
+    /// `update-config` to every session (the bridge's `api-errors.jsonl`),
+    /// and an installed `mcp-builder` would be listed the same way; each
+    /// holds the name of one of the shell's own commands, so the list opens
+    /// under `/help` typed in full, and its Enter must still be the shell's.
+    #[test]
+    fn enter_on_one_of_the_shells_own_commands_typed_in_full_runs_it_rather_than_a_skill() {
+        let skills = ["keybindings-help", "update-config", "mcp-builder"];
+        for (text, opened) in [
+            ("/help", "a sheet"),
+            ("/config", "a sheet"),
+            ("/mcp", "the mcp view"),
+        ] {
+            let mut app = offering(&skills);
+            typed(&mut app, text);
+            assert!(
+                !app.offered_commands().0.is_empty(),
+                "a skill holding {text} is offered"
+            );
+            app.on_key(key(KeyCode::Enter));
+            assert_eq!(app.composed(), "", "{text} was not replaced by a skill");
+            assert_eq!(app.said(), [], "{text}");
+            let shown = match opened {
+                "the mcp view" => app.mcp().is_some(),
+                _ => app.sheet().is_some(),
+            };
+            assert!(shown, "{text} opened {opened}");
+        }
     }
 
     #[test]
