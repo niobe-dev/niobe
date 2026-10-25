@@ -147,7 +147,9 @@ fn reads_back(written: &str, path: &Path, before: Config, rule: &Rule) -> Result
         )
     };
     let after = Config::parse(written, path).map_err(|_| differs())?;
-    match after == with_rule(before, rule, path) {
+    // Compared without the lines values were written on: the rule's own line
+    // moves what is under the array down one, which says nothing different.
+    match after.without_lines() == with_rule(before, rule, path).without_lines() {
         true => Ok(()),
         false => Err(differs()),
     }
@@ -708,6 +710,36 @@ allow = [
                 rules.contains(&Rule::targeted("Bash", "cargo test"))
                     && rules.contains(&Rule::tool("Read")),
                 "round {round} lost a rule: {rules:?}"
+            );
+        }
+    }
+
+    /// A rule on a line of its own moves every line under the array down by
+    /// one, and with it the line a profile's `settings` or a `theme` is
+    /// reported at; that is not a change to what the file says, and the rule
+    /// is kept.
+    #[test]
+    fn a_rule_is_kept_above_a_settings_path_or_a_theme_it_moves_down_a_line() {
+        for before in [
+            "[permissions]\nallow = [\n  \"Read\",\n]\n\n\
+             [profiles.max]\nbackend = \"claude\"\nsettings = \"/max.json\"\n",
+            "permissions.allow = [\n  \"Read\",\n]\ntheme = \"classic\"\n\
+             default_profile = \"max\"\n[profiles.max]\nbackend = \"claude\"\n",
+        ] {
+            let dir = tempfile::tempdir().expect("a temporary directory");
+            let file = dir.path().join("config.toml");
+            std::fs::write(&file, before).expect("the file is written");
+
+            remember(&file, &Rule::targeted("Bash", "cargo test"))
+                .unwrap_or_else(|error| panic!("{before:?}: {error}"));
+
+            let config = Config::read(&file)
+                .expect("what was written reads back")
+                .expect("the file is there");
+            assert_eq!(
+                config.allowed().rules(),
+                [Rule::tool("Read"), Rule::targeted("Bash", "cargo test")],
+                "{before:?}"
             );
         }
     }

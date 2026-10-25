@@ -569,6 +569,32 @@ impl Config {
         Ok(config)
     }
 
+    /// This config with every line it keeps for an error message set to 0, so
+    /// that two configs that say the same thing compare equal however far
+    /// down the file each value was written.
+    ///
+    /// A rule written into a one-to-a-line array moves everything under the
+    /// array down a line; comparing with the lines in would refuse that write
+    /// as a change to the file's meaning. A field that keeps a line belongs
+    /// here.
+    pub(crate) fn without_lines(mut self) -> Self {
+        for profile in self.profiles.values_mut() {
+            if let Some(settings) = &mut profile.settings {
+                settings.line = 0;
+            }
+        }
+        for default in [&mut self.default_profile, &mut self.withheld_default]
+            .into_iter()
+            .flatten()
+        {
+            default.line = 0;
+        }
+        if let Some(theme) = &mut self.theme {
+            theme.line = 0;
+        }
+        self
+    }
+
     /// The config a session runs on where no config file exists: one profile,
     /// [`IMPLIED_PROFILE`], that runs the `claude` CLI found on `PATH` with
     /// its own settings untouched, and is the default.
