@@ -64,6 +64,10 @@ reviewers that encode both, for an agent working in this tree.
   lines and libtest's passing-test lines left out, every other line kept in order, so that it
   reads the same to `test_run.rs` as the whole; `tests/trim.rs` trims the cargo runs recorded in
   `tests/fixtures/trim/`, whose README carries the byte counts it asserts, worked out with `grep`;
+  `tests/fold_model.rs` folds thousands of seeded random event streams — ends said twice or late,
+  exits with no spawn, a clear mid-turn, a session left and taken up again — and checks after every
+  event the figures that must hold whatever arrived, against counts kept from the events alone, and
+  that a conversation read back from its clear has the turns it had live;
   `work.rs` puts each tool call under the kind of
   work it did — exploring code, editing files, building and testing, version control, the web,
   delegating, an MCP server, housekeeping — from the tool's name or, for a shell call, from the

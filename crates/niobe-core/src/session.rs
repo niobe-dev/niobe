@@ -736,13 +736,17 @@ impl SessionState {
             Event::PromptNotSent { .. } => {}
 
             // A prompt sent while a turn runs joins it: the turn began with
-            // the first one.
+            // the first one. So does one sent while the turn that typed a
+            // clear may still run, which a conversation read back from its
+            // clear cannot tell from one that has ended until that turn's end
+            // comes: joined, what the conversation spent before the prompt is
+            // its first turn's, as it is live.
             Event::UserMessage { text } => {
                 bump(&mut self.user_messages);
                 if self.first_prompt.is_none() {
                     self.first_prompt = Some(text.clone());
                 }
-                if !self.turn_running {
+                if !self.turn_running && !self.clear_open {
                     self.turn_began = Some(self.mark());
                     self.window_reported = false;
                     self.usage_reported = false;
@@ -756,7 +760,7 @@ impl SessionState {
             // With nothing between, it is the last turn's end said again,
             // and a turn recorded for it would be one nobody ran.
             Event::TurnEnded if self.ended_last => {}
-            Event::TurnEnded if self.clear_open => self.end_clear(),
+            Event::TurnEnded if self.clear_open => self.end_clear(false),
             Event::TurnEnded => self.end_turn(false),
 
             Event::AssistantDelta { text } => self.pending_assistant.push_str(text),
@@ -910,9 +914,7 @@ impl SessionState {
                 self.pending_permissions.clear();
                 self.pending_assistant.clear();
                 self.interrupt_backend_work();
-                if self.turn_running {
-                    self.end_turn(true);
-                }
+                self.cut_short();
             }
 
             Event::PermissionRequest { id, .. } => {
@@ -1007,12 +1009,7 @@ impl SessionState {
                     self.pending_permissions.clear();
                     self.pending_assistant.clear();
                     self.interrupt_backend_work();
-                    // The turn it cut short spent what it spent, and is
-                    // recorded with it; with no turn running there is none
-                    // to end.
-                    if self.turn_running {
-                        self.end_turn(true);
-                    }
+                    self.cut_short();
                 }
             }
 
@@ -1213,17 +1210,37 @@ impl SessionState {
     /// Ends the turn that typed a clear, which is no turn of the conversation
     /// it started: nothing is recorded, and nothing it left open is carried
     /// into the new one.
-    fn end_clear(&mut self) {
+    ///
+    /// `cut` is whether the session ended under it rather than the backend
+    /// ending it.
+    fn end_clear(&mut self, cut: bool) {
         // A prompt sent, or tokens spent, after the clear belong to the new
         // conversation, and the turn that carried them ends here: it is its
         // first, and the turns would otherwise not add up to the session's
         // total.
         if self.user_messages > 0 || self.usage_reported {
-            self.end_turn(false);
+            self.end_turn(cut);
             return;
         }
         self.clear_open = false;
         self.turn_running = false;
+    }
+
+    /// Ends the turn the session's own end cut short, and records what it
+    /// spent; with no turn running, and none that may be, there is none to
+    /// end.
+    ///
+    /// The turn that typed a clear is ended as its own end would end it, so
+    /// that the conversation reads the same live, where the fold saw that
+    /// turn running, and read back from the clear it opens on, where it did
+    /// not: a turn of its own in neither where nothing was sent or spent
+    /// since the clear, and the first one in both where something was.
+    fn cut_short(&mut self) {
+        match (self.clear_open, self.turn_running) {
+            (true, _) => self.end_clear(true),
+            (false, true) => self.end_turn(true),
+            (false, false) => {}
+        }
     }
 
     /// Ends the running turn, and records what it spent.
@@ -2753,6 +2770,102 @@ mod tests {
         assert_eq!(turns.len(), 1, "{turns:?}");
         assert_eq!(turns[0].number, 1);
         assert_eq!(turns[0].tokens, Some(9));
+    }
+
+    #[test]
+    fn what_the_clears_turn_spent_before_the_next_prompt_is_the_first_turns_live_or_read_back() {
+        let after_the_clear = [
+            Event::Cleared,
+            usage(5, 4, None),
+            Event::UserMessage {
+                text: "next".to_owned(),
+            },
+            usage(2, 1, None),
+            Event::TurnEnded,
+        ];
+        let live: Vec<Event> = std::iter::once(Event::UserMessage {
+            text: "/clear".to_owned(),
+        })
+        .chain(after_the_clear.iter().cloned())
+        .collect();
+
+        for (events, read) in [(&live[..], "live"), (&after_the_clear[..], "read back")] {
+            let state = SessionState::replay(events);
+            let turns = state.turns();
+            assert_eq!(turns.len(), 1, "{read}: {turns:?}");
+            assert_eq!(turns[0].tokens, Some(12), "{read}");
+        }
+    }
+
+    /// The session ending under the turn that typed a clear, before that
+    /// turn's own end came, as the CLI dying or the session failing does.
+    fn ended_under_the_clear() -> [Event; 2] {
+        [
+            Event::SessionLeft,
+            Event::Error {
+                message: "the CLI exited".to_owned(),
+                fatal: true,
+            },
+        ]
+    }
+
+    #[test]
+    fn the_turn_that_typed_a_clear_and_was_cut_short_is_still_no_turn_live_or_read_back() {
+        for ending in ended_under_the_clear() {
+            let live = SessionState::replay(&[
+                Event::UserMessage {
+                    text: "/clear".to_owned(),
+                },
+                Event::Cleared,
+                ending.clone(),
+                Event::UserMessage {
+                    text: "next".to_owned(),
+                },
+                usage(5, 4, None),
+                Event::TurnEnded,
+            ]);
+            let read_back = SessionState::replay(&[
+                Event::Cleared,
+                ending.clone(),
+                Event::UserMessage {
+                    text: "next".to_owned(),
+                },
+                usage(5, 4, None),
+                Event::TurnEnded,
+            ]);
+
+            for (state, read) in [(&live, "live"), (&read_back, "read back")] {
+                let turns = state.turns();
+                assert_eq!(turns.len(), 1, "{read} after {ending:?}: {turns:?}");
+                assert_eq!(turns[0].number, 1, "{read} after {ending:?}");
+                assert_eq!(turns[0].tokens, Some(9), "{read} after {ending:?}");
+                assert!(!turns[0].cut, "{read} after {ending:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn what_the_clears_turn_spent_before_it_was_cut_short_is_a_cut_turn_live_or_read_back() {
+        for ending in ended_under_the_clear() {
+            let live = SessionState::replay(&[
+                Event::UserMessage {
+                    text: "/clear".to_owned(),
+                },
+                Event::Cleared,
+                usage(5, 4, None),
+                ending.clone(),
+            ]);
+            let read_back =
+                SessionState::replay(&[Event::Cleared, usage(5, 4, None), ending.clone()]);
+
+            for (state, read) in [(&live, "live"), (&read_back, "read back")] {
+                let turns = state.turns();
+                assert_eq!(turns.len(), 1, "{read} after {ending:?}: {turns:?}");
+                assert_eq!(turns[0].tokens, Some(9), "{read} after {ending:?}");
+                assert!(turns[0].cut, "{read} after {ending:?}");
+                assert!(!state.turn_running(), "{read} after {ending:?}");
+            }
+        }
     }
 
     /// A call counted as cut short whose end then comes is one call, and
