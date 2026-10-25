@@ -499,9 +499,39 @@ fn printed_lines(
 /// have failed.
 fn test_line(run: &TestRunRecord, room: usize, theme: &Theme) -> Line<'static> {
     let dim = Style::new().fg(theme.dim);
+    let figures = test_run_figures(run, theme);
+    let room = room.saturating_sub(text::width(LAST_BRANCH));
+    let cells = bar_cells(room, figures_width(&figures));
+    let bar = run
+        .counts
+        .filter(|_| cells > 0)
+        .map(|counts| result_bar(counts, cells, theme));
+    let room = match bar {
+        Some(_) => room.saturating_sub(cells + text::width(BAR_GAP)),
+        None => room,
+    };
+    let figures = fit_test_figures(figures, &run.failures, room);
+
+    let mut spans = vec![Span::styled(LAST_BRANCH, dim)];
+    if let Some(bar) = bar {
+        spans.extend(bar);
+        spans.push(Span::raw(BAR_GAP));
+    }
+    for (at, (_, figure)) in figures.into_iter().enumerate() {
+        if at > 0 {
+            spans.push(Span::styled(" · ", dim));
+        }
+        spans.push(figure);
+    }
+    Line::from(spans)
+}
+
+/// Assembles the initial list of figures and their priorities for a test run.
+fn test_run_figures(run: &TestRunRecord, theme: &Theme) -> Vec<(u8, Span<'static>)> {
+    let dim = Style::new().fg(theme.dim);
     let named = failing_within(&run.failures, usize::MAX)
         .map(|said| (NAMED, Span::styled(said, theme_del(theme))));
-    let mut figures = match run.counts {
+    match run.counts {
         Some(counts) => {
             let (passed, failed) = match counts.failing() {
                 true => (Style::new().fg(theme.fg), theme_del(theme).bold()),
@@ -524,17 +554,15 @@ fn test_line(run: &TestRunRecord, room: usize, theme: &Theme) -> Line<'static> {
             figures
         }
         None => vec![(0, Span::styled("test result not read", dim.italic()))],
-    };
-    let room = room.saturating_sub(text::width(LAST_BRANCH));
-    let cells = bar_cells(room, figures_width(&figures));
-    let bar = run
-        .counts
-        .filter(|_| cells > 0)
-        .map(|counts| result_bar(counts, cells, theme));
-    let room = match bar {
-        Some(_) => room.saturating_sub(cells + text::width(BAR_GAP)),
-        None => room,
-    };
+    }
+}
+
+/// Drops or shortens test run figures until they fit within `room`.
+fn fit_test_figures(
+    mut figures: Vec<(u8, Span<'static>)>,
+    failures: &[FailedTests],
+    room: usize,
+) -> Vec<(u8, Span<'static>)> {
     while figures.len() > 1 && figures_width(&figures) > room {
         let Some(least) = (0..figures.len()).max_by_key(|&at| figures[at].0) else {
             break;
@@ -545,7 +573,7 @@ fn test_line(run: &TestRunRecord, room: usize, theme: &Theme) -> Line<'static> {
         let shortened = (figures[least].0 == NAMED)
             .then(|| {
                 let columns = text::width(&figures[least].1.content).saturating_sub(excess);
-                failing_within(&run.failures, columns)
+                failing_within(failures, columns)
             })
             .flatten();
         match shortened {
@@ -558,18 +586,7 @@ fn test_line(run: &TestRunRecord, room: usize, theme: &Theme) -> Line<'static> {
             }
         }
     }
-    let mut spans = vec![Span::styled(LAST_BRANCH, dim)];
-    if let Some(bar) = bar {
-        spans.extend(bar);
-        spans.push(Span::raw(BAR_GAP));
-    }
-    for (at, (_, figure)) in figures.into_iter().enumerate() {
-        if at > 0 {
-            spans.push(Span::styled(" · ", dim));
-        }
-        spans.push(figure);
-    }
-    Line::from(spans)
+    figures
 }
 
 /// How many cells a test run's bar takes in `room` beside `said` columns of
