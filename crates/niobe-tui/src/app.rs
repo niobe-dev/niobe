@@ -7566,7 +7566,10 @@ impl App {
             (Handoff::Edit(path), Ok(())) => format!("Edited {path}"),
             (Handoff::Edit(path), Err(reason)) => format!("{path} is not edited: {reason}"),
             (Handoff::Report(link), Ok(())) => {
-                format!("Copied the diagnostics for a report: paste them into the form at {link}")
+                format!(
+                    "Gathering the diagnostics for a report: once they are on the clipboard, \
+                     the form at {link} opens to paste them into"
+                )
             }
             (Handoff::Report(_), Err(reason)) => format!("Nothing reported: {reason}"),
         });
@@ -18760,8 +18763,8 @@ mod tests {
         };
         assert!(link.ends_with("/issues/new?template=bug.yml"), "{link}");
         app.handed_off(&handoffs[0], Ok(()));
-        let said = app.hint().expect("the bar says what was copied");
-        assert!(said.contains("Copied the diagnostics"), "{said}");
+        let said = app.hint().expect("the bar says what is being copied");
+        assert!(said.contains("Gathering the diagnostics"), "{said}");
         assert!(said.contains(link.as_str()), "{said}");
 
         app.handed_off(

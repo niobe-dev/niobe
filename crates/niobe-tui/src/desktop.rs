@@ -39,6 +39,10 @@ pub trait Desktop: std::fmt::Debug {
     /// operator reads the block and pastes it. An error says why it could
     /// not, in words the operator reads.
     ///
+    /// Not waited on past starting either: the block takes seconds to
+    /// gather, so it is gathered, copied and the page opened after this
+    /// returns, the page only once the block is on the clipboard.
+    ///
     /// Refused unless the desktop knows how to make the block, which only the
     /// binary does.
     fn report(&mut self, _link: &str) -> Result<(), String> {

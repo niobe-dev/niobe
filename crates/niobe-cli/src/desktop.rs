@@ -180,8 +180,10 @@ pub struct System {
     diagnostics: Option<Diagnostics>,
 }
 
-/// What makes the diagnostics block of a report of a problem.
-struct Diagnostics(Box<dyn Fn() -> String>);
+/// What makes the diagnostics block of a report of a problem. Shared with
+/// the thread that gathers it, since gathering asks the CLIs' own status
+/// commands, which take seconds.
+struct Diagnostics(std::sync::Arc<dyn Fn() -> String + Send + Sync>);
 
 impl std::fmt::Debug for Diagnostics {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -204,35 +206,43 @@ impl System {
     /// This desktop, able to put a report's diagnostics on the clipboard:
     /// `diagnostics` makes the block when a report is asked for.
     #[must_use]
-    pub fn reporting(mut self, diagnostics: impl Fn() -> String + 'static) -> Self {
-        self.diagnostics = Some(Diagnostics(Box::new(diagnostics)));
+    pub fn reporting(mut self, diagnostics: impl Fn() -> String + Send + Sync + 'static) -> Self {
+        self.diagnostics = Some(Diagnostics(std::sync::Arc::new(diagnostics)));
         self
     }
+
+    /// The first copier that is installed, started with its input piped,
+    /// or why none could be.
+    fn start_copier(&self) -> Result<Child, String> {
+        for copier in &self.copiers {
+            match copier.start(&[], true) {
+                Ok(child) => return Ok(child),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(format!("{} did not start: {error}", copier.name)),
+            }
+        }
+        let names: Vec<&str> = self.copiers.iter().map(|c| c.name.as_str()).collect();
+        Err(format!("this needs one of {} installed", names.join(", ")))
+    }
+}
+
+/// Writes `text` to `copier`'s input, closes it and waits for the copier to
+/// end, saying whether it ended successfully.
+fn hand_to(mut copier: Child, text: &str) -> bool {
+    if let Some(mut input) = copier.stdin.take() {
+        let _ = input.write_all(text.as_bytes());
+    }
+    copier.wait().is_ok_and(|status| status.success())
 }
 
 impl Desktop for System {
     fn copy(&mut self, text: &str) -> Result<(), String> {
-        for copier in &self.copiers {
-            let mut child = match copier.start(&[], true) {
-                Ok(child) => child,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(error) => return Err(format!("{} did not start: {error}", copier.name)),
-            };
-            let mut input = child.stdin.take();
-            let text = text.to_owned();
-            // Written on the thread that reaps it, so a copier slow to read
-            // does not hold up the frame.
-            std::thread::spawn(move || {
-                if let Some(input) = input.as_mut() {
-                    let _ = input.write_all(text.as_bytes());
-                }
-                drop(input);
-                let _ = child.wait();
-            });
-            return Ok(());
-        }
-        let names: Vec<&str> = self.copiers.iter().map(|c| c.name.as_str()).collect();
-        Err(format!("this needs one of {} installed", names.join(", ")))
+        let copier = self.start_copier()?;
+        let text = text.to_owned();
+        // Written on the thread that reaps it, so a copier slow to read
+        // does not hold up the frame.
+        std::thread::spawn(move || hand_to(copier, &text));
+        Ok(())
     }
 
     fn open(&mut self, link: &str) -> Result<(), String> {
@@ -258,13 +268,26 @@ impl Desktop for System {
         let Some(diagnostics) = &self.diagnostics else {
             return Err("this session has no diagnostics to put in a report".to_owned());
         };
-        let block = (diagnostics.0)();
-        // Not opened where the block could not be copied: a form the operator
-        // cannot paste into asks for the very thing they were not given.
-        self.copy(&block).map_err(|reason| {
+        may_open(link)?;
+        let copier = self.start_copier().map_err(|reason| {
             format!("{reason}; `niobe doctor --json` prints the same block to paste")
         })?;
-        self.open(link)
+        let gather = std::sync::Arc::clone(&diagnostics.0);
+        let opener = self.opener.clone();
+        let link = link.to_owned();
+        // Gathered off the draw path: the block asks each CLI for its version
+        // and its login, each given seconds to answer, and reads the store.
+        // The form is opened only once the block is on the clipboard, since
+        // a form the operator cannot paste into asks for the very thing they
+        // were not given.
+        std::thread::spawn(move || {
+            if hand_to(copier, &gather())
+                && let Ok(mut opened) = opener.start(&[&link], false)
+            {
+                let _ = opened.wait();
+            }
+        });
+        Ok(())
     }
 }
 
@@ -502,6 +525,48 @@ mod tests {
         assert!(failed.contains("sh ended"), "{failed}");
         assert!(desktop.edit("--help").is_err());
         assert!(desktop.edit("CLAUDE.md").is_err());
+    }
+
+    #[test]
+    fn a_report_returns_before_its_diagnostics_are_gathered_and_opens_the_form_once_they_are_copied()
+     {
+        let scratch = Scratch::new("report");
+        let copied = scratch.0.join("copied");
+        let opened = scratch.0.join("opened");
+        // The diagnostics wait for a word the test sends only once `report`
+        // has returned, as gathering them waits on the CLIs' status commands,
+        // which take seconds: a report that gathered them on the draw path
+        // would hold the screen until they gave up.
+        let (go, gathering) = std::sync::mpsc::channel::<()>();
+        let gathering = std::sync::Mutex::new(gathering);
+        let mut desktop = System {
+            copiers: vec![sh(&format!(
+                "cat > '{0}.part' && mv '{0}.part' '{0}'",
+                copied.display()
+            ))],
+            opener: sh(&format!(
+                "test -f '{}' && printf '%s' \"$1\" > '{}'",
+                copied.display(),
+                opened.display()
+            )),
+            editor: sh("true"),
+            diagnostics: None,
+        }
+        .reporting(move || {
+            let waited = gathering
+                .lock()
+                .map(|gathering| gathering.recv_timeout(Duration::from_secs(5)));
+            match waited {
+                Ok(Ok(())) => "the diagnostics".to_owned(),
+                _ => "gathered while the screen waited".to_owned(),
+            }
+        });
+
+        assert_eq!(desktop.report("https://example.com/issues/new"), Ok(()));
+        let _ = go.send(());
+
+        assert_eq!(written(&copied), "the diagnostics");
+        assert_eq!(written(&opened), "https://example.com/issues/new");
     }
 
     #[test]
