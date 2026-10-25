@@ -153,6 +153,7 @@ fn one_of_each() -> Vec<Event> {
             id: ToolCallId::new("t2"),
         },
         Event::ModeSelected { mode: Mode::Plan },
+        Event::ModeUnknown,
         Event::ModelSelected {
             model: text("opus"),
         },
@@ -288,6 +289,7 @@ fn every_variant_is_listed() {
             Event::PermissionResponse { .. } => "permission_response",
             Event::PermissionWithdrawn { .. } => "permission_withdrawn",
             Event::ModeSelected { .. } => "mode_selected",
+            Event::ModeUnknown => "mode_unknown",
             Event::ModelSelected { .. } => "model_selected",
             Event::ModelRefused { .. } => "model_refused",
             Event::FileChange { .. } => "file_change",
@@ -306,7 +308,7 @@ fn every_variant_is_listed() {
         assert!(!seen.contains(&name), "{name} is listed twice");
         seen.push(name);
     }
-    assert_eq!(seen.len(), 36, "every variant has one value: {seen:?}");
+    assert_eq!(seen.len(), 37, "every variant has one value: {seen:?}");
 }
 
 #[test]

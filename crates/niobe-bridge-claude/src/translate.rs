@@ -1155,11 +1155,19 @@ impl Translator {
             // The CLI gates calls in ways Niobe has no word for —
             // `acceptEdits`, `bypassPermissions`, `dontAsk` — and a profile
             // can ask for one through its own arguments. Naming it beats
-            // showing a mode the session is not in.
-            None => out.push(warn(format!(
-                "the CLI is gating tool calls as `{spelt}`, which this version of Niobe does \
-                 not model. No mode is reported until the session is moved to one it does."
-            ))),
+            // showing a mode the session is not in, and so does putting down
+            // the one the session was in before. Said once while it lasts:
+            // every turn's `init` repeats it.
+            None => {
+                if self.mode.as_ref() != Some(&spelt) {
+                    out.push(warn(format!(
+                        "the CLI is gating tool calls as `{spelt}`, which this version of Niobe \
+                         does not model. No mode is reported until the session is moved to one \
+                         it does."
+                    )));
+                }
+                out.push(Event::ModeUnknown);
+            }
         }
         self.mode = Some(spelt);
     }
@@ -6513,6 +6521,36 @@ mod tests {
             .line(r#"{"type":"system","subtype":"status","status":null,"permissionMode":"auto"}"#);
 
         assert_eq!(events, [Event::ModeSelected { mode: Mode::Auto }]);
+    }
+
+    #[test]
+    fn a_session_moved_to_a_mode_niobe_does_not_model_no_longer_shows_the_one_it_left() {
+        let mut translator = Translator::new("max");
+        let mut events =
+            translator.line(r#"{"type":"system","subtype":"init","permissionMode":"plan"}"#);
+
+        events.extend(translator.line(
+            r#"{"type":"system","subtype":"status","status":null,"permissionMode":"bypassPermissions"}"#,
+        ));
+
+        let state = niobe_core::session::SessionState::replay(&events);
+        assert_eq!(
+            state.mode(),
+            None,
+            "the shell still shows plan while the CLI asks about nothing: {events:?}"
+        );
+    }
+
+    #[test]
+    fn an_init_that_repeats_a_mode_niobe_does_not_model_warns_once() {
+        let mut translator = Translator::new("max");
+        let init = r#"{"type":"system","subtype":"init","permissionMode":"acceptEdits"}"#;
+
+        let first = translator.line(init);
+        let again = translator.line(init);
+
+        assert_eq!(warnings(&first).len(), 1, "{first:?}");
+        assert!(warnings(&again).is_empty(), "{again:?}");
     }
 
     #[test]

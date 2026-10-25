@@ -705,6 +705,7 @@ fn send_produced(
             | SessionEvent::SessionLeft
             | SessionEvent::PermissionRequest { .. }
             | SessionEvent::PermissionWithdrawn { .. }
+            | SessionEvent::ModeUnknown
             | SessionEvent::ModelRefused { .. }
             | SessionEvent::FileChange { .. }
             | SessionEvent::TestRun { .. }

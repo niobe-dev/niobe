@@ -711,6 +711,7 @@ impl SessionState {
             }
 
             Event::ModeSelected { mode } => self.mode = Some(*mode),
+            Event::ModeUnknown => self.mode = None,
 
             // The operator's choice stands until the backend says what it
             // resolved that to, which is the next `SessionMeta`, or refuses
@@ -1327,7 +1328,8 @@ impl SessionState {
         self.meta.as_ref()
     }
 
-    /// How tool calls are gated, once something has said.
+    /// How tool calls are gated, once something has said, and none where the
+    /// backend last said it gates them in a way [`Mode`] has no name for.
     pub fn mode(&self) -> Option<Mode> {
         self.mode
     }
@@ -2969,6 +2971,18 @@ mod tests {
         state.apply(&Event::ModeSelected { mode: Mode::Plan });
 
         assert_eq!(state.mode(), Some(Mode::Plan));
+    }
+
+    #[test]
+    fn a_mode_no_name_is_kept_for_puts_down_the_one_before_until_one_is_chosen() {
+        let mut state = SessionState::new();
+        state.apply(&Event::ModeSelected { mode: Mode::Plan });
+
+        state.apply(&Event::ModeUnknown);
+        assert_eq!(state.mode(), None, "the mode the session left still stands");
+
+        state.apply(&Event::ModeSelected { mode: Mode::Ask });
+        assert_eq!(state.mode(), Some(Mode::Ask));
     }
 
     #[test]

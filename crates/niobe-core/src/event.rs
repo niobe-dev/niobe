@@ -1005,6 +1005,14 @@ pub enum Event {
         mode: Mode,
     },
 
+    /// The backend gates tool calls in a way that is none of [`Mode`]'s — the
+    /// CLI's `acceptEdits` or `bypassPermissions`, which a profile's own
+    /// arguments can start it in — so the session is in no mode the shell can
+    /// name until a [`Event::ModeSelected`] says otherwise. Without it the
+    /// mode the session left would stand, and the shell would show `plan` or
+    /// `ask` over a backend that asks about nothing.
+    ModeUnknown,
+
     /// The model the operator asked the session to answer with.
     ///
     /// A backend applies it from its next turn and says what it ended up on

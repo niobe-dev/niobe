@@ -72,6 +72,7 @@ impl Attention {
             | Event::PermissionResponse { .. }
             | Event::PermissionWithdrawn { .. }
             | Event::ModeSelected { .. }
+            | Event::ModeUnknown
             | Event::ModelSelected { .. }
             | Event::AgentSpawn { .. }
             | Event::AgentProgress { .. }

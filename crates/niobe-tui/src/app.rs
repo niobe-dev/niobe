@@ -2210,6 +2210,7 @@ impl App {
             | Event::PermissionResponse { .. }
             | Event::PermissionWithdrawn { .. }
             | Event::ModeSelected { .. }
+            | Event::ModeUnknown
             | Event::ModelSelected { .. }
             | Event::ModelRefused { .. }
             | Event::AgentSpawn { .. }
@@ -2948,6 +2949,7 @@ impl App {
             | Event::Titled { .. }
             | Event::Usage(_)
             | Event::ModeSelected { .. }
+            | Event::ModeUnknown
             | Event::ModelSelected { .. }
             | Event::ModelRefused { .. }
             | Event::UsageWindows(_)
