@@ -4654,7 +4654,7 @@ impl App {
         match key.code {
             KeyCode::Up => picker.at = picker.at.saturating_sub(1),
             KeyCode::Down => picker.at = picker.at.saturating_add(1).min(last),
-            KeyCode::Esc | KeyCode::F(4) => self.picking = None,
+            KeyCode::Esc => self.picking = None,
             KeyCode::Enter => {
                 let purpose = picker.purpose;
                 let chosen = picker
@@ -5016,18 +5016,10 @@ impl App {
     }
 
     /// One key, while the Memory view is open: it holds the keyboard as a
-    /// sheet does, and an F-key closes it and does what the key does.
+    /// sheet does. An F-key never reaches it: see [`App::press_over`].
     fn on_memory_key(&mut self, key: ratatui::crossterm::event::KeyEvent) {
         use crate::memory::Outcome;
-        use ratatui::crossterm::event::KeyCode;
 
-        if let KeyCode::F(n) = key.code {
-            self.memory = None;
-            if let Some(action) = crate::menu::fkey(n) {
-                self.perform(action);
-            }
-            return;
-        }
         let Some(view) = self.memory.as_mut() else {
             return;
         };
@@ -5040,18 +5032,10 @@ impl App {
     }
 
     /// One key, while the MCP view is open: it holds the keyboard as the
-    /// Memory view does, and an F-key closes it and does what the key does.
+    /// Memory view does.
     fn on_mcp_key(&mut self, key: ratatui::crossterm::event::KeyEvent) {
         use crate::mcp::Outcome;
-        use ratatui::crossterm::event::KeyCode;
 
-        if let KeyCode::F(n) = key.code {
-            self.mcp = None;
-            if let Some(action) = crate::menu::fkey(n) {
-                self.perform(action);
-            }
-            return;
-        }
         let Some(view) = self.mcp.as_mut() else {
             return;
         };
@@ -5543,12 +5527,6 @@ impl App {
                     self.perform(item.action);
                 }
             }
-            KeyCode::F(n) => {
-                self.menu = None;
-                if let Some(action) = crate::menu::fkey(n) {
-                    self.perform(action);
-                }
-            }
             KeyCode::Char(c) => self.menu = Some(open.to_letter(c)),
             _ => {}
         }
@@ -5573,12 +5551,6 @@ impl App {
                     self.handoffs.push(crate::desktop::Handoff::Open(link));
                 }
             }
-            KeyCode::F(n) => {
-                self.sheet = None;
-                if let Some(action) = crate::menu::fkey(n) {
-                    self.perform(action);
-                }
-            }
             _ => {}
         }
     }
@@ -5594,6 +5566,14 @@ impl App {
     fn on_menu_click(&mut self, column: u16, row: u16) -> bool {
         let point = (column, row).into();
         let on_menu_bar = self.bars.is_some_and(|(bar, _)| bar.contains(point));
+        if let Some((_, fkeys)) = self.bars.filter(|(_, fkeys)| fkeys.contains(point))
+            && self.takes_the_keys_over()
+        {
+            let action =
+                crate::menu::fkey_at_for(fkeys.width, column - fkeys.x, &self.fkey_labels());
+            self.press_over(action);
+            return true;
+        }
         if let Some(open) = self.menu {
             if let Some(list) = self.menu_list.filter(|list| list.contains(point)) {
                 let item = usize::from(row.saturating_sub(list.y.saturating_add(1)));
@@ -5642,14 +5622,54 @@ impl App {
         false
     }
 
+    /// Whether something the operator opened over the session takes the
+    /// keys from it: a menu, a sheet, the Memory or MCP view, a page being
+    /// read, the history dialog or a list. A search is not among them: it
+    /// lets the F-keys through and stays open.
+    fn takes_the_keys_over(&self) -> bool {
+        self.menu.is_some()
+            || self.sheet.is_some()
+            || self.memory.is_some()
+            || self.mcp.is_some()
+            || self.detail.is_some()
+            || self.browser.is_some()
+            || self.picking.is_some()
+    }
+
+    /// An F-key pressed or clicked while [`App::takes_the_keys_over`]: what
+    /// is open closes, and `action`, the key's, is then done as a click on the
+    /// bar does it, so a question waiting under what was open is answered
+    /// first whichever way the key came. Done while the overlay stayed open,
+    /// it would act behind a list the operator was still reading, and a
+    /// `/clear` sent from a menu would go out under a question.
+    ///
+    /// The model's key over a list only closes it, as it always has: it is
+    /// the key that opened the model list.
+    fn press_over(&mut self, action: Option<crate::menu::Action>) {
+        let a_list = self.picking.is_some();
+        self.menu = None;
+        self.sheet = None;
+        self.memory = None;
+        self.mcp = None;
+        self.detail = None;
+        self.browser = None;
+        self.picking = None;
+        match action {
+            Some(crate::menu::Action::SwitchModel) if a_list => {}
+            Some(action) => self.perform_clicked(action),
+            None => {}
+        }
+    }
+
     /// Whether a permission question, or the question whether to trust the
     /// repository's config, waits for an answer.
     fn question_waits(&self) -> bool {
         self.trusting.is_some() || self.asking().is_some()
     }
 
-    /// Does what a clicked menu item or F-key names, unless a question waits
-    /// and it is neither quitting nor stopping the turn.
+    /// Does what a clicked menu item or F-key names, or an F-key pressed over
+    /// something open (see [`App::press_over`]), unless a question waits and
+    /// it is neither quitting nor stopping the turn.
     ///
     /// A key goes to the question ahead of the bars, but a click reaches
     /// them past it: a list or the search it opened would then be drawn
@@ -7966,6 +7986,14 @@ impl App {
         // behind it to type into, and nothing else to do until it is answered.
         if self.trusting.is_some() {
             self.on_trust_key(key);
+            return;
+        }
+        // An F-key over what is open closes it and is then the key it is with
+        // nothing open, through the guard a click on the bar goes through.
+        if let KeyCode::F(n) = key.code
+            && self.takes_the_keys_over()
+        {
+            self.press_over(crate::menu::fkey(n));
             return;
         }
         // An open menu, and a sheet, take the keyboard whole: each is
@@ -18120,6 +18148,82 @@ mod tests {
 
         assert_eq!(app.said(), []);
         assert_eq!(app.hint(), Some(TOO_SOON_HINT));
+    }
+
+    /// Each kind of thing that opens over the session and takes the keys,
+    /// opened on `app`, with what it is called.
+    /// What opens one thing over the session.
+    type Opens = fn(&mut App);
+
+    fn overlays() -> [(&'static str, Opens); 7] {
+        use crate::menu::Action;
+        [
+            ("a menu", |app| app.open_menu(0)),
+            ("a sheet", |app| app.perform(Action::Shortcuts)),
+            ("the Memory view", |app| app.perform(Action::Memory)),
+            ("the MCP view", |app| app.perform(Action::Mcp)),
+            ("the overview", |app| app.perform(Action::Overview)),
+            ("the history", |app| app.perform(Action::History)),
+            ("a list", |app| app.perform(Action::Theme)),
+        ]
+    }
+
+    /// F3 pressed, `by_click` on the F-key bar a 120-column frame drew.
+    fn press_f3(app: &mut App, by_click: bool) {
+        match by_click {
+            true => {
+                let widths = crate::menu::fkey_widths(120);
+                let clear = crate::menu::stop_columns() + widths[..2].iter().sum::<u16>() + 2;
+                app.on_mouse(click_at(clear, 29));
+            }
+            false => app.on_key(key(KeyCode::F(3))),
+        }
+    }
+
+    #[test]
+    fn an_f_key_over_anything_open_closes_it_and_does_what_it_does_with_nothing_open() {
+        for (name, open) in overlays() {
+            for by_click in [false, true] {
+                let mut app = offering(&["clear"]);
+                app.drew_bars(Rect::new(0, 0, 120, 1), Rect::new(0, 29, 120, 1));
+                open(&mut app);
+                assert!(app.overlay().is_some(), "{name} did not open");
+
+                press_f3(&mut app, by_click);
+
+                assert_eq!(app.overlay(), None, "{name}, click {by_click}: still open");
+                assert_eq!(
+                    app.said(),
+                    [Event::UserMessage {
+                        text: "/clear".to_owned()
+                    }],
+                    "{name}, click {by_click}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_f_key_over_anything_open_runs_nothing_while_a_question_waits() {
+        for (name, open) in overlays() {
+            for by_click in [false, true] {
+                let mut app = offering(&["clear"]);
+                app.drew_bars(Rect::new(0, 0, 120, 1), Rect::new(0, 29, 120, 1));
+                open(&mut app);
+                app.apply(&prompt(Some("rm -rf build")));
+
+                press_f3(&mut app, by_click);
+
+                assert_eq!(app.said(), [], "{name}, click {by_click}: /clear went");
+                assert_eq!(app.overlay(), None, "{name}, click {by_click}: still open");
+                assert!(app.asking().is_some(), "{name}, click {by_click}");
+                assert_eq!(
+                    app.hint(),
+                    Some(QUESTION_FIRST_HINT),
+                    "{name}, click {by_click}"
+                );
+            }
+        }
     }
 
     #[test]
