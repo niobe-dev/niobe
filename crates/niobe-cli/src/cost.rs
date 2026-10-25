@@ -99,6 +99,18 @@ pub(crate) fn rfc3339(at: SystemTime) -> String {
     )
 }
 
+/// Every token `totals` spent, where a backend reported any usage at all:
+/// `None` for a session no usage record reached, as `niobe replay` and the
+/// Usage pane read it, rather than a zero nothing measured.
+fn tokens(totals: &Totals) -> Option<u64> {
+    (totals.records > 0).then(|| totals.tokens())
+}
+
+/// A token count as the tables print it, an em dash where there is none.
+fn tokens_cell(tokens: Option<u64>) -> String {
+    tokens.map_or_else(|| "—".to_owned(), grouped)
+}
+
 /// The money of `totals` where a backend reported any, `None` where none did.
 fn reported(totals: &Totals) -> Option<f64> {
     (!totals.reported_cost_by_model.is_empty()).then_some(totals.reported_cost_usd)
@@ -205,7 +217,7 @@ fn table(sessions: &[Folded]) -> Vec<String> {
             s.id,
             rfc3339(s.started_at),
             billing(Billed::of(session)),
-            grouped(session.totals().tokens()),
+            tokens_cell(tokens(session.totals())),
         )
     }));
     lines.push(String::new());
@@ -221,12 +233,13 @@ fn table(sessions: &[Folded]) -> Vec<String> {
 /// The sessions summed by the UTC day each started on and the profile it
 /// ran under, oldest day first. Tokens only: a day's money would add a
 /// plan's nothing to a metered bill, which is a figure nobody was charged.
-/// A session that never said its profile is counted under `—`.
+/// A session that never said its profile is counted under `—`, and a day
+/// none of whose sessions reported any usage has `—` for its tokens.
 fn days(sessions: &[Folded]) -> Vec<String> {
     if sessions.is_empty() {
         return vec!["No sessions recorded in this repository.".to_owned()];
     }
-    let mut by_day: BTreeMap<(String, String), (u64, u64)> = BTreeMap::new();
+    let mut by_day: BTreeMap<(String, String), (u64, Option<u64>)> = BTreeMap::new();
     for folded in sessions {
         let day = rfc3339(folded.started_at)
             .get(..10)
@@ -236,9 +249,13 @@ fn days(sessions: &[Folded]) -> Vec<String> {
             .state
             .meta()
             .map_or_else(|| "—".to_owned(), |meta| meta.profile.clone());
-        let (count, tokens) = by_day.entry((day, profile)).or_default();
+        let (count, sum) = by_day.entry((day, profile)).or_default();
         *count = count.saturating_add(1);
-        *tokens = tokens.saturating_add(folded.state.totals().tokens());
+        // A day is a sum of what its sessions reported: one that reported
+        // nothing adds nothing, and a day where none did has no figure.
+        if let Some(spent) = tokens(folded.state.totals()) {
+            *sum = Some(sum.map_or(spent, |sum| sum.saturating_add(spent)));
+        }
     }
     let profile_width = by_day
         .keys()
@@ -253,7 +270,7 @@ fn days(sessions: &[Folded]) -> Vec<String> {
     lines.extend(by_day.iter().map(|((day, profile), (count, tokens))| {
         format!(
             "{day:<10}  {profile:<profile_width$}  {count:>8}  {:>12}",
-            grouped(*tokens)
+            tokens_cell(*tokens)
         )
     }));
     lines.push(String::new());
@@ -462,5 +479,49 @@ mod tests {
     fn a_missing_figure_is_an_empty_field_not_a_zero() {
         assert_eq!(field::<u64>(None), "");
         assert_eq!(field(Some(0)), "0");
+    }
+
+    /// A session that reported no usage at all: opened and closed before a
+    /// turn spent anything.
+    fn unreported(id: u32, started: u64) -> Folded {
+        Folded {
+            id: id.to_string().parse().expect("a number is a session id"),
+            started_at: UNIX_EPOCH + Duration::from_secs(started),
+            state: SessionState::new(),
+            decided_at: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_session_that_reported_no_usage_has_a_dash_for_its_tokens_not_a_zero() {
+        let sessions = [unreported(1, 1_789_732_800), session(2, 1_789_732_900, 0)];
+        let table = lines("repo", &sessions, Format::Table);
+        // The first measured nothing; the second reported a record of no
+        // tokens, which is a measured zero.
+        assert_eq!(
+            table[1],
+            " 1  2026-09-18T12:00:00Z  unknown             —  —"
+        );
+        assert_eq!(
+            table[2],
+            " 2  2026-09-18T12:01:40Z  unknown             0  —"
+        );
+    }
+
+    #[test]
+    fn a_day_whose_sessions_reported_no_usage_has_a_dash_for_its_tokens() {
+        let sessions = [
+            unreported(1, 1_789_732_800),
+            unreported(2, 1_789_732_900),
+            unreported(3, 1_789_732_800 + 43_200),
+            session(4, 1_789_732_800 + 43_300, 40),
+        ];
+        assert_eq!(
+            lines("repo", &sessions, Format::Days)[1..3],
+            [
+                "2026-09-18  —               2             —",
+                "2026-09-19  —               2            40",
+            ]
+        );
     }
 }
