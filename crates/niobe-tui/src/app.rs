@@ -1351,6 +1351,14 @@ pub struct App {
     /// How each call the operator or a rule let through was allowed, until
     /// the call ends and its entry takes the answer.
     answered: BTreeMap<ToolCallId, PermissionDecision>,
+    /// The entry each question still unanswered raised to needing the
+    /// operator, because no standing rule in force covered it when it came.
+    asked_rows: BTreeMap<ToolCallId, usize>,
+    /// What each entry in [`App::asked_rows`] asks of the operator without
+    /// the questions waiting on it, which it goes back to where the record
+    /// says a rule answered them: the rules in force when a session is read
+    /// back are not the ones that were in force when it ran.
+    unasked: BTreeMap<usize, Attention>,
     /// The call that ended with the event just folded — its entry and its
     /// place in it — and how it came to run. A backend reports a file change
     /// or a test run directly after the end of the call that made it, so this
@@ -1969,6 +1977,8 @@ impl App {
             tools_by_name: false,
             diffs_open: false,
             answered: BTreeMap::new(),
+            asked_rows: BTreeMap::new(),
+            unasked: BTreeMap::new(),
             just_ended: None,
             agents: Vec::new(),
             decided_at: Vec::new(),
@@ -2135,8 +2145,17 @@ impl App {
         self.last_folded_at = ended_at;
         let ended = self.just_ended.take();
         let (from, reply) = (self.entries.len(), self.reply);
+        let answered = match event {
+            Event::PermissionResponse { id, decision, .. } => {
+                Some((id, *decision, self.tool_entries.get(id).map(|&(at, _)| at)))
+            }
+            _ => None,
+        };
         self.fold_into_transcript(event, ended);
         self.raise(event, from, reply, ended);
+        if let Some((id, decision, row)) = answered {
+            self.settle_asked(id, decision, row);
+        }
         if self.session.turns().len() > turns {
             self.rule_turn(ended_at);
         }
@@ -2163,10 +2182,72 @@ impl App {
             false => from,
         };
         let into = self.went_into(event, reply, ended);
+        let asked = match event {
+            Event::PermissionRequest { id, .. } => Some(id),
+            _ => None,
+        };
         for at in (from..self.entries.len()).chain(into) {
-            if let Some(entry) = self.entries.get_mut(at) {
-                entry.attention = entry.attention.max(level);
+            let Some(entry) = self.entries.get_mut(at) else {
+                continue;
+            };
+            match asked {
+                Some(id) => {
+                    self.unasked.entry(at).or_insert(entry.attention);
+                    self.asked_rows.insert(id.clone(), at);
+                }
+                None => {
+                    if let Some(unasked) = self.unasked.get_mut(&at) {
+                        *unasked = (*unasked).max(level);
+                    }
+                }
             }
+            entry.attention = entry.attention.max(level);
+        }
+    }
+
+    /// Settles what the question `id` asked of the operator, now that the
+    /// record says who answered it, about the call on the entry at `row`.
+    ///
+    /// A question is raised as it comes unless a standing rule in force
+    /// covers it, which is right while the session runs: the rules answer
+    /// it straight after. Read back, the rules in force are today's, and the
+    /// answer is what says what happened — the operator answering one, though
+    /// a rule saved since covers it, was asked; a rule answering one, though
+    /// that rule is gone, asked nobody.
+    fn settle_asked(&mut self, id: &ToolCallId, decision: PermissionDecision, row: Option<usize>) {
+        let raised = self.asked_rows.remove(id);
+        let row = raised.or(row);
+        let Some(at) = row else {
+            return;
+        };
+        let by_rule = match decision {
+            PermissionDecision::AllowByRule => true,
+            PermissionDecision::Allow
+            | PermissionDecision::AllowAlways
+            | PermissionDecision::Deny => false,
+        };
+        let waiting = self.asked_rows.values().any(|&other| other == at);
+        let Some(entry) = self.entries.get_mut(at) else {
+            return;
+        };
+        match (by_rule, raised.is_some()) {
+            // Nothing was raised for it, and nobody was asked.
+            (true, false) => {}
+            // Another question on the same entry still waits, and holds it up.
+            (true, true) => {
+                if !waiting && let Some(&unasked) = self.unasked.get(&at) {
+                    entry.attention = unasked;
+                }
+            }
+            (false, _) => {
+                entry.attention = entry.attention.max(Attention::NeedsYou);
+                if let Some(unasked) = self.unasked.get_mut(&at) {
+                    *unasked = Attention::NeedsYou;
+                }
+            }
+        }
+        if !waiting {
+            self.unasked.remove(&at);
         }
     }
 
@@ -2254,6 +2335,8 @@ impl App {
         self.reply = None;
         self.compaction = None;
         self.answered.clear();
+        self.asked_rows.clear();
+        self.unasked.clear();
         self.just_ended = None;
         self.scroll = 0;
         self.follow = true;
@@ -14196,6 +14279,114 @@ mod tests {
             attention(&ruled).last(),
             Some(&Attention::Routine),
             "a standing rule answered it, and nobody was asked"
+        );
+    }
+
+    #[test]
+    fn a_question_the_operator_answered_for_good_reads_back_as_one_they_were_asked() {
+        let mut live = sent(app().attached(), "go");
+        live.apply(&start("t1", "Bash", "{}", Some("rm -rf build")));
+        live.apply(&prompt(Some("rm -rf build")));
+        live.answer(Answer::AlwaysTool);
+        let recorded: Vec<Event> = [
+            Event::UserMessage {
+                text: "go".to_owned(),
+            },
+            start("t1", "Bash", "{}", Some("rm -rf build")),
+            prompt(Some("rm -rf build")),
+        ]
+        .into_iter()
+        .chain(live.take_produced().into_iter().skip(1))
+        .collect();
+
+        // Opened again under the config the answer saved its rule to.
+        let mut back = app().with_rules(live.allowed().clone());
+        back.extend(&recorded);
+
+        assert_eq!(attention(&live).last(), Some(&Attention::NeedsYou));
+        assert_eq!(
+            attention(&back),
+            attention(&live),
+            "the record says the operator answered it, whatever the rules say now"
+        );
+    }
+
+    #[test]
+    fn a_question_a_rule_answered_reads_back_as_asking_nobody_once_the_rule_is_gone() {
+        let mut live = sent(
+            app()
+                .attached()
+                .with_rules([Rule::tool("Bash")].into_iter().collect()),
+            "go",
+        );
+        live.apply(&start("t1", "Bash", "{}", Some("rm -rf build")));
+        live.apply(&prompt(Some("rm -rf build")));
+        live.settle_rules();
+        let recorded: Vec<Event> = [
+            Event::UserMessage {
+                text: "go".to_owned(),
+            },
+            start("t1", "Bash", "{}", Some("rm -rf build")),
+            prompt(Some("rm -rf build")),
+        ]
+        .into_iter()
+        .chain(live.take_produced().into_iter().skip(1))
+        .collect();
+
+        // Opened again where the rule is not in force: a `-p --allow` rule
+        // that nothing wrote down, or one taken out of the config since.
+        let mut back = app();
+        back.extend(&recorded);
+
+        assert_eq!(attention(&live).last(), Some(&Attention::Routine));
+        assert_eq!(
+            attention(&back),
+            attention(&live),
+            "the record says a rule answered it"
+        );
+    }
+
+    #[test]
+    fn a_question_a_rule_answers_while_another_on_the_same_row_waits_leaves_the_row_waiting() {
+        let mut app = sent(app().attached(), "go");
+        app.apply(&start("t1", "Bash", "{}", Some("rm -rf build")));
+        app.apply(&start("t2", "Bash", "{}", Some("rm -rf dist")));
+        assert_eq!(
+            app.entries().len(),
+            2,
+            "one row for the prompt, one for the run"
+        );
+        let ask = |id: &str| Event::PermissionRequest {
+            id: id.into(),
+            tool: "Bash".to_owned(),
+            input: "{}".to_owned(),
+            target: Some("rm -rf build".to_owned()),
+            proposal: None,
+            reason: None,
+            agent: None,
+        };
+        app.apply(&ask("t1"));
+        app.apply(&ask("t2"));
+        app.apply(&Event::PermissionResponse {
+            id: "t2".into(),
+            decision: PermissionDecision::AllowByRule,
+            message: None,
+        });
+        assert_eq!(
+            attention(&app).last(),
+            Some(&Attention::NeedsYou),
+            "the question about the first call is still waiting"
+        );
+
+        app.apply(&Event::PermissionResponse {
+            id: "t1".into(),
+            decision: PermissionDecision::AllowByRule,
+            message: None,
+        });
+        assert_eq!(
+            attention(&app).last(),
+            Some(&Attention::Routine),
+            "a rule answered both, so neither asked anybody"
         );
     }
 

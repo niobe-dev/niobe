@@ -418,7 +418,11 @@ reviewers that encode both, for an agent working in this tree.
   `tests/billing.rs` folds the bridge's recordings into the shell and compares the Usage pane
   with the pictures in its `tests/snapshots/`, one per way a session is billed. `tests/agents.rs` folds the
   recording with sub-agents and narrows the transcript to each, against what the bridge said each
-  agent sent.
+  agent sent. `tests/read_back.rs` runs every one of the bridge's stream recordings as a live
+  shell would, the operator answering each question for good, into a real store, and holds the
+  fold, every transcript entry with the attention it asks, the 120×30 frame and what `--resume`
+  and `replay` print against the session read back — under the rules the answers saved, and
+  under none.
 - **`xtask/`** — workspace automation, run as `cargo xtask <task>`; the checks CI runs.
   `version.rs` is the workspace version: the eight places the root manifest writes it, and
   what the conventional-commit subjects since the last release tag call for (§8). `headers.rs`
