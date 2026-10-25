@@ -1202,7 +1202,7 @@ fn a_question_on_a_window_too_small_to_draw_it_takes_no_answer_until_the_window_
 
     let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
     let shown = Instant::now();
-    let mut app = session_waiting_on_a_prompt();
+    let mut app = session_waiting_on_a_prompt().attached();
     app.tick(shown, None);
     let frame = screen(&mut app, 60, 20);
     assert!(!frame.contains("claude asks"), "{frame}");
@@ -1262,7 +1262,7 @@ fn question_cells(frame: &str) -> Vec<String> {
 fn the_question_shows_what_would_run_and_every_way_to_answer_it() {
     use niobe_tui::app::Answer;
 
-    let mut app = session_waiting_on_a_prompt();
+    let mut app = session_waiting_on_a_prompt().attached();
     let frame = screen(&mut app, 120, 30);
 
     assert!(frame.contains("? claude asks"), "{frame}");
@@ -1305,7 +1305,7 @@ fn the_question_shows_what_would_run_and_every_way_to_answer_it() {
     app.answer(Answer::Once);
     assert_eq!(
         screen(&mut app, 120, 30),
-        screen(&mut running_session(), 120, 30),
+        screen(&mut running_session().attached(), 120, 30),
         "the question left something behind on the frame"
     );
 }

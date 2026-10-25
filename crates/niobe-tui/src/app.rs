@@ -1924,6 +1924,11 @@ const TYPED_AT_QUESTION_HINT: &str =
 const NO_IMAGE_IN_A_COMMAND_HINT: &str =
     "No image attached: a ! command goes to sh, which takes text. Esc leaves ! mode";
 
+/// What the bar says when a question read back with no backend attached is
+/// answered.
+const UNATTACHED_ANSWER_HINT: &str = "Not answered: this session is not attached to a backend, so nothing is waiting on the \
+     question; the record holds the answer it was given";
+
 /// What the bar says when a prompt chosen from the history took the composer
 /// out of `!` mode.
 const LEFT_BANG_FOR_HISTORY_HINT: &str =
@@ -3799,6 +3804,11 @@ impl App {
     /// wait on the operator's answer to a question about something else. The
     /// prompt on screen, and what the operator chose on it, stay as they were.
     pub fn settle_rules(&mut self) {
+        // Nothing waits on a question read back with no backend attached,
+        // and the record already holds the answer it was given.
+        if !self.attached {
+            return;
+        }
         let covered: Vec<ToolCallId> = self
             .asks
             .iter()
@@ -3825,6 +3835,9 @@ impl App {
         let Some(ask) = self.asks.front().cloned() else {
             return;
         };
+        if self.refused_unattached_answer() {
+            return;
+        }
 
         let rule = match answer {
             Answer::Once | Answer::No => None,
@@ -3859,6 +3872,9 @@ impl App {
     /// as a new prompt instead would leave the call waiting and start a turn
     /// behind it.
     pub fn answer_saying(&mut self, words: &str) {
+        if self.asks.is_empty() || self.refused_unattached_answer() {
+            return;
+        }
         let Some(ask) = self.asks.front() else {
             return;
         };
@@ -3873,6 +3889,22 @@ impl App {
             message: Some(words.to_owned()),
         });
         self.scroll_to_tail();
+    }
+
+    /// Whether an answer to the question on screen is refused because no
+    /// backend is attached, saying so in the bar.
+    ///
+    /// A question read back — a replayed log, a record folded with nothing
+    /// driving it — has nothing waiting on it, and the record holds the
+    /// answer it was given: one made here would be folded in as a decision
+    /// nobody made, and an "always" would answer the record's later
+    /// questions by a rule it never had.
+    fn refused_unattached_answer(&mut self) -> bool {
+        if self.attached {
+            return false;
+        }
+        self.hint = Some(UNATTACHED_ANSWER_HINT.to_owned());
+        true
     }
 
     /// The rules the operator made since the last call, oldest first.
@@ -12081,7 +12113,7 @@ mod tests {
     #[test]
     fn a_prompt_waits_on_the_operator_and_is_answered_once() {
         use ratatui::crossterm::event::KeyCode;
-        let mut app = app();
+        let mut app = app().attached();
         app.apply(&prompt(Some("rm -rf build")));
 
         let ask = app.asking().expect("the transcript has a question");
@@ -12181,7 +12213,7 @@ mod tests {
     #[test]
     fn a_refusal_is_visible_in_the_transcript() {
         use ratatui::crossterm::event::KeyCode;
-        let mut app = app();
+        let mut app = app().attached();
         app.apply(&prompt(Some("rm -rf build")));
 
         app.on_key(key(KeyCode::Char('4')));
@@ -12211,7 +12243,7 @@ mod tests {
     fn always_this_target_on_a_command_ending_in_a_glob_allows_only_that_command() {
         use ratatui::crossterm::event::KeyCode;
 
-        let mut app = app();
+        let mut app = app().attached();
         app.apply(&prompt(Some("rm -rf build/*")));
         let rule = app
             .asking()
@@ -12230,7 +12262,7 @@ mod tests {
     fn always_this_tool_and_always_this_target_store_the_rule_they_name() {
         use ratatui::crossterm::event::KeyCode;
 
-        let mut by_target = app();
+        let mut by_target = app().attached();
         by_target.apply(&prompt(Some("rm -rf build")));
         by_target.on_key(key(KeyCode::Char('3')));
         by_target.on_key(key(KeyCode::Enter));
@@ -12240,7 +12272,7 @@ mod tests {
         );
         assert!(!by_target.allowed().allows("Bash", Some("rm -rf dist")));
 
-        let mut by_tool = app();
+        let mut by_tool = app().attached();
         by_tool.apply(&prompt(Some("rm -rf build")));
         by_tool.on_key(key(KeyCode::Char('2')));
         by_tool.on_key(key(KeyCode::Enter));
@@ -12347,7 +12379,7 @@ mod tests {
     #[test]
     fn prompts_are_answered_in_the_order_they_arrived() {
         use ratatui::crossterm::event::KeyCode;
-        let mut app = app();
+        let mut app = app().attached();
         app.apply(&prompt(Some("rm -rf build")));
         app.apply(&Event::PermissionRequest {
             id: "t2".into(),
@@ -12603,7 +12635,7 @@ mod tests {
     #[test]
     fn tab_writes_an_answer_that_reaches_the_backend_as_the_answer() {
         use ratatui::crossterm::event::KeyCode;
-        let mut app = app();
+        let mut app = app().attached();
         app.type_into_composer(Input {
             key: Key::Char('d'),
             ..Default::default()
@@ -12715,6 +12747,40 @@ mod tests {
             [Event::PermissionResponse { id, decision: PermissionDecision::Allow, .. }]
                 if id.as_str() == "bg"
         ));
+    }
+
+    #[test]
+    fn a_question_read_back_with_no_backend_attached_takes_no_answer_and_makes_no_rule() {
+        // A replayed log hands the shell its questions as a live session
+        // would, and nothing is waiting on them: the log holds the answers
+        // that were given. An answer from here would be folded into the
+        // record as a decision nobody made, and an "always" would go on to
+        // answer the log's later questions by a rule it never had.
+        let mut app = app();
+        app.apply(&prompt(Some("rm -rf build")));
+        let before = app.session().clone();
+
+        app.answer(Answer::AlwaysTool);
+        app.answer_saying("not that");
+        app.on_key(key(ratatui::crossterm::event::KeyCode::Enter));
+
+        assert!(app.take_produced().is_empty(), "an answer was produced");
+        assert!(app.take_rules().is_empty(), "a rule was made");
+        assert_eq!(app.session(), &before, "the record was changed");
+        assert_eq!(
+            app.asking().map(|ask| ask.id.as_str()),
+            Some("t1"),
+            "the question was taken down as though it were answered"
+        );
+
+        let mut ruled =
+            App::new(Repo::default()).with_rules([Rule::tool("Bash")].into_iter().collect());
+        ruled.apply(&prompt(Some("rm -rf build")));
+        ruled.settle_rules();
+        assert!(
+            ruled.take_produced().is_empty(),
+            "a rule answered a question read back"
+        );
     }
 
     #[test]
@@ -12852,7 +12918,7 @@ mod tests {
     #[test]
     fn a_key_meant_for_a_question_out_of_view_brings_it_into_view_first() {
         use ratatui::crossterm::event::KeyCode;
-        let mut app = app();
+        let mut app = app().attached();
         app.measured(100, 20);
         app.scroll_up(30);
         app.apply(&prompt(Some("rm -rf build")));
@@ -12893,7 +12959,7 @@ mod tests {
         use ratatui::crossterm::event::KeyCode;
 
         let from_an_agent = |answer: char| {
-            let mut app = app();
+            let mut app = app().attached();
             app.apply(&Event::AgentSpawn {
                 id: AgentId::new("toolu_a"),
                 parent: None,
@@ -12958,7 +13024,9 @@ mod tests {
 
     #[test]
     fn a_standing_rule_answers_a_prompt_without_showing_it() {
-        let mut app = app().with_rules([Rule::tool("Read")].into_iter().collect());
+        let mut app = app()
+            .attached()
+            .with_rules([Rule::tool("Read")].into_iter().collect());
         app.apply(&Event::PermissionRequest {
             id: "t1".into(),
             tool: "Read".to_owned(),
@@ -12992,7 +13060,9 @@ mod tests {
     fn a_standing_rule_answers_a_prompt_queued_behind_one_it_does_not() {
         use ratatui::crossterm::event::KeyCode;
 
-        let mut app = app().with_rules([Rule::tool("Read")].into_iter().collect());
+        let mut app = app()
+            .attached()
+            .with_rules([Rule::tool("Read")].into_iter().collect());
         app.apply(&asked_by("t1", None));
         app.on_key(key(KeyCode::Down));
         let chosen = app.ask_selected();
@@ -14884,7 +14954,7 @@ mod tests {
     }
 
     fn asked(target: Option<&str>) -> App {
-        let mut app = app();
+        let mut app = app().attached();
         for id in ["t1", "t2"] {
             app.apply(&Event::PermissionRequest {
                 id: id.into(),
@@ -14984,7 +15054,7 @@ mod tests {
     /// quiet a question waits for, and sending it.
     fn typed_at_the_question(text: &str) -> App {
         let shown = Instant::now();
-        let mut app = app();
+        let mut app = app().attached();
         app.tick(shown, None);
         app.apply(&prompt(Some("touch one.txt")));
         let mut at = shown + ASK_QUIET * 2;
@@ -15123,7 +15193,7 @@ mod tests {
     #[test]
     fn a_digit_or_enter_on_an_untouched_question_still_answers_it() {
         let shown = Instant::now();
-        let mut first = app();
+        let mut first = app().attached();
         first.tick(shown, None);
         first.apply(&prompt(Some("touch one.txt")));
         read(&mut first, b"\r", shown + ASK_QUIET * 2);
@@ -15136,7 +15206,7 @@ mod tests {
             }]
         );
 
-        let mut again = app();
+        let mut again = app().attached();
         again.tick(shown, None);
         again.apply(&prompt(Some("touch one.txt")));
         read(&mut again, b"4", shown + ASK_QUIET * 2);
@@ -16672,7 +16742,7 @@ mod tests {
 
     /// A prompt for `rm -rf build`, put on screen by the tick at `shown`.
     fn shown_at(shown: Instant) -> App {
-        let mut app = app();
+        let mut app = app().attached();
         app.tick(shown, None);
         app.apply(&prompt(Some("rm -rf build")));
         assert_eq!(
@@ -17808,7 +17878,7 @@ mod tests {
             Overlay::Memory => (app().attached(), key(KeyCode::F(8)), key(KeyCode::Esc)),
             Overlay::Mcp => (app().attached(), key(KeyCode::F(7)), key(KeyCode::Esc)),
             Overlay::History => (
-                remembering(&[("rm the build dir and rebuild", "3")], &["3"]),
+                remembering(&[("rm the build dir and rebuild", "3")], &["3"]).attached(),
                 ctrl('r'),
                 key(KeyCode::Enter),
             ),
@@ -17817,9 +17887,9 @@ mod tests {
                 key(KeyCode::F(4)),
                 key(KeyCode::Enter),
             ),
-            Overlay::Search => (app(), ctrl('f'), key(KeyCode::Esc)),
+            Overlay::Search => (app().attached(), ctrl('f'), key(KeyCode::Esc)),
             Overlay::Detail => {
-                let mut app = app();
+                let mut app = app().attached();
                 read_call(&mut app, "t1", "README.md", "# niobe");
                 app.pick_call();
                 (app, key(KeyCode::Enter), key(KeyCode::Esc))

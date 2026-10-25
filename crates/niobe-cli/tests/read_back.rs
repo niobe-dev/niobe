@@ -66,12 +66,15 @@ fn utc() -> Clock {
     Clock::fixed(0).expect("UTC is a timezone")
 }
 
+/// A shell attached to a backend, as a live session's is and as `--resume`
+/// opens one: only an attached shell takes an answer to a question.
 fn shell() -> App {
     App::new(Repo {
         name: "niobe".to_owned(),
         branch: Some("main".to_owned()),
         ..Repo::default()
     })
+    .attached()
 }
 
 /// The moment the `n`th line of a recording arrived at: a second apart, so
