@@ -17,7 +17,9 @@
 //! Everything else is read as crossterm reads it, sequence for sequence, so
 //! that the shell's keys mean the same on either path: the same modifiers from
 //! the same masks, a lone Esc at the end of a read being the Esc key, and a
-//! sequence nobody recognises passed over whole rather than typed out.
+//! sequence nobody recognises passed over whole rather than typed out. Bytes
+//! that are no character part from crossterm: they are passed over without
+//! the key typed after them.
 //!
 //! A bracketed paste, `CSI 200 ~ … CSI 201 ~`, is read as one
 //! [`Event::Paste`] of everything between the two markers, byte for byte: the
@@ -61,6 +63,10 @@ enum Step {
     Paste,
     /// The start of a sequence whose end has not been read yet.
     Wait,
+    /// The first this many bytes are no character and no sequence: a byte
+    /// that starts a character the byte after it does not continue. Only they
+    /// are passed over; the byte that showed it is read again on its own.
+    Invalid(usize),
 }
 
 /// Turns the bytes read from the terminal into events, holding a sequence
@@ -126,6 +132,13 @@ impl Decoder {
             }
             self.pending.push(*byte);
             let more = more || index + 1 < bytes.len();
+            self.read_pending(more, now, events);
+        }
+    }
+
+    /// Reads what [`Decoder::pending`] holds now that one more byte is in it.
+    fn read_pending(&mut self, more: bool, now: std::time::Instant, events: &mut Vec<Event>) {
+        loop {
             match step(&self.pending, more) {
                 Step::Event(event) => {
                     events.push(event);
@@ -142,7 +155,14 @@ impl Decoder {
                     self.discarding = true;
                 }
                 Step::Wait => {}
+                Step::Invalid(count) => {
+                    self.pending.drain(..count.min(self.pending.len()));
+                    if !self.pending.is_empty() {
+                        continue;
+                    }
+                }
             }
+            return;
         }
     }
 }
@@ -253,6 +273,8 @@ fn alt(inner: Step) -> Step {
             key.modifiers |= KeyModifiers::ALT;
             Step::Event(Event::Key(key))
         }
+        // The Esc goes with the bytes it was in front of.
+        Step::Invalid(count) => Step::Invalid(count.saturating_add(1)),
         // Alt is held on a key only; any other step is what it was.
         other => other,
     }
@@ -260,6 +282,11 @@ fn alt(inner: Step) -> Step {
 
 /// A character typed, once all of its UTF-8 bytes are in. An upper-case letter
 /// is read as typed with Shift, as crossterm reads it.
+///
+/// Bytes that are no character are passed over alone. crossterm drops the
+/// byte that showed them to be none with them, and that byte is a key the
+/// operator pressed: Enter after a Latin-1 `é` would do nothing, and the Esc
+/// of an arrow would go, typing the rest of the arrow into the prompt.
 fn typed(buffer: &[u8]) -> Step {
     match std::str::from_utf8(buffer) {
         Ok(text) => match text.chars().next() {
@@ -267,8 +294,10 @@ fn typed(buffer: &[u8]) -> Step {
             Some(c) => key(KeyCode::Char(c), KeyModifiers::NONE),
             None => Step::Wait,
         },
-        Err(error) if error.error_len().is_none() => Step::Wait,
-        Err(_) => Step::Skip,
+        Err(error) => match error.error_len() {
+            None => Step::Wait,
+            Some(length) => Step::Invalid(error.valid_up_to().saturating_add(length)),
+        },
     }
 }
 
@@ -937,5 +966,108 @@ mod tests {
                 pressed(KeyCode::F(10), KeyModifiers::NONE)
             ]
         );
+    }
+
+    /// A byte that starts a character the bytes after it do not finish — a
+    /// terminal set to Latin-1 sends `é` as one — is no key, and the key typed
+    /// after it is still that key: held with it and passed over, Enter would
+    /// do nothing and an arrow's tail would be typed into the prompt.
+    #[test]
+    fn a_byte_that_is_no_character_does_not_take_the_next_key_with_it() {
+        assert_eq!(
+            read(b"\xe9\r\xe9a\xc3(\xf0\x9f\x98b\x1b\xe9c"),
+            [
+                pressed(KeyCode::Enter, KeyModifiers::NONE),
+                pressed(KeyCode::Char('a'), KeyModifiers::NONE),
+                pressed(KeyCode::Char('('), KeyModifiers::NONE),
+                pressed(KeyCode::Char('b'), KeyModifiers::NONE),
+                pressed(KeyCode::Char('c'), KeyModifiers::NONE),
+            ]
+        );
+        assert_eq!(
+            read(b"\xe9\x1b[A"),
+            [pressed(KeyCode::Up, KeyModifiers::NONE)]
+        );
+    }
+
+    /// Every way of cutting a run of keys, clicks, replies and pastes between
+    /// two reads reads the same events as one read of the whole, but for an
+    /// Esc a read ends on while saying nothing more is coming, which is the
+    /// Esc key by design.
+    #[test]
+    fn a_run_cut_between_two_reads_anywhere_reads_as_the_whole() {
+        let mut long = b"\x1b[".to_vec();
+        long.extend(std::iter::repeat_n(b'1', LONGEST_SEQUENCE * 3));
+        long.push(b'~');
+        let tokens: [&[u8]; 36] = [
+            b"a",
+            b"Z",
+            "é".as_bytes(),
+            "→".as_bytes(),
+            "😀".as_bytes(),
+            b"\r",
+            b"\n",
+            b"\t",
+            b"\x7f",
+            b"\x1b[A",
+            b"\x1bOB",
+            b"\x1b[1;5C",
+            b"\x1b[3~",
+            b"\x1b[27;2;13~",
+            b"\x1b[13;2u",
+            b"\x1b[97;1:3u",
+            b"\x1b[<64;10;5M",
+            b"\x1b[<0;3;4m",
+            b"\x1b[M`!!",
+            b"\x1b[?0u",
+            b"\x1b[?62;22c",
+            b"\x1b[I",
+            b"\x1b[O",
+            b"\x1b[200~p\rq\x1b[A\x1b[201~",
+            b"\x1ba",
+            b"\x1b\r",
+            "\x1bé".as_bytes(),
+            b"\x1b[999999999999;5u",
+            b"\x1b[<1;99999;3M",
+            b"\x1b[[A",
+            b"\x1b[Z",
+            b"\x1b[57414u",
+            b"\xe9",
+            b"\xc3",
+            b"\xf0\x9f",
+            &long,
+        ];
+        // A fixed xorshift, so that a failure names a run that fails again.
+        let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next = move |below: usize| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            usize::try_from(state % below as u64).expect("below a usize")
+        };
+        for run in 0..2000 {
+            let mut bytes = Vec::new();
+            for _ in 0..=next(8) {
+                bytes.extend_from_slice(tokens[next(tokens.len())]);
+            }
+            let whole = read(&bytes);
+            for cut in 1..bytes.len() {
+                for more in [true, false] {
+                    if !more && bytes[cut - 1] == 0x1b {
+                        continue;
+                    }
+                    let mut decoder = Decoder::default();
+                    let mut events = Vec::new();
+                    decoder.feed(&bytes[..cut], more, &mut events);
+                    decoder.feed(&bytes[cut..], false, &mut events);
+                    assert_eq!(
+                        events,
+                        whole,
+                        "run {run}, cut after byte {cut}, more {more}: {:?}",
+                        String::from_utf8_lossy(&bytes)
+                    );
+                }
+            }
+        }
     }
 }
