@@ -1432,6 +1432,14 @@ impl SessionState {
         &self.in_flight_tools
     }
 
+    /// Whether the end of call `id` has been counted since it last started,
+    /// so that an end said for it now is the same end said again and counts
+    /// for nothing. A consumer that keeps its own record of calls reads this
+    /// before folding an end in, to treat the repeat as the fold does.
+    pub fn call_ended(&self, id: &ToolCallId) -> bool {
+        self.ended_tools.contains(id)
+    }
+
     /// Whether the backend is still answering the last prompt: from the prompt
     /// until [`Event::TurnEnded`], or a fatal error ends the session under it.
     ///

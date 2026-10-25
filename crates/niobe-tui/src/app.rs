@@ -2121,6 +2121,12 @@ impl App {
                 }
             }
         }
+        // An end said again for a call already ended changes nothing in the
+        // fold, so it puts nothing in the transcript: a second row for it
+        // would be a call the fold does not count, and the turn's rule would
+        // count it too.
+        let repeated_end =
+            matches!(event, Event::ToolCallEnd { id, .. } if self.session.call_ended(id));
         self.session.apply(event);
         // The fold carries no times, so when each decision was stated is kept
         // here: the ones the event added get this moment, and a clear that
@@ -2143,6 +2149,9 @@ impl App {
             self.at
         };
         self.last_folded_at = ended_at;
+        if repeated_end {
+            return;
+        }
         let ended = self.just_ended.take();
         let (from, reply) = (self.entries.len(), self.reply);
         let answered = match event {
@@ -15040,6 +15049,33 @@ mod tests {
             .map(|(_, rule)| (rule.agents, rule.calls))
             .collect();
         assert_eq!(counted, [(0, 1), (1, 3)]);
+    }
+
+    /// The fold counts an end said again for a call already ended as the same
+    /// call ending; the transcript draws it as the one row it already has,
+    /// and the turn's rule counts it once.
+    #[test]
+    fn an_end_said_again_is_neither_a_second_row_nor_a_second_call_on_the_rule() {
+        let mut app = app();
+        app.apply(&said("read it"));
+        app.apply(&start("t1", "Read", "{}", Some("src/lib.rs")));
+        app.apply(&ended("t1", "Read", ToolOutcome::Ok, 120));
+        app.apply(&ended("t1", "Read", ToolOutcome::Ok, 120));
+        app.apply(&Event::TurnEnded);
+
+        let calls: Vec<usize> = app
+            .entries()
+            .iter()
+            .filter(|entry| !entry.calls.is_empty())
+            .map(|entry| entry.calls.len())
+            .collect();
+        assert_eq!(calls, [1], "{:?}", app.entries());
+        assert_eq!(app.session().tools().finished, 1, "the fold's own count");
+        let counted: Vec<u64> = rules(&app)
+            .into_iter()
+            .map(|(_, rule)| rule.calls)
+            .collect();
+        assert_eq!(counted, [1]);
     }
 
     #[test]
