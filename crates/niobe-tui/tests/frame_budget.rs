@@ -66,6 +66,44 @@ fn a_resize_redraws_inside_a_frame_budget() {
     );
 }
 
+/// How deep the quotes of [`a_reply_quoted_thousands_deep_redraws_inside_a_frame_budget`]
+/// are nested, and how many lines are drawn inside them: a reply of 22 KB,
+/// which a model can write.
+const QUOTE_DEPTH: usize = 8000;
+const QUOTED_LINES: usize = 2000;
+
+/// A resize of a reply that opens thousands of quotes inside one another and
+/// draws lines inside the deepest. Every level is a block the renderer opens
+/// and closes and every line sits behind all of them, and the reply is
+/// rendered again on every delta while it streams, so a cost per level that
+/// grows with the depth, or a cost per line that does, stalls the screen.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "a frame is timed in an optimised build")]
+fn a_reply_quoted_thousands_deep_redraws_inside_a_frame_budget() {
+    let _alone = ALONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut app = running_session();
+    app.apply(&Event::AssistantMessage {
+        text: format!(
+            "{}{}deep",
+            "> ".repeat(QUOTE_DEPTH),
+            "line\\\n".repeat(QUOTED_LINES)
+        ),
+        agent: None,
+    });
+    let frame = screen(&mut app, 200, 60);
+    assert!(frame.contains("deep"), "the reply is drawn: {frame}");
+
+    let median = median_frame(&mut app, &[(200, 60), (180, 60)]);
+
+    assert!(
+        median <= FRAME_BUDGET,
+        "the median resized frame of a reply quoted {QUOTE_DEPTH} deep took {median:?}, over \
+         the {FRAME_BUDGET:?} budget"
+    );
+}
+
 /// The redraw every tick makes, ten a second, in a long session of replies in
 /// markdown. Each reply is parsed and wrapped once and drawn from what that
 /// made after, so a transcript that only grows costs a frame what its visible

@@ -108,9 +108,25 @@ struct Indent {
     first: String,
     rest: String,
     style: Style,
+    /// The cells `rest` takes, which is what `first` takes too, worked out
+    /// once: the room is asked for on every block opened and closed.
+    cells: usize,
     /// Whether the first line has been drawn, after which every line takes
     /// `rest`.
     used: bool,
+}
+
+impl Indent {
+    fn new(first: String, rest: String, style: Style) -> Self {
+        let cells = text::width(&rest);
+        Self {
+            first,
+            rest,
+            style,
+            cells,
+            used: false,
+        }
+    }
 }
 
 /// A table being read: its column alignments, its rows so far, and the cell
@@ -134,6 +150,10 @@ struct Renderer<'t> {
     /// The inline style in force, innermost last.
     styles: Vec<Style>,
     indents: Vec<Indent>,
+    /// How many of `indents` are list items', counted as they open and close
+    /// so that a block opened deep inside quotes does not look through every
+    /// one of them to learn whether it is in an item.
+    items: usize,
     /// The next number of each open list, `None` for a bulleted one.
     lists: Vec<Option<u64>>,
     /// A fenced or indented code block being gathered.
@@ -153,6 +173,7 @@ impl<'t> Renderer<'t> {
             runs: Vec::new(),
             styles: vec![Style::new().fg(theme.fg)],
             indents: Vec::new(),
+            items: 0,
             lists: Vec::new(),
             code: None,
             table: None,
@@ -286,12 +307,11 @@ impl<'t> Renderer<'t> {
     fn start_block_quote(&mut self) {
         self.flush();
         self.gap();
-        self.indents.push(Indent {
-            first: QUOTE_BAR.to_owned(),
-            rest: QUOTE_BAR.to_owned(),
-            style: Style::new().fg(self.theme.dim),
-            used: false,
-        });
+        self.indents.push(Indent::new(
+            QUOTE_BAR.to_owned(),
+            QUOTE_BAR.to_owned(),
+            Style::new().fg(self.theme.dim),
+        ));
         let dim = self.theme.dim;
         self.push_style(|style| style.fg(dim).add_modifier(Modifier::ITALIC));
     }
@@ -319,12 +339,9 @@ impl<'t> Renderer<'t> {
             _ => "• ".to_owned(),
         };
         let rest = " ".repeat(text::width(&marker));
-        self.indents.push(Indent {
-            first: marker,
-            rest,
-            style: Style::new().fg(self.theme.hot),
-            used: false,
-        });
+        self.indents
+            .push(Indent::new(marker, rest, Style::new().fg(self.theme.hot)));
+        self.items = self.items.saturating_add(1);
     }
 
     fn start_table(&mut self, alignments: Vec<Alignment>) {
@@ -358,6 +375,7 @@ impl<'t> Renderer<'t> {
             TagEnd::Item => {
                 self.flush();
                 self.indents.pop();
+                self.items = self.items.saturating_sub(1);
             }
             TagEnd::TableCell => {
                 let cell = std::mem::take(&mut self.runs);
@@ -439,10 +457,7 @@ impl<'t> Renderer<'t> {
     /// blank line already, or sits inside a list item, where blocks follow one
     /// another tightly the way the item's text does.
     fn gap(&mut self) {
-        let in_item = self
-            .indents
-            .iter()
-            .any(|indent| indent.rest.trim().is_empty());
+        let in_item = self.items > 0;
         let after_blank = self.lines.last().is_none_or(|line| line.width() == 0);
         if !in_item && !after_blank {
             self.lines.push(Line::from(""));
@@ -453,7 +468,7 @@ impl<'t> Renderer<'t> {
     fn room(&self) -> usize {
         let indent: usize = self.indents[self.outermost_drawn()..]
             .iter()
-            .map(|i| text::width(&i.rest))
+            .map(|i| i.cells)
             .sum();
         self.width.saturating_sub(indent).max(1)
     }
@@ -467,7 +482,7 @@ impl<'t> Renderer<'t> {
         let limit = self.width / 2;
         let mut taken: usize = 0;
         for (at, indent) in self.indents.iter().enumerate().rev() {
-            taken = taken.saturating_add(text::width(&indent.rest));
+            taken = taken.saturating_add(indent.cells);
             if taken > limit {
                 return at + 1;
             }
@@ -486,18 +501,28 @@ impl<'t> Renderer<'t> {
     /// Emits one line behind the enclosing blocks' drawn indents. An indent
     /// not drawn still counts as used, so the first line it would have
     /// marked is not marked again further down.
+    ///
+    /// Only the drawn indents and the unused ones are visited, so a line
+    /// costs what its own marks cost however deep the blocks around it go.
+    /// The unused ones are always the innermost: an indent is pushed unused
+    /// on top of the others, every line marks them all, and only the
+    /// innermost is ever popped.
     fn emit(&mut self, content: Vec<Span<'static>>) {
         let drawn = self.outermost_drawn();
-        let mut spans = Vec::with_capacity(self.indents.len() + content.len());
-        for (at, indent) in self.indents.iter_mut().enumerate() {
+        let marks = self.indents.get(drawn..).unwrap_or_default();
+        let mut spans = Vec::with_capacity(marks.len() + content.len());
+        for indent in marks {
             let marker = match indent.used {
-                true => indent.rest.clone(),
-                false => indent.first.clone(),
+                true => &indent.rest,
+                false => &indent.first,
             };
-            indent.used = true;
-            if at >= drawn {
-                spans.push(Span::styled(marker, indent.style));
+            spans.push(Span::styled(marker.clone(), indent.style));
+        }
+        for indent in self.indents.iter_mut().rev() {
+            if indent.used {
+                break;
             }
+            indent.used = true;
         }
         spans.extend(content);
         self.lines.push(Line::from(spans));
