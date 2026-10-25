@@ -939,7 +939,15 @@ impl Translator {
             .map(unknown_spend)
             .into_iter()
             .collect();
-        out.extend(match serde_json::from_str::<wire::Message>(line) {
+        out.extend(self.read(line, true));
+        out
+    }
+
+    /// The events of one line, where `mend` says a line that does not parse
+    /// may be read again with each half of a surrogate pair it holds alone
+    /// read as U+FFFD: see [`wire::without_lone_surrogates`].
+    fn read(&mut self, line: &str, mend: bool) -> Vec<Event> {
+        match serde_json::from_str::<wire::Message>(line) {
             Ok(wire::Message::Unknown) => {
                 let kind = kind_of(line);
                 self.unread_once(
@@ -954,9 +962,15 @@ impl Translator {
                 .collect()
             }
             Ok(message) => self.message(message),
-            Err(error) => self.without_figures(line, &error),
-        });
-        out
+            Err(error) => match mend.then(|| wire::without_lone_surrogates(line)).flatten() {
+                Some(mended) => {
+                    let mut out = vec![warn(HALF_A_CHARACTER.to_owned())];
+                    out.extend(self.read(&mended, false));
+                    out
+                }
+                None => self.without_figures(line, &error),
+            },
+        }
     }
 
     /// A line that did not read as a message, read again without its token
@@ -3368,6 +3382,11 @@ pub(crate) fn compacted(metadata: wire::CompactMetadata) -> Event {
         after: metadata.post_tokens,
     }
 }
+
+/// The warning for a line of the CLI's that held half of a character, which
+/// is shown as U+FFFD, as a byte of a line that is not UTF-8 is.
+const HALF_A_CHARACTER: &str = "the CLI sent a line holding half of a character, cut where \
+    the CLI cut a string; the half is shown as \u{fffd}.";
 
 /// A non-fatal entry: something the session should show and go on from.
 pub(crate) fn warn(message: String) -> Event {
@@ -9509,5 +9528,37 @@ error: could not compile `demo` (lib test) due to 1 previous error";
             let spent = Spent::from_model_usage(&model_usage);
             assert!(!spent.is_known(), "{odd}: {spent:?}");
         }
+    }
+
+    #[test]
+    fn a_line_holding_half_of_a_surrogate_pair_is_read_with_that_half_as_a_replacement() {
+        // The CLI is JavaScript: a string it cuts by UTF-16 units can end on
+        // the first half of an emoji, and `JSON.stringify` writes that half
+        // as an escape of its own, which serde_json refuses.
+        let mut translator = Translator::new("max");
+        translator.line(
+            r#"{"type":"assistant","message":{"model":"opus-5","id":"m1","type":"message","role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"cargo test"}}]}}"#,
+        );
+
+        let ended = translator.line(
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"ok \ud83d"}]}}"#,
+        );
+        let finished = translator.line(
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"\ude00 cut"}"#,
+        );
+
+        assert!(
+            ended.iter().any(|event| matches!(
+                event,
+                Event::ToolCallEnd { id, output, .. } if id.as_str() == "t1" && output == "ok \u{fffd}"
+            )),
+            "{ended:?}"
+        );
+        assert!(
+            finished
+                .iter()
+                .any(|event| matches!(event, Event::TurnEnded)),
+            "{finished:?}"
+        );
     }
 }

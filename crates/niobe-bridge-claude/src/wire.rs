@@ -1136,6 +1136,69 @@ pub(crate) struct Denial {
     pub(crate) tool_input: Option<serde_json::Value>,
 }
 
+/// `line` with every `\u` escape that is half of a UTF-16 surrogate pair on
+/// its own written as `\ufffd`, or `None` where it holds no such escape.
+///
+/// The CLI is JavaScript, whose strings are UTF-16: one it cuts to a length,
+/// as it cuts a long tool result, can end between the two halves of an
+/// emoji, and `JSON.stringify` writes the half left as an escape of its own.
+/// serde_json refuses that escape and with it the whole line — a tool call's
+/// end, or the `result` that ends the turn — so the half is read as U+FFFD,
+/// as a byte that is not UTF-8 is. A backslash appears in JSON only inside a
+/// string, so every escape is found by walking from one backslash to the
+/// next without following the strings; `\\` is passed over whole, so a
+/// literal backslash before a `u` is never read as an escape.
+pub(crate) fn without_lone_surrogates(line: &str) -> Option<String> {
+    let bytes = line.as_bytes();
+    let unit = |at: usize| -> Option<u16> {
+        let digits = bytes.get(at..at.checked_add(4)?)?;
+        if !digits.iter().all(u8::is_ascii_hexdigit) {
+            return None;
+        }
+        u16::from_str_radix(std::str::from_utf8(digits).ok()?, 16).ok()
+    };
+    let mut mended = String::new();
+    let mut copied = 0;
+    let mut at = 0;
+    while let Some(found) = bytes
+        .get(at..)
+        .and_then(|rest| rest.iter().position(|&byte| byte == b'\\'))
+    {
+        let escape = at + found;
+        if bytes.get(escape + 1) != Some(&b'u') {
+            at = escape + 2;
+            continue;
+        }
+        at = escape + 6;
+        let lone = match unit(escape + 2) {
+            Some(0xD800..=0xDBFF) => {
+                let low = (bytes.get(escape + 6..escape + 8) == Some(b"\\u".as_slice()))
+                    .then(|| unit(escape + 8))
+                    .flatten();
+                match low {
+                    Some(0xDC00..=0xDFFF) => {
+                        at = escape + 12;
+                        false
+                    }
+                    _ => true,
+                }
+            }
+            Some(0xDC00..=0xDFFF) => true,
+            _ => false,
+        };
+        if lone {
+            mended.push_str(line.get(copied..escape)?);
+            mended.push_str("\\ufffd");
+            copied = escape + 6;
+        }
+    }
+    if copied == 0 {
+        return None;
+    }
+    mended.push_str(line.get(copied..)?);
+    Some(mended)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1300,5 +1363,42 @@ mod tests {
         assert_eq!(body.subtype.as_deref(), Some("can_use_tool"));
         assert_eq!(body.tool_name.as_deref(), Some("Bash"));
         assert_eq!(body.tool_use_id.as_deref(), Some("toolu_1"));
+    }
+
+    #[test]
+    fn half_of_a_surrogate_pair_is_written_as_a_replacement_and_a_whole_pair_is_kept() {
+        let mend = |line: &str| without_lone_surrogates(line);
+
+        assert_eq!(mend(r#"{"a":"ok"}"#), None);
+        assert_eq!(mend(r#"{"a":"\ud83d\ude00"}"#), None, "a whole pair");
+        assert_eq!(
+            mend(r#"{"a":"x\ud83d"}"#).as_deref(),
+            Some(r#"{"a":"x\ufffd"}"#)
+        );
+        assert_eq!(
+            mend(r#"{"a":"\ude00x"}"#).as_deref(),
+            Some(r#"{"a":"\ufffdx"}"#)
+        );
+        assert_eq!(
+            mend(r#"{"a":"\ud83d\ud83d\ude00"}"#).as_deref(),
+            Some(r#"{"a":"\ufffd\ud83d\ude00"}"#),
+            "the first of two leading halves has no pair"
+        );
+        assert_eq!(
+            mend(r#"{"a":"\\ud83d","b":"\ud83d"}"#).as_deref(),
+            Some(r#"{"a":"\\ud83d","b":"\ufffd"}"#),
+            "an escaped backslash before a u is text"
+        );
+        assert_eq!(mend(r#"{"a":"\ud8"}"#), None, "too short to be an escape");
+    }
+
+    #[test]
+    fn a_line_mended_of_its_lone_halves_parses() {
+        let mended = without_lone_surrogates(r#"{"a":"é \ud83d","b":"\ude00"}"#)
+            .expect("both halves are lone");
+        let value: serde_json::Value =
+            serde_json::from_str(&mended).expect("the mended line is JSON");
+        assert_eq!(value["a"], "é \u{fffd}");
+        assert_eq!(value["b"], "\u{fffd}");
     }
 }
