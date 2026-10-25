@@ -17,7 +17,7 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::SystemTime;
 
 use niobe_core::event::Event;
-use niobe_core::session::SessionState;
+use niobe_core::session::{DecisionRecord, SessionState};
 use niobe_store::SessionId;
 
 use crate::args::Narrowing;
@@ -607,7 +607,7 @@ fn usage(sessions: &[Folded]) -> Vec<String> {
 /// Every decision the sessions' replies stated, newest first, each with when
 /// and in which session: the agent's account, said to be one.
 fn decisions(sessions: &[Folded]) -> Vec<String> {
-    let mut stated: Vec<(SystemTime, SessionId, &str)> = sessions
+    let mut stated: Vec<(SystemTime, SessionId, &DecisionRecord)> = sessions
         .iter()
         .flat_map(|session| {
             session
@@ -615,7 +615,7 @@ fn decisions(sessions: &[Folded]) -> Vec<String> {
                 .decisions()
                 .iter()
                 .zip(&session.decided_at)
-                .map(|(decision, at)| (*at, session.id, decision.summary.as_str()))
+                .map(|(decision, at)| (*at, session.id, decision))
         })
         .collect();
     if stated.is_empty() {
@@ -629,11 +629,17 @@ fn decisions(sessions: &[Folded]) -> Vec<String> {
             .to_owned(),
         String::new(),
     ];
-    lines.extend(stated.into_iter().rev().map(|(at, id, summary)| {
+    // A sub-agent's decision is that agent's account and not the session's,
+    // and says so.
+    lines.extend(stated.into_iter().rev().map(|(at, id, decision)| {
+        let by = match decision.agent {
+            Some(_) => ", a sub-agent",
+            None => "",
+        };
         format!(
-            "- {} UTC, session {id}: {}",
+            "- {} UTC, session {id}{by}: {}",
             utc_minute(at),
-            inline(summary)
+            inline(&decision.summary)
         )
     }));
     lines
@@ -817,6 +823,23 @@ mod tests {
         assert_eq!(
             decisions(&[folded(3, &[said("No decision.")])]),
             ["None stated."]
+        );
+    }
+
+    #[test]
+    fn a_decision_a_sub_agent_stated_says_it_was_a_sub_agent_s() {
+        let mut session = folded(
+            1,
+            &[Event::AssistantMessage {
+                text: "DECISION: read only the parser".to_owned(),
+                agent: Some("a1".into()),
+            }],
+        );
+        session.decided_at = vec![UNIX_EPOCH + Duration::from_secs(1_789_732_800)];
+
+        assert_eq!(
+            decisions(&[session])[2],
+            "- 2026-09-18 12:00 UTC, session 1, a sub-agent: read only the parser"
         );
     }
 

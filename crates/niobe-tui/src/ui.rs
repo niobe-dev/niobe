@@ -5340,7 +5340,8 @@ const DECISION_TIME: usize = 6;
 ///
 /// The heading says whose account they are: the agent reports its own
 /// reasoning and may have it wrong, and a pane that listed it bare would read
-/// as a log of what happened.
+/// as a log of what happened. A decision a sub-agent stated is that agent's
+/// account, and its row names the agent by its tag.
 ///
 /// **Newest first**: the pane does not follow its own tail, so a decision
 /// appended at the bottom of a section whose top is wherever the sub-agents
@@ -5380,16 +5381,28 @@ fn decision_rows(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
             .and_then(|at| at.local())
             .map(|time| time.to_string())
             .unwrap_or_default();
-        for (i, wrapped) in text::wrap(&decision.summary, width.saturating_sub(column + 1))
+        // A sub-agent's decision is its account and not the session's, so it
+        // is named by the tag its transcript rows carry, and its text hangs
+        // after the tag on every row it wraps to.
+        let tag = decision.agent.as_ref().map(|agent| {
+            let tag = app.sub_agent_tag(agent);
+            format!("{} ", text::truncate(&tag, crate::tags::TAG_MAX))
+        });
+        let tagged = column + tag.as_deref().map_or(0, text::width);
+        for (i, wrapped) in text::wrap(&decision.summary, width.saturating_sub(tagged + 1))
             .into_iter()
             .enumerate()
         {
-            let head = match i {
-                0 => format!("{ROW_INDENT}{when:<w$}", w = DECISION_TIME),
-                _ => " ".repeat(column),
+            let (head, by) = match i {
+                0 => (
+                    format!("{ROW_INDENT}{when:<w$}", w = DECISION_TIME),
+                    tag.clone().unwrap_or_default(),
+                ),
+                _ => (" ".repeat(tagged), String::new()),
             };
             rows.push(Line::from(vec![
                 Span::styled(head, Style::new().fg(theme.dim)),
+                Span::styled(by, Style::new().fg(theme.agent)),
                 Span::styled(wrapped, Style::new().fg(theme.fg)),
             ]));
         }
@@ -8255,6 +8268,59 @@ mod tests {
         assert!(
             rows[1].starts_with("        "),
             "no clock, so the time column is blank rather than a made-up moment"
+        );
+    }
+
+    /// A sub-agent's decision is that agent's account, not the session's:
+    /// the row names it by the tag its transcript rows carry, and the
+    /// session's own decision carries no tag.
+    #[test]
+    fn a_decision_a_sub_agent_stated_names_that_agent_and_the_session_s_own_names_none() {
+        use niobe_core::event::{AgentId, Event};
+        let mut app = App::new(crate::app::Repo::default());
+        app.apply(&Event::AgentSpawn {
+            id: AgentId::new("a1"),
+            parent: None,
+            kind: Some("Explore".to_owned()),
+            label: "look around".to_owned(),
+        });
+        app.apply(&Event::AssistantMessage {
+            text: "DECISION: read only the parser".to_owned(),
+            agent: Some(AgentId::new("a1")),
+        });
+        app.apply(&Event::AssistantMessage {
+            text: "DECISION: left the exporter alone".to_owned(),
+            agent: None,
+        });
+
+        let rows = decision_text(&app, 60);
+        assert_eq!(rows[1].trim(), "left the exporter alone", "{rows:?}");
+        assert_eq!(rows[2].trim(), "explore read only the parser", "{rows:?}");
+    }
+
+    #[test]
+    fn a_sub_agent_s_wrapped_decision_hangs_under_its_text_and_not_under_its_tag() {
+        use niobe_core::event::{AgentId, Event};
+        let mut app = App::new(crate::app::Repo::default());
+        app.apply(&Event::AgentSpawn {
+            id: AgentId::new("a1"),
+            parent: None,
+            kind: Some("Explore".to_owned()),
+            label: "look around".to_owned(),
+        });
+        app.apply(&Event::AssistantMessage {
+            text: "DECISION: read only the parser and nothing of the exporter".to_owned(),
+            agent: Some(AgentId::new("a1")),
+        });
+
+        let rows = decision_text(&app, 30);
+        let first = rows[1].find("read").expect("the first row holds the text");
+        assert!(rows.len() > 2, "{rows:?}");
+        assert!(
+            rows[2..].iter().all(|row| row.len() > first
+                && row[..first].trim().is_empty()
+                && text::width(row) <= 30),
+            "{rows:?}"
         );
     }
 

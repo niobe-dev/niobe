@@ -3220,7 +3220,7 @@ impl App {
 
     /// What sub-agent `id` is called on a row it shares with what it did:
     /// see [`Entry::agent`].
-    fn sub_agent_tag(&self, id: &AgentId) -> String {
+    pub(crate) fn sub_agent_tag(&self, id: &AgentId) -> String {
         match self.agents.iter().position(|agent| &agent.id == id) {
             Some(at) => self.agent_tags().swap_remove(at),
             None => id.to_string(),

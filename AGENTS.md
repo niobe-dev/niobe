@@ -141,8 +141,8 @@ reviewers that encode both, for an agent working in this tree.
   go to — and each transcript entry's attention, the highest of the events that built it, `ui.rs`
   draws it, leaving the routine entries out where `n` is pressed in a side pane, each run of them
   a row that counts them, its Activity pane listing the decisions the agent's replies stated,
-  newest first under a heading that says they are its own account, and counting tool calls by kind of work with what
-  did each under it, and by the tools' own names where `t` is pressed in that pane, `run.rs` is the event loop, `journal.rs` is the trait the loop hands the
+  newest first under a heading that says they are its own account, a sub-agent's named by its
+  tag, and counting tool calls by kind of work with what did each under it, and by the tools' own names where `t` is pressed in that pane, `run.rs` is the event loop, `journal.rs` is the trait the loop hands the
   operator's events to and `rules.rs` the one it hands their standing answers to, `bridge.rs`
   the one it sends turns to and takes events from, `watch.rs` the one it asks what the
   repository looks like now, and `prices.rs` the one it asks to value the tokens no reported

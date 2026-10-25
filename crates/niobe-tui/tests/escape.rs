@@ -507,6 +507,15 @@ fn decision_stated(p: &str) -> App {
     }])
 }
 
+/// A decision a sub-agent stated, under an agent id the backend never
+/// spawned, which the row names it by.
+fn decision_by_agent(p: &str) -> App {
+    with(vec![Event::AssistantMessage {
+        text: "DECISION: kept the parser as it was".to_owned(),
+        agent: Some(p.into()),
+    }])
+}
+
 fn overview_page(p: &str) -> App {
     let mut app = running_session();
     app.perform(niobe_tui::menu::Action::Overview);
@@ -622,6 +631,7 @@ const SITES: &[Site] = &[
     ("call-detail", call_detail, "output"),
     ("overview", overview_page, "built"),
     ("decision", decision_stated, "Decisions, as the agent says"),
+    ("decision-by-agent", decision_by_agent, "kept the parser"),
 ];
 
 #[test]
