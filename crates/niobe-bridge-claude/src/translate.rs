@@ -347,13 +347,32 @@ pub struct Spent {
 impl Spent {
     /// The totals a `modelUsage` block states, which is what the CLI's
     /// `cost-state` record carries.
+    ///
+    /// A cost recorded there that no bill can be leaves the spend unknown:
+    /// measuring the resumed session's bills from it would report the
+    /// difference as spend.
     pub(crate) fn from_model_usage(model_usage: &BTreeMap<String, wire::ModelUsage>) -> Self {
+        let unmeant = model_usage
+            .iter()
+            .find_map(|(model, usage)| match &usage.cost_usd {
+                Some(wire::Cost::Unmeant(text)) => Some((model, text)),
+                Some(wire::Cost::Said(_)) | None => None,
+            });
+        if let Some((model, text)) = unmeant {
+            return Self::unknown(format!(
+                "the CLI recorded {model} as having cost `{text}`, which no bill can be"
+            ));
+        }
         let by_model = model_usage
             .iter()
             .map(|(model, usage)| {
                 let reported = Reported {
                     tokens: Counts::from(usage),
-                    cost_usd: usage.cost_usd.unwrap_or_default(),
+                    cost_usd: usage
+                        .cost_usd
+                        .as_ref()
+                        .and_then(wire::Cost::usd)
+                        .unwrap_or_default(),
                 };
                 (model.clone(), reported)
             })
@@ -2644,7 +2663,7 @@ impl Translator {
     /// model it summarises with — and those are reported here or nowhere.
     fn report_cost(&mut self, outcome: &wire::Outcome, out: &mut Vec<Event>) {
         if std::mem::take(&mut self.restored_unknown) {
-            self.take_as_reported(outcome);
+            self.take_as_reported(outcome, out);
             return;
         }
         let from = out.len();
@@ -2672,6 +2691,7 @@ impl Translator {
         let moved = self.file_messages_under_their_bill(&outcome.model_usage);
 
         let mut costs = 0.0;
+        let mut unmeant = false;
         let mut settled = Vec::new();
         for (model, usage) in &outcome.model_usage {
             if let Some(basis) = &usage.cost_basis
@@ -2682,17 +2702,33 @@ impl Translator {
                      (`{basis}`). Its figure is kept as the CLI reported it."
                 )));
             }
-            let cost_now = usage.cost_usd.unwrap_or_default();
-            costs += cost_now;
+            // A cost no bill can be is left out, and the model's last
+            // readable cost stays what the next one is measured from: the
+            // figure is a running total, so the next one still holds this
+            // turn's spend.
+            let cost_now = match &usage.cost_usd {
+                Some(wire::Cost::Said(usd)) => Some(*usd),
+                Some(wire::Cost::Unmeant(text)) => {
+                    out.push(unmeant_cost(model, text));
+                    unmeant = true;
+                    None
+                }
+                None => Some(0.0),
+            };
+            costs += cost_now.unwrap_or_default();
 
             let seen = self.reported.entry(model.clone()).or_default();
             let tokens = seen.tokens.beyond(Counts::from(usage));
-            let spent = cost_now - seen.cost_usd;
+            let spent = cost_now.map_or(0.0, |now| now - seen.cost_usd);
             if tokens.is_empty() && spent <= 0.0 {
                 continue;
             }
             seen.tokens.add(tokens);
-            seen.cost_usd = cost_now;
+            let Some(now) = cost_now else {
+                out.push(self.uncosted_record(model.clone(), tokens));
+                continue;
+            };
+            seen.cost_usd = now;
             if spent > 0.0 {
                 settled.push(model.clone());
             }
@@ -2702,7 +2738,16 @@ impl Translator {
             out.push(covered_elsewhere(model));
         }
 
-        if let Some(total) = outcome.total_cost_usd
+        let total = match &outcome.total_cost_usd {
+            Some(wire::Cost::Said(total)) => Some(*total),
+            Some(wire::Cost::Unmeant(text)) => {
+                out.push(unmeant_cost("the session", text));
+                None
+            }
+            None => None,
+        };
+        if let Some(total) = total
+            && !unmeant
             && (total - costs).abs() > COST_TOLERANCE_USD
         {
             out.push(warn(format!(
@@ -2715,15 +2760,44 @@ impl Translator {
     /// Counts the running totals `outcome` states as already reported,
     /// reporting none of them: the first bill of a resumed session whose
     /// earlier spend is unknown. See [`Translator::resuming`].
-    fn take_as_reported(&mut self, outcome: &wire::Outcome) {
+    ///
+    /// A bill holding a cost no bill can be is no base to measure from, so it
+    /// is passed over and the next bill is taken as the base instead: the
+    /// turn between goes uncounted, as the first one does, and the session's
+    /// figure stays the floor it already is.
+    fn take_as_reported(&mut self, outcome: &wire::Outcome, out: &mut Vec<Event>) {
+        let costs = outcome
+            .model_usage
+            .iter()
+            .map(|(model, usage)| (model.as_str(), usage.cost_usd.as_ref()));
+        let session = outcome
+            .model_usage
+            .is_empty()
+            .then_some(("the session", outcome.total_cost_usd.as_ref()));
+        let unmeant: Vec<Event> = costs
+            .chain(session)
+            .filter_map(|(what, cost)| match cost {
+                Some(wire::Cost::Unmeant(text)) => Some(unmeant_cost(what, text)),
+                Some(wire::Cost::Said(_)) | None => None,
+            })
+            .collect();
+        if !unmeant.is_empty() {
+            out.extend(unmeant);
+            self.restored_unknown = true;
+            return;
+        }
         for (model, usage) in &outcome.model_usage {
             let seen = self.reported.entry(model.clone()).or_default();
             seen.tokens = Counts::from(usage);
-            seen.cost_usd = usage.cost_usd.unwrap_or_default();
+            seen.cost_usd = usage
+                .cost_usd
+                .as_ref()
+                .and_then(wire::Cost::usd)
+                .unwrap_or_default();
             self.short.insert(model.clone());
         }
         if outcome.model_usage.is_empty()
-            && let Some(total) = outcome.total_cost_usd
+            && let Some(total) = outcome.total_cost_usd.as_ref().and_then(wire::Cost::usd)
         {
             let model = self.model.clone().unwrap_or_default();
             self.reported.entry(model.clone()).or_default().cost_usd = total;
@@ -2889,8 +2963,14 @@ impl Translator {
     /// difference within [`COST_TOLERANCE_USD`] is the sum's rounding rather
     /// than spend, and is left for the next total, which still holds it.
     fn report_session_cost(&mut self, outcome: &wire::Outcome, out: &mut Vec<Event>) {
-        let Some(total) = outcome.total_cost_usd else {
-            return;
+        let total = match &outcome.total_cost_usd {
+            Some(wire::Cost::Said(total)) => *total,
+            // Left out, and not the base the next total is measured from.
+            Some(wire::Cost::Unmeant(text)) => {
+                out.push(unmeant_cost("the session", text));
+                return;
+            }
+            None => return,
         };
         let reported: f64 = self.reported.values().map(|seen| seen.cost_usd).sum();
         let spent = total - reported;
@@ -2910,6 +2990,26 @@ impl Translator {
     /// bill, the provider charging those prices; on a plan no money moves with
     /// the work, and the shell shows no figure at all, so nothing here needs
     /// to say which the record is: the session's billing does.
+    /// A usage record for tokens the bill reported beside a cost no bill can
+    /// be: no money, and settling nothing, so they stay owed rather than
+    /// read as covered.
+    fn uncosted_record(&self, model: String, tokens: Counts) -> Event {
+        Event::Usage(Usage {
+            input: tokens.input,
+            output: tokens.output,
+            cache_read: tokens.cache_read,
+            cache_write: tokens.cache_write,
+            // As in `cost_record`: `modelUsage` splits no cache write by
+            // lifetime.
+            cache_write_1h: (tokens.cache_write == 0).then_some(0),
+            reasoning: 0,
+            model,
+            cost_usd: None,
+            settles_model: Some(false),
+            fast: false,
+        })
+    }
+
     fn cost_record(&self, model: String, tokens: Counts, spent: f64) -> Event {
         Event::Usage(Usage {
             input: tokens.input,
@@ -2933,6 +3033,16 @@ impl Translator {
             fast: false,
         })
     }
+}
+
+/// What the operator is told where the CLI stated a cost no bill can be:
+/// `what` is the model or the session it was stated for, `text` the value as
+/// written.
+fn unmeant_cost(what: &str, text: &str) -> Event {
+    warn(format!(
+        "the CLI reported {what} as costing `{text}`, which no bill can be, so no cost was \
+         counted from it. The next cost it reports is measured from the last one that could be."
+    ))
 }
 
 /// A record settling what went out under `model` that the CLI billed under
@@ -8985,5 +9095,123 @@ error: could not compile `demo` (lib test) due to 1 previous error";
             ),
             "{events:?}"
         );
+    }
+
+    fn bill(model_cost: &str, total: &str) -> String {
+        format!(
+            r#"{{"type":"result","subtype":"success","modelUsage":{{"opus-5":{{"inputTokens":10,"outputTokens":1,"costUSD":{model_cost}}}}},"total_cost_usd":{total}}}"#
+        )
+    }
+
+    fn session_bill(total: &str) -> String {
+        format!(r#"{{"type":"result","subtype":"success","total_cost_usd":{total}}}"#)
+    }
+
+    fn reported_after(translator: &mut Translator, lines: &[String]) -> (f64, Vec<Event>) {
+        let events: Vec<Event> = lines
+            .iter()
+            .flat_map(|line| translator.line(line))
+            .collect();
+        let totals = niobe_core::session::SessionState::replay(&events)
+            .totals()
+            .clone();
+        (totals.reported_cost_usd, events)
+    }
+
+    fn warned(events: &[Event]) -> bool {
+        events
+            .iter()
+            .any(|event| matches!(event, Event::Error { fatal: false, .. }))
+    }
+
+    /// The costs no bill can be: below nothing, a string, and more than any
+    /// session could run up.
+    const UNMEANT_COSTS: [&str; 4] = ["-5", "\"0.5\"", "1e308", "2000000"];
+
+    #[test]
+    fn a_cost_no_bill_can_be_is_no_figure_and_not_what_the_next_bill_is_measured_from() {
+        for odd in UNMEANT_COSTS {
+            let mut translator = translator();
+            let (cost, events) = reported_after(
+                &mut translator,
+                &[bill("0.3", "0.3"), bill(odd, odd), bill("0.8", "0.8")],
+            );
+            assert!((cost - 0.8).abs() < 1e-9, "{odd}: {cost} from {events:?}");
+            assert!(warned(&events), "{odd}: nothing said: {events:?}");
+            assert_eq!(
+                events.iter().filter(|e| **e == Event::TurnEnded).count(),
+                3,
+                "{odd}: {events:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_cost_no_bill_can_be_on_the_first_bill_leaves_the_next_measured_from_nothing() {
+        for odd in UNMEANT_COSTS {
+            let mut translator = translator();
+            let (cost, events) =
+                reported_after(&mut translator, &[bill(odd, odd), bill("0.5", "0.5")]);
+            assert!((cost - 0.5).abs() < 1e-9, "{odd}: {cost} from {events:?}");
+            assert!(warned(&events), "{odd}: nothing said: {events:?}");
+        }
+    }
+
+    #[test]
+    fn a_session_total_no_bill_can_be_is_no_figure_and_not_a_base() {
+        for odd in UNMEANT_COSTS {
+            let mut translator = translator();
+            let (cost, events) = reported_after(
+                &mut translator,
+                &[session_bill("0.3"), session_bill(odd), session_bill("0.8")],
+            );
+            assert!((cost - 0.8).abs() < 1e-9, "{odd}: {cost} from {events:?}");
+            assert!(warned(&events), "{odd}: nothing said: {events:?}");
+        }
+    }
+
+    /// A resumed session whose earlier spend is unknown takes its first bill
+    /// as the base; a first bill that is no bill cannot be one, so the next
+    /// readable one is taken instead and the turn between stays uncounted.
+    #[test]
+    fn a_resumed_first_bill_no_bill_can_be_leaves_the_next_one_as_the_base() {
+        for odd in UNMEANT_COSTS {
+            let mut translator = Translator::new("max").resuming(&Spent::unknown("unreadable"));
+            translator
+                .line(r#"{"type":"system","subtype":"init","session_id":"s-1","model":"opus-5"}"#);
+            let (cost, events) = reported_after(
+                &mut translator,
+                &[bill(odd, odd), bill("0.7", "0.7"), bill("0.9", "0.9")],
+            );
+            assert!((cost - 0.2).abs() < 1e-9, "{odd}: {cost} from {events:?}");
+            assert!(warned(&events), "{odd}: nothing said: {events:?}");
+        }
+    }
+
+    #[test]
+    fn a_resumed_session_total_no_bill_can_be_leaves_the_next_one_as_the_base() {
+        for odd in UNMEANT_COSTS {
+            let mut translator = Translator::new("max").resuming(&Spent::unknown("unreadable"));
+            translator
+                .line(r#"{"type":"system","subtype":"init","session_id":"s-1","model":"opus-5"}"#);
+            let (cost, events) = reported_after(
+                &mut translator,
+                &[session_bill(odd), session_bill("0.7"), session_bill("0.9")],
+            );
+            assert!((cost - 0.2).abs() < 1e-9, "{odd}: {cost} from {events:?}");
+            assert!(warned(&events), "{odd}: nothing said: {events:?}");
+        }
+    }
+
+    #[test]
+    fn a_recorded_spend_holding_a_cost_no_bill_can_be_is_unknown() {
+        for odd in UNMEANT_COSTS {
+            let model_usage: BTreeMap<String, wire::ModelUsage> = serde_json::from_str(&format!(
+                r#"{{"opus-5":{{"inputTokens":10,"costUSD":{odd}}}}}"#
+            ))
+            .expect("a cost the protocol cannot mean still reads");
+            let spent = Spent::from_model_usage(&model_usage);
+            assert!(!spent.is_known(), "{odd}: {spent:?}");
+        }
     }
 }

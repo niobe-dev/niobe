@@ -1779,8 +1779,8 @@ struct Attachment {
 struct CostState {
     #[serde(rename = "modelUsage", default)]
     model_usage: BTreeMap<String, wire::ModelUsage>,
-    #[serde(rename = "totalCostUSD")]
-    total_cost_usd: Option<f64>,
+    #[serde(rename = "totalCostUSD", default, deserialize_with = "wire::cost")]
+    total_cost_usd: Option<wire::Cost>,
     /// Set where the CLI ran a model it has no price for, which makes the
     /// total it recorded a floor.
     #[serde(rename = "hasUnknownModelCost", default)]

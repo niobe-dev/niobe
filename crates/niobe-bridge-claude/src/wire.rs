@@ -1016,7 +1016,8 @@ pub(crate) struct Outcome {
     pub(crate) usage: Option<Usage>,
     #[serde(rename = "modelUsage", default)]
     pub(crate) model_usage: std::collections::BTreeMap<String, ModelUsage>,
-    pub(crate) total_cost_usd: Option<f64>,
+    #[serde(default, deserialize_with = "cost")]
+    pub(crate) total_cost_usd: Option<Cost>,
     #[serde(default)]
     pub(crate) permission_denials: Vec<Denial>,
     pub(crate) result: Option<String>,
@@ -1055,8 +1056,8 @@ pub(crate) struct ModelUsage {
         deserialize_with = "count"
     )]
     pub(crate) cache_creation_input_tokens: u64,
-    #[serde(rename = "costUSD")]
-    pub(crate) cost_usd: Option<f64>,
+    #[serde(rename = "costUSD", default, deserialize_with = "cost")]
+    pub(crate) cost_usd: Option<Cost>,
     /// `"list"` where the figure was computed from published prices rather
     /// than billed. A subscription plan reports exactly that.
     #[serde(rename = "costBasis")]
@@ -1074,6 +1075,57 @@ pub(crate) struct ModelUsage {
     /// for the id this entry is keyed by.
     #[serde(rename = "contextWindow")]
     pub(crate) context_window: Option<u64>,
+}
+
+/// The most one of the CLI's running totals can be and still be a bill, in
+/// USD.
+///
+/// At the dearest output rate the price table holds, $55 per million tokens,
+/// doubled for fast mode, a million dollars is some nine billion output
+/// tokens: years of a model writing without a pause, in one session. A figure
+/// past it is no session's spend, and a figure like `1e308` drawn as dollars,
+/// or two of them summed to infinity, is worse than none.
+pub(crate) const MOST_A_SESSION_COSTS_USD: f64 = 1_000_000.0;
+
+/// A cost the CLI stated, as it stated it.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Cost {
+    /// An amount in USD that a bill can be: finite, not below nothing and not
+    /// past [`MOST_A_SESSION_COSTS_USD`].
+    Said(f64),
+    /// What stood where the cost goes, as written, where no bill can be it.
+    Unmeant(String),
+}
+
+impl Cost {
+    /// The amount, where it is one a bill can be.
+    pub(crate) fn usd(&self) -> Option<f64> {
+        match self {
+            Cost::Said(usd) => Some(*usd),
+            Cost::Unmeant(_) => None,
+        }
+    }
+}
+
+/// A cost where there is one: `null` is none stated, and anything that is not
+/// an amount a bill can be is kept as written, so the translator can say what
+/// it passed over rather than count it or lose the message it came in.
+pub(crate) fn cost<'de, D>(deserializer: D) -> Result<Option<Cost>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    const SHOWN: usize = 40;
+    let value = serde_json::Value::deserialize(deserializer)?;
+    let usd = value
+        .as_f64()
+        .filter(|usd| usd.is_finite() && (0.0..=MOST_A_SESSION_COSTS_USD).contains(usd));
+    Ok(match (value, usd) {
+        (serde_json::Value::Null, _) => None,
+        (_, Some(usd)) => Some(Cost::Said(usd)),
+        (value, None) => Some(Cost::Unmeant(
+            value.to_string().chars().take(SHOWN).collect(),
+        )),
+    })
 }
 
 /// One call the CLI refused to make.
