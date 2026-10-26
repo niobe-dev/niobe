@@ -14,3 +14,8 @@ Copyright (c) Viacheslav Shynkarenko
 **Vulnerability:** In `niobe-bridge-claude`, string slicing in `tag()` (`transcript.rs`) and `entries()` (`memory.rs`) used direct indexing (`text[start..start + length]` and `rest[close + 1..]`) and unchecked byte addition (`start + open.len()`), risking thread panics on malformed subprocess strings or multi-byte UTF-8 sequences.
 **Learning:** `find()` and substring length calculations on string slices produce raw byte offsets. Using direct `[]` string indexing without bounds/boundary validation can trigger thread panics if delimiter calculations produce invalid character boundaries.
 **Prevention:** Use `.checked_add()` for index arithmetic and `.get(...)` for slicing string references, returning `None` gracefully on invalid bounds or character boundaries.
+
+## 2026-10-26 - Repository Config Path Traversal Boundary Check
+**Vulnerability:** Untrusted repository configuration profiles (`.niobe/config.toml`) could specify `settings` paths or attached file paths using relative path traversal (e.g. `../`) that resolved to files outside the repository root.
+**Learning:** Path expansion and joining relative config settings with the workspace root can resolve targets outside the repository boundary if not explicitly verified against canonical or tree ancestors.
+**Prevention:** Validate all repository-defined profile paths with `repo::inside(root, &path)` before opening or attaching them, while leaving user-defined profiles (`profile.source() != repo_config`) exempt.

@@ -16,7 +16,7 @@ use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
 use niobe_config::trust::Trusted;
-use niobe_config::{Config, FILE_NAME, Selected, Settings};
+use niobe_config::{Config, FILE_NAME, Profile, Selected, Settings};
 use niobe_tui::app::SelectedProfile;
 
 use crate::repo;
@@ -145,6 +145,13 @@ pub fn settings_path(
             .display()
             .to_string(),
     };
+
+    if from_repository(selected, root) {
+        // Prevent path traversal outside repository boundary for repository-defined profiles.
+        if let Err(error) = repo::inside(root, Path::new(&path)) {
+            return Err(said(error));
+        }
+    }
 
     if !Path::new(&path).is_file() {
         let problem = match Path::new(&path).exists() {
@@ -511,21 +518,26 @@ fn root_of(path: &Path) -> PathBuf {
 /// appears it is a file that was not trusted.
 pub fn attached(config: &Config, root: &Path, home: Option<&OsStr>) -> Vec<Attached> {
     let mut files: Vec<Attached> = Vec::new();
-    let mut add = |path: PathBuf, profile: &str, settings: bool| {
+    let repo_config = repo::config_path(root);
+    let mut add = |path: PathBuf, profile: &Profile, name: &str, settings: bool| {
         if !path.is_file() {
+            return;
+        }
+        // A repository-defined profile's attached settings and arguments must stay within the repository root.
+        if profile.source() == repo_config && repo::inside(root, &path).is_err() {
             return;
         }
         match files.iter_mut().find(|file| file.path == path) {
             Some(file) => {
                 file.settings |= settings;
-                if !file.profiles.iter().any(|name| name == profile) {
-                    file.profiles.push(profile.to_owned());
+                if !file.profiles.iter().any(|p| p == name) {
+                    file.profiles.push(name.to_owned());
                 }
             }
             None => files.push(Attached {
                 text: niobe_config::read::text(&path).map_err(|error| error.to_string()),
                 path,
-                profiles: vec![profile.to_owned()],
+                profiles: vec![name.to_owned()],
                 settings,
             }),
         }
@@ -534,11 +546,11 @@ pub fn attached(config: &Config, root: &Path, home: Option<&OsStr>) -> Vec<Attac
         if let Some(settings) = profile.settings()
             && let Some(written) = expanded(settings, home)
         {
-            add(root.join(written), name, true);
+            add(root.join(written), profile, name, true);
         }
         for arg in profile.args() {
             for candidate in path_candidates(arg) {
-                add(root.join(candidate), name, false);
+                add(root.join(candidate), profile, name, false);
             }
         }
     }
@@ -1200,5 +1212,50 @@ mod tests {
         .expect("the record is written");
 
         assert!(clone.load().untrusted.is_some());
+    }
+
+    #[test]
+    fn a_repository_profile_naming_a_settings_file_outside_the_repository_is_refused() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let root = dir.path().join("repo");
+        std::fs::create_dir_all(&root).expect("the temporary directory is writable");
+        let outside = dir.path().join("outside.json");
+        std::fs::write(&outside, "{}").expect("the settings file is written");
+
+        let config = niobe_config::Config::parse(
+            "[profiles.team]\nbackend = \"claude\"\nsettings = \"../outside.json\"\n",
+            &repo::config_path(&root),
+        )
+        .expect("the config is valid");
+
+        let selected = config
+            .select(Some("team"))
+            .expect("profile defined")
+            .expect("profile selected");
+
+        let said = settings_path(&selected, os("/home/me"), &root)
+            .expect_err("a settings file outside the repository must be refused");
+        assert!(said.contains("outside the repository"), "{said}");
+    }
+
+    #[test]
+    fn an_attached_file_outside_the_repository_is_ignored() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let root = dir.path().join("repo");
+        std::fs::create_dir_all(&root).expect("the temporary directory is writable");
+        let outside = dir.path().join("outside.json");
+        std::fs::write(&outside, "{}").expect("the file is written");
+
+        let config = niobe_config::Config::parse(
+            "[profiles.team]\nbackend = \"claude\"\nsettings = \"../outside.json\"\nargs = [\"--mcp-config\", \"../outside.json\"]\n",
+            &repo::config_path(&root),
+        )
+        .expect("the config is valid");
+
+        let files = attached(&config, &root, os("/home/me").as_deref());
+        assert!(
+            files.is_empty(),
+            "files outside the repository must not be attached"
+        );
     }
 }
