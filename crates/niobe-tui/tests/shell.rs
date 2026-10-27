@@ -4671,13 +4671,13 @@ fn a_run_of_calls_folds_to_its_group_row_and_opens_again() {
     let mut app = running_session();
     let open = screen(&mut app, 200, 60);
     assert!(open.contains("▾ Read ×3"), "{open}");
-    assert!(open.contains("15.3 kB · 3.6s"), "the run's sums: {open}");
+    assert!(open.contains("15.3 kB · 2.0s"), "the run's sums: {open}");
     assert!(open.contains("├ catalog/fetch.ts"), "{open}");
 
     app.on_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
     let folded = screen(&mut app, 200, 60);
     assert!(folded.contains("▸ Read ×3"), "{folded}");
-    assert!(folded.contains("15.3 kB · 3.6s"), "{folded}");
+    assert!(folded.contains("15.3 kB · 2.0s"), "{folded}");
     assert!(!folded.contains("├ catalog/fetch.ts"), "{folded}");
 
     app.on_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));

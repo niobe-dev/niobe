@@ -37,10 +37,11 @@
 //! allowed, and not drawn at all while a question about it waits.
 //!
 //! A run of calls to the same tool is one group: a row with the run's summed
-//! figures, and a row for each call under it unless the operator has folded
-//! the runs away.
+//! figures and the span of time it ran — calls a backend ran side by side
+//! overlap, and are not counted twice — and a row for each call under it
+//! unless the operator has folded the runs away.
 
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
@@ -1032,7 +1033,8 @@ const RULE_MARK: &str = "rule";
 /// What a run of calls cost, summed: the lines its changes added and removed
 /// where every call that succeeded changed a file, and otherwise the bytes
 /// every call returned; how many failed, how many were refused, and how many
-/// the session ended under; and how long they ran.
+/// the session ended under; and how long they ran, as [`spanned_time`]
+/// reads it.
 ///
 /// A sum is marked `≥` where one of the calls in it had no figure to add, by
 /// [`count`]'s rule — and a call that has not finished has none yet.
@@ -1091,7 +1093,7 @@ fn group_result(calls: &[Call], theme: &Theme) -> Vec<Span<'static>> {
         }
         follows = true;
     }
-    if let Some(took) = summed_time(calls) {
+    if let Some(took) = spanned_time(calls) {
         spans.push(Span::styled(format!(" · {took}"), dim));
     }
     spans
@@ -1108,15 +1110,44 @@ fn summed(sides: impl Iterator<Item = Option<u64>>) -> (u64, bool) {
     })
 }
 
-/// How long a run of calls ran, all told: `≥` where the clock missed an end
-/// of one of them, and `None` where it missed every one.
-fn summed_time(calls: &[Call]) -> Option<String> {
-    let timed: Vec<Duration> = calls.iter().filter_map(|call| call.took).collect();
-    if timed.is_empty() {
+/// How long a run of calls ran: the time the clock had at least one of them
+/// running, `≥` where it missed an end of one of them, and `None` where it
+/// missed every one.
+///
+/// A backend runs some calls side by side — sub-agents, reads — and their
+/// times overlap, so the run took the span they covered rather than the sum
+/// of their times: three ten-second calls at once took ten seconds. Calls
+/// that ran one after another cover their own times and no gap between them,
+/// which is their sum. A run never reads longer than the turn it is part of.
+fn spanned_time(calls: &[Call]) -> Option<String> {
+    let mut spans: Vec<(SystemTime, SystemTime)> = calls
+        .iter()
+        .filter_map(|call| {
+            let began = call.began()?.at();
+            Some((began, began.checked_add(call.took?)?))
+        })
+        .collect();
+    if spans.is_empty() {
         return None;
     }
-    let total = timed.iter().sum();
-    Some(match timed.len() == calls.len() {
+    let timed = spans.len();
+    spans.sort_unstable();
+    let mut total = Duration::ZERO;
+    let mut open: Option<(SystemTime, SystemTime)> = None;
+    for (began, ended) in spans {
+        open = match open {
+            Some((from, to)) if began <= to => Some((from, to.max(ended))),
+            Some((from, to)) => {
+                total = total.saturating_add(to.duration_since(from).unwrap_or_default());
+                Some((began, ended))
+            }
+            None => Some((began, ended)),
+        };
+    }
+    if let Some((from, to)) = open {
+        total = total.saturating_add(to.duration_since(from).unwrap_or_default());
+    }
+    Some(match timed == calls.len() {
         true => clock::took(total),
         false => format!("≥{}", clock::took(total)),
     })
@@ -1344,6 +1375,35 @@ mod tests {
             "the failed call's reason hangs under it"
         );
         assert_eq!(drawn(&app, true).len(), 2, "folded, the group row alone");
+    }
+
+    /// Calls the backend ran side by side — sub-agents, reads — overlap on
+    /// the clock, so the run took as long as the span they covered, not the
+    /// sum of their times: three ten-second calls at once took ten seconds,
+    /// and a run read as thirty would be longer than the turn it was part of.
+    #[test]
+    fn a_run_of_calls_that_ran_at_once_took_the_span_they_covered() {
+        let mut app = app();
+        for id in ["t1", "t2", "t3"] {
+            app.apply_at(&start(id, "Agent"), at(0));
+        }
+        for id in ["t1", "t2", "t3"] {
+            app.apply_at(&end(id, "Agent", ToolOutcome::Ok, None), at(10_000));
+        }
+        let rows = drawn(&app, false);
+        assert!(rows[0].ends_with("3.0 kB · 10s"), "{rows:?}");
+
+        // Overlapping in part, the span runs from the first start to the
+        // last end; apart, the gap between them is no call's time.
+        let mut app = self::app();
+        app.apply_at(&start("t1", "Read"), at(0));
+        app.apply_at(&start("t2", "Read"), at(5_000));
+        app.apply_at(&end("t1", "Read", ToolOutcome::Ok, None), at(10_000));
+        app.apply_at(&end("t2", "Read", ToolOutcome::Ok, None), at(15_000));
+        app.apply_at(&start("t3", "Read"), at(20_000));
+        app.apply_at(&end("t3", "Read", ToolOutcome::Ok, None), at(22_500));
+        let rows = drawn(&app, false);
+        assert!(rows[0].ends_with("3.0 kB · 17s"), "{rows:?}");
     }
 
     /// In a run of edits where only some were to the agent's own notes, the
