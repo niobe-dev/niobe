@@ -1066,6 +1066,52 @@ fn an_accounting_of_one_turn_is_that_turns_spend() {
     assert_eq!(turns, [Some(19_716), Some(43_310 - 19_716)]);
 }
 
+/// The process that resumes a session can be told something before it is
+/// asked anything — a local command typed, its mode moved — and the turn the
+/// accounting ended is not ended again by the prompt after that: the same
+/// two turns, with the same spend, as where nothing came between.
+#[test]
+fn what_a_resumed_process_records_before_its_first_prompt_ends_no_turn_of_its_own() {
+    let recorded = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/resumed-open-transcript.jsonl"),
+    )
+    .expect("the fixture reads");
+    let first_accounting = recorded
+        .find(r#"{"type":"cost-state""#)
+        .expect("the fixture holds an accounting");
+    let resumed_at = first_accounting
+        + recorded[first_accounting..]
+            .find('\n')
+            .expect("the accounting is a whole line")
+        + 1;
+    for between in [
+        concat!(
+            r#"{"type":"user","message":{"role":"user","content":"<command-name>/model</command-name>\n<command-args>sonnet</command-args>"}}"#,
+            "\n",
+            r#"{"type":"user","message":{"role":"user","content":"<local-command-stdout>Set model to Sonnet 5.5</local-command-stdout>"}}"#,
+            "\n",
+        ),
+        "{\"type\":\"permission-mode\",\"permissionMode\":\"plan\"}\n",
+    ] {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let path = dir.path().join("s-1.jsonl");
+        let text = [&recorded[..resumed_at], between, &recorded[resumed_at..]].concat();
+        std::fs::write(&path, text).expect("the transcript is written");
+
+        let events =
+            transcript::events(&path, "max", Path::new("/repo")).expect("the transcript reads");
+        let state = SessionState::replay(&events);
+
+        let turns: Vec<Option<u64>> = state.turns().iter().map(|turn| turn.tokens).collect();
+        assert_eq!(
+            turns,
+            [Some(19_716), Some(43_310 - 19_716)],
+            "{between}{:?}",
+            state.turns()
+        );
+    }
+}
+
 /// The open turn's tokens are measured, so they are in the totals; what it
 /// cost was never written down, so the bill is a floor. The totals come to
 /// what the CLI recorded once that process left, as the README shows.

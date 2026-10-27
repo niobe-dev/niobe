@@ -1425,10 +1425,16 @@ impl Fold {
         // so that it is counted in the session and in no turn's figure,
         // rather than as the last turn's. One that covers a single turn is
         // that turn's bill, and ends it as a `result` does.
+        //
+        // Either way the turn has ended once the accounting is folded, so the
+        // operator's next prompt does not end it again: anything the resumed
+        // process records before that prompt — a local command's note, a
+        // change of mode — would otherwise stand between the two ends and
+        // make the second a turn nobody ran.
         let spans_turns = std::mem::take(&mut self.awaited_before);
         self.awaited = false;
+        self.answered = false;
         if spans_turns {
-            self.answered = false;
             self.out.push(Event::TurnEnded);
         }
         let mut billed = self
