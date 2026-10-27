@@ -1462,7 +1462,7 @@ fn with_no_config_file_the_list_shows_the_implied_profile_and_the_file_that_make
 
 #[test]
 fn where_a_config_file_defines_no_profile_the_list_says_where_it_looked() {
-    let setup = Configured::new("", "# nothing defined here\n");
+    let setup = Configured::new("# nothing defined here\n", "# nor here\n");
     let output = setup.run(&["profiles"]);
     let out = stdout(&output);
 
@@ -1476,6 +1476,20 @@ fn where_a_config_file_defines_no_profile_the_list_says_where_it_looked() {
         out.contains(&repo_config(setup.repo.path()).display().to_string()),
         "{out}"
     );
+}
+
+/// The rules niobe writes into the repository's file when the operator
+/// answers a question for good, with no config of their own: the next run
+/// still lists the implied profile it ran under.
+#[test]
+fn a_repository_file_holding_only_rules_leaves_the_implied_profile_listed() {
+    let setup = Configured::new("", "[permissions]\nallow = [\n    \"Read\",\n]\n");
+    let output = setup.run(&["profiles"]);
+    let out = stdout(&output);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(!out.contains("no profiles defined"), "{out}");
+    assert!(out.contains("`claude` is implied"), "{out}");
 }
 
 /// A user config directory holding `prices` as its price file.

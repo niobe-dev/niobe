@@ -202,13 +202,14 @@ fn listed(withheld: &Withheld) -> String {
 }
 
 /// What `niobe profiles` adds under the table where the profile in it is the
-/// implied one: that no file was found, and the file that would make it
+/// implied one: that no file says which profile runs, and the file that would make it
 /// explicit, to be written at `searched`'s first path, the user's.
 pub fn implied_note(searched: &[PathBuf]) -> Vec<String> {
     let mut lines = vec![String::new()];
     lines.push(format!(
-        "`{}` is implied: no config file was found, so niobe runs the `claude` on PATH \
-         with its own settings. Writing a config file replaces it.",
+        "`{}` is implied: no config file says which profile runs, so niobe runs the \
+         `claude` on PATH with its own settings. A config file that defines a profile \
+         replaces it.",
         niobe_config::IMPLIED_PROFILE
     ));
     if let Some(path) = searched.first() {

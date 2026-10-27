@@ -32,8 +32,10 @@ pub struct Loaded {
     /// once it has been trusted and has not been trusted. What it set is not
     /// in `config`.
     pub untrusted: Option<Untrusted>,
-    /// Whether no config file exists anywhere it was looked for, so that
-    /// `config` is [`Config::implied`] and not something written.
+    /// Whether no config file says which profile runs — there is no user's
+    /// file, and the repository's, where there is one, defines no profile and
+    /// names no default — so that the profile in `config` is the one
+    /// [`Config::implied`] gives and not one anybody wrote.
     pub implied: bool,
 }
 
@@ -354,10 +356,17 @@ fn load_with(
         .is_some_and(|path| std::fs::symlink_metadata(path).is_ok());
     let mut config = user_config(user.as_deref())?;
     let mut untrusted = None;
-    let mut repo_present = false;
+    let mut implied = !user_present;
     repo::inside(root, &repo)?;
     if let Some(layer) = repository(&repo, root, &config, record.as_deref(), home.as_deref())? {
-        repo_present = true;
+        // The implied profile stands in for the user's file. A repository's
+        // file replaces it only where it says which profile runs: one that
+        // holds no more than the rules Niobe wrote there for the operator's
+        // own answers would otherwise leave the next session with no backend.
+        implied &= !layer.config.names_profile();
+        if implied {
+            config = Config::implied();
+        }
         // A file that defines a profile the user's does is worth trusting
         // even where it sets nothing else: until it is trusted, its profile of
         // that name is not the one in force.
@@ -371,12 +380,7 @@ fn load_with(
             });
         }
         config = config.overlay(layer.config);
-    }
-
-    // The implied profile stands in for a file and is never laid under one:
-    // any file at all, even an empty one, is what the operator wrote.
-    let implied = !user_present && !repo_present;
-    if implied {
+    } else if implied {
         config = Config::implied();
     }
 
@@ -993,10 +997,122 @@ mod tests {
     }
 
     #[test]
-    fn a_repository_file_that_defines_no_profile_leaves_the_session_with_none() {
+    fn a_repository_file_that_names_no_profile_keeps_the_implied_one_under_it() {
         let repo = Cloned::new("# nothing here\n");
 
         let loaded = repo.load();
+
+        assert!(loaded.implied);
+        assert_eq!(
+            loaded.selected(None).expect("valid").map(|s| s.name),
+            Some(niobe_config::IMPLIED_PROFILE.to_owned())
+        );
+    }
+
+    /// The operator's first "always" answer, with no config of their own,
+    /// creates the repository's file holding only that rule: the next session
+    /// still runs the `claude` it ran on, and the rule answers in it.
+    #[test]
+    fn a_rule_saved_with_no_config_anywhere_keeps_the_implied_profile_next_session() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let path = repo::config_path(dir.path());
+        std::fs::create_dir_all(path.parent().expect("a directory"))
+            .expect("the temporary directory is writable");
+        let record = dir.path().join("trusted.list");
+        let load = || {
+            load_with(None, dir.path(), Some(record.clone()), os("/home/me"))
+                .expect("the config loads")
+        };
+        assert!(load().implied);
+
+        let remembered = niobe_config::remember(&path, &niobe_core::permission::Rule::tool("Read"))
+            .expect("the temporary directory is writable");
+        Trusted::update(&record, |trusted| trusted.trust(&path, &remembered.after))
+            .expect("the record is written");
+
+        let loaded = load();
+        assert!(loaded.untrusted.is_none());
+        assert_eq!(
+            loaded.selected(None).expect("valid").map(|s| s.name),
+            Some(niobe_config::IMPLIED_PROFILE.to_owned())
+        );
+        assert_eq!(
+            loaded.config.allowed().rules(),
+            [niobe_core::permission::Rule::tool("Read")]
+        );
+    }
+
+    #[test]
+    fn a_repository_file_that_defines_a_profile_replaces_the_implied_one() {
+        let repo = Cloned::new("[profiles.work]\nbackend = \"claude\"\n");
+
+        let loaded = repo.load();
+
+        assert!(!loaded.implied);
+        assert_eq!(
+            loaded.config.profiles().keys().collect::<Vec<_>>(),
+            ["work"]
+        );
+        assert!(
+            loaded
+                .selected(None)
+                .expect("no default is named")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_repository_file_that_names_a_default_replaces_the_implied_one_trusted_or_not() {
+        let text = "default_profile = \"work\"\n[profiles.work]\nbackend = \"claude\"\n";
+        let untrusted = Cloned::new(text);
+        let loaded = untrusted.load();
+        assert!(!loaded.implied);
+        assert!(loaded.config.withheld_default().is_some());
+        assert!(
+            loaded
+                .selected(None)
+                .expect("the default is withheld")
+                .is_none()
+        );
+
+        let trusted = Cloned::new(text);
+        trusted.trust();
+        let loaded = trusted.load();
+        assert!(!loaded.implied);
+        assert_eq!(
+            loaded.selected(None).expect("valid").map(|s| s.name),
+            Some("work".to_owned())
+        );
+    }
+
+    /// A default the repository names for a profile it does not define is
+    /// still a choice of profile, and is reported, not run around.
+    #[test]
+    fn a_repository_file_that_only_names_a_default_does_not_get_the_implied_profile() {
+        let repo = Cloned::new("default_profile = \"claude\"\n");
+        repo.trust();
+
+        let loaded = repo.load();
+
+        assert!(!loaded.implied);
+        assert!(loaded.config.profiles().is_empty());
+    }
+
+    #[test]
+    fn a_users_file_that_defines_no_profile_leaves_the_session_with_none() {
+        let repo = Cloned::new("[permissions]\nallow = [\"Read\"]\n");
+        repo.trust();
+        let user = repo.dir.path().join("user.toml");
+        std::fs::write(&user, "# no profile is defined\n")
+            .expect("the temporary directory is writable");
+
+        let loaded = load_with(
+            Some(user),
+            repo.dir.path(),
+            Some(repo.record.clone()),
+            os("/home/me"),
+        )
+        .expect("the config loads");
 
         assert!(!loaded.implied);
         assert!(loaded.config.profiles().is_empty());

@@ -153,8 +153,8 @@ pub use write::{Remembered, remember};
 /// repository's `.niobe` directory alike.
 pub const FILE_NAME: &str = "config.toml";
 
-/// The name of the profile a session runs under where no config file exists
-/// anywhere: see [`Config::implied`].
+/// The name of the profile a session runs under where no config file says
+/// which one: see [`Config::implied`].
 pub const IMPLIED_PROFILE: &str = "claude";
 
 /// The file that says what [`Config::implied`] is, in the words a config is
@@ -595,15 +595,18 @@ impl Config {
         self
     }
 
-    /// The config a session runs on where no config file exists: one profile,
-    /// [`IMPLIED_PROFILE`], that runs the `claude` CLI found on `PATH` with
-    /// its own settings untouched, and is the default.
+    /// The config a session runs on where no config file says which profile
+    /// it runs under: one profile, [`IMPLIED_PROFILE`], that runs the `claude`
+    /// CLI found on `PATH` with its own settings untouched, and is the default.
     ///
-    /// It is a stand-in for a file and never an addition to one. A caller
-    /// uses it only where there is no file to read, so a file that exists
-    /// replaces it whole and nothing changes under an operator who has one.
+    /// It stands in for the user's file. A user's file that exists replaces it
+    /// whole, so nothing changes under an operator who has one, and so does a
+    /// repository's file that defines a profile or names a default
+    /// ([`Config::names_profile`]). A repository's file that does neither —
+    /// one holding only the `[permissions]` rules Niobe wrote there for the
+    /// operator's own answers — is laid over it.
     pub fn implied() -> Self {
-        let source = Path::new("(implied: no config file)");
+        let source = Path::new("(implied: no config file names a profile)");
         let mut config = Self::default();
         if let Ok(parsed) = Self::parse(IMPLIED_FILE, source) {
             config = parsed;
@@ -753,6 +756,19 @@ impl Config {
             || self.withheld_rules.is_some()
             || self.titles == Some(Titles::Model)
             || self.withheld_model_titles
+    }
+
+    /// Whether this config says anything about which profile a session runs
+    /// under: it defines a profile, or names a `default_profile`, in force or
+    /// withheld because the file has not been trusted.
+    ///
+    /// A file that says none of it — rules, keys, a theme and no more — leaves
+    /// the choice of profile where it was, which with no other file is
+    /// [`Config::implied`].
+    pub fn names_profile(&self) -> bool {
+        !self.profiles.is_empty()
+            || self.default_profile.is_some()
+            || self.withheld_default.is_some()
     }
 
     /// Whether a file that has not been trusted says `titles = "model"`, which
@@ -1040,6 +1056,19 @@ args = ["--model", "gpt-4"]
         assert!(selected.profile.settings().is_none());
         assert!(selected.profile.auth_refresh().is_none());
         assert!(config.allowed().is_empty());
+    }
+
+    #[test]
+    fn a_config_names_a_profile_by_defining_one_or_naming_a_default_even_withheld() {
+        assert!(!parsed("theme = \"x\"\n[permissions]\nallow = [\"Read\"]\n").names_profile());
+        assert!(!parsed("").names_profile());
+        assert!(parsed("[profiles.a]\nbackend = \"claude\"\n").names_profile());
+        let default = parsed("default_profile = \"a\"\n");
+        assert!(default.names_profile());
+        assert!(
+            default.untrusted().names_profile(),
+            "a withheld default is still a choice of profile"
+        );
     }
 
     #[test]

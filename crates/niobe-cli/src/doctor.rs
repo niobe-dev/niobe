@@ -136,6 +136,9 @@ pub struct Facts {
     /// The repository's config, where it sets what only a trusted file may
     /// and has not been trusted.
     pub untrusted: Option<PathBuf>,
+    /// Whether no config file says which profile runs, so that the implied
+    /// `claude` profile does.
+    pub implied: bool,
     /// `TERM`.
     pub term: Option<String>,
     /// `COLORTERM`.
@@ -343,10 +346,10 @@ fn config_rows(facts: &Facts) -> Vec<Row> {
             Row::ok("config", detail)
         })
         .collect();
-    if !facts.config.iter().any(|file| file.exists) {
+    if facts.implied {
         rows.push(Row::ok(
             "profile",
-            "no config file, so the implied `claude` profile runs",
+            "no config file names a profile, so the implied `claude` profile runs",
         ));
     }
     if let Some(path) = &facts.untrusted {
@@ -615,6 +618,7 @@ pub fn gather(
             })
             .collect(),
         untrusted: config.untrusted.as_ref().map(|u| u.path.clone()),
+        implied: config.implied,
         term: std::env::var("TERM").ok().filter(|term| !term.is_empty()),
         colorterm: std::env::var("COLORTERM")
             .ok()
@@ -706,6 +710,7 @@ mod tests {
                 },
             ],
             untrusted: None,
+            implied: false,
             term: Some("xterm-256color".to_owned()),
             colorterm: Some("truecolor".to_owned()),
             size: Some((120, 40)),
@@ -836,6 +841,7 @@ mod tests {
         for file in &mut none.config {
             file.exists = false;
         }
+        none.implied = true;
 
         let rows = rows(&none);
 

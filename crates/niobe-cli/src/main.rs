@@ -1401,7 +1401,7 @@ fn attached_or_noticed(
         Err(said) if loaded.implied => {
             let cause = said.strip_prefix(backend::CANNOT_START).unwrap_or(&said);
             let body = format!(
-                "With no config file niobe runs the `claude` CLI found on PATH, and it \
+                "With no config file naming a profile niobe runs the `claude` CLI found on PATH, and it \
                  would not start: {cause} `niobe doctor` checks the rest of the setup."
             );
             Ok((

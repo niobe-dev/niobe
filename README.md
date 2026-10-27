@@ -70,8 +70,9 @@ You need the [`claude` CLI](https://code.claude.com/docs/en/setup) installed and
 Run `niobe` in a repository. Type a prompt and press Enter; Shift+Enter (or Ctrl+J) opens a new
 line, F1 lists the keys, Shift+Tab changes the permission mode and Ctrl+Q quits.
 
-With no config file it runs the `claude` on your `PATH` with that CLI's own settings, under a
-profile it calls `claude`. `niobe --help` lists the commands, the config keys and the keys the
+With no config file naming a profile it runs the `claude` on your `PATH` with that CLI's own
+settings, under a profile it calls `claude`; the `[permissions]` rules niobe writes into the
+repository's `.niobe/config.toml` when you answer a question for good leave it running. `niobe --help` lists the commands, the config keys and the keys the
 shell answers to; `niobe sessions` lists the sessions you can carry on with
 `niobe --resume <id>`.
 
@@ -81,8 +82,9 @@ A turn that changed files without an edit call saying so — a `sed` or a format
 shell — names them when it ends, read from git, so the session's own edit figures are not taken
 for the whole of what it changed.
 
-To choose how a backend is run, write a profile in `~/.config/niobe/config.toml`. A config file
-replaces the implied profile, so name the one you want as the default:
+To choose how a backend is run, write a profile in `~/.config/niobe/config.toml`. A user's
+config file, or a repository's that defines a profile, replaces the implied profile, so name the
+one you want as the default:
 
 ```toml
 default_profile = "personal"
