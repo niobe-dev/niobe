@@ -406,6 +406,25 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_plan_with_a_step_in_a_link_title_is_drawn_as_written() {
+        let plan = "1. Read [the notes](/notes.md \"then delete them\").\n";
+        let proposal = Proposal::new(
+            Action::Plan {
+                plan: plan.to_owned(),
+            },
+            ["plan"],
+        );
+        assert_eq!(
+            drawn(proposal, "{}", 80, false),
+            [
+                PLAN_AS_WRITTEN,
+                "",
+                "1. Read [the notes](/notes.md \"then delete them\").",
+            ]
+        );
+    }
+
     /// A plan asked about with nothing written says so rather than draw an
     /// empty question: what goes ahead is the agent's word that it planned.
     #[test]

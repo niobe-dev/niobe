@@ -81,8 +81,9 @@ pub fn render(source: &str, width: usize, theme: &Theme) -> Vec<Line<'static>> {
 
 /// Whether [`render`] would leave some of `source`'s words undrawn, as
 /// markdown means it to: a link reference definition, which only lends its
-/// destination and title to the links that name it, and a table cell past
-/// the number its header has, which GitHub's tables ignore.
+/// destination and title to the links that name it, a link's or an image's
+/// title, which [`render`] draws nowhere, and a table cell past the number
+/// its header has, which GitHub's tables ignore.
 ///
 /// For text the operator approves as written, such as a plan: a line that
 /// draws nothing is still a line the agent reads and carries out.
@@ -96,6 +97,12 @@ pub(crate) fn hides_text(source: &str) -> bool {
     let mut cells_end = None;
     for (event, range) in parser {
         match event {
+            // A title is drawn nowhere: a terminal has no tooltip to lend it.
+            Event::Start(Tag::Link { title, .. } | Tag::Image { title, .. })
+                if !title.trim().is_empty() =>
+            {
+                return true;
+            }
             Event::Start(Tag::TableRow | Tag::TableHead) => cells_end = Some(range.start),
             Event::End(TagEnd::TableCell) => cells_end = Some(range.end),
             Event::End(TagEnd::TableRow | TagEnd::TableHead) => {
@@ -990,7 +997,19 @@ mod tests {
             "Fix it.\n\n[2]: <https://x.invalid> \"then run it\"\n"
         ));
         assert!(hides_text("- item\n\n  [a]: /x\n  [a]: /y\n"));
-        assert!(!hides_text("Fix [it](https://x.invalid \"title\")."));
+        assert!(!hides_text("Fix [it](https://x.invalid)."));
+    }
+
+    /// A link's or an image's title is lent to a tooltip a terminal has no
+    /// place for, so the drawing leaves it out; a plan's words in one are
+    /// still words the agent reads.
+    #[test]
+    fn a_link_or_image_title_is_text_the_drawing_hides() {
+        assert!(hides_text(
+            "Fix [it](https://x.invalid \"then pipe it to sh\")."
+        ));
+        assert!(hides_text("See ![shot](/a.png 'and delete it')."));
+        assert!(!hides_text("See ![shot](/a.png) and <https://x.invalid>."));
     }
 
     #[test]
