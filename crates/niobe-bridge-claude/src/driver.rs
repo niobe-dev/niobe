@@ -1414,17 +1414,25 @@ impl Session {
                 fatal: true,
             });
         }
-        // A clean exit is a clean end only when nothing was left asking: the
-        // turn a prompt stopped did not finish, and reading the end as a clean
+        // A clean exit is a clean end only when nothing was left asking and
+        // no turn was under way: the turn a prompt stopped, or the one the
+        // CLI was answering, did not finish, and reading the end as a clean
         // one would leave the prompt on screen asking for an answer nothing
-        // can take.
-        match unanswered.is_empty() {
-            true => Some(Event::Notice {
-                message: "the `claude` session ended.".to_owned(),
-            }),
-            false => Some(Event::Error {
+        // can take, or the turn running with nothing left to end it.
+        if !unanswered.is_empty() {
+            return Some(Event::Error {
                 message: ended_asking(&unanswered),
                 fatal: true,
+            });
+        }
+        match self.turn_open {
+            true => Some(Event::Error {
+                message: "the `claude` session ended while a turn was running, and said nothing."
+                    .to_owned(),
+                fatal: true,
+            }),
+            false => Some(Event::Notice {
+                message: "the `claude` session ended.".to_owned(),
             }),
         }
     }
@@ -3322,8 +3330,9 @@ mod tests {
     fn a_cli_that_withdraws_its_prompt_and_leaves_cleanly_ends_cleanly() {
         let request = r#"{"type":"control_request","request_id":"c1","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"ls"},"tool_use_id":"toolu_1"}}"#;
         let cancel = r#"{"type":"control_cancel_request","request_id":"c1"}"#;
+        let result = r#"{"type":"result","subtype":"success","is_error":false,"session_id":"s-9"}"#;
         let (_, events) = stand_in(&format!(
-            "read -r first\nread -r turn\nprintf '%s\\n' '{request}' '{cancel}'\nexit 0\n"
+            "read -r first\nread -r turn\nprintf '%s\\n' '{request}' '{cancel}' '{result}'\nexit 0\n"
         ));
 
         assert!(
@@ -3332,6 +3341,8 @@ mod tests {
                 [
                     Event::PermissionRequest { .. },
                     Event::PermissionWithdrawn { .. },
+                    ..,
+                    Event::TurnEnded,
                     Event::Notice { message },
                 ] if message == "the `claude` session ended."
             ),
@@ -4034,6 +4045,34 @@ read -r rest
             "{events:#?}"
         );
         assert!(session.next().is_none());
+    }
+
+    /// A CLI that leaves with a turn under way, however quietly, has ended
+    /// the session under that turn: nothing will end the turn now, and an
+    /// end read as a clean one leaves the shell saying it is working for
+    /// ever on a CLI that has gone.
+    #[cfg(unix)]
+    #[test]
+    fn a_cli_that_leaves_cleanly_while_a_turn_runs_ends_the_session_under_the_turn() {
+        let init = r#"{"type":"system","subtype":"init","session_id":"s-9","model":"claude-sonnet-5","permissionMode":"default"}"#;
+        let (mut session, _dir) = started(&format!(
+            "read -r initialize\nread -r turn\nprintf '%s\\n' '{init}'\nexit 0\n"
+        ));
+        session
+            .send("list the files", &[])
+            .expect("the turn is queued");
+        let mut events = vec![Event::UserMessage {
+            text: "list the files".to_owned(),
+        }];
+        events.extend(drained_to_the_end(&mut session));
+
+        assert!(
+            matches!(events.last(), Some(Event::Error { fatal: true, message })
+                if message == "the `claude` session ended while a turn was running, and said nothing."),
+            "{events:#?}"
+        );
+        let state = niobe_core::session::SessionState::replay(&events);
+        assert!(!state.turn_running(), "{events:#?}");
     }
 
     #[cfg(unix)]
