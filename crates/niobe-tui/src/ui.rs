@@ -3851,7 +3851,7 @@ fn usage_figure_columns(app: &App) -> usize {
     };
     let spend = match models(app).is_empty() {
         true => 0,
-        false => share + MODEL_TOKENS + model_cost_columns(app),
+        false => share + model_token_columns(app) + model_cost_columns(app),
     };
     let floor = app.session().context_is_a_floor();
     let context = match app.session().context() {
@@ -4119,10 +4119,25 @@ fn extra(windows: &UsageWindows) -> Option<(String, bool)> {
     }
 }
 
-/// What a model's tokens get: the widest figure [`compact`] produces for a
-/// session under a hundred million tokens (`999k`, `12.3M`) and a column of
-/// gap before it, which is drawn whatever the figure's width.
+/// The least a model's tokens are drawn in: the widest figure [`compact`]
+/// produces for a session under a hundred million tokens (`999k`, `12.3M`)
+/// and a column of gap before it, which is drawn whatever the figure's width.
+/// A wider count widens the column: see [`model_token_columns`].
 const MODEL_TOKENS: usize = 6;
+
+/// What the models' token counts, and the cache's reads under them, are drawn
+/// in this frame: [`MODEL_TOKENS`], or the widest count a row draws and its
+/// gap where that is wider — `150.0M` is — so that no count pushes the cost
+/// after it past the pane's edge, where `$12.34` cut by a column is `$12.3`.
+fn model_token_columns(app: &App) -> usize {
+    let cache_read = app.session().totals().cache_read;
+    models(app)
+        .iter()
+        .map(|(_, tokens)| *tokens)
+        .chain([cache_read])
+        .map(|tokens| text::width(&compact(tokens)) + 1)
+        .fold(MODEL_TOKENS, usize::max)
+}
 
 /// The least a model's cost is drawn in on a metered account: the widest
 /// figure under a hundred dollars the pane prints for one (`≥~$12.34`) and a
@@ -4237,8 +4252,9 @@ fn spend_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
     // does: how much of a bar is drawn is worth less than the figure beside it.
     let costed = metered(app);
     let cost_columns = model_cost_columns(app);
+    let token_columns = model_token_columns(app);
     let cells = width
-        .saturating_sub(columns + SHARE_COLUMNS + SHARE_GAP.len() + MODEL_TOKENS + cost_columns)
+        .saturating_sub(columns + SHARE_COLUMNS + SHARE_GAP.len() + token_columns + cost_columns)
         .min(METER_CELLS);
 
     // A label, a figure, a meter of the share that figure rounds, a count, and
@@ -4259,7 +4275,7 @@ fn spend_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
             Span::raw(SHARE_GAP),
             Span::styled(filled, style),
             Span::styled(track, dim),
-            Span::styled(format!(" {count:>width$}", width = MODEL_TOKENS - 1), dim),
+            Span::styled(format!(" {count:>width$}", width = token_columns - 1), dim),
         ];
         if let Some(cost) = cost {
             spans.push(Span::styled(
@@ -9207,6 +9223,24 @@ mod tests {
         let app = metered_on(&[("opus-5", 2_000, Some(1_234.56)), ("opus-5", 200, None)]);
         let rows = pane_of(&app, 38);
         assert_eq!(rows[2], "opus-5    100% ▓▓▓▓▓▓▓  2200 ≥$1234.56");
+    }
+
+    /// A hundred million tokens is `100.0M`, a column wider than `12.3M`; a
+    /// long session's cache reads pass it. The count's column grows to it
+    /// rather than push the cost past the pane's edge, where `$12.34` cut by
+    /// a column reads `$12.3`.
+    #[test]
+    fn a_count_of_a_hundred_million_tokens_is_drawn_whole_and_so_is_the_cost_after_it() {
+        let app = metered_on(&[
+            ("opus-5", 150_000_000, Some(12.34)),
+            ("sonnet-5", 20_000_000, Some(3.21)),
+        ]);
+        let rows = pane_of(&app, 38);
+        for row in &rows {
+            assert!(text::width(row) <= 38, "{row:?} overflows 38: {rows:?}");
+        }
+        assert!(rows[2].ends_with(" 150.0M   $12.34"), "{rows:?}");
+        assert!(rows[3].ends_with("  20.0M    $3.21"), "{rows:?}");
     }
 
     /// Too narrow for the window's size beside the share, the row gives up
