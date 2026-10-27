@@ -54,6 +54,12 @@ type Cell = Vec<Run>;
 /// The gutter a code block's lines sit behind.
 const CODE_GUTTER: &str = "│ ";
 
+/// Before a fenced code block's label, on its first row.
+const LABEL_MARK: &str = "╭ ";
+
+/// Under [`LABEL_MARK`], before the rows a long label wraps to.
+const LABEL_UNDER: &str = "  ";
+
 /// What a block quote's lines sit behind.
 const QUOTE_BAR: &str = "▎ ";
 
@@ -339,13 +345,30 @@ impl<'t> Renderer<'t> {
     fn start_code_block(&mut self, kind: CodeBlockKind<'_>) {
         self.flush();
         self.gap();
-        if let CodeBlockKind::Fenced(language) = kind
-            && !language.is_empty()
+        if let CodeBlockKind::Fenced(label) = kind
+            && !label.is_empty()
         {
-            let label = text::truncate(&format!("╭ {language}"), self.room());
-            self.emit(vec![Span::styled(label, Style::new().fg(self.theme.dim))]);
+            self.code_label(&label);
         }
         self.code = Some(String::new());
+    }
+
+    /// A fence's info string above its code, whole: wrapped under itself
+    /// rather than cut at the edge, since past its first word it is words
+    /// the agent wrote — and in a plan, words the agent carries out.
+    fn code_label(&mut self, label: &str) {
+        let room = self.room().saturating_sub(text::width(LABEL_MARK)).max(1);
+        let style = Style::new().fg(self.theme.dim);
+        for (at, row) in text::wrap_keeping_spaces(label, room)
+            .into_iter()
+            .enumerate()
+        {
+            let lead = match at {
+                0 => LABEL_MARK,
+                _ => LABEL_UNDER,
+            };
+            self.emit(vec![Span::styled(format!("{lead}{row}"), style)]);
+        }
     }
 
     fn start_item(&mut self) {
@@ -1190,12 +1213,42 @@ mod tests {
         );
     }
 
+    /// A label is the fence's info string, which a plan can carry words in,
+    /// so it is wrapped under itself rather than cut at the edge.
     #[test]
-    fn a_long_code_block_label_is_cut_at_the_edge() {
+    fn a_long_code_block_label_is_wrapped_whole_under_itself() {
         assert_eq!(
             drawn("```a-language-name-longer-than-the-pane\nx\n```", 20),
-            ["╭ a-language-name-l…", "│ x"]
+            ["╭ a-language-name-lo", "  nger-than-the-pane", "│ x"]
         );
+        assert_eq!(
+            drawn("```bash and then rm -rf ~\nls\n```", 16),
+            ["╭ bash and then", "  rm -rf ~", "│ ls"]
+        );
+    }
+
+    #[test]
+    fn a_short_code_block_label_is_one_row() {
+        assert_eq!(drawn("```rust\nx\n```", 20), ["╭ rust", "│ x"]);
+    }
+
+    #[test]
+    fn a_code_block_label_exactly_the_room_is_one_row() {
+        assert_eq!(
+            drawn("```abcdefghijklmnopq\nx\n```", 20),
+            ["╭ abcdefghijklmnopq", "│ x"]
+        );
+        assert_eq!(
+            drawn("```abcdefghijklmnopqr\nx\n```", 20),
+            ["╭ abcdefghijklmnopqr", "│ x"]
+        );
+    }
+
+    #[test]
+    fn a_wide_character_code_block_label_wraps_by_cells() {
+        let rows = drawn("```日本語のコード名前\nx\n```", 12);
+        assert_eq!(rows, ["╭ 日本語のコ", "  ード名前", "│ x"]);
+        assert!(rows.iter().all(|row| text::width(row) <= 12));
     }
 
     #[test]
