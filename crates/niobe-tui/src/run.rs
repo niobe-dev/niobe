@@ -1246,6 +1246,8 @@ mod tests {
         assert_eq!(watch.nudges, 0);
     }
 
+    /// The operator's quit is what stopped it, as Ctrl+G would have: the
+    /// command neither failed nor was refused.
     #[test]
     fn a_command_still_running_as_the_session_ends_is_kept_as_stopped() {
         let mut app = app_that_ran("sleep 60");
@@ -1259,10 +1261,12 @@ mod tests {
         assert_eq!(
             ended_calls(&kept),
             [(
-                ToolOutcome::Failed,
+                ToolOutcome::Interrupted,
                 Some("stopped: the session ended before the command did".to_owned())
             )]
         );
+        assert_eq!(app.session().tools().failed, 0);
+        assert_eq!(app.session().tools().stopped, 1);
     }
 
     /// A session stopped on a prompt the operator has not answered.

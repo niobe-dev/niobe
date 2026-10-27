@@ -2476,14 +2476,7 @@ impl App {
             .map(|(id, _)| id.clone())
             .collect();
         for id in open {
-            self.ran(crate::shell::Ran {
-                id,
-                output: String::new(),
-                bytes: 0,
-                whole: false,
-                exit_code: None,
-                error: Some("stopped: the session ended before the command did".to_owned()),
-            });
+            self.ended_with_the_session(id);
         }
         // What happened after the operator last looked is news on their first
         // key back, the process that ran it having ended while they were
@@ -6972,7 +6965,31 @@ impl App {
     /// and with no status: whatever `sh` exited with after the stop is how the shell
     /// ended, not how the command did, and an `exit 0` beside "stopped"
     /// would read as a command that succeeded.
-    pub fn ran(&mut self, mut ran: crate::shell::Ran) {
+    pub fn ran(&mut self, ran: crate::shell::Ran) {
+        self.command_ended(ran, false);
+    }
+
+    /// Records the end of a command the session ending stopped: as
+    /// interrupted, as [`App::ran`] records one the operator stopped, since
+    /// the operator's quit — or the end of the process that ran it — is what
+    /// stopped it, and the command neither failed nor was refused.
+    fn ended_with_the_session(&mut self, id: ToolCallId) {
+        self.command_ended(
+            crate::shell::Ran {
+                id,
+                output: String::new(),
+                bytes: 0,
+                whole: false,
+                exit_code: None,
+                error: Some("stopped: the session ended before the command did".to_owned()),
+            },
+            true,
+        );
+    }
+
+    /// [`App::ran`], where `cut` says the session ending cut the command
+    /// short.
+    fn command_ended(&mut self, mut ran: crate::shell::Ran, cut: bool) {
         let command = match self
             .running_commands
             .iter()
@@ -6989,7 +7006,7 @@ impl App {
             ran.error = Some(crate::shell::STOPPED.to_owned());
             ran.exit_code = None;
         }
-        let outcome = match (stopped, ran.exit_code) {
+        let outcome = match (stopped || cut, ran.exit_code) {
             (true, _) => ToolOutcome::Interrupted,
             (false, Some(0)) => ToolOutcome::Ok,
             (false, _) => ToolOutcome::Failed,
@@ -7032,14 +7049,7 @@ impl App {
             .map(|(id, _)| id.clone())
             .collect();
         for id in running {
-            self.ran(crate::shell::Ran {
-                id,
-                output: String::new(),
-                bytes: 0,
-                whole: false,
-                exit_code: None,
-                error: Some("stopped: the session ended before the command did".to_owned()),
-            });
+            self.ended_with_the_session(id);
         }
     }
 
@@ -16381,12 +16391,13 @@ mod tests {
         assert!(
             matches!(
                 produced.as_slice(),
-                [Event::ToolCallEnd { id, error: Some(error), .. }]
+                [Event::ToolCallEnd { id, error: Some(error), outcome: ToolOutcome::Interrupted, .. }]
                     if id.as_str() == "op1" && error.contains("stopped")
             ),
             "{produced:?}"
         );
         assert!(app.session().in_flight_tools().is_empty());
+        assert_eq!(app.session().tools().failed, 0);
     }
 
     #[test]
