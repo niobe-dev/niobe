@@ -18,7 +18,7 @@ use std::time::SystemTime;
 
 use niobe_core::event::Event;
 use niobe_core::session::{DecisionRecord, SessionState};
-use niobe_store::SessionId;
+use niobe_store::{SessionId, StoredEvent};
 
 use crate::args::Narrowing;
 use crate::repo;
@@ -49,46 +49,107 @@ pub struct Folded {
 
 /// Every session the store at `root` holds, folded, oldest first; none where
 /// nothing has been recorded there.
+///
+/// The store starts a session at each clear, but a store written before it
+/// did holds a clear inside the session it cleared. The fold forgets what a
+/// conversation spent at its clear, so such a record folded whole would count
+/// only what was spent after its last clear: each of its conversations is
+/// folded as a session of its own instead, under the record's id, as the
+/// store now keeps them.
 pub fn read(root: &Path) -> Result<Vec<Folded>, String> {
     let Some(store) = repo::read_existing_store(root)? else {
         return Ok(Vec::new());
     };
-    let mut folded = Vec::new();
-    let mut bounds = Vec::new();
+    let mut read = Vec::new();
     for summary in store.sessions().map_err(|e| e.to_string())? {
         let stored = store.events(summary.id).map_err(|e| e.to_string())?;
-        let mut state = SessionState::new();
-        let mut decided_at = Vec::new();
-        for event in &stored {
-            state.apply(&event.event);
-            decided_at.resize(state.decisions().len(), event.at);
-        }
-        bounds.push(Bounds {
-            first: stored
-                .first()
-                .map(|event| (event.at, matches!(event.event, Event::Cleared))),
-            last: stored.last().map(|event| event.at),
-        });
-        folded.push(Folded {
-            id: summary.id,
-            // When its first event happened, which an imported session dates
-            // by the CLI's own record rather than by its import.
-            started_at: stored.first().map_or(summary.started_at, |event| event.at),
-            state,
-            decided_at,
-            cleared: false,
-        });
+        read.extend(fold(summary.id, summary.started_at, &stored));
     }
-    mark_cleared(&mut folded, &bounds);
     // The store lists the newest first; a record of what was built reads
-    // from the start.
-    folded.sort_by_key(|session| session.id);
+    // from the start, and a record's conversations in the order they ran.
+    read.sort_by_key(|(_, bounds)| bounds.key);
+    let (mut folded, bounds): (Vec<Folded>, Vec<Bounds>) = read.into_iter().unzip();
+    mark_cleared(&mut folded, &bounds);
     Ok(folded)
+}
+
+/// The conversations of the record `id`, each from the clear that opened it,
+/// or from the record's start, to the event before the next clear, folded,
+/// with their bounds. A record with no events is one conversation of none.
+///
+/// One fold runs through the whole record, as it ran live, and each
+/// conversation is what it held just before the clear that ended it: what a
+/// clear keeps — how the session is billed, its profile and model, the plan's
+/// windows — is said once in a record, before the first clear, and the
+/// conversations after it are still billed by it.
+fn fold(id: SessionId, created: SystemTime, stored: &[StoredEvent]) -> Vec<(Folded, Bounds)> {
+    let mut folded = Vec::new();
+    let mut state = SessionState::new();
+    let mut decided_at = Vec::new();
+    let mut first: Option<&StoredEvent> = None;
+    let mut last: Option<&StoredEvent> = None;
+    for event in stored {
+        if matches!(event.event, Event::Cleared) && first.is_some() {
+            folded.push(conversation(
+                id,
+                created,
+                (first, last),
+                state.clone(),
+                std::mem::take(&mut decided_at),
+                folded.len(),
+            ));
+            first = None;
+        }
+        first = first.or(Some(event));
+        last = Some(event);
+        state.apply(&event.event);
+        decided_at.resize(state.decisions().len(), event.at);
+    }
+    folded.push(conversation(
+        id,
+        created,
+        (first, last),
+        state,
+        decided_at,
+        folded.len(),
+    ));
+    folded
+}
+
+/// The `part`-th conversation of the record `id`, between the events `ends`,
+/// folded to `state`.
+fn conversation(
+    id: SessionId,
+    created: SystemTime,
+    ends: (Option<&StoredEvent>, Option<&StoredEvent>),
+    state: SessionState,
+    decided_at: Vec<SystemTime>,
+    part: usize,
+) -> (Folded, Bounds) {
+    let (first, last) = ends;
+    let bounds = Bounds {
+        key: (id, part),
+        first: first.map(|event| (event.at, matches!(event.event, Event::Cleared))),
+        last: last.map(|event| event.at),
+    };
+    let folded = Folded {
+        id,
+        // When its first event happened, which an imported session dates
+        // by the CLI's own record rather than by its import.
+        started_at: first.map_or(created, |event| event.at),
+        state,
+        decided_at,
+        cleared: false,
+    };
+    (folded, bounds)
 }
 
 /// When a stored session's first and last events happened, and whether the
 /// first was a clear.
 struct Bounds {
+    /// The record it was folded from, and which of the record's
+    /// conversations it is.
+    key: (SessionId, usize),
     first: Option<(SystemTime, bool)>,
     last: Option<SystemTime>,
 }
@@ -103,11 +164,10 @@ struct Bounds {
 /// another shell's session can come between the two in the store's
 /// numbering, but not between the prompt that typed a clear and the clear.
 fn mark_cleared(folded: &mut [Folded], bounds: &[Bounds]) {
-    let mut clears: Vec<(SystemTime, SessionId)> = folded
+    let mut clears: Vec<(SystemTime, (SessionId, usize))> = bounds
         .iter()
-        .zip(bounds)
-        .filter_map(|(session, bounds)| match bounds.first {
-            Some((at, true)) => Some((at, session.id)),
+        .filter_map(|bounds| match bounds.first {
+            Some((at, true)) => Some((at, bounds.key)),
             Some((_, false)) | None => None,
         })
         .collect();
@@ -118,12 +178,12 @@ fn mark_cleared(folded: &mut [Folded], bounds: &[Bounds]) {
             .zip(bounds)
             .enumerate()
             .filter(|(_, (session, bounds))| {
-                session.id < clearing
+                bounds.key < clearing
                     && !session.cleared
                     && session.state.turn_running()
                     && bounds.last.is_some_and(|last| last <= cleared_at)
             })
-            .max_by_key(|(_, (session, bounds))| (bounds.last, session.id))
+            .max_by_key(|(_, (_, bounds))| (bounds.last, bounds.key))
             .map(|(index, _)| index);
         if let Some(session) = before.and_then(|index| folded.get_mut(index)) {
             session.cleared = true;
@@ -766,7 +826,8 @@ mod tests {
             text: "/clear".to_owned(),
         };
         let at = |minute: u64| UNIX_EPOCH + Duration::from_secs(1_789_732_800 + minute * 60);
-        let bounds = |first: u64, clear: bool, last: u64| Bounds {
+        let bounds = |id: u32, first: u64, clear: bool, last: u64| Bounds {
+            key: (id.to_string().parse().expect("a number is a session id"), 0),
             first: Some((at(first), clear)),
             last: Some(at(last)),
         };
@@ -778,11 +839,11 @@ mod tests {
             folded(5, &[Event::Cleared, Event::TurnEnded]),
         ];
         let stored = [
-            bounds(0, false, 1),
-            bounds(2, false, 3),
-            bounds(3, true, 6),
-            bounds(6, true, 7),
-            bounds(9, true, 9),
+            bounds(1, 0, false, 1),
+            bounds(2, 2, false, 3),
+            bounds(3, 3, true, 6),
+            bounds(4, 6, true, 7),
+            bounds(5, 9, true, 9),
         ];
 
         mark_cleared(&mut sessions, &stored);

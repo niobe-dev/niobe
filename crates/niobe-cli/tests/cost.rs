@@ -304,3 +304,91 @@ fn each_turn_is_listed_with_the_tokens_its_usage_records_hold() {
     assert_eq!(rows, listed, "{table}");
     assert_eq!(expected.iter().sum::<u64>(), 562_988, "the session's total");
 }
+
+/// A usage record of `input` tokens of `model` that reports `cost_usd` and
+/// settles what that model spent before it.
+fn settled(input: u64, cost_usd: f64) -> Event {
+    Event::Usage(niobe_core::event::Usage {
+        input,
+        output: 0,
+        cache_read: 0,
+        cache_write: 0,
+        cache_write_1h: Some(0),
+        reasoning: 0,
+        model: "claude-sonnet-5".to_owned(),
+        cost_usd: Some(cost_usd),
+        settles_model: Some(true),
+        fast: false,
+    })
+}
+
+/// A repository holding one session as a Niobe that kept a clear inside the
+/// session it cleared stored it: a turn of 1,000 tokens that cost $0.25,
+/// `/clear`, and a turn of 300 tokens that cost $0.10, all in one record.
+fn repository_cleared_inside_one_record() -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::tempdir().expect("a temporary directory can be created");
+    let root = dir.path().join("catalog");
+    std::fs::create_dir_all(root.join(".git")).expect("a .git directory can be made");
+    std::fs::create_dir(root.join(".niobe")).expect("a .niobe directory can be made");
+    let store = Store::open(&root.join(".niobe").join("sessions.db"))
+        .expect("a store opens in a temporary directory");
+    let session = store.create_session().expect("a session is created");
+    let prompt = |text: &str| Event::UserMessage {
+        text: text.to_owned(),
+    };
+    let events = [
+        Event::Billing {
+            billing: Billing::Metered,
+        },
+        prompt("first"),
+        settled(1_000, 0.25),
+        Event::TurnEnded,
+        prompt("/clear"),
+        Event::Cleared,
+        Event::TurnEnded,
+        prompt("second"),
+        settled(300, 0.10),
+        Event::TurnEnded,
+    ];
+    for (n, event) in (0..).zip(&events) {
+        store
+            .append_at(
+                session,
+                event,
+                UNIX_EPOCH + Duration::from_millis(RECORDED_ON_MS + n * 1_000),
+            )
+            .expect("an append succeeds");
+    }
+    (dir, root)
+}
+
+#[test]
+fn a_session_an_older_niobe_kept_a_clear_inside_counts_what_it_spent_before_the_clear() {
+    let (_dir, root) = repository_cleared_inside_one_record();
+    let document = exported(&root);
+    let sessions = document["sessions"]
+        .as_array()
+        .expect("sessions is an array");
+    let tokens: u64 = sessions
+        .iter()
+        .map(|s| s["tokens"]["total"].as_u64().expect("a token total"))
+        .sum();
+    let money: f64 = sessions
+        .iter()
+        .map(|s| s["cost"]["reported_usd"].as_f64().expect("a reported cost"))
+        .sum();
+    assert_eq!(tokens, 1_300, "{document:#}");
+    assert!((money - 0.35).abs() < 1e-9, "{document:#}");
+
+    let turns = cost(&root, &["--by-turn"]);
+    let listed: Vec<u64> = turns
+        .lines()
+        .skip(1)
+        .take_while(|line| !line.is_empty())
+        .map(|line| {
+            let columns: Vec<&str> = line.split_whitespace().collect();
+            columns[2].replace(',', "").parse().expect("a token count")
+        })
+        .collect();
+    assert_eq!(listed.iter().sum::<u64>(), 1_300, "{turns}");
+}
