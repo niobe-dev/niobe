@@ -7754,10 +7754,11 @@ impl App {
                     self.ask_draft.push_str(&joined_lines(&text));
                     return;
                 }
-                AskFocus::Choosing => {
-                    self.hint = Some(TOO_SOON_HINT.to_owned());
-                    return;
-                }
+                // What is pasted at the numbered answers is the operator's
+                // next prompt, as a letter typed there is: it goes in behind
+                // the question, put aside, so the Enter that would send it is
+                // refused rather than taking the answer the cursor is on.
+                AskFocus::Choosing => self.put_question_aside(),
                 AskFocus::Deferred => {}
             }
         }
@@ -8313,9 +8314,7 @@ impl App {
     /// move the cursor and leave Enter to answer wherever it stopped. Typed
     /// as text, a `!` opens no command.
     fn type_past_the_question(&mut self, typed: char) {
-        self.ask_focus = AskFocus::Deferred;
-        self.focus = Focus::Session;
-        self.hint = Some(TYPED_AT_QUESTION_HINT.to_owned());
+        self.put_question_aside();
         if !self.composer_has_room_for(typed.len_utf8()) {
             return;
         }
@@ -8324,6 +8323,14 @@ impl App {
             self.offer_selected = 0;
             self.reopen_offers();
         }
+    }
+
+    /// Puts the question on screen aside, as Esc does, for what the operator
+    /// typed or pasted at it to go into the prompt behind it, and says so.
+    fn put_question_aside(&mut self) {
+        self.ask_focus = AskFocus::Deferred;
+        self.focus = Focus::Session;
+        self.hint = Some(TYPED_AT_QUESTION_HINT.to_owned());
     }
 
     /// One key, on the numbered answers.
@@ -16981,23 +16988,39 @@ mod tests {
     }
 
     #[test]
-    fn a_bracketed_paste_answers_no_prompt_and_types_nothing_under_it() {
+    fn a_bracketed_paste_answers_no_prompt_and_goes_into_the_prompt_behind_it() {
         let shown = Instant::now();
         let mut app = shown_at(shown);
 
         app.on_paste("2\r");
 
         assert!(app.asking().is_some(), "the paste answered the question");
+        assert!(app.said().is_empty());
         assert!(app.take_rules().is_empty());
         assert_eq!(
             app.ask_selected(),
             Answer::Once,
             "the paste chose an answer"
         );
-        assert!(
-            app.composer().is_empty(),
-            "the paste went under the question"
-        );
+        assert_eq!(app.composer().lines(), ["2", ""]);
+        assert_eq!(app.ask_focus(), AskFocus::Deferred);
+        assert_eq!(app.hint(), Some(TYPED_AT_QUESTION_HINT));
+    }
+
+    /// An operator pasting their next prompt as a question comes up, and
+    /// pressing Enter to send it, as one typing it would.
+    #[test]
+    fn a_prompt_pasted_at_a_question_and_sent_answers_nothing_and_is_kept() {
+        let shown = Instant::now();
+        let mut app = shown_at(shown);
+
+        app.on_paste("the build fails on main");
+        read(&mut app, b"\r", shown + ASK_QUIET * 4);
+
+        assert_eq!(app.said(), [], "the Enter after a paste answered");
+        assert!(app.asking().is_some());
+        assert_eq!(app.composed(), "the build fails on main");
+        assert_eq!(app.ask_focus(), AskFocus::Deferred);
     }
 
     #[test]
