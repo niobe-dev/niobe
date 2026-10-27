@@ -2248,6 +2248,10 @@ struct Drawn {
     /// counts the matches, and reading every line of a long session for them
     /// is what the frame would otherwise spend its time on.
     found: Option<Vec<crate::find::Found>>,
+    /// The lines read as a search compares them, once a search has read
+    /// them, so a key typed into the search reads again only the entries
+    /// drawn again since.
+    read: Option<crate::find::Text>,
 }
 
 /// What the transcript draws at one place, before it is drawn.
@@ -2364,6 +2368,7 @@ impl DrawnEntries {
                         hidden: counted,
                         lines: draw(),
                         found: None,
+                        read: None,
                     }
                 }
                 None => {
@@ -2375,6 +2380,7 @@ impl DrawnEntries {
                         hidden: counted,
                         lines: draw(),
                         found: None,
+                        read: None,
                     });
                 }
             }
@@ -2408,7 +2414,10 @@ impl DrawnEntries {
                 nth: 0,
             };
             let lines = &drawn.lines;
-            let here = drawn.found.get_or_insert_with(|| query.in_lines(lines, 0));
+            let read = &mut drawn.read;
+            let here = drawn
+                .found
+                .get_or_insert_with(|| query.in_lines(lines, 0, read));
             found.extend(here.iter().map(|at| at.placed(first, which)));
             first += lines.len();
         }

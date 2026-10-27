@@ -237,6 +237,62 @@ fn an_idle_session_holding_a_twenty_megabyte_reply_redraws_as_fast_as_one_withou
     );
 }
 
+/// How long a key typed into a search over a long transcript may take to
+/// land and be drawn: what the composer's longest paste is held to.
+const SEARCH_KEY_BUDGET: Duration = Duration::from_millis(50);
+
+/// A key typed into the search over a session holding a reply of
+/// [`HUGE_REPLY_BYTES`]: every key changes what is looked for, so every key
+/// looks through the whole transcript again. What the transcript's lines
+/// read as to a search is read once, by the first key, and kept with them;
+/// the keys after it, a letter typed and taken back in turn, are timed.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "a key is timed in an optimised build")]
+fn a_key_typed_into_a_search_over_a_twenty_megabyte_reply_lands_inside_a_budget() {
+    let _alone = ALONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut app = running_session();
+    app.apply(&Event::UserMessage {
+        text: "Print the generated catalog.".to_owned(),
+    });
+    app.apply(&Event::AssistantMessage {
+        text: MARKDOWN_REPLY.repeat(HUGE_REPLY_BYTES / MARKDOWN_REPLY.len()),
+        agent: None,
+    });
+    app.apply(&Event::TurnEnded);
+    app.on_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+    for c in "lru".chars() {
+        app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+    }
+    let frame = screen(&mut app, 200, 60);
+    assert!(
+        frame.contains(" of "),
+        "the reply's matches are counted, or the keys time nothing:\n{frame}"
+    );
+
+    let mut keys: Vec<Duration> = (0..FRAMES)
+        .map(|n| {
+            let key = match n % 2 {
+                0 => KeyCode::Backspace,
+                _ => KeyCode::Char('u'),
+            };
+            let started = Instant::now();
+            app.on_key(KeyEvent::new(key, KeyModifiers::NONE));
+            let _ = screen(&mut app, 200, 60);
+            started.elapsed()
+        })
+        .collect();
+    keys.sort_unstable();
+    let median = keys[FRAMES / 2];
+
+    assert!(
+        median <= SEARCH_KEY_BUDGET,
+        "the median key typed into a search over a {HUGE_REPLY_BYTES}-byte reply took \
+         {median:?} to land and draw, over the {SEARCH_KEY_BUDGET:?} budget"
+    );
+}
+
 /// How long one frame of `app` takes to draw at 200x60.
 fn frame_time(app: &mut App) -> Duration {
     let started = Instant::now();

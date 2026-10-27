@@ -118,57 +118,208 @@ impl Query {
     /// The lines are read as one text with a space between each, so a match
     /// can run from one line on to the next. Lines of different entries are
     /// never joined.
-    pub(crate) fn in_lines(&self, lines: &[Line<'_>], first: usize) -> Vec<Found> {
-        let mut text: Vec<(char, Option<(usize, usize)>)> = Vec::new();
-        for (row, line) in lines.iter().enumerate() {
-            if row > 0 {
-                text.push((' ', None));
-            }
-            let chars = line.spans.iter().flat_map(|span| span.content.chars());
-            for (column, c) in chars.enumerate() {
-                text.push((fold(c, self.exact), Some((first + row, column))));
-            }
-        }
+    ///
+    /// `read` keeps that text between searches of the same lines: it is
+    /// read again only where it is absent or was read for a query that
+    /// ignored the case where this one does not, or the other way round.
+    /// The caller empties it whenever the lines change.
+    pub(crate) fn in_lines(
+        &self,
+        lines: &[Line<'_>],
+        first: usize,
+        read: &mut Option<Text>,
+    ) -> Vec<Found> {
+        let text = match read {
+            Some(text) if text.exact == self.exact => text,
+            _ => read.insert(Text::of(lines, self.exact)),
+        };
         let mut found = Vec::new();
         let mut at = 0;
-        while at < text.len() {
-            match self.matches_at(&text, at).and_then(|end| {
-                let located = text.get(at..end)?.iter().filter_map(|(c, place)| {
-                    let (line, column) = (*place)?;
-                    Some((line, column, c.is_whitespace()))
-                });
-                Some((end, parts(located)?))
+        let mut counted = Counted::default();
+        while let Some(start) = self.next_start(&text.text, at) {
+            match self.matches_at(&text.text, start).and_then(|end| {
+                counted = text.count_to(counted, start);
+                Some((end, parts(text.places(counted, end, first))?))
             }) {
                 Some((end, mut parts)) => {
                     parts.which.nth = found.len();
                     found.push(parts);
                     at = end;
                 }
-                None => at += 1,
+                None => at = start + text.width_at(start),
             }
         }
         found
     }
 
-    /// Where a match that starts at `at` in `text` ends, if one does.
-    fn matches_at(&self, text: &[(char, Option<(usize, usize)>)], at: usize) -> Option<usize> {
+    /// The first place from byte `at` on in `text` a match could start:
+    /// where the query's first character is. Looking for that one character
+    /// is what keeps a key typed into the search quick over a long reply,
+    /// which is mostly places no match starts.
+    fn next_start(&self, text: &str, at: usize) -> Option<usize> {
+        let rest = text.get(at..)?;
+        let offset = match self.chars.first()? {
+            ' ' => rest.find(char::is_whitespace),
+            want => rest.find(*want),
+        }?;
+        Some(at + offset)
+    }
+
+    /// The byte a match that starts at byte `at` of `text` ends before, if
+    /// one starts there.
+    fn matches_at(&self, text: &str, at: usize) -> Option<usize> {
+        let mut rest = text.get(at..)?.chars().peekable();
         let mut here = at;
         for want in &self.chars {
-            let (c, _) = text.get(here)?;
+            let c = *rest.peek()?;
             match want {
                 ' ' => {
                     if !c.is_whitespace() {
                         return None;
                     }
-                    while text.get(here).is_some_and(|(c, _)| c.is_whitespace()) {
-                        here += 1;
+                    while let Some(c) = rest.next_if(|c| c.is_whitespace()) {
+                        here += c.len_utf8();
                     }
                 }
-                _ if c == want => here += 1,
+                _ if c == *want => {
+                    rest.next();
+                    here += c.len_utf8();
+                }
                 _ => return None,
             }
         }
         Some(here)
+    }
+}
+
+/// One entry's lines read as one text, as a comparison sees them, with a
+/// space between each line and the next.
+///
+/// Kept as one string and the byte each line starts at, rather than as each
+/// character beside its place, and kept with the lines it was read from
+/// rather than read again for every key typed into the search: reading a
+/// reply of megabytes is what a key would otherwise spend its time on. A
+/// place is worked out only for the characters a match covers.
+#[derive(Debug)]
+pub(crate) struct Text {
+    text: String,
+    /// Whether the case was kept, for a query with a capital in it.
+    exact: bool,
+    /// The byte of `text` each line starts at. The space joining a line to
+    /// the next is the byte before the next one's start.
+    starts: Vec<usize>,
+}
+
+impl Text {
+    fn of(lines: &[Line<'_>], exact: bool) -> Self {
+        let bytes = lines
+            .iter()
+            .flat_map(|line| &line.spans)
+            .map(|span| span.content.len())
+            .fold(lines.len(), usize::saturating_add);
+        let mut text = String::with_capacity(bytes);
+        let mut starts = Vec::with_capacity(lines.len());
+        for (row, line) in lines.iter().enumerate() {
+            if row > 0 {
+                text.push(' ');
+            }
+            starts.push(text.len());
+            for span in &line.spans {
+                push_folded(&mut text, &span.content, exact);
+            }
+        }
+        Self {
+            text,
+            exact,
+            starts,
+        }
+    }
+
+    /// How many bytes the character at byte `at` takes, or one past the
+    /// end, so that a search moved on by it always moves on.
+    fn width_at(&self, at: usize) -> usize {
+        self.text
+            .get(at..)
+            .and_then(|rest| rest.chars().next())
+            .map_or(1, char::len_utf8)
+    }
+
+    /// `counted` moved on to byte `at`, which is not before it: the line
+    /// `at` is on and its character of that line, counted from where
+    /// `counted` was where that is the same line, so that the matches of a
+    /// long line are not each counted from its start.
+    fn count_to(&self, counted: Counted, at: usize) -> Counted {
+        let row = self
+            .starts
+            .partition_point(|line| *line <= at)
+            .saturating_sub(1);
+        let (from, column) = match row == counted.row && counted.at <= at {
+            true => (counted.at, counted.column),
+            false => (self.starts.get(row).copied().unwrap_or(at), 0),
+        };
+        let between = self
+            .text
+            .get(from..at)
+            .map_or(0, |text| text.chars().count());
+        Counted {
+            at,
+            row,
+            column: column.saturating_add(between),
+        }
+    }
+
+    /// The places of the characters from `start` to byte `end`, in order,
+    /// each as its line — counted from `first` — its character of that
+    /// line, and whether it is whitespace. The space joining two lines is
+    /// on neither and has no place.
+    fn places(
+        &self,
+        start: Counted,
+        end: usize,
+        first: usize,
+    ) -> impl Iterator<Item = (usize, usize, bool)> + '_ {
+        let Counted {
+            at: from,
+            mut row,
+            mut column,
+        } = start;
+        let covered = self.text.get(from..end).unwrap_or_default();
+        covered.char_indices().filter_map(move |(offset, c)| {
+            let at = from + offset;
+            if self.starts.get(row + 1) == Some(&(at + 1)) {
+                row += 1;
+                column = 0;
+                return None;
+            }
+            column += 1;
+            Some((first.saturating_add(row), column - 1, c.is_whitespace()))
+        })
+    }
+}
+
+/// A byte of a [`Text`] with the line it is on and its character of that
+/// line, counted from the line's first.
+#[derive(Debug, Clone, Copy, Default)]
+struct Counted {
+    at: usize,
+    row: usize,
+    column: usize,
+}
+
+/// Appends `content` to `text` as a comparison sees it. Text that is all
+/// ASCII, which most of a transcript is, is copied whole and lowered in
+/// place rather than a character at a time.
+fn push_folded(text: &mut String, content: &str, exact: bool) {
+    if exact {
+        text.push_str(content);
+    } else if content.is_ascii() {
+        let from = text.len();
+        text.push_str(content);
+        if let Some(added) = text.get_mut(from..) {
+            added.make_ascii_lowercase();
+        }
+    } else {
+        text.extend(content.chars().map(|c| fold(c, exact)));
     }
 }
 
@@ -179,29 +330,27 @@ impl Query {
 /// than something found, and is not marked. `None` where the match covers no
 /// character of a line at all.
 fn parts(places: impl Iterator<Item = (usize, usize, bool)>) -> Option<Found> {
-    let mut lines: Vec<(usize, Vec<(usize, bool)>)> = Vec::new();
+    let mut runs: Vec<Run> = Vec::new();
+    let mut run: Option<Run> = None;
     for (line, column, space) in places {
-        match lines.last_mut() {
-            Some((last, columns)) if *last == line => columns.push((column, space)),
-            _ => lines.push((line, vec![(column, space)])),
+        match run.as_mut() {
+            Some(open) if open.line == line => open.add(column, space),
+            _ => runs.extend(run.replace(Run::new(line, column, space))),
         }
     }
-    let last = lines.len().checked_sub(1)?;
-    let mut kept = lines
-        .into_iter()
-        .enumerate()
-        .filter_map(|(index, (line, columns))| {
-            let words = |(_, space): &&(usize, bool)| !*space;
-            let from = match index {
-                0 => columns.first(),
-                _ => columns.iter().find(words),
-            }?;
-            let to = match index == last {
-                true => columns.last(),
-                false => columns.iter().rev().find(words),
-            }?;
-            Some((line, from.0, to.0 + 1 - from.0))
-        });
+    runs.extend(run);
+    let last = runs.len().checked_sub(1)?;
+    let mut kept = runs.iter().enumerate().filter_map(|(index, run)| {
+        let from = match index {
+            0 => Some(run.first),
+            _ => run.first_word,
+        }?;
+        let to = match index == last {
+            true => Some(run.last),
+            false => run.last_word,
+        }?;
+        Some((run.line, from, to + 1 - from))
+    });
     let (line, start, len) = kept.next()?;
     Some(Found {
         line,
@@ -210,6 +359,39 @@ fn parts(places: impl Iterator<Item = (usize, usize, bool)>) -> Option<Found> {
         more: kept.collect(),
         which: Which::default(),
     })
+}
+
+/// The characters a match covers on one line, as the columns that bound
+/// them: kept as these four rather than as every column, because a key
+/// typed into the search can find a match in every line of a long reply.
+struct Run {
+    line: usize,
+    first: usize,
+    last: usize,
+    /// The first and last that are not whitespace, where any is not.
+    first_word: Option<usize>,
+    last_word: Option<usize>,
+}
+
+impl Run {
+    fn new(line: usize, column: usize, space: bool) -> Self {
+        let word = (!space).then_some(column);
+        Self {
+            line,
+            first: column,
+            last: column,
+            first_word: word,
+            last_word: word,
+        }
+    }
+
+    fn add(&mut self, column: usize, space: bool) {
+        self.last = column;
+        if !space {
+            self.first_word.get_or_insert(column);
+            self.last_word = Some(column);
+        }
+    }
 }
 
 /// A character as a comparison sees it.
@@ -270,7 +452,7 @@ mod tests {
     fn found(query: &str, line: &str) -> Vec<(usize, usize)> {
         Query::new(query)
             .expect("the query has something in it")
-            .in_lines(&[Line::from(line.to_owned())], 0)
+            .in_lines(&[Line::from(line.to_owned())], 0, &mut None)
             .into_iter()
             .map(|found| (found.start, found.len))
             .collect()
@@ -296,7 +478,7 @@ mod tests {
             .collect();
         Query::new(query)
             .expect("the query has something in it")
-            .in_lines(&lines, 10)
+            .in_lines(&lines, 10, &mut None)
             .into_iter()
             .map(|found| found.parts().collect())
             .collect()
@@ -320,6 +502,40 @@ mod tests {
             vec![vec![(10, 4, 12)]]
         );
         assert!(found_in("zebra quokka", &["a zebra", "• quokka"]).is_empty());
+    }
+
+    /// Places are counted in characters of the line, whatever the bytes
+    /// before them: an accented letter, a wide one, an empty line between
+    /// two that a phrase runs across.
+    #[test]
+    fn a_match_after_wide_and_accented_letters_and_across_an_empty_line_is_placed_by_character() {
+        assert_eq!(
+            found_in("zebra", &["Café 漢字 ZEBRA zebra"]),
+            vec![vec![(10, 8, 5)], vec![(10, 14, 5)]]
+        );
+        assert_eq!(
+            found_in("zebra quokka", &["é zebra", "", "  quokka"]),
+            vec![vec![(10, 2, 5), (12, 2, 6)]]
+        );
+    }
+
+    /// The text a search reads is kept with the lines, and read again where
+    /// the next query keeps the case and the last one did not.
+    #[test]
+    fn the_text_kept_between_searches_is_read_again_for_a_query_that_keeps_the_case() {
+        let lines = [Line::from("ETag and etag".to_owned())];
+        let mut read = None;
+        let starts = |query: &str, read: &mut Option<Text>| -> Vec<usize> {
+            Query::new(query)
+                .expect("the query has something in it")
+                .in_lines(&lines, 0, read)
+                .into_iter()
+                .map(|found| found.start)
+                .collect()
+        };
+        assert_eq!(starts("etag", &mut read), vec![0, 9]);
+        assert_eq!(starts("ETag", &mut read), vec![0]);
+        assert_eq!(starts("etag", &mut read), vec![0, 9]);
     }
 
     /// Drawn with a combining accent, a letter is one cell and the accent
