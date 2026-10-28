@@ -392,6 +392,13 @@ fn a_turn_may_edit_inside_its_copy_and_nowhere_else() {
     inside.answered("inside", "allow");
     let ran = results(&inside.bench(&["--json"]));
     assert_eq!(ran["tasks"][0]["passed"], true, "{ran:#}");
+    // The stand-in's result carries no usage, so the turn reported no spend:
+    // its report's zeros are no count of the suite's tokens.
+    assert_eq!(ran["tasks"][0]["turn"]["models"], serde_json::json!({}));
+    assert_eq!(ran["summary"]["tokens"], Value::Null, "{ran:#}");
+    assert_eq!(ran["summary"]["output_tokens"], Value::Null);
+    assert_eq!(ran["summary"]["tokens_reported_by"], 0);
+    assert!(schema::refusals("bench.schema.json", &ran).is_empty());
 
     let outside = Setup::new(&asks_to_edit("/etc/hosts"));
     outside.answered("outside", "deny");
