@@ -41,6 +41,22 @@ impl Selection {
         Self { anchor, head }
     }
 
+    /// The same selection with each end moved to the line `line_now` says
+    /// it is drawn on now, its column kept. `None` where either end is no
+    /// longer drawn.
+    pub(crate) fn moved(self, mut line_now: impl FnMut(usize) -> Option<usize>) -> Option<Self> {
+        let mut move_point = |point: Point| {
+            line_now(point.line).map(|line| Point {
+                line,
+                column: point.column,
+            })
+        };
+        Some(Self {
+            anchor: move_point(self.anchor)?,
+            head: move_point(self.head)?,
+        })
+    }
+
     /// The first cell covered and the last.
     fn ends(&self) -> (Point, Point) {
         (self.anchor.min(self.head), self.anchor.max(self.head))

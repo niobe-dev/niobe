@@ -1702,6 +1702,11 @@ pub struct App {
     /// The line at the top of the view when a switch was pressed while the
     /// transcript was scrolled back, until the next draw puts it back there.
     held: Option<crate::ui::Anchor>,
+    /// The lines of the transcript as last laid out that the top of a view
+    /// scrolled back, a selection's ends and a press stand on, each with
+    /// where it is among the entries: taken before a draw lays the entries
+    /// out again, so the draw can put each back on the line it was on.
+    placed: Vec<(usize, crate::ui::Place)>,
     should_quit: bool,
     /// Whether the operator pressed Ctrl+Z since the loop last asked.
     suspend: bool,
@@ -2134,6 +2139,7 @@ impl App {
             idle_since: None,
             drawn: crate::ui::DrawnEntries::default(),
             held: None,
+            placed: Vec::new(),
             should_quit: false,
             suspend: false,
             interrupt: false,
@@ -3574,20 +3580,63 @@ impl App {
     /// cells of the lines as last laid out, which hold other text once the
     /// entries are wrapped again, so keeping them would mark, and copy on
     /// letting go, what the operator never dragged over.
+    ///
+    /// At the same width, the lines the view, the selection and a press
+    /// stand on are placed among the entries instead: an entry above them
+    /// can still be drawn on to more lines or fewer — a call that ended with
+    /// what it printed, a diff that arrived — and the same line numbers
+    /// would then be other text.
     pub(crate) fn lay_out_at(&mut self, width: usize) {
+        self.placed.clear();
         if self.drawn.width().is_some_and(|last| last != width) {
             self.hold_view();
             self.selection = None;
             self.pressed = None;
+            return;
+        }
+        let top = (!self.follow && self.held.is_none()).then_some(self.scroll);
+        let selected = self.selection.map(|selection| selection.lines());
+        let ends = selected.map(|lines| [*lines.start(), *lines.end()]);
+        let pressed = self.pressed.map(|point| point.line);
+        let lines = top
+            .into_iter()
+            .chain(ends.into_iter().flatten())
+            .chain(pressed);
+        for line in lines {
+            if let Some(place) = self.drawn.place(line) {
+                self.placed.push((line, place));
+            }
         }
     }
 
     /// Puts the line [`App::hold_view`] remembered back at the top of the
-    /// view, called by the draw once it has laid the entries out again.
+    /// view, called by the draw once it has laid the entries out again, and
+    /// each line [`App::lay_out_at`] placed back where its entry is now. A
+    /// selection or a press whose line is no longer drawn is let go of
+    /// rather than left on whatever took its place.
     pub(crate) fn keep_view(&mut self) {
-        if let Some(line) = self.held.take().and_then(|held| self.drawn.line_of(&held)) {
+        let placed = std::mem::take(&mut self.placed);
+        let drawn = &self.drawn;
+        let now = |line: usize| {
+            placed
+                .iter()
+                .find(|(was, _)| *was == line)
+                .and_then(|(_, place)| drawn.line_at(place))
+        };
+        if let Some(line) = self.held.take().and_then(|held| drawn.line_of(&held)) {
+            self.scroll = line;
+        } else if !self.follow
+            && let Some(line) = now(self.scroll)
+        {
             self.scroll = line;
         }
+        self.selection = self.selection.and_then(|selection| selection.moved(now));
+        self.pressed = self.pressed.and_then(|point| {
+            now(point.line).map(|line| crate::select::Point {
+                line,
+                column: point.column,
+            })
+        });
     }
 
     /// Folds in an event the operator produced here and queues it to be kept.

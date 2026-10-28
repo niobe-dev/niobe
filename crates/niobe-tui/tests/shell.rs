@@ -7128,3 +7128,64 @@ fn a_plan_question_shows_every_line_of_the_plan_however_its_markdown_would_draw(
         );
     }
 }
+
+/// The running session with a shell call started and many replies after it,
+/// and the call's end, which draws what it failed with under its row.
+fn a_call_left_running_above_many_replies() -> (App, Event) {
+    let mut app = running_session();
+    let input = "{\"command\":\"false\"}".to_owned();
+    app.apply(&Event::ToolCallStart {
+        id: "late".into(),
+        name: "Bash".to_owned(),
+        input: input.clone(),
+        summary: Some("false".to_owned()),
+        agent: None,
+    });
+    for n in 0..40 {
+        app.apply(&Event::AssistantMessage {
+            text: format!("Reply number {n}."),
+            agent: None,
+        });
+    }
+    let output = "first\nsecond\nthird".to_owned();
+    let end = Event::ToolCallEnd {
+        id: "late".into(),
+        name: "Bash".to_owned(),
+        input,
+        bytes: output.len() as u64,
+        output,
+        outcome: niobe_core::event::ToolOutcome::Failed,
+        summary: Some("false".to_owned()),
+        exit_code: Some(1),
+        error: Some("it failed\non three\nlines".to_owned()),
+        command: None,
+        untrimmed: None,
+    };
+    (app, end)
+}
+
+#[test]
+fn an_entry_above_the_view_that_grows_leaves_the_lines_being_read_in_view() {
+    let (mut app, end) = a_call_left_running_above_many_replies();
+    let _ = screen(&mut app, 120, 40);
+    app.scroll_up(10);
+    let before = screen(&mut app, 120, 40);
+    let read = first_row_with(&before, "Reply number")
+        .map(|(at, line)| {
+            (
+                at,
+                line.trim_matches(|c: char| !c.is_alphanumeric()).to_owned(),
+            )
+        })
+        .expect("a reply is in view");
+
+    app.apply(&end);
+    let after = screen(&mut app, 120, 40);
+
+    assert_eq!(
+        first_row_with(&after, &read.1).map(|(at, _)| at),
+        Some(read.0),
+        "{before}\n{after}"
+    );
+    assert!(!app.follows_tail());
+}

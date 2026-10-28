@@ -2574,6 +2574,46 @@ impl DrawnEntries {
         None
     }
 
+    /// Line `line` of the whole transcript as last drawn, as the entry it
+    /// belongs to and how far into that entry's lines it is. `None` where
+    /// nothing is drawn there.
+    ///
+    /// Unlike an [`Anchor`] it keeps none of the lines, so it costs nothing
+    /// to take on every frame.
+    pub(crate) fn place(&self, line: usize) -> Option<Place> {
+        let mut first = 0usize;
+        for drawn in &self.drawn {
+            let offset = line.checked_sub(first)?;
+            if offset < drawn.lines.len() {
+                return Some(Place {
+                    entry: drawn.entry,
+                    heading: drawn.heading,
+                    hidden: drawn.hidden,
+                    offset,
+                });
+            }
+            first = first.saturating_add(drawn.lines.len());
+        }
+        None
+    }
+
+    /// Where `place` is in the transcript as drawn now: the same line of the
+    /// same entry, however many lines the entries above it came to since.
+    /// `None` where that entry is no longer drawn.
+    pub(crate) fn line_at(&self, place: &Place) -> Option<usize> {
+        let mut first = 0usize;
+        for drawn in &self.drawn {
+            if (drawn.entry, drawn.heading, drawn.hidden)
+                == (place.entry, place.heading, place.hidden)
+            {
+                let last = drawn.lines.len().checked_sub(1)?;
+                return Some(first.saturating_add(place.offset.min(last)));
+            }
+            first = first.saturating_add(drawn.lines.len());
+        }
+        None
+    }
+
     /// How many cells wide the lines were last laid out, `None` before the
     /// first time.
     pub(crate) fn width(&self) -> Option<usize> {
@@ -2971,6 +3011,18 @@ fn hidden_key(count: usize, width: usize, theme: &Theme) -> u64 {
     width.hash(&mut hasher);
     theme.hash(&mut hasher);
     hasher.finish()
+}
+
+/// A transcript line as the entry it belongs to and how far into that
+/// entry's lines it is: a line found again after the entries above it were
+/// drawn on to more lines or fewer, which a call that ended, a diff that
+/// arrived or a sub-agent's progress does without a key being pressed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Place {
+    entry: usize,
+    heading: bool,
+    hidden: bool,
+    offset: usize,
 }
 
 /// A transcript line as the entry it belongs to and its place among that

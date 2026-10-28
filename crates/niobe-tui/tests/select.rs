@@ -643,3 +643,57 @@ fn rewrapped() -> String {
         "Every word of this paragraph moves when the window is resized. ".repeat(6)
     )
 }
+
+#[test]
+fn a_selection_stays_on_what_it_covered_when_an_entry_above_it_grows() {
+    let mut app = running_session();
+    let input = "{\"command\":\"false\"}".to_owned();
+    app.apply(&Event::ToolCallStart {
+        id: "late".into(),
+        name: "Bash".to_owned(),
+        input: input.clone(),
+        summary: Some("false".to_owned()),
+        agent: None,
+    });
+    app.apply(&Event::AssistantMessage {
+        text: "The config lives in niobe.toml beside the manifest.".to_owned(),
+        agent: None,
+    });
+    let frame = screen(&mut app, WIDTH, HEIGHT);
+    let (column, row) = cell_of(&frame, "niobe.toml");
+    app.on_mouse(mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        (column, row),
+    ));
+    app.on_mouse(mouse(
+        MouseEventKind::Drag(MouseButton::Left),
+        (column + 9, row),
+    ));
+
+    // The call above the selection ends mid-drag, with what it failed with
+    // drawn under its row.
+    let output = "first\nsecond\nthird".to_owned();
+    app.apply(&Event::ToolCallEnd {
+        id: "late".into(),
+        name: "Bash".to_owned(),
+        input,
+        bytes: output.len() as u64,
+        output,
+        outcome: niobe_core::event::ToolOutcome::Failed,
+        summary: Some("false".to_owned()),
+        exit_code: Some(1),
+        error: Some("it failed\non three\nlines".to_owned()),
+        command: None,
+        untrimmed: None,
+    });
+    let _ = screen(&mut app, WIDTH, HEIGHT);
+    app.on_mouse(mouse(
+        MouseEventKind::Up(MouseButton::Left),
+        (column + 9, row),
+    ));
+
+    assert_eq!(
+        app.take_handoffs(),
+        vec![Handoff::Copy("niobe.toml".to_owned())]
+    );
+}
