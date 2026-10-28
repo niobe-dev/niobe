@@ -210,7 +210,7 @@ fn listing(
     (width, rows): (usize, usize),
     theme: &Theme,
 ) -> Vec<Line<'static>> {
-    let dim = Style::new().fg(theme.dim);
+    let dim = Style::new().fg(theme.dialog_dim);
     let mut lines = vec![Line::from("")];
     let elsewhere = elsewhere(app, width);
     if servers.is_empty() {
@@ -313,9 +313,9 @@ fn row(
     Line::from(vec![
         Span::styled(lead, Style::new().fg(theme.dialog_fg)),
         Span::styled(status, status_style(&server.status, theme)),
-        Span::styled(origin, Style::new().fg(theme.dim)),
+        Span::styled(origin, Style::new().fg(theme.dialog_dim)),
         Span::raw(gap),
-        Span::styled(tools, Style::new().fg(theme.dim)),
+        Span::styled(tools, Style::new().fg(theme.dialog_dim)),
     ])
 }
 
@@ -325,7 +325,7 @@ fn status_style(status: &McpStatus, theme: &Theme) -> Style {
     match status {
         McpStatus::Connected => Style::new().fg(theme.dialog_fg),
         McpStatus::Pending | McpStatus::Disabled | McpStatus::Other(_) => {
-            Style::new().fg(theme.dim)
+            Style::new().fg(theme.dialog_dim)
         }
         McpStatus::Failed | McpStatus::NeedsAuth => Style::new().fg(theme.warn).bold(),
     }
@@ -353,7 +353,7 @@ fn detail(
                 Line::from(""),
                 Line::styled(
                     text::truncate("The backend no longer reports this server.", width),
-                    Style::new().fg(theme.dim),
+                    Style::new().fg(theme.dialog_dim),
                 ),
             ],
             0,
@@ -365,7 +365,7 @@ fn detail(
         for (i, said) in text::wrap(value, room.max(1)).into_iter().enumerate() {
             let label = if i == 0 { label } else { "" };
             all.push(Line::from(vec![
-                Span::styled(text::pad(label, LABELS), Style::new().fg(theme.dim)),
+                Span::styled(text::pad(label, LABELS), Style::new().fg(theme.dialog_dim)),
                 Span::styled(said, style),
             ]));
         }

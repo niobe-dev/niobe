@@ -192,6 +192,12 @@ pub struct Theme {
     pub dialog_bg: Color,
     /// Text in a dialog.
     pub dialog_fg: Color,
+    /// What is secondary in a dialog: where an MCP server is configured, a
+    /// memory file's size, a model's note in a list. A field of its own
+    /// rather than [`Theme::dim`], because a dialog's face is not the panes'
+    /// background, and a theme can draw its dialog in the very colour its
+    /// secondary text is.
+    pub dialog_dim: Color,
     /// A dialog's border, and what its bottom edge says.
     pub dialog_frame: Color,
     /// The title on a dialog's top edge.
@@ -279,6 +285,9 @@ pub const CLASSIC: Theme = Theme {
 
     dialog_bg: Color::Gray,
     dialog_fg: Color::Black,
+    // Far greys out what a dialog cannot do in dark grey on its grey face;
+    // the panes' grey would be the face itself.
+    dialog_dim: Color::DarkGray,
     dialog_frame: Color::White,
     dialog_title: Color::Black,
     cursor_bg: Color::Cyan,
@@ -358,6 +367,9 @@ pub const NEO: Theme = Theme {
     // would be lighter than the desk, which reads as a glow, not a shadow.
     dialog_bg: Color::Green,
     dialog_fg: Color::Black,
+    // The panes' secondary green is the dialog's face, so what is
+    // secondary in it recedes to the grey rather than vanish.
+    dialog_dim: Color::DarkGray,
     dialog_frame: Color::Black,
     dialog_title: Color::Black,
     cursor_bg: Color::LightGreen,
@@ -432,6 +444,7 @@ pub const CYBER: Theme = Theme {
     // Its cursor row goes back to the panes' green.
     dialog_bg: Color::Magenta,
     dialog_fg: Color::White,
+    dialog_dim: Color::Green,
     dialog_frame: Color::LightMagenta,
     dialog_title: Color::LightMagenta,
     cursor_bg: Color::LightGreen,
@@ -499,6 +512,7 @@ pub const MODERN: Theme = Theme {
 
     dialog_bg: Color::DarkGray,
     dialog_fg: Color::White,
+    dialog_dim: Color::Gray,
     dialog_frame: Color::Gray,
     dialog_title: Color::Gray,
     cursor_bg: Color::LightBlue,
@@ -586,6 +600,7 @@ pub const NEO_TRUE: Theme = Theme {
 
     dialog_bg: hex(0x0a2211),
     dialog_fg: hex(0x9bffb0),
+    dialog_dim: hex(0x2e8b44),
     dialog_frame: hex(0x00ff41),
     dialog_title: hex(0x00ff41),
     cursor_bg: hex(0x00ff41),
@@ -641,6 +656,7 @@ pub const CYBER_TRUE: Theme = Theme {
 
     dialog_bg: hex(0x16121f),
     dialog_fg: hex(0xe6e9ff),
+    dialog_dim: hex(0x6b9a7c),
     dialog_frame: hex(0xff2bd6),
     dialog_title: hex(0xff2bd6),
     cursor_bg: hex(0x39ff7a),
@@ -692,6 +708,7 @@ pub const MODERN_TRUE: Theme = Theme {
 
     dialog_bg: hex(0x323233),
     dialog_fg: hex(0xcccccc),
+    dialog_dim: hex(0x858585),
     dialog_frame: hex(0x007acc),
     dialog_title: hex(0x007acc),
     cursor_bg: hex(0x04395e),
@@ -829,6 +846,9 @@ impl Theme {
             (t.del, t.menu_bg, "an error count in the menu row"),
             (t.dialog_bg, t.pane_bg, "a dialog over the panes"),
             (t.dialog_fg, t.dialog_bg, "dialog text"),
+            (t.dialog_dim, t.dialog_bg, "secondary text in a dialog"),
+            (t.warn, t.dialog_bg, "a failure in a dialog"),
+            (t.hot, t.dialog_bg, "a hint in a dialog"),
             (t.dialog_frame, t.dialog_bg, "a dialog's border"),
             (t.dialog_title, t.dialog_bg, "a dialog's title"),
             (t.cursor_bg, t.dialog_bg, "a dialog's cursor row"),
@@ -872,6 +892,7 @@ impl Theme {
                 "an open menu's cursor row's text",
             ),
             (t.dialog_fg, t.dialog_bg, "dialog text"),
+            (t.dialog_dim, t.dialog_bg, "secondary text in a dialog"),
             (t.cursor_fg, t.cursor_bg, "the cursor row's text"),
         ]
     }
@@ -954,7 +975,7 @@ pub fn register_user(themes: Vec<UserTheme>) -> bool {
 
 impl Theme {
     /// The colours a theme file may set, by the key it spells them with.
-    pub const COLOUR_KEYS: [&'static str; 37] = [
+    pub const COLOUR_KEYS: [&'static str; 38] = [
         "pane_bg",
         "frame",
         "frame_focus",
@@ -986,6 +1007,7 @@ impl Theme {
         "command",
         "dialog_bg",
         "dialog_fg",
+        "dialog_dim",
         "dialog_frame",
         "dialog_title",
         "cursor_bg",
@@ -1033,6 +1055,7 @@ impl Theme {
             "command" => &mut self.command,
             "dialog_bg" => &mut self.dialog_bg,
             "dialog_fg" => &mut self.dialog_fg,
+            "dialog_dim" => &mut self.dialog_dim,
             "dialog_frame" => &mut self.dialog_frame,
             "dialog_title" => &mut self.dialog_title,
             "cursor_bg" => &mut self.cursor_bg,
@@ -1131,7 +1154,7 @@ mod tests {
 
     /// Every colour of one theme, so that a field added to [`Theme`] and left
     /// out of a check here is a field the checks below do not cover.
-    fn colours(t: &Theme) -> [Color; 37] {
+    fn colours(t: &Theme) -> [Color; 38] {
         [
             t.pane_bg,
             t.frame,
@@ -1164,6 +1187,7 @@ mod tests {
             t.command,
             t.dialog_bg,
             t.dialog_fg,
+            t.dialog_dim,
             t.dialog_frame,
             t.dialog_title,
             t.cursor_bg,
@@ -1353,6 +1377,11 @@ mod tests {
                 (t.dialog_fg, t.dialog_bg),
                 (Color::Black, Color::Gray),
                 "dialog text",
+            ),
+            (
+                (t.dialog_dim, t.dialog_bg),
+                (Color::DarkGray, Color::Gray),
+                "a greyed line of a dialog",
             ),
             (
                 (t.dialog_frame, t.dialog_bg),

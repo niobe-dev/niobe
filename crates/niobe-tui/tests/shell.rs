@@ -6375,6 +6375,50 @@ fn f7_lists_the_mcp_servers_while_a_turn_runs() {
     assert_snapshot("mcp-server-120x30", &frame);
 }
 
+/// What a dialog says beside its rows — where an MCP server is configured
+/// and how many tools it gave — is drawn in the dialog's secondary colour on
+/// the dialog's face, and every theme at every depth draws it in a colour
+/// the face is not, so it does not vanish into the box it is written in.
+#[test]
+fn a_dialogs_secondary_text_is_drawn_in_a_colour_its_face_is_not() {
+    use niobe_core::event::{McpServer, McpStatus};
+    use ratatui::crossterm::event::KeyCode;
+
+    for theme in THEMES {
+        for depth in [Depth::Sixteen, Depth::TrueColour] {
+            let mut app = running_session().with_depth(depth).with_theme(theme);
+            app.apply(&Event::McpServers {
+                servers: ["github", "notes"]
+                    .into_iter()
+                    .map(|name| McpServer {
+                        name: name.to_owned(),
+                        status: McpStatus::Connected,
+                        source: None,
+                        tools: vec!["create_issue".to_owned(), "search_code".to_owned()],
+                        scope: Some("project".to_owned()),
+                        error: None,
+                        endpoint: None,
+                        reports_as: None,
+                    })
+                    .collect(),
+            });
+            press(&mut app, KeyCode::F(7));
+            // The second row: the first is under the cursor, drawn in the
+            // cursor's colours.
+            for said in ["project", "2 tools"] {
+                let style = *styles_at(&mut app, 120, 30, said)
+                    .get(1)
+                    .unwrap_or_else(|| panic!("{}: `{said}` is drawn twice", theme.name));
+                assert_ne!(
+                    style.fg, style.bg,
+                    "{} at {depth:?}: `{said}` is drawn on its own colour",
+                    theme.name
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn a_pane_hidden_from_the_view_menu_gives_its_rows_to_the_others() {
     let mut app = running_session();

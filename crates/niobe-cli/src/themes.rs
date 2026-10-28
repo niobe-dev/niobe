@@ -383,6 +383,14 @@ mod tests {
     }
 
     #[test]
+    fn a_dialog_whose_secondary_text_is_its_own_face_is_refused() {
+        let said = themed("[colors]\ndialog_bg = \"green\"\ndialog_dim = \"green\"\n")
+            .expect_err("a dialog's notes on its own colour");
+
+        assert!(said.contains("secondary text in a dialog"), "{said}");
+    }
+
+    #[test]
     fn a_24_bit_palette_that_cannot_be_read_is_refused_with_its_ratio() {
         let said = themed("[colors]\nfg = \"#202020\"\npane_bg = \"#222222\"\n")
             .expect_err("near-black on near-black");

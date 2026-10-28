@@ -445,7 +445,7 @@ pub(crate) fn draw(frame: &mut Frame, body: Rect, app: &mut App, theme: &Theme) 
             .into_iter()
             .map(|(line, kind)| match kind {
                 Kind::Heading => Line::styled(line, plain.bold()),
-                Kind::Note => Line::styled(line, Style::new().fg(theme.dim)),
+                Kind::Note => Line::styled(line, Style::new().fg(theme.dialog_dim)),
                 Kind::Text => Line::styled(line, plain),
             }),
     );

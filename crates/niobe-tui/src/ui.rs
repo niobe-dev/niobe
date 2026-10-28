@@ -279,7 +279,7 @@ fn draw_pick(
                 ),
                 text_width,
             ))
-            .style(Style::new().fg(theme.dim)),
+            .style(Style::new().fg(theme.dialog_dim)),
         );
     }
     tail.push(Line::from(""));
@@ -319,7 +319,7 @@ fn draw_pick(
                 .style(Style::new().bg(theme.cursor_bg).fg(theme.cursor_fg).bold()),
             false => Line::from(vec![
                 Span::styled(format!("{marker}{said}"), plain),
-                Span::styled(note, Style::new().fg(theme.dim)),
+                Span::styled(note, Style::new().fg(theme.dialog_dim)),
             ]),
         });
     }

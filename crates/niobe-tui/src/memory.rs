@@ -306,7 +306,7 @@ fn listing(
     (width, rows): (usize, usize),
     theme: &Theme,
 ) -> Vec<Line<'static>> {
-    let dim = Style::new().fg(theme.dim);
+    let dim = Style::new().fg(theme.dialog_dim);
     let mut lines = vec![Line::from("")];
     let Some(files) = view.files.as_ref() else {
         lines.push(Line::styled("reading…", dim));
@@ -378,21 +378,21 @@ fn row(app: &App, file: &MemoryFile, on_it: bool, width: usize, theme: &Theme) -
         return Line::from(said).style(Style::new().bg(theme.cursor_bg).fg(theme.cursor_fg).bold());
     }
     let mut spans = vec![
-        Span::styled(lead, Style::new().fg(theme.dim)),
+        Span::styled(lead, Style::new().fg(theme.dialog_dim)),
         Span::styled(path, Style::new().fg(theme.dialog_fg)),
-        Span::styled(note, Style::new().fg(theme.dim)),
+        Span::styled(note, Style::new().fg(theme.dialog_dim)),
         Span::raw(" ".repeat(gap)),
     ];
     match changed {
         true => {
             let size = sized(file);
-            spans.push(Span::styled(size, Style::new().fg(theme.dim)));
+            spans.push(Span::styled(size, Style::new().fg(theme.dialog_dim)));
             spans.push(Span::styled(
                 format!(" · {CHANGED}"),
                 Style::new().fg(theme.warn).bold(),
             ));
         }
-        false => spans.push(Span::styled(figures, Style::new().fg(theme.dim))),
+        false => spans.push(Span::styled(figures, Style::new().fg(theme.dialog_dim))),
     }
     Line::from(spans)
 }
@@ -419,7 +419,7 @@ fn reading(page: &Detail, (width, room): (usize, usize), theme: &Theme) -> Vec<L
     page.visible(width, room)
         .into_iter()
         .map(|(line, kind)| match kind {
-            Kind::Note => Line::styled(line, Style::new().fg(theme.dim)),
+            Kind::Note => Line::styled(line, Style::new().fg(theme.dialog_dim)),
             Kind::Heading | Kind::Text => Line::styled(line, plain),
         })
         .collect()
