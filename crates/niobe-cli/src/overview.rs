@@ -45,6 +45,33 @@ pub struct Folded {
     /// turn's end is the first of the next one's, so the turn this fold
     /// leaves running did not stop.
     pub cleared: bool,
+    /// What it had open when the process it ran in was left, where nothing
+    /// after that took it up again: the fold ends a turn there, cut, and
+    /// lets go of its questions and its sub-agents, so the state alone no
+    /// longer says that they were open.
+    pub left: Option<Open>,
+}
+
+/// What a session had not finished.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Open {
+    /// Its turn was running.
+    pub turn: bool,
+    /// How many questions waited on the operator.
+    pub questions: usize,
+    /// How many sub-agents were running.
+    pub agents: usize,
+}
+
+impl Open {
+    /// What `state` has open now.
+    fn of(state: &SessionState) -> Self {
+        Self {
+            turn: state.turn_running(),
+            questions: state.pending_permissions().len(),
+            agents: state.running_agents().len(),
+        }
+    }
 }
 
 /// Every session the store at `root` holds, folded, oldest first; none where
@@ -88,13 +115,14 @@ fn fold(id: SessionId, created: SystemTime, stored: &[StoredEvent]) -> Vec<(Fold
     let mut decided_at = Vec::new();
     let mut first: Option<&StoredEvent> = None;
     let mut last: Option<&StoredEvent> = None;
+    let mut left = Left::default();
     for event in stored {
         if matches!(event.event, Event::Cleared) && first.is_some() {
             folded.push(conversation(
                 id,
                 created,
                 (first, last),
-                state.clone(),
+                (state.clone(), std::mem::take(&mut left).open),
                 std::mem::take(&mut decided_at),
                 folded.len(),
             ));
@@ -102,27 +130,52 @@ fn fold(id: SessionId, created: SystemTime, stored: &[StoredEvent]) -> Vec<(Fold
         }
         first = first.or(Some(event));
         last = Some(event);
-        state.apply(&event.event);
+        left.apply(&mut state, &event.event);
         decided_at.resize(state.decisions().len(), event.at);
     }
     folded.push(conversation(
         id,
         created,
         (first, last),
-        state,
+        (state, left.open),
         decided_at,
         folded.len(),
     ));
     folded
 }
 
+/// What a conversation had open when its process was last left, kept until
+/// something takes it up again.
+#[derive(Default)]
+struct Left {
+    open: Option<Open>,
+    /// How many turns had ended once it was left: a turn ending after that
+    /// is the session carrying on.
+    turns: usize,
+}
+
+impl Left {
+    /// Applies `event` to `state`, noting what was open if it is the
+    /// process being left, and forgetting it if `event` carried on.
+    fn apply(&mut self, state: &mut SessionState, event: &Event) {
+        let open = matches!(event, Event::SessionLeft).then(|| Open::of(state));
+        state.apply(event);
+        if open.is_some() {
+            self.open = open;
+            self.turns = state.turns().len();
+        } else if state.turn_running() || state.turns().len() != self.turns {
+            self.open = None;
+        }
+    }
+}
+
 /// The `part`-th conversation of the record `id`, between the events `ends`,
-/// folded to `state`.
+/// folded to `state`, with what it had open when it was `left`.
 fn conversation(
     id: SessionId,
     created: SystemTime,
     ends: (Option<&StoredEvent>, Option<&StoredEvent>),
-    state: SessionState,
+    (state, left): (SessionState, Option<Open>),
     decided_at: Vec<SystemTime>,
     part: usize,
 ) -> (Folded, Bounds) {
@@ -140,6 +193,7 @@ fn conversation(
         state,
         decided_at,
         cleared: false,
+        left,
     };
     (folded, bounds)
 }
@@ -461,26 +515,23 @@ fn left_open(sessions: &[Folded], uncommitted: Option<&[String]>) -> Vec<String>
         .iter()
         .filter_map(|session| {
             let s = &session.state;
+            let open = session.left.unwrap_or_else(|| Open::of(s));
             let mut what = Vec::new();
-            if !s.pending_permissions().is_empty() {
+            if open.questions > 0 {
                 what.push(format!(
                     "stopped waiting on {}",
-                    counted(
-                        s.pending_permissions().len() as u64,
-                        "question",
-                        "questions"
-                    )
+                    counted(open.questions as u64, "question", "questions")
                 ));
-            } else if s.turn_running() && !session.cleared {
+            } else if open.turn && !session.cleared {
                 what.push("stopped in the middle of a turn".to_owned());
             }
             if s.test_run().is_some_and(|run| run.failed) {
                 what.push("its last test run failed".to_owned());
             }
-            if !s.running_agents().is_empty() {
+            if open.agents > 0 {
                 what.push(format!(
                     "{} never reported an end",
-                    counted(s.running_agents().len() as u64, "sub-agent", "sub-agents")
+                    counted(open.agents as u64, "sub-agent", "sub-agents")
                 ));
             }
             (!what.is_empty()).then(|| {
@@ -762,6 +813,7 @@ mod tests {
             ],
             state,
             cleared: false,
+            left: None,
         }
     }
 
@@ -1077,6 +1129,101 @@ mod tests {
         assert_eq!(
             lines,
             ["- Session 4: stopped waiting on 1 question — `niobe --resume 4`"]
+        );
+        assert_eq!(
+            left_open(&[folded(5, &[])], Some(&[])),
+            ["Nothing: every session ended between turns, and what they changed is committed."]
+        );
+    }
+
+    fn stored(events: Vec<Event>) -> Vec<StoredEvent> {
+        events
+            .into_iter()
+            .zip(1..)
+            .map(|(event, seq)| StoredEvent {
+                seq,
+                at: UNIX_EPOCH + Duration::from_secs(1_789_732_800 + seq),
+                event,
+            })
+            .collect()
+    }
+
+    fn read_whole(id: u32, events: Vec<Event>) -> Folded {
+        let id = id.to_string().parse().expect("a number is a session id");
+        let mut read = fold(id, UNIX_EPOCH, &stored(events));
+        assert_eq!(read.len(), 1, "one conversation");
+        read.remove(0).0
+    }
+
+    fn prompt() -> Event {
+        Event::UserMessage {
+            text: "go".to_owned(),
+        }
+    }
+
+    fn question(id: &str) -> Event {
+        Event::PermissionRequest {
+            id: ToolCallId::new(id),
+            tool: "Bash".to_owned(),
+            input: "{}".to_owned(),
+            target: None,
+            proposal: None,
+            reason: None,
+            agent: None,
+        }
+    }
+
+    fn spawned(id: &str) -> Event {
+        Event::AgentSpawn {
+            id: id.into(),
+            parent: None,
+            kind: None,
+            label: "explorer".to_owned(),
+        }
+    }
+
+    /// The shell records that it was left when the operator quits in the
+    /// middle of a turn, and the fold ends the turn there, cut: what was
+    /// open when it was left is still what the session left open.
+    #[test]
+    fn a_session_the_operator_quit_in_the_middle_of_a_turn_is_left_open() {
+        let quit_mid_turn = read_whole(1, vec![prompt(), Event::SessionLeft]);
+        let quit_on_a_question = read_whole(2, vec![prompt(), question("q"), Event::SessionLeft]);
+        let quit_with_an_agent = read_whole(
+            3,
+            vec![
+                prompt(),
+                spawned("a1"),
+                Event::TurnEnded,
+                Event::SessionLeft,
+            ],
+        );
+
+        assert_eq!(
+            left_open(
+                &[quit_mid_turn, quit_on_a_question, quit_with_an_agent],
+                Some(&[])
+            ),
+            [
+                "- Session 1: stopped in the middle of a turn — `niobe --resume 1`",
+                "- Session 2: stopped waiting on 1 question — `niobe --resume 2`",
+                "- Session 3: 1 sub-agent never reported an end — `niobe --resume 3`",
+            ]
+        );
+    }
+
+    /// A session left in the middle of a turn and taken up again, with a
+    /// turn of its own after, finished what it was doing there.
+    #[test]
+    fn a_session_left_and_taken_up_again_is_open_only_if_it_was_left_again() {
+        let carried_on = read_whole(
+            1,
+            vec![prompt(), Event::SessionLeft, prompt(), Event::TurnEnded],
+        );
+
+        assert_eq!(
+            left_open(&[carried_on], Some(&[])),
+            ["Nothing: every session ended between turns, and what they changed is committed."]
         );
         assert_eq!(
             left_open(&[folded(5, &[])], Some(&[])),

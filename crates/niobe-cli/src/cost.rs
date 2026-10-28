@@ -368,6 +368,7 @@ mod tests {
             state,
             decided_at: Vec::new(),
             cleared: false,
+            left: None,
         }
     }
 
@@ -491,6 +492,7 @@ mod tests {
             state: SessionState::new(),
             decided_at: Vec::new(),
             cleared: false,
+            left: None,
         }
     }
 
