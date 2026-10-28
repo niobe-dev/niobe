@@ -4223,23 +4223,63 @@ fn endpoint(config: wire::McpConfig) -> Option<String> {
 /// host. A user and password end at the last `@` of the authority, since a
 /// password may hold one, and are dropped with or without a scheme before
 /// them — an address that names none reads as a host all the same.
+///
+/// The CLI reads an address as a browser does, where a `\` separates an
+/// `http` address's path as a `/` does, so the authority ends at either.
+/// What does not read as a plain host is cut rather than shown: a `%` in the
+/// host, which is a separator spelt out that the CLI refuses, a port that is
+/// not a number — the start of a password a separator cut short — and a
+/// scheme not spelt as one, which is read as part of the host. The slashes
+/// after a scheme may be any run of `/` and `\\`, as the CLI takes them.
 fn without_secrets(url: &str) -> String {
-    let (scheme, rest) = match url.split_once("://") {
-        Some((scheme, rest)) => (Some(scheme), rest),
-        None => (None, url),
+    let (scheme, rest) = match url.split_once(':') {
+        Some((scheme, rest)) if is_scheme(scheme) && rest.starts_with(['/', '\\']) => {
+            (Some(scheme), rest.trim_start_matches(['/', '\\']))
+        }
+        _ => (None, url),
     };
-    let end = rest.find(['/', '?', '#', ';']).unwrap_or(rest.len());
+    let end = rest.find(['/', '\\', '?', '#', ';']).unwrap_or(rest.len());
     let (authority, tail) = rest.split_at(end);
     let host = authority
         .rsplit_once('@')
         .map_or(authority, |(_, host)| host);
-    let path = match tail.trim_start_matches('/').is_empty() || tail.starts_with(['?', '#', ';']) {
+    let (host, encoded) = match host.split_once('%') {
+        Some((host, _)) => (host, true),
+        None => (host, false),
+    };
+    let host = without_odd_port(host);
+    let after = tail.trim_start_matches(['/', '\\']);
+    let path = match !encoded && (after.is_empty() || tail.starts_with(['?', '#', ';'])) {
         true => "",
         false => "/…",
     };
     match scheme {
         Some(scheme) => format!("{scheme}://{host}{path}"),
         None => format!("{host}{path}"),
+    }
+}
+
+/// Whether `text` is spelt as a URL's scheme is: a letter, then letters,
+/// digits, `+`, `-` and `.`.
+fn is_scheme(text: &str) -> bool {
+    let mut chars = text.chars();
+    chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+}
+
+/// `host` with its port where the port is a number, and without it where it
+/// is anything else: what follows a `:` that is no port is a password.
+fn without_odd_port(host: &str) -> &str {
+    let Some((name, port)) = host.rsplit_once(':') else {
+        return host;
+    };
+    // The colons of a bracketed IPv6 address are not a port's.
+    if port.contains(']') {
+        return host;
+    }
+    match !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) {
+        true => host,
+        false => name,
     }
 }
 
@@ -9274,6 +9314,64 @@ error: could not compile `demo` (lib test) due to 1 previous error";
             mcp_status("reconnecting".to_owned()),
             McpStatus::Other("reconnecting".to_owned())
         );
+    }
+
+    /// The CLI reads an address as a browser does, where a `\` in an `http`
+    /// address separates the path as a `/` does, so the key a hosted server
+    /// keeps in its path is still the key behind one. Every form that does
+    /// not parse as a plain host keeps no more than the host either way.
+    #[test]
+    fn an_mcp_servers_address_keeps_no_secret_however_its_separators_are_spelt() {
+        let kept = |url: &str| without_secrets(url);
+        assert_eq!(
+            kept(r"https://actions.zapier.com\mcp\sk-ak-SECRET\sse"),
+            "https://actions.zapier.com/…"
+        );
+        assert_eq!(
+            kept(r"https://user:SECRET@host.example\mcp"),
+            "https://host.example/…"
+        );
+        assert_eq!(
+            kept(r"HTTPS://host.example\SECRET"),
+            "HTTPS://host.example/…"
+        );
+        assert_eq!(
+            kept(r"https:\\host.example\SECRET"),
+            "https://host.example/…"
+        );
+        assert_eq!(kept(r"host.example\SECRET"), "host.example/…");
+        // A password cut short by a separator is no port: the host before it
+        // is all that is kept.
+        assert_eq!(kept("https://user:SECRET/x@host/mcp"), "https://user/…");
+        assert_eq!(kept(r"https://user:SECRET\x@host"), "https://user/…");
+        assert_eq!(
+            kept("https://host.example:8443/mcp"),
+            "https://host.example:8443/…"
+        );
+        assert_eq!(kept("http://[::1]:9/mcp"), "http://[::1]:9/…");
+        // A separator written percent-encoded is not one to the CLI, which
+        // refuses the host; what follows the `%` is not kept.
+        assert_eq!(
+            kept("https://host.example%2Fmcp%2FSECRET"),
+            "https://host.example/…"
+        );
+        assert_eq!(
+            kept("https://us%40er:SE%40CRET@host.example?key=SECRET#SECRET"),
+            "https://host.example"
+        );
+        // What stands before `://` is a scheme only where it is spelt as one.
+        assert_eq!(kept("user:SECRET@host.example://mcp"), "host.example/…");
+        for url in [
+            r"https://actions.zapier.com\mcp\sk-ak-SECRET\sse",
+            "https://user:SECRET/x@host/mcp",
+            "https://host.example%2Fmcp%2FSECRET",
+            "user:SECRET@host.example://mcp",
+            "https://h?SECRET",
+            "https://h#SECRET",
+            "https://h;SECRET",
+        ] {
+            assert!(!kept(url).contains("SECRET"), "{url}: {}", kept(url));
+        }
     }
 
     #[test]
