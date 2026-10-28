@@ -104,6 +104,48 @@ fn a_reply_quoted_thousands_deep_redraws_inside_a_frame_budget() {
     );
 }
 
+/// How many links the paragraph of
+/// [`a_paragraph_of_thousands_of_links_redraws_inside_a_frame_budget`] holds,
+/// one to a line: a reply of 120 KB, which an agent listing the files it
+/// read can write.
+const LINKED_LINES: usize = 4000;
+
+/// A resize of a reply whose one paragraph is thousands of links, each
+/// on a line of its own with no blank line between, so every one of them is
+/// in the paragraph being gathered when it closes. Each link is drawn with
+/// where it leads unless its text already says so, which is worked out as it
+/// closes; a cost there that grows with the text gathered before it makes
+/// the paragraph cost the square of its length, on every delta while it
+/// streams.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "a frame is timed in an optimised build")]
+fn a_paragraph_of_thousands_of_links_redraws_inside_a_frame_budget() {
+    let _alone = ALONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut app = running_session();
+    let links: String = (0..LINKED_LINES)
+        .map(|n| format!("[file{n}.rs](crates/niobe-tui/src/file{n}.rs)\n"))
+        .collect();
+    app.apply(&Event::AssistantMessage {
+        text: format!("{links}last"),
+        agent: None,
+    });
+    let frame = screen(&mut app, 200, 60);
+    assert!(
+        frame.contains("file3999.rs) last"),
+        "the reply is drawn: {frame}"
+    );
+
+    let median = median_frame(&mut app, &[(200, 60), (180, 60)]);
+
+    assert!(
+        median <= FRAME_BUDGET,
+        "the median resized frame of a paragraph of {LINKED_LINES} links took {median:?}, over \
+         the {FRAME_BUDGET:?} budget"
+    );
+}
+
 /// The redraw every tick makes, ten a second, in a long session of replies in
 /// markdown. Each reply is parsed and wrapped once and drawn from what that
 /// made after, so a transcript that only grows costs a frame what its visible

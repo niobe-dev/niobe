@@ -663,7 +663,7 @@ Where tests live:
     `UPDATE_SNAPSHOTS=1 cargo test -p niobe-tui --test shell` and **read the diff** of the
     snapshot files before accepting it. The session both draw is in `tests/common/mod.rs`.
   - `niobe-tui/tests/frame_budget.rs` times a 200×60 resize, a resize of a reply quoted thousands
-    deep, and the steady redraw of a long session of markdown replies, against a 16 ms budget, and a long line typed or pasted into
+    deep, a resize of a paragraph of thousands of links, and the steady redraw of a long session of markdown replies, against a 16 ms budget, and a long line typed or pasted into
     the composer: a paste as long as the composer holds against 50 ms, a key typed into it
     against 16 ms, and keys read together against a linear ratio — and a
     100,000-line file written from scratch, applied and drawn against 50 ms — and a key in the

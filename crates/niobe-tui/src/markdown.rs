@@ -51,6 +51,55 @@ enum Spacing {
 /// What a table cell holds: its runs.
 type Cell = Vec<Run>;
 
+/// The runs of the block being drawn, and how many bytes of text they hold.
+///
+/// The length is kept as runs are added rather than summed when asked: it
+/// is asked as every link and image opens, and a paragraph of thousands of
+/// links would sum every run before each one.
+#[derive(Debug, Default)]
+struct Gathered {
+    runs: Vec<Run>,
+    len: usize,
+}
+
+impl Gathered {
+    /// Adds `text` in `style`, to the last run where it is drawn alike.
+    fn push(&mut self, text: &str, style: Style, spacing: Spacing) {
+        self.len = self.len.saturating_add(text.len());
+        match self.runs.last_mut() {
+            Some((last, last_style, last_spacing))
+                if *last_style == style && *last_spacing == spacing =>
+            {
+                last.push_str(text);
+            }
+            _ => self.runs.push((text.to_owned(), style, spacing)),
+        }
+    }
+
+    /// The runs gathered, leaving none.
+    fn take(&mut self) -> Vec<Run> {
+        self.len = 0;
+        std::mem::take(&mut self.runs)
+    }
+
+    /// The text gathered after the first `at` bytes, read from the last run
+    /// back so that it costs what that text is, not what came before it.
+    /// `None` where `at` is past the text or inside a character.
+    fn since(&self, at: usize) -> Option<String> {
+        let mut left = self.len.checked_sub(at)?;
+        let mut pieces = Vec::new();
+        for (text, _, _) in self.runs.iter().rev() {
+            if left == 0 {
+                break;
+            }
+            let start = text.len().saturating_sub(left);
+            pieces.push(text.get(start..)?);
+            left = left.saturating_sub(text.len());
+        }
+        Some(pieces.into_iter().rev().collect())
+    }
+}
+
 /// The gutter a code block's lines sit behind.
 const CODE_GUTTER: &str = "│ ";
 
@@ -172,7 +221,7 @@ struct Renderer<'t> {
     theme: &'t Theme,
     lines: Vec<Line<'static>>,
     /// The paragraph, heading or list item text being gathered.
-    runs: Vec<Run>,
+    runs: Gathered,
     /// The inline style in force, innermost last.
     styles: Vec<Style>,
     indents: Vec<Indent>,
@@ -196,7 +245,7 @@ impl<'t> Renderer<'t> {
             width,
             theme,
             lines: Vec::new(),
-            runs: Vec::new(),
+            runs: Gathered::default(),
             styles: vec![Style::new().fg(theme.fg)],
             indents: Vec::new(),
             items: 0,
@@ -421,7 +470,7 @@ impl<'t> Renderer<'t> {
                 self.items = self.items.saturating_sub(1);
             }
             TagEnd::TableCell => {
-                let cell = std::mem::take(&mut self.runs);
+                let cell = self.runs.take();
                 if let Some(table) = &mut self.table {
                     table.row.push(cell);
                 }
@@ -460,13 +509,8 @@ impl<'t> Renderer<'t> {
         }
     }
 
-    /// How much text has been gathered for the block being drawn.
-    fn gathered(&self) -> usize {
-        self.runs.iter().map(|(text, _, _)| text.len()).sum()
-    }
-
     fn open_destination(&mut self, destination: &str) {
-        let at = self.gathered();
+        let at = self.runs.len;
         self.destinations.push((destination.to_owned(), at));
     }
 
@@ -477,11 +521,8 @@ impl<'t> Renderer<'t> {
         let Some((destination, at)) = self.destinations.pop() else {
             return;
         };
-        let said: String = self.runs.iter().map(|(text, _, _)| text.as_str()).collect();
-        let own = said
-            .get(at..)
-            .unwrap_or_default()
-            .trim_start_matches(IMAGE_MARK);
+        let said = self.runs.since(at).unwrap_or_default();
+        let own = said.trim_start_matches(IMAGE_MARK);
         if destination.is_empty() || own == destination {
             return;
         }
@@ -494,14 +535,7 @@ impl<'t> Renderer<'t> {
     }
 
     fn run(&mut self, text: &str, style: Style, spacing: Spacing) {
-        match self.runs.last_mut() {
-            Some((last, last_style, last_spacing))
-                if *last_style == style && *last_spacing == spacing =>
-            {
-                last.push_str(text);
-            }
-            _ => self.runs.push((text.to_owned(), style, spacing)),
-        }
+        self.runs.push(text, style, spacing);
     }
 
     /// Puts a blank line before a block, unless it opens the reply, follows a
@@ -543,7 +577,7 @@ impl<'t> Renderer<'t> {
 
     /// Wraps the gathered runs and emits them.
     fn flush(&mut self) {
-        let runs = std::mem::take(&mut self.runs);
+        let runs = self.runs.take();
         for line in wrap_runs(&runs, self.room()) {
             self.emit(line);
         }
@@ -1404,6 +1438,31 @@ mod tests {
         );
         let bare = drawn("---", 20);
         assert_eq!(text::width(&bare[0]), 20, "{bare:?}");
+    }
+
+    #[test]
+    fn the_text_gathered_since_a_point_reads_back_across_runs_from_the_end() {
+        let mut gathered = Gathered::default();
+        gathered.push("see ", Style::new(), Spacing::Collapsed);
+        gathered.push("日本", Style::new().bold(), Spacing::Collapsed);
+        gathered.push("`x`", Style::new(), Spacing::Kept);
+        assert_eq!(gathered.since(0).as_deref(), Some("see 日本`x`"));
+        assert_eq!(gathered.since(4).as_deref(), Some("日本`x`"));
+        assert_eq!(gathered.since(7).as_deref(), Some("本`x`"));
+        assert_eq!(gathered.since(13).as_deref(), Some(""));
+        assert_eq!(gathered.since(5), None, "inside a character");
+        assert_eq!(gathered.since(14), None, "past the text");
+        assert!(gathered.take().len() == 3 && gathered.since(0).as_deref() == Some(""));
+    }
+
+    #[test]
+    fn a_link_whose_text_is_its_destination_says_it_once_however_much_came_before() {
+        let source: String = (0..50)
+            .map(|n| format!("[f{n}](f{n}) [a{n}](b{n})\n"))
+            .collect();
+        let drawn = drawn(&source, 4000).concat();
+        assert!(drawn.starts_with("f0 a0 (b0) f1 a1 (b1)"), "{drawn}");
+        assert!(drawn.ends_with("f49 a49 (b49)"), "{drawn}");
     }
 
     #[test]
