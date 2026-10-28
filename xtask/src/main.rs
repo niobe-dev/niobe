@@ -342,17 +342,21 @@ fn headers() -> Result<(), String> {
 /// `HACK` or `XXX`.
 fn audit() -> Result<(), String> {
     let listing = published_files()?;
+    let tree: Vec<&str> = listing
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .collect();
 
     let mut swept = 0;
     let mut marks = Vec::new();
-    for path in listing.split('\0').filter(|path| audit::swept(path)) {
+    for path in tree.iter().copied().filter(|path| audit::swept(path)) {
         let source = match std::fs::read_to_string(workspace_root().join(path)) {
             Ok(source) => source,
             Err(e) if e.kind() == ErrorKind::NotFound => continue,
             Err(e) => return Err(format!("cannot read {path}: {e}")),
         };
         swept += 1;
-        marks.extend(audit::marks_in(path, &source));
+        marks.extend(audit::marks_in(path, &source, &tree));
     }
 
     if marks.is_empty() {

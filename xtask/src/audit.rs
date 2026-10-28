@@ -20,7 +20,9 @@ pub fn swept(path: &str) -> bool {
 }
 
 /// Every mark in `source`, each as `path:line: what`, in file order.
-pub fn marks_in(path: &str, source: &str) -> Vec<String> {
+/// `tree` is every file git would publish, relative to the workspace root:
+/// the files a `§` may name.
+pub fn marks_in(path: &str, source: &str, tree: &[&str]) -> Vec<String> {
     source
         .lines()
         .enumerate()
@@ -30,7 +32,7 @@ pub fn marks_in(path: &str, source: &str) -> Vec<String> {
             if is_banner(text) {
                 found.push(format!("{path}:{line}: section banner"));
             }
-            if names_planning(text) {
+            if names_planning(text, tree) {
                 found.push(format!(
                     "{path}:{line}: reference to planning outside the repository"
                 ));
@@ -63,9 +65,9 @@ fn is_banner(text: &str) -> bool {
 }
 
 /// Whether the comment names planning that lives outside the repository: a
-/// `§` after anything but a file in the tree, a task or phase number, a
+/// `§` after anything but a file in `tree`, a task or phase number, a
 /// milestone, a ticket, or a priority label.
-fn names_planning(text: &str) -> bool {
+fn names_planning(text: &str, tree: &[&str]) -> bool {
     let section_outside_a_file = text
         .split('§')
         .take(text.matches('§').count())
@@ -73,7 +75,7 @@ fn names_planning(text: &str) -> bool {
             !before
                 .split_whitespace()
                 .next_back()
-                .is_some_and(|word| word.ends_with(".md"))
+                .is_some_and(|word| names_a_file_in(word, tree))
         });
 
     let words: Vec<&str> = text
@@ -96,6 +98,22 @@ fn names_planning(text: &str) -> bool {
         || priority
 }
 
+/// Whether `word`, with the punctuation prose puts around a name taken off,
+/// is a file in `tree`, by its path from the root or by the end of one. A
+/// document that merely looks like one — `VISION.md`, `AGENTS.local.md` —
+/// is the private planning the rule keeps out.
+fn names_a_file_in(word: &str, tree: &[&str]) -> bool {
+    let name =
+        word.trim_matches(|c| matches!(c, '(' | ')' | '[' | ']' | '`' | '"' | '\'' | '*' | ','));
+    !name.is_empty()
+        && tree.iter().any(|path| {
+            *path == name
+                || path
+                    .strip_suffix(name)
+                    .is_some_and(|parent| parent.ends_with('/'))
+        })
+}
+
 /// Whether the comment marks a gap with a word that says nothing about it.
 fn marks_a_gap(text: &str) -> bool {
     text.split(|c: char| !c.is_alphanumeric())
@@ -106,8 +124,16 @@ fn marks_a_gap(text: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// The files the comments under test may name a section of.
+    const TREE: &[&str] = &[
+        "AGENTS.md",
+        "PRINCIPLES.md",
+        "crates/niobe-core/src/x.rs",
+        "crates/niobe-core/tests/fixtures/README.md",
+    ];
+
     fn marks(source: &str) -> Vec<String> {
-        marks_in("crates/niobe-core/src/x.rs", source)
+        marks_in("crates/niobe-core/src/x.rs", source, TREE)
     }
 
     #[test]
@@ -148,9 +174,20 @@ mod tests {
     }
 
     #[test]
+    fn a_section_of_a_document_that_is_not_in_the_tree_is_a_mark() {
+        assert_eq!(
+            marks("// the order VISION.md §2 sets\n"),
+            ["crates/niobe-core/src/x.rs:1: reference to planning outside the repository"]
+        );
+        assert_eq!(marks("/// as AGENTS.local.md §1 says\n").len(), 1);
+        assert_eq!(marks("// (docs/AGENTS.md §3)\n").len(), 1);
+    }
+
+    #[test]
     fn a_section_of_a_file_in_the_tree_may_be_named() {
         assert!(marks("// the rule a test may `expect` under (AGENTS.md §3)\n").is_empty());
         assert!(marks("/// PRINCIPLES.md §4 says why.\n").is_empty());
+        assert!(marks("// `AGENTS.md` §6 and fixtures/README.md §2\n").is_empty());
         assert!(marks("// the task the loop hands the journal\n").is_empty());
         assert!(marks("// a multitasking terminal\n").is_empty());
         assert!(marks("// the phases of the moon\n").is_empty());
