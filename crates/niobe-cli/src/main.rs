@@ -1208,10 +1208,19 @@ fn run_bench(
                 .map(|name| name.to_string_lossy().into_owned())
         })
         .unwrap_or_else(|| suite.display().to_string());
+    // Caught, so that a job's timeout or Ctrl+C ends the task's turn running
+    // then, and the CLI under it, rather than leave them running with no
+    // deadline once the bench is gone; see `bench::run`.
+    let signals = signals::Signals::watch()
+        .map_err(|error| format!("the signals that stop a bench could not be caught: {error}"))?;
+    let stopped = || signals.received();
 
     let Some(technique) = ab else {
         let started_at = SystemTime::now();
-        let ran = run_suite(&exe, &tasks, &flags, timeout, "");
+        let ran = match run_suite(&exe, &tasks, &flags, timeout, "", &stopped) {
+            Ok(ran) => ran,
+            Err(status) => return Ok(status),
+        };
         match json {
             true => say!(
                 "{}",
@@ -1231,9 +1240,15 @@ fn run_bench(
         flags
     };
     let started_without = SystemTime::now();
-    let without = run_suite(&exe, &tasks, &side(false), timeout, "without-");
+    let without = match run_suite(&exe, &tasks, &side(false), timeout, "without-", &stopped) {
+        Ok(ran) => ran,
+        Err(status) => return Ok(status),
+    };
     let started_with = SystemTime::now();
-    let with = run_suite(&exe, &tasks, &side(true), timeout, "with-");
+    let with = match run_suite(&exe, &tasks, &side(true), timeout, "with-", &stopped) {
+        Ok(ran) => ran,
+        Err(status) => return Ok(status),
+    };
     match json {
         true => say!(
             "{}",
@@ -1279,13 +1294,18 @@ fn bench_runs_turns(profile: Option<&str>) -> Result<(), String> {
 
 /// Every task of a suite, run in turn with `flags`, each saying on standard
 /// error which it is as it starts.
+///
+/// A signal that stops the bench stops it at the task running then: where
+/// that task's copy is kept is said, and the bench ends by that signal, as it
+/// would have uncaught, with no results printed.
 fn run_suite(
     exe: &Path,
     tasks: &[bench::Task],
     flags: &[String],
     timeout: Duration,
     side: &str,
-) -> Vec<bench::Ran> {
+    stopped: bench::Stopped,
+) -> Result<Vec<bench::Ran>, u8> {
     let mut ran = Vec::with_capacity(tasks.len());
     for (number, task) in tasks.iter().enumerate() {
         note(&format!(
@@ -1294,9 +1314,24 @@ fn run_suite(
             tasks.len(),
             task.name
         ));
-        ran.push(bench::run(exe, task, flags, timeout, side));
+        let task = bench::run(exe, task, flags, timeout, side, stopped);
+        if let Some(signal) = stopped() {
+            let kept = task
+                .kept
+                .as_ref()
+                .map(|kept| format!("; its copy is kept at {}", kept.display()))
+                .unwrap_or_default();
+            note(&format!(
+                "{} stopped the bench at {side}{}{kept}",
+                signal.name(),
+                task.name
+            ));
+            signals::end_by(signal);
+            return Err(signal.status());
+        }
+        ran.push(task);
     }
-    ran
+    Ok(ran)
 }
 
 /// Says something the operator is owed knowing on standard error, where a

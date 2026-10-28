@@ -16,8 +16,10 @@
 //!
 //! Each turn is its own `niobe -p` process, so a bench measures exactly what
 //! a job running `-p` would get, and a turn that never ends is ended at the
-//! deadline without the bench having to reach into a backend. Nothing here is
-//! an estimate: the figures are the ones each turn's `--json` printed.
+//! deadline without the bench having to reach into a backend. A SIGTERM or
+//! SIGINT that stops the bench is passed to the turn running then, which
+//! ends with its backend before the bench ends by that signal. Nothing here
+//! is an estimate: the figures are the ones each turn's `--json` printed.
 
 use std::fs;
 use std::io::{self, Read};
@@ -29,6 +31,7 @@ use std::time::{Duration, Instant, SystemTime};
 use serde_json::{Value, json};
 
 use crate::cost::rfc3339;
+use crate::signals::Stopping;
 use crate::summary::grouped;
 
 /// The version of the JSON's shape, which `schema/bench.schema.json` names.
@@ -45,6 +48,14 @@ const CHECK_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// How often a running process is looked at.
 const POLL: Duration = Duration::from_millis(20);
+
+/// How long a turn passed the signal that stopped the bench is given to end
+/// by itself: `niobe -p` gives its backend three seconds to close, then saves
+/// the turn and reports it.
+const STOP_GRACE: Duration = Duration::from_secs(5);
+
+/// Whether a signal has asked the bench to stop, and which.
+pub type Stopped<'a> = &'a dyn Fn() -> Option<Stopping>;
 
 /// A technique `--ab` measures: the suite run without it, then with it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -181,7 +192,18 @@ fn prompt_of(text: &str) -> String {
 ///
 /// `side` tells this run's copies from another's in the same bench, so that
 /// an `--ab` run's second pass does not clear a copy its first one kept.
-pub fn run(exe: &Path, task: &Task, flags: &[String], timeout: Duration, side: &str) -> Ran {
+///
+/// A signal `stopped` reports ends the turn, or the check, where it stands:
+/// the turn is passed the signal, as `niobe -p` run on its own would have
+/// been, and the task does not pass, so its copy is kept.
+pub fn run(
+    exe: &Path,
+    task: &Task,
+    flags: &[String],
+    timeout: Duration,
+    side: &str,
+    stopped: Stopped,
+) -> Ran {
     let work = scratch(&format!("{side}{}", task.name));
     let started = Instant::now();
     let laid_out = lay_out(&task.dir.join("files"), &work).and_then(|()| work.canonicalize());
@@ -193,12 +215,14 @@ pub fn run(exe: &Path, task: &Task, flags: &[String], timeout: Duration, side: &
                     flags.extend(["--allow".to_owned(), rule]);
                 }
             }
-            turn(exe, &work, &task.prompt, &flags, timeout)
+            turn(exe, &work, &task.prompt, &flags, timeout, stopped)
         }
         Err(e) => Ended::Unreported(format!("the task's files could not be laid out: {e}")),
     };
     let wall = started.elapsed();
-    let passed = !matches!(ended, Ended::TimedOut) && checks(&task.dir.join("check.sh"), &work);
+    let passed = !matches!(ended, Ended::TimedOut)
+        && stopped().is_none()
+        && checks(&task.dir.join("check.sh"), &work, stopped);
     let kept = match passed {
         true => {
             let _ = fs::remove_dir_all(&work);
@@ -289,8 +313,22 @@ fn copy_tree(from: &Path, to: &Path) -> io::Result<()> {
 }
 
 /// Runs one `niobe -p` turn in `work` and reads its report.
-fn turn(exe: &Path, work: &Path, prompt: &str, flags: &[String], timeout: Duration) -> Ended {
-    let spawned = Command::new(exe)
+///
+/// The turn runs in a process group of its own, so that a signal meant for
+/// the bench — Ctrl+C at a terminal, a job runner's timeout sent to the
+/// bench's group — reaches the turn once, from the bench, rather than twice,
+/// which `niobe -p` reads as being told to end at once without saving.
+fn turn(
+    exe: &Path,
+    work: &Path,
+    prompt: &str,
+    flags: &[String],
+    timeout: Duration,
+    stopped: Stopped,
+) -> Ended {
+    let mut command = Command::new(exe);
+    own_group(&mut command);
+    let spawned = command
         .args(["-p", prompt, "--json"])
         .args(flags)
         .current_dir(work)
@@ -306,20 +344,28 @@ fn turn(exe: &Path, work: &Path, prompt: &str, flags: &[String], timeout: Durati
     // hold the turn up on its last write.
     let stdout = drain(child.stdout.take());
     let stderr = drain(child.stderr.take());
-    let status = ended_by(&mut child, timeout);
+    let waited = ended_by(&mut child, timeout, stopped);
     let (stdout, stderr) = (joined(stdout), joined(stderr));
-    match status {
-        None => Ended::TimedOut,
-        Some(_) => match serde_json::from_slice::<Value>(&stdout) {
+    match waited {
+        Waited::Deadline => Ended::TimedOut,
+        Waited::Exited(_) | Waited::Stopped => match serde_json::from_slice::<Value>(&stdout) {
             Ok(report) if report.is_object() => Ended::Reported(report),
             _ => Ended::Unreported(last_line(&stderr)),
         },
     }
 }
 
+#[cfg(unix)]
+fn own_group(command: &mut Command) {
+    std::os::unix::process::CommandExt::process_group(command, 0);
+}
+
+#[cfg(not(unix))]
+fn own_group(_command: &mut Command) {}
+
 /// Whether the check at `check` passes in `work`: `sh` runs it there and
-/// exits 0 within its deadline.
-fn checks(check: &Path, work: &Path) -> bool {
+/// exits 0 within its deadline, and no signal stopped the bench meanwhile.
+fn checks(check: &Path, work: &Path, stopped: Stopped) -> bool {
     Command::new("sh")
         .arg(check)
         .current_dir(work)
@@ -328,11 +374,27 @@ fn checks(check: &Path, work: &Path) -> bool {
         .stderr(Stdio::null())
         .spawn()
         .ok()
-        .and_then(|mut child| ended_by(&mut child, CHECK_TIMEOUT))
-        .is_some_and(|status| status.success())
+        .map(|mut child| ended_by(&mut child, CHECK_TIMEOUT, stopped))
+        .is_some_and(|waited| match waited {
+            Waited::Exited(status) => status.success() && stopped().is_none(),
+            Waited::Deadline | Waited::Stopped => false,
+        })
 }
 
-/// How `child` ended, or `None` where it ran past `timeout` and was killed.
+/// How a process the bench waited on ended.
+#[derive(Debug)]
+enum Waited {
+    /// By itself, with this status.
+    Exited(ExitStatus),
+    /// It ran past its deadline and was killed.
+    Deadline,
+    /// A signal stopped the bench, which passed it on, and the process ended
+    /// on it or was killed when it had not within [`STOP_GRACE`].
+    Stopped,
+}
+
+/// How `child` ended: by itself, at `timeout`, or on the signal `stopped`
+/// reports, which it is passed.
 ///
 /// A `niobe` killed here takes its backend with it: the reaper it starts ends
 /// every process group it was told of once the pipe the killed process held
@@ -340,22 +402,67 @@ fn checks(check: &Path, work: &Path) -> bool {
 ///
 /// A `timeout` too long for the clock to hold — `--timeout` takes any whole
 /// number of seconds — is no deadline at all, rather than a panic.
-fn ended_by(child: &mut Child, timeout: Duration) -> Option<ExitStatus> {
+fn ended_by(child: &mut Child, timeout: Duration, stopped: Stopped) -> Waited {
     let deadline = Instant::now().checked_add(timeout);
     loop {
+        if let Some(signal) = stopped() {
+            pass_on(child, signal);
+            return match wait_for(child, STOP_GRACE) {
+                Some(_) => Waited::Stopped,
+                None => {
+                    end(child);
+                    Waited::Stopped
+                }
+            };
+        }
         match child.try_wait() {
-            Ok(Some(status)) => return Some(status),
+            Ok(Some(status)) => return Waited::Exited(status),
             Ok(None) if deadline.is_none_or(|deadline| Instant::now() < deadline) => {
                 std::thread::sleep(POLL)
             }
             Ok(None) | Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
+                end(child);
+                return Waited::Deadline;
             }
         }
     }
 }
+
+/// How `child` ended, where it did within `grace`.
+fn wait_for(child: &mut Child, grace: Duration) -> Option<ExitStatus> {
+    let until = Instant::now() + grace;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status),
+            Ok(None) if Instant::now() < until => std::thread::sleep(POLL),
+            Ok(None) | Err(_) => return None,
+        }
+    }
+}
+
+fn end(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// Sends `child` the signal that stopped the bench.
+#[cfg(unix)]
+fn pass_on(child: &Child, signal: Stopping) {
+    let signal = match signal {
+        Stopping::Terminated => rustix::process::Signal::TERM,
+        Stopping::Interrupted => rustix::process::Signal::INT,
+    };
+    let pid = i32::try_from(child.id())
+        .ok()
+        .and_then(rustix::process::Pid::from_raw);
+    if let Some(pid) = pid {
+        // A process that has already ended is what was wanted.
+        let _ = rustix::process::kill_process(pid, signal);
+    }
+}
+
+#[cfg(not(unix))]
+fn pass_on(_child: &Child, _signal: Stopping) {}
 
 fn drain(pipe: Option<impl Read + Send + 'static>) -> Option<JoinHandle<Vec<u8>>> {
     pipe.map(|mut pipe| {
@@ -653,8 +760,11 @@ mod tests {
         let mut child = Command::new("true")
             .spawn()
             .expect("`true` is on every unix PATH");
-        let status = ended_by(&mut child, Duration::from_secs(u64::MAX));
-        assert!(status.is_some_and(|status| status.success()), "{status:?}");
+        let waited = ended_by(&mut child, Duration::from_secs(u64::MAX), &|| None);
+        assert!(
+            matches!(&waited, Waited::Exited(status) if status.success()),
+            "{waited:?}"
+        );
     }
 
     #[test]

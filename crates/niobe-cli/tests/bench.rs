@@ -102,7 +102,12 @@ impl Setup {
     }
 
     fn bench(&self, args: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_niobe"))
+        self.command(args).output().expect("the niobe binary runs")
+    }
+
+    fn command(&self, args: &[&str]) -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_niobe"));
+        command
             .arg("bench")
             // Named as typed, relative to where niobe runs, which is not
             // where each check runs.
@@ -115,9 +120,8 @@ impl Setup {
             .env(
                 "PATH",
                 format!("{}:/bin:/usr/bin", self.dir.path().join("bin").display()),
-            )
-            .output()
-            .expect("the niobe binary runs")
+            );
+        command
     }
 }
 
@@ -309,6 +313,77 @@ fn a_turn_that_never_ends_is_ended_at_its_deadline_and_takes_its_cli_with_it() {
     if let Some(kept) = task["kept"].as_str() {
         let _ = std::fs::remove_dir_all(kept);
     }
+}
+
+/// A job runner's timeout, or `kill`, signals the bench alone. The turn it
+/// was running, and the CLI under that, end with it rather than run on with
+/// no deadline and nobody reading what they report.
+#[test]
+fn a_bench_ended_by_sigterm_takes_the_running_turn_and_its_cli_with_it() {
+    let setup = Setup::new("");
+    let pid_file = setup.dir.path().join("claude.pid");
+    executable(
+        &setup.dir.path().join("bin").join("claude"),
+        &format!(
+            "#!/bin/sh\necho $$ > '{}'\nwhile read -r line; do :; done\n",
+            pid_file.display()
+        ),
+    );
+    setup.task("hangs", "done.txt");
+    let mut bench = setup
+        .command(&["--json", "--timeout", "600"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the niobe binary runs");
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let pid = loop {
+        match std::fs::read_to_string(&pid_file) {
+            Ok(pid) if !pid.trim().is_empty() => break pid.trim().to_owned(),
+            _ => {
+                assert!(Instant::now() < deadline, "the stand-in claude never ran");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+    };
+    let sent = Command::new("kill")
+        .args(["-TERM", &bench.id().to_string()])
+        .status()
+        .expect("kill runs");
+    assert!(sent.success());
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let status = loop {
+        if let Some(status) = bench.try_wait().expect("the bench can be waited on") {
+            break status;
+        }
+        assert!(Instant::now() < deadline, "the bench outlived its SIGTERM");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    use std::os::unix::process::ExitStatusExt;
+    assert_eq!(status.signal(), Some(15), "{status:?}");
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while alive(&pid) {
+        if Instant::now() >= deadline {
+            let _ = Command::new("kill").args(["-KILL", &pid]).status();
+            panic!("the stand-in claude outlived the bench a SIGTERM ended");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let mut said = String::new();
+    std::io::Read::read_to_string(
+        bench.stderr.as_mut().expect("standard error is piped"),
+        &mut said,
+    )
+    .expect("standard error reads");
+    let kept = said
+        .lines()
+        .find_map(|line| line.split_once("kept at ").map(|(_, at)| at.to_owned()))
+        .unwrap_or_else(|| panic!("the stopped task's copy is named: {said}"));
+    assert!(Path::new(&kept).join("README").exists(), "{said}");
+    let _ = std::fs::remove_dir_all(kept);
 }
 
 #[test]
