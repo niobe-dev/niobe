@@ -715,11 +715,32 @@ impl SessionState {
         if let Event::PromptNotSent { .. } | Event::Looked = event {
             return;
         }
+        if self.opens_a_turn(event) {
+            self.turn_running = true;
+        }
         self.fold(event);
         self.ended_last = matches!(
             event,
             Event::TurnEnded | Event::Error { fatal: true, .. } | Event::SessionLeft
         );
+    }
+
+    /// Whether `event` is the first anyone hears of a turn no prompt
+    /// opened: the session's own agent answering or calling a tool while no
+    /// turn runs. The backend starts such a turn of itself when a sub-agent
+    /// or a command it left in the background ends and it is told so. Its
+    /// beginning is not marked, so the turn is counted, as one the fold never
+    /// saw begin, from where the last one ended. A sub-agent working on after
+    /// its turn ended opens nothing, and nor does the reply in the turn that
+    /// typed a clear, which is no turn of the conversation it starts.
+    fn opens_a_turn(&self, event: &Event) -> bool {
+        let answers = matches!(
+            event,
+            Event::AssistantDelta { .. }
+                | Event::AssistantMessage { agent: None, .. }
+                | Event::ToolCallStart { agent: None, .. }
+        );
+        answers && !self.turn_running && !self.clear_open
     }
 
     fn fold(&mut self, event: &Event) {
@@ -1491,6 +1512,8 @@ impl SessionState {
 
     /// Whether the backend is still answering the last prompt: from the prompt
     /// until [`Event::TurnEnded`], or a fatal error ends the session under it.
+    /// A turn the backend starts of itself, with no prompt, runs from the
+    /// first word or call of the session's own agent after the last end.
     ///
     /// A log recorded by a backend that never reports a turn's end leaves its
     /// last turn running here; whether that turn is running *now* is a question
@@ -4398,6 +4421,54 @@ mod tests {
             Event::TurnEnded,
         ]);
         assert_eq!(state.turns().len(), 2, "{:?}", state.turns());
+    }
+
+    /// The backend starts a turn of its own when a background sub-agent or
+    /// command it was told of ends: no prompt opens it, and the agent's words
+    /// and calls are the first anyone hears of it. A sub-agent still working
+    /// after the turn ended is not that turn.
+    #[test]
+    fn the_agent_answering_after_its_turn_ended_with_no_prompt_is_a_turn_running() {
+        let mut state = SessionState::replay(&[prompt(), cached(100, 10, 0, 0), Event::TurnEnded]);
+        state.apply(&Event::AssistantMessage {
+            text: "still reviewing".to_owned(),
+            agent: Some(AgentId::new("toolu_a")),
+        });
+        assert!(!state.turn_running(), "a sub-agent's words opened a turn");
+
+        state.apply(&cached(50, 0, 0, 0));
+        state.apply(&Event::AssistantDelta {
+            text: "The review".to_owned(),
+        });
+        assert!(state.turn_running(), "the agent answers and nothing runs");
+
+        state.apply(&cached(0, 20, 0, 0));
+        state.apply(&Event::TurnEnded);
+        assert!(!state.turn_running());
+        let turns: Vec<(u64, Option<u64>)> = state
+            .turns()
+            .iter()
+            .map(|turn| (turn.number, turn.tokens))
+            .collect();
+        assert_eq!(turns, [(1, Some(110)), (2, Some(70))]);
+
+        for opens in [
+            Event::AssistantMessage {
+                text: "done".to_owned(),
+                agent: None,
+            },
+            Event::ToolCallStart {
+                id: ToolCallId::new("t9"),
+                name: "Read".to_owned(),
+                input: "{}".to_owned(),
+                summary: None,
+                agent: None,
+            },
+        ] {
+            let mut state = SessionState::replay(&[prompt(), Event::TurnEnded]);
+            state.apply(&opens);
+            assert!(state.turn_running(), "{opens:?} opened no turn");
+        }
     }
 
     #[test]

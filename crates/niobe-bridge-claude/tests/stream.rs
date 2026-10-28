@@ -2598,6 +2598,31 @@ mod background {
         );
     }
 
+    /// The README's three `result`s for one prompt: the prompt's turn, then
+    /// one the CLI started of itself for each command's end. Each of the two
+    /// is a turn running from its reply to its `result`, so the shell shows
+    /// the agent working while it answers rather than sitting idle.
+    #[test]
+    fn each_turn_a_background_commands_end_starts_runs_until_its_result() {
+        let mut state = SessionState::new();
+        state.apply(&Event::UserMessage {
+            text: "run both in the background".to_owned(),
+        });
+        let mut began = 1;
+        let mut running = true;
+        for event in events() {
+            state.apply(&event);
+            if state.turn_running() && !running {
+                began += 1;
+            }
+            running = state.turn_running();
+        }
+
+        assert_eq!(began, 3, "the turns seen running");
+        assert_eq!(state.turns().len(), 3);
+        assert!(!state.turn_running(), "the last result ended its turn");
+    }
+
     #[test]
     fn a_command_put_in_the_background_names_no_status_on_its_call() {
         let statuses: Vec<Option<i32>> = events()

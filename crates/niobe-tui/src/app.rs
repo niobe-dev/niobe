@@ -13130,6 +13130,43 @@ mod tests {
         assert_eq!(app.take_alert(), None, "the same end rang twice");
     }
 
+    /// The backend answers of itself once a sub-agent or a command it left
+    /// in the background ends: that turn is the agent working, which the
+    /// operator can see, stop, queue a prompt behind and be called back from.
+    #[test]
+    fn a_turn_the_backend_starts_of_itself_is_shown_working_and_calls_back_at_its_end() {
+        use ratatui::crossterm::event::KeyCode;
+        let mut app = sent(app().attached(), "go");
+        app.said();
+        assert_eq!(app.take_alert(), None);
+        app.apply(&Event::TurnEnded);
+        assert_eq!(app.take_alert(), Some(Alert::TurnEnded));
+        assert!(app.activity().is_none());
+
+        app.apply(&Event::AssistantDelta {
+            text: "The background command finished".to_owned(),
+        });
+        assert!(
+            app.activity().is_some(),
+            "the agent answers and the shell shows it idle"
+        );
+        assert_eq!(app.take_alert(), None);
+
+        let mut app = sent(app, "and then?");
+        assert_eq!(
+            app.session().turns().len(),
+            1,
+            "a prompt sent while it answers ended its turn"
+        );
+        app.said();
+        app.on_key(key(KeyCode::Esc));
+        assert!(app.take_interrupt(), "Esc did not stop the turn");
+
+        app.apply(&Event::TurnEnded);
+        assert_eq!(app.take_alert(), None, "the operator stopped it");
+        assert_eq!(app.session().turns().len(), 2);
+    }
+
     #[test]
     fn a_turn_the_operator_stopped_ends_without_calling_them_back() {
         use ratatui::crossterm::event::KeyCode;
