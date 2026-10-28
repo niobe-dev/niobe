@@ -5234,6 +5234,10 @@ impl App {
     /// Replaces the "Reconnecting" hint with what the backend answered: the
     /// failure it gave, or how the server stands in the report that follows.
     /// A hint a key has already replaced is left alone.
+    ///
+    /// A refusal arrives as the warning the bridge says it with, and is the
+    /// answer: the report asked after it names the failure the server was
+    /// holding, which need not be why it could not be connected again.
     fn reconnect_answered(&mut self, event: &Event) {
         let Some(server) = self.reconnecting.clone() else {
             return;
@@ -5243,7 +5247,7 @@ impl App {
             return;
         }
         match event {
-            Event::Notice { message }
+            Event::Error { message, .. }
                 if message.contains(&format!("`{server}`"))
                     && message.contains("could not be reconnected") =>
             {
@@ -19448,14 +19452,44 @@ mod tests {
             app.hint()
         );
 
-        app.apply(&Event::Notice {
+        // As the Claude bridge says a refused reconnect: a warning, not a
+        // notice (`tests/stream.rs` in that crate reads it from a recording).
+        app.apply(&Event::Error {
             message: "the MCP server `remote docs` could not be reconnected: ECONNREFUSED"
                 .to_owned(),
+            fatal: false,
         });
 
         let hint = app.hint().expect("the answer is on the bar");
         assert!(!hint.contains("Reconnecting"), "{hint}");
         assert!(hint.contains("ECONNREFUSED"), "{hint}");
+    }
+
+    #[test]
+    fn a_refused_reconnect_is_not_answered_by_the_report_of_the_server_as_it_stood() {
+        let mut app = with_mcp_servers();
+        app.on_key(key(KeyCode::F(7)));
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Char('r')));
+        app.apply(&Event::Error {
+            message: "the MCP server `remote docs` could not be reconnected: \
+                      ENOENT: no such file or directory"
+                .to_owned(),
+            fatal: false,
+        });
+
+        // The report asked after the refusal names the failure the server was
+        // already holding, which is not why the reconnect failed.
+        app.apply(&Event::McpServers {
+            servers: vec![mcp_server(
+                "remote docs",
+                niobe_core::event::McpStatus::Failed,
+                &[],
+            )],
+        });
+
+        let hint = app.hint().expect("the answer is on the bar");
+        assert!(hint.contains("ENOENT"), "{hint}");
     }
 
     #[test]
