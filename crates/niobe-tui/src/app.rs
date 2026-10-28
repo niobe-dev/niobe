@@ -4189,6 +4189,14 @@ impl App {
         };
         let fresh = |since: Instant| self.repo.read && self.repo.began.is_some_and(|b| b >= since);
         let turn_over = ended > watch.ended_before;
+        // The turn that typed a clear ends recording no turn, so the count
+        // never moves for it. Kept, the watch would outlive it and hold the
+        // tree as it stood then against the end of the next turn, naming
+        // whatever changed between the two as that turn's doing.
+        if !turn_over && !self.session.turn_running() {
+            self.tree_watch = None;
+            return false;
+        }
         if watch.before.is_none() && !turn_over && fresh(watch.asked) {
             watch.before = Some(self.repo.working.clone());
         }
@@ -13882,6 +13890,47 @@ mod tests {
             "{}",
             said[0].body
         );
+    }
+
+    /// The turn that typed a clear ends as no turn of the new conversation,
+    /// and its end can come in a later tick than the clear: the tree read
+    /// while it ran is no turn's start, and what the operator changes before
+    /// the next prompt is not that turn's doing.
+    #[test]
+    fn a_clear_ended_after_its_own_tick_leaves_no_watch_for_the_next_turn() {
+        let start = Instant::now();
+        let at = |ms| start + Duration::from_millis(ms);
+        let mut app = app();
+        app.apply(&Event::UserMessage {
+            text: "/clear".to_owned(),
+        });
+        app.settle_tree(at(0));
+        app.set_repo(tree_read(at(1), &[]));
+        app.settle_tree(at(2));
+        app.apply(&Event::Cleared);
+        app.settle_tree(at(3));
+        app.set_repo(tree_read(at(4), &[]));
+        app.settle_tree(at(5));
+        app.apply(&Event::TurnEnded);
+        app.settle_tree(at(6));
+
+        // The operator edits a file in their own editor between turns.
+        app.set_repo(tree_read(at(7), &[file("README.md", 3, 0)]));
+        app.settle_tree(at(8));
+
+        app.apply(&Event::UserMessage {
+            text: "explain it".to_owned(),
+        });
+        app.settle_tree(at(9));
+        app.set_repo(tree_read(at(10), &[file("README.md", 3, 0)]));
+        app.settle_tree(at(11));
+        app.apply(&Event::TurnEnded);
+        app.settle_tree(at(12));
+        app.set_repo(tree_read(at(13), &[file("README.md", 3, 0)]));
+        app.settle_tree(at(14));
+        app.settle_tree(at(15));
+
+        assert!(outside(&app).is_empty(), "{:?}", outside(&app));
     }
 
     /// The backend runs at the repository's root, so an edit names a file
