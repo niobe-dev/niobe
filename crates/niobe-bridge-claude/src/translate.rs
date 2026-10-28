@@ -274,6 +274,16 @@ enum CarriedOn {
     No,
 }
 
+/// Whether a line ends the text the session's reply is streaming, and so
+/// lets out what was held aside while it streamed: before the line's own
+/// events, or after them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TextEnds {
+    No,
+    Before,
+    After,
+}
+
 /// What a `tool_use` id was called, called with, and acts on.
 ///
 /// Kept whole so that the `tool_result` can repeat it without the consumer
@@ -439,6 +449,13 @@ pub struct Translator {
     /// speed, so both are remembered from the `message_start` that opened the
     /// same stream.
     in_flight: BTreeMap<Option<String>, InFlight>,
+    /// The notices and warnings that arrived while the session's reply was
+    /// streaming its text, or `None` while it is not. Held until the text's
+    /// message, or whatever else ends the text, has gone out: the shell
+    /// takes an entry landing under a reply's fragments for the end of that
+    /// reply, so a notice let out between them would cut the reply in two
+    /// and leave its whole message drawn a second time under the notice.
+    aside: Option<Vec<Event>>,
     /// What each outstanding `tool_use` id was called and called with, so that
     /// the `tool_result` can repeat both without the consumer holding state.
     tool_calls: BTreeMap<String, Call>,
@@ -638,6 +655,7 @@ impl Translator {
             announced_session: None,
             unavailable: Vec::new(),
             in_flight: BTreeMap::new(),
+            aside: None,
             tool_calls: BTreeMap::new(),
             ended_agents: BTreeMap::new(),
             usage_limit: None,
@@ -970,7 +988,19 @@ impl Translator {
             .into_iter()
             .collect();
         out.extend(self.read(line, true));
+        if let Some(aside) = self.aside.as_mut() {
+            let (held, kept): (Vec<Event>, Vec<Event>) = out.into_iter().partition(is_aside);
+            aside.extend(held);
+            out = kept;
+        }
         out
+    }
+
+    /// The notices and warnings held for a reply whose text was still
+    /// streaming when the CLI's output ended, which nothing after it will
+    /// let out.
+    pub(crate) fn take_aside(&mut self) -> Vec<Event> {
+        self.aside.take().unwrap_or_default()
     }
 
     /// The events of one line, where `mend` says a line that does not parse
@@ -1046,6 +1076,10 @@ impl Translator {
     /// of its own. Both fold through here, so the two cannot drift.
     pub(crate) fn message(&mut self, message: wire::Message) -> Vec<Event> {
         let mut out = Vec::new();
+        let text_ends = self.text_ends(&message);
+        if text_ends == TextEnds::Before {
+            out.append(&mut self.take_aside());
+        }
         match message {
             wire::Message::System(system) => self.system(*system, &mut out),
             wire::Message::Assistant(envelope) => self.assistant(envelope, &mut out),
@@ -1066,7 +1100,49 @@ impl Translator {
             // whoever read that line is the one that can report it.
             wire::Message::Unknown => {}
         }
+        if text_ends == TextEnds::After {
+            out.append(&mut self.take_aside());
+        }
         out
+    }
+
+    /// Whether `message` ends the text the session's reply is streaming, and
+    /// whether the asides held while it streamed go out before its events or
+    /// after them: after the reply's own message, which finishes it, and
+    /// before anything else that ends it — the next message of the stream, a
+    /// block that is not text, the turn's end or a clear.
+    fn text_ends(&self, message: &wire::Message) -> TextEnds {
+        if self.aside.is_none() {
+            return TextEnds::No;
+        }
+        match message {
+            wire::Message::Assistant(envelope) if envelope.parent_tool_use_id.is_none() => {
+                TextEnds::After
+            }
+            wire::Message::StreamEvent(event) if event.parent_tool_use_id.is_none() => {
+                match &event.event {
+                    wire::StreamBody::ContentBlockDelta {
+                        delta: wire::Delta::TextDelta { .. },
+                    } => TextEnds::No,
+                    wire::StreamBody::MessageStart { .. }
+                    | wire::StreamBody::MessageDelta { .. }
+                    | wire::StreamBody::ContentBlockDelta { .. }
+                    | wire::StreamBody::Other => TextEnds::Before,
+                }
+            }
+            wire::Message::Result(_) | wire::Message::ConversationReset(_) => TextEnds::Before,
+            wire::Message::Assistant(_)
+            | wire::Message::StreamEvent(_)
+            | wire::Message::System(_)
+            | wire::Message::User(_)
+            | wire::Message::ControlRequest(_)
+            | wire::Message::ControlCancelRequest(_)
+            | wire::Message::ControlResponse(_)
+            | wire::Message::RateLimitEvent(_)
+            | wire::Message::ToolProgress(_)
+            | wire::Message::CommandLifecycle(_)
+            | wire::Message::Unknown => TextEnds::No,
+        }
     }
 
     /// Reads the CLI's answer to a request of Niobe's own: the slash commands
@@ -2335,7 +2411,10 @@ impl Translator {
             // which names its agent, carries the same words.
             wire::StreamBody::ContentBlockDelta {
                 delta: wire::Delta::TextDelta { text },
-            } if stream.is_none() => out.push(Event::AssistantDelta { text }),
+            } if stream.is_none() => {
+                self.aside.get_or_insert_with(Vec::new);
+                out.push(Event::AssistantDelta { text });
+            }
 
             wire::StreamBody::ContentBlockDelta { .. } | wire::StreamBody::Other => {}
         }
@@ -3474,6 +3553,15 @@ pub(crate) const HALF_A_CHARACTER: &str = "the CLI sent a line holding half of a
     the CLI cut a string; the half is shown as \u{fffd}.";
 
 /// A non-fatal entry: something the session should show and go on from.
+/// Whether `event` is the shell's own line rather than the session's: a
+/// notice or a warning, which a reply still streaming holds back.
+fn is_aside(event: &Event) -> bool {
+    matches!(
+        event,
+        Event::Notice { .. } | Event::Error { fatal: false, .. }
+    )
+}
+
 pub(crate) fn warn(message: String) -> Event {
     Event::Error {
         message,
@@ -4781,6 +4869,124 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    fn text_delta(text: &str) -> String {
+        format!(
+            r#"{{"type":"stream_event","event":{{"type":"content_block_delta","index":0,"delta":{{"type":"text_delta","text":"{text}"}}}}}}"#
+        )
+    }
+
+    const NOTIFIED: &str = r#"{"type":"system","subtype":"notification","key":"k","text":"Fast mode disabled","priority":"immediate"}"#;
+    const RETRYING: &str =
+        r#"{"type":"system","subtype":"informational","content":"Heads up","level":"warning"}"#;
+
+    /// The reply's text and the shell's own lines, in the order they reach
+    /// the transcript.
+    fn spoken(events: &[Event]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                Event::AssistantDelta { text } => Some(format!("delta {text}")),
+                Event::AssistantMessage { text, .. } => Some(format!("reply {text}")),
+                Event::Notice { message } if message.contains("cut off") => {
+                    Some("cut off".to_owned())
+                }
+                Event::Notice { message } => Some(format!("notice {message}")),
+                Event::Error { message, .. } => Some(format!("warning {message}")),
+                Event::TurnEnded => Some("turn ended".to_owned()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn lines(translator: &mut Translator, lines: &[&str]) -> Vec<Event> {
+        lines
+            .iter()
+            .flat_map(|line| translator.line(line))
+            .collect()
+    }
+
+    /// A notice the CLI sends while a reply's text is streaming lands after
+    /// that text's message: in between, it would end the reply the fragments
+    /// were building, and the message would be drawn whole a second time
+    /// under it.
+    #[test]
+    fn a_notice_sent_while_the_reply_streams_lands_after_the_replys_message() {
+        let mut translator = translator();
+        let events = lines(
+            &mut translator,
+            &[
+                &started("msg_1"),
+                &text_delta("Hello "),
+                NOTIFIED,
+                RETRYING,
+                &text_delta("world"),
+                &written("msg_1", ""),
+                &delta(2, 10),
+            ],
+        );
+
+        assert_eq!(
+            spoken(&events),
+            [
+                "delta Hello ",
+                "delta world",
+                "reply Writing",
+                "notice Fast mode disabled",
+                "warning Heads up",
+            ]
+        );
+    }
+
+    /// A reply whose text never had its message — the turn stopped, or its
+    /// stream was cut and a new one began — still gets the notices that
+    /// arrived while it streamed, before the turn ends and before the next
+    /// reply's words.
+    #[test]
+    fn a_notice_held_for_a_reply_that_never_finished_is_not_lost() {
+        let mut translator = translator();
+        let stopped = lines(
+            &mut translator,
+            &[
+                &started("msg_1"),
+                &text_delta("Hel"),
+                NOTIFIED,
+                r#"{"type":"result","subtype":"error_during_execution","usage":{"input_tokens":1,"output_tokens":1}}"#,
+            ],
+        );
+        assert_eq!(
+            spoken(&stopped)
+                .into_iter()
+                .filter(|said| !said.starts_with("warning"))
+                .collect::<Vec<_>>(),
+            [
+                "delta Hel",
+                "notice Fast mode disabled",
+                "cut off",
+                "turn ended"
+            ]
+        );
+
+        let cut = lines(
+            &mut translator,
+            &[
+                &started("msg_2"),
+                &text_delta("Hel"),
+                NOTIFIED,
+                &started("msg_3"),
+                &text_delta("Hello"),
+            ],
+        );
+        assert_eq!(
+            spoken(&cut),
+            [
+                "delta Hel",
+                "notice Fast mode disabled",
+                "cut off",
+                "delta Hello"
+            ]
+        );
     }
 
     #[test]

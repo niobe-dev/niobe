@@ -858,6 +858,11 @@ impl Session {
                     return;
                 }
             }
+            let aside = translator.take_aside();
+            if !aside.is_empty() {
+                // The receiver gone is the session dropped, as above.
+                let _ = sender.send(aside);
+            }
         });
 
         let kept = Arc::new(Mutex::new(Tail::default()));
@@ -2937,6 +2942,29 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         (session, events)
+    }
+
+    /// A notice held while the reply's text streamed is still said when the
+    /// CLI ends before anything lets it out, and before the end it reports.
+    #[cfg(unix)]
+    #[test]
+    fn a_notice_held_for_a_streaming_reply_is_said_when_the_cli_ends_under_it() {
+        let start = r#"{"type":"stream_event","event":{"type":"message_start","message":{"model":"opus-5","id":"msg_1"}}}"#;
+        let text = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hel"}}}"#;
+        let notice =
+            r#"{"type":"system","subtype":"notification","key":"k","text":"Fast mode disabled"}"#;
+        let (_, events) = stand_in(&format!(
+            "read -r first\nprintf '%s\\n' '{start}' '{text}' '{notice}'\nexit 1\n"
+        ));
+
+        let notice = events.iter().position(
+            |event| matches!(event, Event::Notice { message } if message == "Fast mode disabled"),
+        );
+        let end = events
+            .iter()
+            .position(|event| matches!(event, Event::Error { fatal: true, .. }));
+        assert!(notice.is_some(), "the notice was lost: {events:#?}");
+        assert!(notice < end, "{events:#?}");
     }
 
     #[cfg(unix)]

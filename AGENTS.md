@@ -266,7 +266,9 @@ reviewers that encode both, for an agent working in this tree.
   CLI's answer to `mcp_status` — why a server failed, its scope, its transport and command or
   address (never its arguments, environment or headers) — which it keeps for every later
   `init`, and marks an edit
-  under the CLI's `projects/<project>/memory/` as the agent's own notes — `driver.rs` spawns the
+  under the CLI's `projects/<project>/memory/` as the agent's own notes, and holds a notice that
+  arrives while the session's reply streams its text until that text ends, so the reply is drawn
+  once — `driver.rs` spawns the
   binary, writes a turn with its attached images as base64 image blocks after the text, as the
   CLI's own transcripts hold a pasted screenshot (`base64.rs` encodes them), looks, as a `Write` is asked about, whether a file is at the path it would replace, asks it with
   `initialize` what it offers — the answer is where the slash commands a
