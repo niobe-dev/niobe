@@ -8,13 +8,14 @@
 //! and the disk, which the shell may not.
 //!
 //! The clipboard is read by the programs the platform has for it, as Claude
-//! Code reads it: `osascript` on macOS, `wl-paste` or `xclip` on Linux. Each
-//! runs with no terminal — its input closed, its output read here and its
-//! errors dropped — so nothing it says can land on the screen the shell draws
-//! on, and each is killed, with everything it started, if it has not finished
-//! and closed its output in [`PATIENCE`]; the fetch then fails naming it. A
-//! file a reader names is read only if it is a regular file, as a pasted path
-//! is.
+//! Code reads it: `osascript` on macOS, and on Linux `wl-paste` where
+//! `WAYLAND_DISPLAY` names a compositor and `xclip` where `DISPLAY` names an
+//! X server, so that no other session's clipboard is read. Each runs with no
+//! terminal — its input closed, its output read here and its errors dropped —
+//! so nothing it says can land on the screen the shell draws on, and each is
+//! killed, with everything it started, if it has not finished and closed its
+//! output in [`PATIENCE`]; the fetch then fails naming it. A file a reader
+//! names is read only if it is a regular file, as a pasted path is.
 //!
 //! An image larger than a model takes is shrunk on macOS with `sips` — to a
 //! JPEG no longer than the first of [`SHRUNK_EDGES`] on its long side that
@@ -22,6 +23,7 @@
 //! refused, since a full-screen screenshot on a high-density display is
 //! routinely over the limit and a screenshot is the image most often pasted.
 
+use std::ffi::OsStr;
 use std::io::Read;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -95,8 +97,24 @@ impl Reader {
 /// The programs this platform reads a clipboard image with, in the order they
 /// are tried.
 fn platform_readers() -> Vec<Reader> {
-    if cfg!(target_os = "macos") {
-        vec![
+    readers_for(
+        cfg!(target_os = "macos"),
+        std::env::var_os("WAYLAND_DISPLAY").as_deref(),
+        std::env::var_os("DISPLAY").as_deref(),
+    )
+}
+
+/// The readers for a session on macOS where `macos` says so, or else under
+/// the Wayland compositor `wayland` names and the X server `display` names.
+///
+/// A Linux reader is asked only where its display server is named. With
+/// `WAYLAND_DISPLAY` unset, `wl-paste` connects to `wayland-0` all the same,
+/// which over SSH is the clipboard of a desktop session on that machine, not
+/// the operator's: an image copied there would be attached as the one asked
+/// for. A variable that is set and empty names no display.
+fn readers_for(macos: bool, wayland: Option<&OsStr>, display: Option<&OsStr>) -> Vec<Reader> {
+    if macos {
+        return vec![
             Reader::new(
                 "osascript",
                 &[
@@ -118,21 +136,25 @@ fn platform_readers() -> Vec<Reader> {
                 &["-e", "get POSIX path of (the clipboard as «class furl»)"],
                 Output::Path,
             ),
-        ]
-    } else {
-        vec![
-            Reader::new(
-                "wl-paste",
-                &["--no-newline", "--type", "image/png"],
-                Output::Bytes,
-            ),
-            Reader::new(
-                "xclip",
-                &["-selection", "clipboard", "-t", "image/png", "-o"],
-                Output::Bytes,
-            ),
-        ]
+        ];
     }
+    let named = |var: Option<&OsStr>| var.is_some_and(|value| !value.is_empty());
+    let mut readers = Vec::new();
+    if named(wayland) {
+        readers.push(Reader::new(
+            "wl-paste",
+            &["--no-newline", "--type", "image/png"],
+            Output::Bytes,
+        ));
+    }
+    if named(display) {
+        readers.push(Reader::new(
+            "xclip",
+            &["-selection", "clipboard", "-t", "image/png", "-o"],
+            Output::Bytes,
+        ));
+    }
+    readers
 }
 
 /// The images the operator attaches, fetched on threads of their own.
@@ -261,6 +283,12 @@ impl Fetcher {
     /// be read from, ends the fetch with its reason: the next reader would be
     /// asked the same clipboard, and "no image" would hide what went wrong.
     fn clipboard(&self) -> Result<Vec<u8>, String> {
+        if self.readers.is_empty() {
+            return Err(
+                "neither WAYLAND_DISPLAY nor DISPLAY names a display whose clipboard to read"
+                    .to_owned(),
+            );
+        }
         let mut installed = false;
         for reader in &self.readers {
             match read_with(reader, self.patience) {
@@ -270,7 +298,7 @@ impl Fetcher {
                 Err(Unread::Refused(reason)) => return Err(reason),
             }
         }
-        if installed || self.readers.is_empty() {
+        if installed {
             Err("there is no image on the clipboard".to_owned())
         } else {
             let names = self
@@ -773,6 +801,45 @@ mod tests {
                  `niobe-no-such-reader-b`, and none is installed"
                 .to_owned())
         );
+    }
+
+    fn reader_names(macos: bool, wayland: Option<&str>, display: Option<&str>) -> Vec<String> {
+        readers_for(macos, wayland.map(OsStr::new), display.map(OsStr::new))
+            .iter()
+            .map(|reader| reader.program.clone())
+            .collect()
+    }
+
+    #[test]
+    fn a_linux_reader_is_asked_only_where_its_display_server_is_running() {
+        assert_eq!(
+            reader_names(false, None, Some(":0")),
+            ["xclip"],
+            "wl-paste with WAYLAND_DISPLAY unset connects to wayland-0, \
+             another session's clipboard over SSH"
+        );
+        assert_eq!(reader_names(false, Some("wayland-0"), None), ["wl-paste"]);
+        assert_eq!(
+            reader_names(false, Some("wayland-0"), Some(":0")),
+            ["wl-paste", "xclip"]
+        );
+        assert_eq!(
+            reader_names(false, Some(""), Some("")),
+            Vec::<String>::new(),
+            "an empty variable names no display"
+        );
+        assert_eq!(reader_names(true, None, None), ["osascript", "osascript"]);
+    }
+
+    #[test]
+    fn a_session_with_no_display_to_read_says_so_rather_than_that_the_clipboard_is_empty() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let fetcher = fetcher(dir.path(), readers_for(false, None, None));
+        let refused = fetcher
+            .fetch(&Source::Clipboard)
+            .expect_err("there is no clipboard to read");
+        assert!(refused.contains("WAYLAND_DISPLAY"), "{refused}");
+        assert!(refused.contains("DISPLAY"), "{refused}");
     }
 
     /// A PNG whose encoding is just over what a model takes.
