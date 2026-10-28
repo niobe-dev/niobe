@@ -3454,24 +3454,39 @@ pub(crate) fn rewind_request(
 }
 
 /// What the session is told once the CLI has put the files back as they
-/// were before `prompt`: which went back, or that none had changed.
+/// were before `prompt`: which went back, or that none of those it keeps
+/// had changed.
+///
+/// The CLI keeps a file as it was only once one of its edit tools has
+/// touched it, so what a shell command did to any other file is neither
+/// listed nor put back. Said every time: "no file had changed" would tell
+/// the operator a `sed -i` or a formatter's work was never done, and a list
+/// alone that the files it names were all there was.
 fn rewound(prompt: &str, would: &Would) -> Event {
     let message = match would.files.is_empty() {
-        true => format!("No file had changed since \"{prompt}\", so none was put back."),
+        true => format!(
+            "No file the agent's edit tools changed differs from before \"{prompt}\", so none \
+             was put back. {SHELL_CHANGES_STAY}"
+        ),
         false => {
             let lines = match (would.insertions, would.deletions) {
                 (Some(added), Some(removed)) => format!(" (+{added} −{removed})"),
                 _ => String::new(),
             };
             format!(
-                "Files put back as they were before \"{prompt}\": {}{lines}. The \
-                 conversation keeps everything said since.",
+                "Files put back as they were before \"{prompt}\": {}{lines}. \
+                 {SHELL_CHANGES_STAY} The conversation keeps everything said since.",
                 would.files.join(", ")
             )
         }
     };
     Event::Notice { message }
 }
+
+/// What a rewind leaves as it is, which the CLI does not say: a file only a
+/// shell command changed was never kept as it was before.
+const SHELL_CHANGES_STAY: &str = "What a shell command changed in a file the agent's edit tools \
+     never touched is not kept by the CLI and stays as it is.";
 
 /// What the session is told where the CLI put the files back as they were
 /// before `prompt` but left `skipped` of them as they are: which is not said,
@@ -7301,8 +7316,9 @@ mod tests {
             done,
             [Event::Notice {
                 message: "Files put back as they were before \"make mean() return 0\": \
-                          stats.py, src/io.py (+3 −2). The conversation keeps everything \
-                          said since."
+                          stats.py, src/io.py (+3 −2). What a shell command changed in a file \
+                          the agent's edit tools never touched is not kept by the CLI and stays \
+                          as it is. The conversation keeps everything said since."
                     .to_owned()
             }]
         );
@@ -7400,7 +7416,7 @@ mod tests {
     }
 
     #[test]
-    fn a_rewind_that_changed_no_file_says_so() {
+    fn a_rewind_with_no_edited_file_changed_says_so() {
         let mut translator = Translator::new("max");
         translator.asked_to_rewind("niobe-1", "niobe-2", "p-1", "explain it");
 
@@ -7414,10 +7430,51 @@ mod tests {
         assert_eq!(
             done,
             [Event::Notice {
-                message: "No file had changed since \"explain it\", so none was put back."
-                    .to_owned()
+                message: "No file the agent's edit tools changed differs from before \"explain \
+                          it\", so none was put back. What a shell command changed in a file the \
+                          agent's edit tools never touched is not kept by the CLI and stays as it \
+                          is."
+                .to_owned()
             }]
         );
+    }
+
+    /// Claude Code 2.1.310 keeps a file as it was before a prompt only once
+    /// one of its edit tools has touched it — its own handover note says a
+    /// rewind rolls back "the turn's tool edits (bash-made changes
+    /// excluded)" — so a turn that changed files with `sed -i` or a
+    /// formatter alone is answered with nothing to put back, and a turn that
+    /// did both has only the edited files put back.
+    #[test]
+    fn a_rewind_never_says_files_a_shell_command_changed_went_back_or_never_changed() {
+        let rewind = |files: &str| {
+            let mut translator = Translator::new("max").in_dir("/repo");
+            translator.asked_to_rewind("niobe-1", "niobe-2", "p-1", "format it");
+            translator.line(&format!(
+                r#"{{"type":"control_response","response":{{"subtype":"success","request_id":"niobe-1","response":{{"canRewind":true,"filesChanged":[{files}],"insertions":1,"deletions":1}}}}}}"#
+            ));
+            translator.take_requests();
+            translator.line(
+                r#"{"type":"control_response","response":{"subtype":"success","request_id":"niobe-2","response":{"canRewind":true,"skippedLinks":0}}}"#,
+            )
+        };
+
+        for (files, done) in [
+            ("", rewind("")),
+            (r#""/repo/a.py""#, rewind(r#""/repo/a.py""#)),
+        ] {
+            let [Event::Notice { message }] = done.as_slice() else {
+                panic!("one notice for {files:?}: {done:?}");
+            };
+            assert!(
+                !message.contains("No file had changed"),
+                "said nothing changed, though a shell command may have: {message}"
+            );
+            assert!(
+                message.contains("shell command"),
+                "did not say what a shell command changed stays as it is: {message}"
+            );
+        }
     }
 
     #[test]

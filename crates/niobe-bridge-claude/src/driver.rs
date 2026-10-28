@@ -3781,7 +3781,9 @@ read -r rest
             notice,
             Some(
                 "Files put back as they were before \"make mean() return 0\": stats.py \
-                 (+0 −2). The conversation keeps everything said since."
+                 (+0 −2). What a shell command changed in a file the agent's edit tools never \
+                 touched is not kept by the CLI and stays as it is. The conversation keeps \
+                 everything said since."
             )
         );
         let seen = std::fs::read_to_string(&seen).expect("the stand-in kept what it read");
