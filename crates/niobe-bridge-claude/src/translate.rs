@@ -704,6 +704,18 @@ impl Translator {
         self
     }
 
+    /// Measures the next bill from `spent` alone: the running totals a process
+    /// that resumed the session restored, where what was reported since came
+    /// from messages of a process that ended without a bill of its own. Those
+    /// stay reported; the next bill holds none of them, so measured from what
+    /// has been reported it would take them off its own spend. Where `spent`
+    /// is unknown, the next bill is counted as [`Translator::resuming`]
+    /// counts one.
+    pub(crate) fn restarted_from(&mut self, spent: &Spent) {
+        self.reported = spent.by_model.clone();
+        self.restored_unknown = spent.unknown.is_some();
+    }
+
     /// The same translator, told how the session is billed by the profile it
     /// runs under.
     ///

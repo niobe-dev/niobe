@@ -69,7 +69,7 @@ use std::ffi::OsStr;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
 
@@ -473,8 +473,11 @@ pub fn timed(path: &Path, profile: &str, cwd: &Path) -> Result<Vec<Timed>, Trans
     let read = records(&text);
     let accountings = read
         .iter()
-        .filter(|record| matches!(record.record, Ok(Line::CostState(_))))
-        .count();
+        .filter_map(|record| match &record.record {
+            Ok(Line::CostState(accounting)) => Some(accounting.started()),
+            _ => None,
+        })
+        .collect();
     let mut sides = side_files(path);
     // One agent has one file. Where two name the same call, the first by name
     // is read and the other is said to have been passed over, with the call:
@@ -948,11 +951,22 @@ struct Fold {
     /// said; an event past its end was pushed by the reader itself and has
     /// no time.
     times: Vec<Option<SystemTime>>,
-    /// How many of the CLI's `cost-state` records are still to be folded. A
-    /// message with one still ahead of it is counted by that accounting, and
-    /// one after the last is counted by nothing but itself. See
+    /// When the process that wrote each of the CLI's `cost-state` records
+    /// still to be folded started, in the order they are written, where the
+    /// record says. A message with one still ahead of it is counted by that
+    /// accounting, unless it was stamped before that accounting's process
+    /// started; one after the last is counted by nothing but itself. See
     /// [`Fold::assistant`].
-    accountings: usize,
+    accountings: VecDeque<Option<SystemTime>>,
+    /// When the record being folded was stamped, where it was.
+    at: Option<SystemTime>,
+    /// The running totals the last accounting folded recorded, which a
+    /// process that resumes the session restores; nothing before the first.
+    restored: Spent,
+    /// Whether a message since the last accounting was counted from its own
+    /// usage although another accounting is still ahead, because its process
+    /// ended without writing one.
+    outside_accounting: bool,
     /// Whether a message since the operator last spoke was left to an
     /// accounting still ahead to count.
     awaited: bool,
@@ -992,7 +1006,7 @@ impl Fold {
         profile: &str,
         cwd: &Path,
         id: String,
-        accountings: usize,
+        accountings: VecDeque<Option<SystemTime>>,
         agents: BTreeMap<String, RecordedAgent>,
     ) -> Self {
         Self {
@@ -1004,6 +1018,9 @@ impl Fold {
             out: Vec::new(),
             times: Vec::new(),
             accountings,
+            at: None,
+            restored: Spent::default(),
+            outside_accounting: false,
             awaited: false,
             awaited_before: false,
             counted: BTreeMap::new(),
@@ -1046,10 +1063,11 @@ impl Fold {
             self.out
                 .push(translate::warn(translate::HALF_A_CHARACTER.to_owned()));
         }
+        let at = record.at.as_deref().and_then(stamp::parse);
+        self.at = at;
         self.fold_record(record.line, record.record, agent);
         self.times.resize(start, None);
-        self.times
-            .resize(self.out.len(), record.at.as_deref().and_then(stamp::parse));
+        self.times.resize(self.out.len(), at);
     }
 
     fn fold_record(
@@ -1197,17 +1215,32 @@ impl Fold {
             .and_then(|id| self.last_usage.get(id).cloned())
             .or(message.usage)
             .filter(|_| !written_by_cli);
-        if usage.is_some() && first_time && self.accountings > 0 {
+        let accounted = self.accounted();
+        if usage.is_some() && first_time && accounted {
             self.awaited = true;
         }
         if let Some(usage) = usage
             && first_time
-            && self.accountings == 0
+            && !accounted
         {
+            self.outside_accounting |= !self.accountings.is_empty();
             self.fold(wire::Message::StreamEvent(wire::StreamEvent {
                 event: wire::StreamBody::MessageDelta { usage: Some(usage) },
                 parent_tool_use_id: parent,
             }));
+        }
+    }
+
+    /// Whether the message being folded is one the next accounting counts:
+    /// there is one still ahead, and the message was not stamped before the
+    /// process that wrote it started. A message from before that start was
+    /// written by a process that ended without an accounting of its own, and
+    /// what it spent is in no running total the CLI wrote down.
+    fn accounted(&self) -> bool {
+        match self.accountings.front() {
+            None => false,
+            Some(Some(started)) => self.at.is_none_or(|at| at >= *started),
+            Some(None) => true,
         }
     }
 
@@ -1399,11 +1432,22 @@ impl Fold {
     }
 
     /// The CLI's accounting as a process left the session. The CLI carries
-    /// its running totals over into a process that resumes the session, so
-    /// each covers every message written before it, in this process or an
-    /// earlier one; see `tests/fixtures/README.md`.
+    /// the last accounting's running totals over into a process that resumes
+    /// the session, so each covers every message written before it, in this
+    /// process or an earlier one that wrote an accounting of its own — and
+    /// none of a process that ended without one; see
+    /// `tests/fixtures/README.md` and [`Fold::accounted`].
     fn cost(&mut self, record: CostState) {
-        self.accountings = self.accountings.saturating_sub(1);
+        self.accountings.pop_front();
+        // What was counted from messages since the last accounting is in no
+        // running total this one carries: its process restored the last
+        // accounting's, or nothing, and counted on from its own start. Its
+        // difference is measured from what it restored, so those messages are
+        // not taken off its own spend.
+        if std::mem::take(&mut self.outside_accounting) {
+            self.translator.restarted_from(&self.restored);
+        }
+        self.restored = Spent::from_model_usage(&record.model_usage);
         // The CLI says when it could not price something it ran, and a total
         // that is missing a model is a floor rather than the bill. Said
         // plainly, because nothing else in the record marks which model it was.
@@ -1846,6 +1890,19 @@ struct CostState {
     /// total it recorded a floor.
     #[serde(rename = "hasUnknownModelCost", default)]
     has_unknown_model_cost: bool,
+    /// When the process that wrote the record started, in milliseconds since
+    /// the epoch. Read loosely: a value of another shape is no start rather
+    /// than an accounting this build cannot read.
+    #[serde(rename = "startTime", default)]
+    start_time: Option<serde_json::Value>,
+}
+
+impl CostState {
+    /// When the process that wrote this accounting started, where it says.
+    fn started(&self) -> Option<SystemTime> {
+        let millis = self.start_time.as_ref()?.as_u64()?;
+        UNIX_EPOCH.checked_add(Duration::from_millis(millis))
+    }
 }
 
 /// The CLI's title for the session, in its own words.
@@ -2492,8 +2549,11 @@ mod tests {
     fn folded_knowing(lines: &[&str], agents: BTreeMap<String, RecordedAgent>) -> Vec<Event> {
         let accountings = lines
             .iter()
-            .filter(|line| line.contains(r#""type":"cost-state""#))
-            .count();
+            .filter_map(|line| match serde_json::from_str::<Line>(line) {
+                Ok(Line::CostState(accounting)) => Some(accounting.started()),
+                _ => None,
+            })
+            .collect();
         let mut fold = Fold::new(
             "max",
             Path::new("/repo"),
@@ -3342,6 +3402,87 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// A CLI that ended without writing its accounting — killed, or gone
+    /// with the machine — leaves nothing for the session's next process to
+    /// restore, so that process's `cost-state` counts from its own start,
+    /// which it records. Measured on the machine this was written on, 28
+    /// October 2026: of 1,218 accountings, three followed messages stamped
+    /// before the process that wrote them started. In two the accounting
+    /// matched the messages after the start to within the compactions it
+    /// ran; the third held nothing of a model that only the messages before
+    /// it had run on. Read as covered, those messages are counted by nothing.
+    #[test]
+    fn what_a_process_that_left_no_accounting_spent_is_counted_from_its_messages() {
+        let at = |stamp: &str, record: String| {
+            record.replacen('{', &format!(r#"{{"timestamp":"{stamp}","#), 1)
+        };
+        let events = imported(&[
+            &at("2026-09-30T05:00:00.000Z", prompt("first")),
+            &at(
+                "2026-09-30T05:00:01.000Z",
+                response("msg_1", "claude-opus-5", 3, 40),
+            ),
+            &at("2026-09-30T09:00:30.000Z", prompt("second")),
+            &at(
+                "2026-09-30T09:00:31.000Z",
+                response("msg_2", "claude-opus-5", 5, 7),
+            ),
+            r#"{"type":"cost-state","startTime":1790758820000,"totalCostUSD":0.01,"modelUsage":{"claude-opus-5":{"inputTokens":5,"outputTokens":7,"costUSD":0.01}}}"#,
+        ]);
+
+        let counted = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Usage(usage) => Some((usage.input, usage.output)),
+                _ => None,
+            })
+            .fold((0, 0), |(input, output), (i, o)| (input + i, output + o));
+        assert_eq!(
+            counted,
+            (3 + 5, 40 + 7),
+            "the first process's response from its message, the second's from its accounting: \
+             {events:?}"
+        );
+    }
+
+    /// A process that ended without an accounting between two that wrote
+    /// one: the last restored the first's running totals, not the lost
+    /// process's, so its accounting less the first is its own spend.
+    #[test]
+    fn a_process_lost_between_two_accountings_is_counted_once_and_neither_accounting_twice() {
+        let at = |stamp: &str, record: String| {
+            record.replacen('{', &format!(r#"{{"timestamp":"{stamp}","#), 1)
+        };
+        let events = imported(&[
+            &at("2026-09-30T05:00:00.000Z", prompt("first")),
+            &at(
+                "2026-09-30T05:00:01.000Z",
+                response("msg_1", "claude-opus-5", 2, 10),
+            ),
+            r#"{"type":"cost-state","startTime":1790744390000,"totalCostUSD":0.01,"modelUsage":{"claude-opus-5":{"inputTokens":2,"outputTokens":10,"costUSD":0.01}}}"#,
+            &at("2026-09-30T07:00:00.000Z", prompt("second")),
+            &at(
+                "2026-09-30T07:00:01.000Z",
+                response("msg_2", "claude-opus-5", 3, 40),
+            ),
+            &at("2026-09-30T09:00:30.000Z", prompt("third")),
+            &at(
+                "2026-09-30T09:00:31.000Z",
+                response("msg_3", "claude-opus-5", 5, 7),
+            ),
+            r#"{"type":"cost-state","startTime":1790758820000,"totalCostUSD":0.03,"modelUsage":{"claude-opus-5":{"inputTokens":7,"outputTokens":17,"costUSD":0.03}}}"#,
+        ]);
+
+        let counted = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Usage(usage) => Some((usage.input, usage.output)),
+                _ => None,
+            })
+            .fold((0, 0), |(input, output), (i, o)| (input + i, output + o));
+        assert_eq!(counted, (2 + 3 + 5, 10 + 40 + 7), "{events:?}");
     }
 
     #[test]

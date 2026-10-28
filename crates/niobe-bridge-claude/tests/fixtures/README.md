@@ -1314,6 +1314,18 @@ did leave, the `cost-state` it wrote (not in the fixture) held 6 input,
 9 output, 34,483 cache read and 33,109 cache write, for $0.1394346: the tokens
 counted from the reply are the ones the CLI went on to bill.
 
+A process that ends without writing a `cost-state` — killed, or gone with the
+machine — leaves nothing for the next one to carry over, and that one's
+`cost-state` counts on from its own `startTime`. Of the 1,218 `cost-state`
+records on the machine this was written on, 28 October 2026, three followed
+messages stamped before their own `startTime`. Two held the output of the
+messages after it — 106,975 of 112,548 and 1,262,186 of 1,294,353, the rest
+the compactions each ran — and none of the 343,497 and 427,509 before it; the
+third held nothing of a model only the messages before it ran on. The reader
+counts such messages from their own usage; the unit test
+`what_a_process_that_left_no_accounting_spent_is_counted_from_its_messages` in
+`src/transcript.rs` holds the case.
+
 ## `models-listed.jsonl`
 
 One turn on a Max login, recorded from Claude Code 2.1.288 on 4 October 2026
