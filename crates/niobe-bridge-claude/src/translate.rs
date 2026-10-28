@@ -518,6 +518,12 @@ pub struct Translator {
     /// answered yet: an answer to one of those carries a title rather than a
     /// change taking effect.
     title_requests: BTreeSet<String>,
+    /// The `request_id`s of titles asked for before a `/clear` that the CLI
+    /// has not answered yet. Each was asked from the conversation the clear
+    /// ended, so its answer titles nothing: arriving after the clear, it
+    /// would otherwise caption — and be stored as — the conversation that
+    /// started over, which the prompt it was made from was never part of.
+    cleared_title_requests: BTreeSet<String>,
     /// The `request_id`s of the `mcp_status` requests Niobe made that the CLI
     /// has not answered yet: a refusal of one changed nothing the session runs
     /// with, and says only that this CLI does not answer it.
@@ -674,6 +680,7 @@ impl Translator {
             taken_model: None,
             model_answers: Vec::new(),
             title_requests: BTreeSet::new(),
+            cleared_title_requests: BTreeSet::new(),
             mcp_status_requests: BTreeSet::new(),
             reconnects: BTreeMap::new(),
             rewinds: BTreeMap::new(),
@@ -1206,6 +1213,13 @@ impl Translator {
             .is_some_and(|id| self.title_requests.remove(id));
         if of_title {
             out.extend(titled(outcome));
+            return;
+        }
+        if outcome
+            .request_id
+            .as_deref()
+            .is_some_and(|id| self.cleared_title_requests.remove(id))
+        {
             return;
         }
         if outcome.subtype.as_deref() == Some("success") {
@@ -1848,6 +1862,8 @@ impl Translator {
         self.billing = None;
         self.checked_release = false;
         self.unread_said.clear();
+        let asked_before = std::mem::take(&mut self.title_requests);
+        self.cleared_title_requests.extend(asked_before);
         out.push(Event::Cleared);
     }
 
@@ -7707,6 +7723,35 @@ mod tests {
             events,
             [Event::Titled {
                 title: "Static file handler etag support".to_owned()
+            }]
+        );
+    }
+
+    #[test]
+    fn a_title_answered_after_a_clear_does_not_title_the_conversation_after_it() {
+        let mut translator = translator();
+        translator.asked_for_title("niobe-2");
+        translator.asked_for_title("niobe-3");
+        translator
+            .line(r#"{"type":"conversation_reset","new_conversation_id":"s-2","trigger":"clear"}"#);
+        translator.asked_for_title("niobe-5");
+
+        let late = translator.line(
+            r#"{"type":"control_response","response":{"subtype":"success","request_id":"niobe-2","response":{"title":"Rotate the staging keys"}}}"#,
+        );
+        let late_refusal = translator.line(
+            r#"{"type":"control_response","response":{"subtype":"error","request_id":"niobe-3","error":"aborted"}}"#,
+        );
+        let own = translator.line(
+            r#"{"type":"control_response","response":{"subtype":"success","request_id":"niobe-5","response":{"title":"Etag support"}}}"#,
+        );
+
+        assert!(late.is_empty(), "{late:?}");
+        assert!(late_refusal.is_empty(), "{late_refusal:?}");
+        assert_eq!(
+            own,
+            [Event::Titled {
+                title: "Etag support".to_owned()
             }]
         );
     }
