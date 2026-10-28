@@ -98,11 +98,28 @@ fn control_shown(c: char) -> char {
 /// counts characters, so a name in CJK, two cells to the character, came out
 /// as wide again as its column and pushed everything after it out of line.
 pub fn pad(text: &str, columns: usize) -> String {
-    let fill = columns.saturating_sub(width(text));
+    let text_width = width(text);
+    if text_width >= columns {
+        return text.to_owned();
+    }
+    let fill = columns - text_width;
     let mut out = String::with_capacity(text.len() + fill);
     out.push_str(text);
     out.extend(std::iter::repeat_n(' ', fill));
     out
+}
+
+/// Modifies `text` in place by appending spaces until its display width is at
+/// least `columns`, reusing the existing `String` allocation to eliminate
+/// redundant heap allocations in TUI redraw loops.
+pub fn pad_owned(mut text: String, columns: usize) -> String {
+    let text_width = width(&text);
+    if text_width < columns {
+        let fill = columns - text_width;
+        text.reserve(fill);
+        text.extend(std::iter::repeat_n(' ', fill));
+    }
+    text
 }
 
 /// Columns between tab stops where the shell expands a tab itself.

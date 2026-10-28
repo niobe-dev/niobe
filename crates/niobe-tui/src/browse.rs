@@ -242,7 +242,7 @@ fn empty_or(
 
 /// One row of the list, the cursor's in its colours.
 fn list_row(said: &str, on_it: bool, width: usize, theme: &Theme) -> Line<'static> {
-    let row = text::pad(&text::truncate(said, width), width);
+    let row = text::pad_owned(text::truncate(said, width), width);
     match on_it {
         true => Line::styled(
             row,

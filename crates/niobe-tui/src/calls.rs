@@ -889,13 +889,13 @@ fn row(
 
     let mut spans = vec![
         Span::styled(glyph_padded, Style::new().fg(glyph_colour).bold()),
-        Span::styled(text::pad(&name, name_column), Style::new().fg(colour)),
+        Span::styled(text::pad_owned(name, name_column), Style::new().fg(colour)),
         Span::raw(" "),
     ];
     if agent_column > 0 {
         let tag = text::truncate(doing.agent.unwrap_or_default(), agent_column);
         spans.push(Span::styled(
-            text::pad(&tag, agent_column + 1),
+            text::pad_owned(tag, agent_column + 1),
             Style::new().fg(theme.dim),
         ));
     }
@@ -991,7 +991,10 @@ pub(crate) fn heading(
     let tag = text::truncate(tag, lead.saturating_sub(1));
     Line::from(vec![
         Span::styled("▾ ", Style::new().fg(theme.title).bold()),
-        Span::styled(text::pad(&tag, lead), Style::new().fg(theme.title).bold()),
+        Span::styled(
+            text::pad_owned(tag, lead),
+            Style::new().fg(theme.title).bold(),
+        ),
         Span::styled(task, Style::new().fg(theme.dim)),
         Span::raw(" ".repeat(gap)),
         Span::styled(count, Style::new().fg(theme.dim)),

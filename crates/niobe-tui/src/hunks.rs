@@ -254,7 +254,7 @@ fn capped_marker(beyond: usize, width: usize, theme: &Theme) -> Line<'static> {
     );
     let said = text::truncate(&said, width);
     Line::from(Span::styled(
-        text::pad(&said, width),
+        text::pad_owned(said, width),
         Style::new().fg(theme.dim).bg(theme.diff_bg),
     ))
 }
@@ -279,7 +279,10 @@ fn wrapped_row(line: &DiffLine, width: usize, theme: &Theme) -> Vec<Line<'static
             Line::from(vec![
                 Span::styled(sign, Style::new().fg(sign_colour).bg(bg).bold()),
                 Span::styled(" ", Style::new().bg(bg)),
-                Span::styled(text::pad(&part, room), Style::new().fg(text_colour).bg(bg)),
+                Span::styled(
+                    text::pad_owned(part, room),
+                    Style::new().fg(text_colour).bg(bg),
+                ),
             ])
             .style(Style::new().bg(bg))
         })
@@ -333,7 +336,10 @@ fn draw_row(row: Row<'_>, number_width: usize, width: usize, theme: &Theme) -> L
         ),
         Span::styled(sign, Style::new().fg(number_colour).bg(bg).bold()),
         Span::styled(" ", Style::new().bg(bg)),
-        Span::styled(text::pad(&shown, room), Style::new().fg(text_colour).bg(bg)),
+        Span::styled(
+            text::pad_owned(shown, room),
+            Style::new().fg(text_colour).bg(bg),
+        ),
     ])
     .style(Style::new().bg(bg))
 }
@@ -361,7 +367,7 @@ fn marker(beyond: usize, open: bool, width: usize, theme: &Theme) -> Line<'stati
         false => text::truncate(&said, width),
     };
     Line::from(Span::styled(
-        text::pad(&said, width),
+        text::pad_owned(said, width),
         Style::new().fg(theme.dim).bg(theme.diff_bg),
     ))
 }
