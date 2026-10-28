@@ -1594,6 +1594,7 @@ fn draw_ask_bar(
     .areas(rest);
     let text = text_room(editor, editing(app).is_empty());
     editing(app).render(text, frame.buffer_mut());
+    redraw_the_row_from_the_cursor(frame.buffer_mut(), text, app.editing_mut());
     if app.finding().is_none() {
         colour_commands(frame.buffer_mut(), text, app, theme);
         draw_cursor_past_a_full_row(frame.buffer_mut(), text, app);
@@ -1675,6 +1676,111 @@ fn draw_cursor_past_a_full_row(buffer: &mut ratatui::buffer::Buffer, text: Rect,
     }
     if let Some(cell) = buffer.cell_mut((text.right(), text.y + down)) {
         cell.set_symbol(" ").set_style(style);
+    }
+}
+
+/// Draws again the row of the bar's editor — the composer, or the search —
+/// from the cursor to its end, where the cursor is on a character made of
+/// several code points: a flag, a family joined by zero-width joiners, a
+/// letter and its accent.
+///
+/// The editor draws the cursor as a span of the one code point it is on, so
+/// such a character was drawn as its pieces, and what followed on the row was
+/// read again from the piece after: every flag after it paired the wrong
+/// letters, and 🇺🇦 read as 🇦🇺. The row is drawn here a whole character at a
+/// time, where [`text::editor_spots`] says the editor's wrapping puts each,
+/// in the style the editor gives it.
+fn redraw_the_row_from_the_cursor(
+    buffer: &mut ratatui::buffer::Buffer,
+    text: Rect,
+    editor: &mut ratatui_textarea::TextArea<'static>,
+) {
+    use unicode_segmentation::UnicodeSegmentation as _;
+
+    let Some(down) = crate::app::cursor_row_in_view(editor)
+        .and_then(|down| u16::try_from(down).ok())
+        .filter(|down| *down < text.height)
+    else {
+        return;
+    };
+    let selected = editor.selection_style();
+    let editor = &*editor;
+    let ratatui_textarea::DataCursor(row, col) = editor.cursor();
+    let Some(line) = editor.lines().get(row) else {
+        return;
+    };
+    let Some((split, _)) = line.char_indices().nth(col) else {
+        return;
+    };
+    let from_cursor = &line[split..];
+    if from_cursor
+        .graphemes(true)
+        .next()
+        .is_none_or(|glyph| glyph.chars().nth(1).is_none())
+    {
+        return;
+    }
+    let rest = col..col + from_cursor.chars().count();
+    let spots = text::editor_spots(
+        line,
+        usize::from(text.width),
+        editor.tab_length(),
+        std::slice::from_ref(&rest),
+    );
+    let Some(&(cursor_row, from, _)) = spots.first() else {
+        return;
+    };
+    let plain = editor.style().patch(editor.cursor_line_style());
+    let y = text.y + down;
+    blank_from(buffer, text, y, from, plain);
+    let selection = editor.selection_range();
+    let mut spot = spots.iter();
+    let mut at = col;
+    for glyph in from_cursor.graphemes(true) {
+        let Some(&(on_row, column, cells)) = spot.next() else {
+            break;
+        };
+        if on_row != cursor_row {
+            break;
+        }
+        let style = match (at == col, selection) {
+            (true, _) => editor.style().patch(editor.cursor_style()),
+            (false, Some((start, end))) if start <= (row, at) && (row, at) < end => {
+                editor.style().patch(selected)
+            }
+            (false, _) => plain,
+        };
+        let symbol = match glyph {
+            "\t" => " ".repeat(cells),
+            glyph => glyph.to_owned(),
+        };
+        if let Ok(x) = u16::try_from(column) {
+            buffer.set_stringn(
+                text.x + x,
+                y,
+                symbol,
+                usize::from(text.width).saturating_sub(column),
+                style,
+            );
+        }
+        let chars = glyph.chars().count();
+        for _ in 1..chars {
+            spot.next();
+        }
+        at = at.saturating_add(chars);
+    }
+}
+
+/// Blanks row `y` of `text` from column `from` to its end, in `style`.
+fn blank_from(buffer: &mut ratatui::buffer::Buffer, text: Rect, y: u16, from: usize, style: Style) {
+    for x in from..usize::from(text.width) {
+        if let Some(cell) = u16::try_from(x)
+            .ok()
+            .and_then(|x| buffer.cell_mut((text.x + x, y)))
+        {
+            cell.reset();
+            cell.set_symbol(" ").set_style(style);
+        }
     }
 }
 

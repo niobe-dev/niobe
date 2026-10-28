@@ -6374,24 +6374,9 @@ impl App {
     }
 
     /// The row of the box the composer's cursor was drawn on in the frame
-    /// just drawn, counted from the box's top.
-    ///
-    /// The editor keeps the row it scrolled to to itself; what it does say is
-    /// that a move to stay in sight puts the cursor on the first row in sight,
-    /// so that move, from the first character, reads it, and a jump puts the
-    /// cursor back where it was, a selection kept as it was. `None` where the
-    /// cursor is past the editor's `u16` positions, which a jump cannot reach.
+    /// just drawn, counted from the box's top: see [`cursor_row_in_view`].
     pub(crate) fn composer_cursor_row(&mut self) -> Option<usize> {
-        use ratatui_textarea::CursorMove;
-
-        let ratatui_textarea::DataCursor(row, col) = self.composer.cursor();
-        let (row, col) = (u16::try_from(row).ok()?, u16::try_from(col).ok()?);
-        let at = self.composer.screen_cursor().row;
-        self.composer.move_cursor(CursorMove::Jump(0, 0));
-        self.composer.move_cursor(CursorMove::InViewport);
-        let top = self.composer.screen_cursor().row;
-        self.composer.move_cursor(CursorMove::Jump(row, col));
-        at.checked_sub(top)
+        cursor_row_in_view(&mut self.composer)
     }
 
     /// Whether the composer is drawn from its first row, as it is wherever
@@ -6644,6 +6629,15 @@ impl App {
     /// The composer widget, for the draw.
     pub fn composer(&self) -> &TextArea<'static> {
         &self.composer
+    }
+
+    /// The editor the bar is drawing: the search's while one is open, and the
+    /// composer otherwise.
+    pub(crate) fn editing_mut(&mut self) -> &mut TextArea<'static> {
+        match self.find.as_mut() {
+            Some(find) => &mut find.query,
+            None => &mut self.composer,
+        }
     }
 
     /// What the operator has typed and not sent.
@@ -7225,6 +7219,9 @@ impl App {
     /// Opens a search through the transcript, remembering where the view is.
     fn open_find(&mut self) {
         let mut query = TextArea::default();
+        // Wrapped as the composer is: the bar is sized by the rows the query
+        // wraps to, and its cursor's row is drawn where that wrapping puts it.
+        query.set_wrap_mode(WrapMode::WordOrGlyph);
         query.set_placeholder_text("Find in the transcript");
         paint_composer(&mut query, &self.theme);
         self.find = Some(Find {
@@ -9550,6 +9547,27 @@ fn whole_character(
         }
         _ => None,
     }
+}
+
+/// The row of its box `editor`'s cursor was drawn on in the frame just
+/// drawn, counted from the box's top.
+///
+/// The editor keeps the row it scrolled to to itself; what it does say is
+/// that a move to stay in sight puts the cursor on the first row in sight,
+/// so that move, from the first character, reads it, and a jump puts the
+/// cursor back where it was, a selection kept as it was. `None` where the
+/// cursor is past the editor's `u16` positions, which a jump cannot reach.
+pub(crate) fn cursor_row_in_view(editor: &mut TextArea<'static>) -> Option<usize> {
+    use ratatui_textarea::CursorMove;
+
+    let ratatui_textarea::DataCursor(row, col) = editor.cursor();
+    let (row, col) = (u16::try_from(row).ok()?, u16::try_from(col).ok()?);
+    let at = editor.screen_cursor().row;
+    editor.move_cursor(CursorMove::Jump(0, 0));
+    editor.move_cursor(CursorMove::InViewport);
+    let top = editor.screen_cursor().row;
+    editor.move_cursor(CursorMove::Jump(row, col));
+    at.checked_sub(top)
 }
 
 /// Puts a cursor the editor's own moves left inside what the operator sees

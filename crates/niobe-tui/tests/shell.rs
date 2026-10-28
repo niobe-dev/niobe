@@ -6873,6 +6873,145 @@ fn the_cursor_is_drawn_after_a_line_that_fills_the_composers_row_exactly() {
     }
 }
 
+/// The glyphs the bar's row `down` rows below its first draws from the
+/// column after `lead` — `ask  > ` for the composer, `find  / ` for the
+/// search — a cell's symbol each, blanks and the pane's
+/// side left out — a wide character's second cell is blank — and the symbol
+/// the cursor is drawn on. Read cell by cell, since the text of a row cannot
+/// tell 🇺🇦 🇺🇦 from 🇺 🇦🇺 🇦.
+fn bar_glyphs(
+    app: &mut App,
+    (width, height): (u16, u16),
+    lead: &str,
+    down: u16,
+) -> (Vec<String>, String) {
+    let theme = app.theme().to_owned();
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height))
+        .expect("a test backend cannot fail");
+    terminal
+        .draw(|frame| niobe_tui::ui::draw(frame, app))
+        .expect("a test backend cannot fail");
+    let buffer = terminal.backend().buffer();
+    let cells = |y: u16| -> Vec<ratatui::buffer::Cell> {
+        (0..width)
+            .filter_map(|x| buffer.cell((x, y)).cloned())
+            .collect()
+    };
+    let (bar, at) = (0..height)
+        .find_map(|y| {
+            let lead: Vec<String> = lead.chars().map(String::from).collect();
+            let at = cells(y)
+                .windows(lead.len())
+                .position(|cells| cells.iter().map(|cell| cell.symbol()).eq(lead.iter()))?;
+            Some((y, at + lead.len()))
+        })
+        .expect("the frame has an ask bar");
+    let row = cells(bar + down);
+    let cursor = row[at..]
+        .iter()
+        .find(|cell| {
+            cell.bg == theme.hot
+                && cell.fg == theme.pane_bg
+                && !cell.modifier.contains(ratatui::style::Modifier::BOLD)
+        })
+        .map_or_else(String::new, |cell| cell.symbol().to_owned());
+    let glyphs = row[at..]
+        .iter()
+        .map(|cell| cell.symbol())
+        .filter(|symbol| !symbol.trim().is_empty() && !symbol.starts_with(FOCUS_SIDE))
+        .map(str::to_owned)
+        .collect();
+    (glyphs, cursor)
+}
+
+/// The cursor on a character made of several — a flag, a family joined by
+/// zero-width joiners, a letter and its accent — is drawn on that character
+/// whole. The editor marked only its first code point, so the glyph was drawn
+/// split and every flag after it on the row paired the wrong letters: 🇺🇦
+/// read as 🇦🇺.
+#[test]
+fn the_cursor_on_a_character_of_several_code_points_draws_the_row_as_typed() {
+    use ratatui::crossterm::event::KeyCode;
+    use unicode_segmentation::UnicodeSegmentation as _;
+
+    for (glyph, typed) in [
+        ("🇺🇦", "🇺🇦🇺🇦🇺🇦 ok"),
+        (
+            "👨\u{200d}👩\u{200d}👧",
+            "👨\u{200d}👩\u{200d}👧👨\u{200d}👩\u{200d}👧 ok",
+        ),
+        ("e\u{301}", "e\u{301}e\u{301}e\u{301} ok"),
+    ] {
+        for lefts in [0, 1] {
+            let mut app = running_session();
+            app.on_paste(typed);
+            press(&mut app, KeyCode::Home);
+            for _ in 0..lefts {
+                press(&mut app, KeyCode::Right);
+            }
+            let frame = screen(&mut app, 80, 30);
+            let (drawn, cursor) = bar_glyphs(&mut app, (80, 30), "ask  > ", 0);
+            let glyphs: Vec<&str> = typed.graphemes(true).filter(|g| *g != " ").collect();
+            assert_eq!(
+                drawn.get(..glyphs.len()),
+                Some(&glyphs.iter().map(|g| (*g).to_owned()).collect::<Vec<_>>()[..]),
+                "the cursor {lefts} glyphs in split {glyph}:\n{frame}"
+            );
+            assert_eq!(cursor, glyph, "the cursor {lefts} glyphs in:\n{frame}");
+            // A wide character's second cell is drawn by its first, as the
+            // editor's own cursor on one is.
+            assert_eq!(
+                cursor_cells(&mut app, 80, 30),
+                1,
+                "the cursor is drawn once, on {glyph}:\n{frame}"
+            );
+        }
+    }
+}
+
+/// The same on a row a long line wraps onto, where the cursor goes with Down.
+#[test]
+fn the_cursor_on_a_flag_on_a_wrapped_row_draws_that_row_as_typed() {
+    use ratatui::crossterm::event::KeyCode;
+
+    let mut app = running_session();
+    app.on_paste(&"🇺🇦".repeat(50));
+    press(&mut app, KeyCode::Home);
+    // The editor wraps by the width it was last drawn at.
+    screen(&mut app, 80, 30);
+    press(&mut app, KeyCode::Down);
+    let frame = screen(&mut app, 80, 30);
+    let (drawn, cursor) = bar_glyphs(&mut app, (80, 30), "ask  > ", 1);
+
+    assert_eq!(cursor, "🇺🇦", "{frame}");
+    assert!(!drawn.is_empty(), "{frame}");
+    assert!(
+        drawn.iter().all(|glyph| glyph == "🇺🇦"),
+        "{drawn:?}\n{frame}"
+    );
+}
+
+/// The search bar is the same editor, and its cursor on a flag drew the
+/// query split the same way.
+#[test]
+fn the_search_bars_cursor_on_a_flag_draws_the_query_as_typed() {
+    use ratatui::crossterm::event::KeyCode;
+
+    let mut app = running_session();
+    ctrl_f(&mut app);
+    app.on_paste("🇺🇦🇺🇦🇺🇦 ok");
+    press(&mut app, KeyCode::Home);
+    let frame = screen(&mut app, 80, 30);
+    let (drawn, cursor) = bar_glyphs(&mut app, (80, 30), "find  / ", 0);
+
+    assert_eq!(
+        drawn.get(..5),
+        Some(&["🇺🇦", "🇺🇦", "🇺🇦", "o", "k"].map(String::from)[..]),
+        "{frame}"
+    );
+    assert_eq!(cursor, "🇺🇦", "{frame}");
+}
+
 /// A plan is approved as the text the agent wrote, which it carries out
 /// whole: markdown that draws nothing of a line — a link reference
 /// definition, a table cell past its header's — would let a step through
