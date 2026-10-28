@@ -2969,6 +2969,35 @@ fn an_untrusted_repository_config_is_asked_about_before_the_backend_starts() {
     assert!(!drawn.contains("config not trusted"), "{drawn}");
 }
 
+/// The trust question's shell has closed by the time the session's opens, and
+/// a stopping signal sent to the session is still the quit it is for the
+/// first shell, rather than the default that kills the process outright on the
+/// alternate screen in raw mode.
+#[test]
+fn a_sigterm_after_the_trust_question_hands_the_terminal_back() {
+    for stopping in [Signal::TERM, Signal::INT, Signal::QUIT] {
+        let (repo, _home, terminal, slave, mut shell) = trusting_from_the_question();
+        terminal.shows(OPENING_FRAME);
+        written(&repo.path().join("started"));
+
+        signal(&shell, stopping);
+
+        let (_, status) = ended(&mut shell);
+        let (drawn, cooked) = released(terminal, slave);
+        assert!(
+            status.success(),
+            "a {stopping:?} after the trust question ended the shell with {status}"
+        );
+        assert_handed_back_times(
+            &drawn,
+            cooked,
+            "a stopping signal after the trust question",
+            Keys::Reported,
+            2,
+        );
+    }
+}
+
 /// A prompt typed at the question by an operator who did not read it, and
 /// sent with Enter, trusts nothing and starts nothing: the question stays up
 /// and says why the keys were not taken.

@@ -639,18 +639,36 @@ pub struct Shutdown {
     suspend: std::sync::Arc<AtomicBool>,
     #[cfg(unix)]
     continued: std::sync::Arc<AtomicBool>,
-    /// Set once the shell is done with the terminal, when this is dropped:
-    /// from then on SIGTERM, SIGINT and SIGQUIT do what they would have
-    /// without the shell, so a teardown that stalls after the terminal was
-    /// handed back can still be ended by sending one again. Never while the
-    /// shell holds the terminal, where ending at once would leave it raw.
+    /// Whether dropping this sets [`HANDED_BACK`]: from then on SIGTERM,
+    /// SIGINT and SIGQUIT do what they would have without the shell, so a
+    /// teardown that stalls after the terminal was handed back can still be
+    /// ended by sending one again. Never while the shell holds the terminal,
+    /// where ending at once would leave it raw.
     ///
-    /// `None` until [`Shutdown::hands_back_signals_when_dropped`]: signals are
-    /// the process's, and a `Shutdown` a test installs and drops must not
+    /// `false` until [`Shutdown::hands_back_signals_when_dropped`]: signals
+    /// are the process's, and a `Shutdown` a test installs and drops must not
     /// leave the next test's SIGTERM ending the test binary.
     #[cfg(unix)]
-    released: Option<std::sync::Arc<AtomicBool>>,
+    releases: bool,
 }
+
+/// Whether no shell holds the terminal, which is when SIGTERM, SIGINT and
+/// SIGQUIT take their default action: see [`Shutdown::releases`].
+///
+/// One for the process rather than one per [`Shutdown`], because what a
+/// signal runs stays registered for the life of the process. A process opens
+/// more than one shell — the trust question's before the session's, and the
+/// session the history dialog chose after the one it was chosen in — and a
+/// flag of the first shell's, set as it closed, would have the second's
+/// SIGTERM kill the process outright, raw on the alternate screen.
+#[cfg(unix)]
+static HANDED_BACK: std::sync::LazyLock<std::sync::Arc<AtomicBool>> =
+    std::sync::LazyLock::new(|| std::sync::Arc::new(AtomicBool::new(true)));
+
+/// Whether the default actions [`HANDED_BACK`] guards are registered, so that
+/// they are registered once however many shells the process opens.
+#[cfg(unix)]
+static DEFAULTS_REGISTERED: std::sync::Mutex<bool> = std::sync::Mutex::new(false);
 
 /// The signals that ask the session to stop.
 #[cfg(unix)]
@@ -703,24 +721,33 @@ impl Shutdown {
             hung_up,
             suspend,
             continued,
-            released: None,
+            releases: false,
         })
     }
 
     /// The same handlers, and once this is dropped — after the shell has
     /// handed the terminal back — SIGTERM, SIGINT and SIGQUIT do what they
-    /// would have without them: see [`Shutdown::released`]. For the one
-    /// `Shutdown` a process runs its shell under.
+    /// would have without them: see [`Shutdown::releases`]. For a `Shutdown` a
+    /// shell runs under, one at a time.
     #[cfg(unix)]
     pub fn hands_back_signals_when_dropped(mut self) -> io::Result<Self> {
-        let released = std::sync::Arc::new(AtomicBool::new(false));
-        for asked in STOPPING {
-            signal_hook::flag::register_conditional_default(
-                asked,
-                std::sync::Arc::clone(&released),
-            )?;
+        // Before anything that can fail, so that a registration that fails
+        // drops this as a `Shutdown` that hands the signals back.
+        self.releases = true;
+        HANDED_BACK.store(false, Ordering::SeqCst);
+        let mut registered = DEFAULTS_REGISTERED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !*registered {
+            for asked in STOPPING {
+                signal_hook::flag::register_conditional_default(
+                    asked,
+                    std::sync::Arc::clone(&HANDED_BACK),
+                )?;
+            }
+            *registered = true;
         }
-        self.released = Some(released);
+        drop(registered);
         Ok(self)
     }
 
@@ -732,12 +759,12 @@ impl Shutdown {
     }
 
     /// Hands the three stopping signals back their own behaviour: see
-    /// [`Shutdown::released`]. Done when the shell drops this, which is after
+    /// [`Shutdown::releases`]. Done when the shell drops this, which is after
     /// it has handed the terminal back.
     #[cfg(unix)]
     fn release(&self) {
-        if let Some(released) = &self.released {
-            released.store(true, Ordering::SeqCst);
+        if self.releases {
+            HANDED_BACK.store(true, Ordering::SeqCst);
         }
     }
 
