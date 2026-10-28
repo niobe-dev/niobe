@@ -2227,6 +2227,9 @@ pub struct DrawnEntries {
     /// How many cells wide the lines were last laid out, `None` before the
     /// first time.
     width: Option<usize>,
+    /// The switches the lines were last laid out under, the columns worked
+    /// out among them: what says which call a row of a run belongs to.
+    detail: Detail,
 }
 
 /// One thing the transcript draws, in the order it is drawn: an entry, or
@@ -2296,6 +2299,7 @@ impl DrawnEntries {
             ..detail
         };
         self.width = Some(width);
+        self.detail = detail;
         let named = commands_key(commands);
         let order = order(
             entries,
@@ -2505,13 +2509,25 @@ impl DrawnEntries {
 
     /// The entry drawn on line `line` of the whole transcript, where an entry
     /// is drawn there whole rather than a heading over agents' rows or the
-    /// count of entries left out.
-    pub(crate) fn entry_at(&self, line: usize) -> Option<usize> {
+    /// count of entries left out, and which of its calls the line belongs to
+    /// where it belongs to one: see [`crate::calls::call_on_row`].
+    pub(crate) fn call_at(
+        &self,
+        line: usize,
+        entries: &[Entry],
+        theme: &Theme,
+    ) -> Option<(usize, Option<usize>)> {
+        let width = self.width?;
         let mut first = 0usize;
         for drawn in &self.drawn {
             let offset = line.checked_sub(first)?;
             if offset < drawn.lines.len() {
-                return (!drawn.heading && !drawn.hidden).then_some(drawn.entry);
+                if drawn.heading || drawn.hidden {
+                    return None;
+                }
+                let entry = entries.get(drawn.entry)?;
+                let call = crate::calls::call_on_row(entry, offset, width, self.detail, theme);
+                return Some((drawn.entry, call));
             }
             first = first.saturating_add(drawn.lines.len());
         }

@@ -7631,20 +7631,24 @@ impl App {
     }
 
     /// Opens the call drawn on transcript line `line` whole, where a call is
-    /// drawn there; a run of calls folded into one entry opens the list of
-    /// calls on the run's first, since which of them was meant is not said
-    /// by a click on the run.
+    /// drawn there: a call on its own, or one of a run drawn open, by its
+    /// row or what is drawn under it. A run's own row, and a run folded into
+    /// that row alone, open the list of calls on the run's first instead,
+    /// since a click there does not say which of them was meant.
     fn open_call_at(&mut self, line: usize) {
-        let Some(at) = self.drawn.entry_at(line) else {
+        let Some((at, call)) = self.drawn.call_at(line, &self.entries, &self.theme) else {
             return;
         };
-        let calls = self.entries.get(at).map_or(0, |entry| entry.calls.len());
-        let Some(&first) = self.call_at.get(&(at, 0)) else {
-            return;
-        };
-        match calls {
-            1 => self.open_call(first),
-            _ => {
+        match call {
+            Some(index) => {
+                if let Some(&recorded) = self.call_at.get(&(at, index)) {
+                    self.open_call(recorded);
+                }
+            }
+            None => {
+                let Some(&first) = self.call_at.get(&(at, 0)) else {
+                    return;
+                };
                 self.pick_call();
                 if let Some(picker) = self.picking.as_mut() {
                     picker.at = first;

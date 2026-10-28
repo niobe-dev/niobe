@@ -313,15 +313,63 @@ fn group(
         return lines;
     }
 
-    let indent = " ".repeat(GUTTER);
     for (at, call) in calls.iter().enumerate() {
         let last = at + 1 == calls.len();
-        let branch = if last { LAST_BRANCH } else { BRANCH };
-        let stem = if last { "  " } else { STEM };
-        lines.push(child(branch, call, width, detail, theme));
-        lines.extend(under(call, format!("{indent}{stem}"), width, detail, theme));
+        lines.extend(member(call, last, width, detail, theme));
     }
     lines
+}
+
+/// The rows one call of an open run is drawn as: its own, hung from the
+/// run's, and what is drawn under it.
+fn member(
+    call: &Call,
+    last: bool,
+    width: usize,
+    detail: Detail,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let branch = if last { LAST_BRANCH } else { BRANCH };
+    let stem = if last { "  " } else { STEM };
+    let indent = " ".repeat(GUTTER);
+    let mut lines = vec![child(branch, call, width, detail, theme)];
+    lines.extend(under(call, format!("{indent}{stem}"), width, detail, theme));
+    lines
+}
+
+/// Which of `entry`'s calls row `offset` of its [`lines`] belongs to: the
+/// one call of an entry that has one, and in a run drawn open, the call
+/// whose row it is or that it is drawn under. `None` on a run's own row and
+/// on a run drawn as that row alone, which stand for every call of the run
+/// and so name none of them.
+pub(crate) fn call_on_row(
+    entry: &Entry,
+    offset: usize,
+    width: usize,
+    detail: Detail,
+    theme: &Theme,
+) -> Option<usize> {
+    match entry.calls.as_slice() {
+        [] => None,
+        [_] => Some(0),
+        calls if detail.folded || (!detail.diffs_open && all_memory(calls)) => None,
+        calls => {
+            // The run's own row is row 0, and its calls' rows follow.
+            let mut next = 1usize;
+            if offset < next {
+                return None;
+            }
+            for (at, call) in calls.iter().enumerate() {
+                let last = at + 1 == calls.len();
+                next = next.saturating_add(member(call, last, width, detail, theme).len());
+                if offset < next {
+                    return Some(at);
+                }
+            }
+            // The blank line after the run is its last call's.
+            calls.len().checked_sub(1)
+        }
+    }
 }
 
 /// One call of a group: hung from the group's row, what it does, and its own

@@ -244,7 +244,7 @@ reviewers that encode both, for an agent working in this tree.
   started with and the output its end carried, each headed by its size, nothing cut, and where
   Niobe's hook trimmed that output, the whole of it behind `w` — opened from
   the list of the conversation's calls that `d` in a side pane or View › Tool calls… shows, or by a click on the
-  call's row, a run of calls opening that list on its first; it
+  call's row, a run's own row or a run folded to it opening that list on its first; it
   wraps only the rows on screen, so a megabyte of output pages as fast as a screenful. `s` in a side
   pane or View › Just one agent… narrows the transcript to one sub-agent's own entries — what the
   bridge read under that agent's id, and nothing of the session's — and its title says whose,

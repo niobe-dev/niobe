@@ -419,7 +419,115 @@ fn a_drag_across_a_calls_row_selects_it_and_opens_nothing() {
 fn a_click_on_a_run_of_calls_opens_the_list_on_the_runs_first() {
     let mut app = running_session();
     let frame = screen(&mut app, WIDTH, 60);
-    // The session's reads are one run, drawn as one group row.
+    // The session's reads are one run; its own row names no one call.
+    click(&mut app, cell_of(&frame, "Read ×3"));
+
+    let picker = app.picking().expect("the click opened the list of calls");
+    assert_eq!(
+        picker.options[picker.at].note.as_deref(),
+        Some("catalog/fetch.ts · 7.2 kB")
+    );
+    assert!(app.detail().is_none());
+}
+
+#[test]
+fn a_click_on_a_calls_row_in_an_open_run_opens_that_call() {
+    for (row, path) in [
+        ("├ catalog/fetch.ts", "catalog/fetch.ts"),
+        ("├ catalog/cache.ts", "catalog/cache.ts"),
+        ("└ tests/fetch.test.ts", "tests/fetch.test.ts"),
+    ] {
+        let mut app = running_session();
+        let frame = screen(&mut app, WIDTH, 60);
+
+        click(&mut app, cell_of(&frame, row));
+
+        let detail = app.detail().expect("the click opened the call on its row");
+        assert_eq!(detail.text(), path, "{row}");
+        assert!(app.picking().is_none(), "{row}");
+    }
+}
+
+#[test]
+fn a_click_on_what_is_drawn_under_a_call_in_an_open_run_opens_that_call() {
+    let mut app = running_session();
+    let (first, first_end) = call_events("x1", "Bash", "{\"command\":\"make a\"}", "");
+    let (second, second_end) = call_events("x2", "Bash", "{\"command\":\"make b\"}", "");
+    let failed = match first_end {
+        Event::ToolCallEnd {
+            id,
+            name,
+            input,
+            summary,
+            command,
+            untrimmed,
+            ..
+        } => Event::ToolCallEnd {
+            id,
+            name,
+            input,
+            output: "make: *** no rule to make target 'a'".to_owned(),
+            bytes: 37,
+            outcome: niobe_core::event::ToolOutcome::Failed,
+            summary,
+            exit_code: Some(2),
+            error: Some("no rule to make target 'a'".to_owned()),
+            command,
+            untrimmed,
+        },
+        other => other,
+    };
+    app.apply(&Event::UserMessage {
+        text: "Build both.".to_owned(),
+    });
+    app.apply(&first);
+    app.apply(&second);
+    app.apply(&failed);
+    app.apply(&second_end);
+    let frame = screen(&mut app, WIDTH, 60);
+
+    // The reason the first failed is drawn under its row.
+    click(&mut app, cell_of(&frame, "no rule to make target"));
+
+    let detail = app.detail().expect("the click opened the call it is under");
+    assert!(
+        detail.text().starts_with("{\"command\":\"make a\"}"),
+        "{frame}"
+    );
+}
+
+#[test]
+fn a_click_on_a_sub_agents_call_in_an_open_run_opens_it_with_the_rows_grouped_by_agent() {
+    let mut app = running_session();
+    app.apply(&Event::UserMessage {
+        text: "Look for both.".to_owned(),
+    });
+    for (id, pattern) in [("s1", "etag_first"), ("s2", "etag_second")] {
+        let input = format!("{{\"pattern\":\"{pattern}\"}}");
+        app.apply(&Event::ToolCallStart {
+            id: id.into(),
+            name: "Grep".to_owned(),
+            input: input.clone(),
+            summary: Some(pattern.to_owned()),
+            agent: Some("a1".into()),
+        });
+        let (_, end) = call_events(id, "Grep", &input, "");
+        app.apply(&end);
+    }
+    app.group_by_agent();
+    let frame = screen(&mut app, WIDTH, 60);
+
+    click(&mut app, cell_of(&frame, "└ etag_second"));
+
+    let detail = app.detail().expect("the click opened the call on its row");
+    assert_eq!(detail.text(), "{\"pattern\":\"etag_second\"}", "{frame}");
+}
+
+#[test]
+fn a_click_on_a_folded_run_opens_the_list_on_the_runs_first() {
+    let mut app = running_session();
+    app.fold_calls();
+    let frame = screen(&mut app, WIDTH, 60);
     click(&mut app, cell_of(&frame, "Read ×3"));
 
     let picker = app.picking().expect("the click opened the list of calls");
