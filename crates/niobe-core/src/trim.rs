@@ -360,6 +360,8 @@ mod tests {
             )
             .is_some()
         );
+        assert!(trim("/usr/bin/env cargo test 2>&1 | tail -n 400", &output).is_some());
+        assert!(trim("/usr/bin/time -p cargo test", &output).is_some());
     }
 
     #[test]
@@ -400,6 +402,8 @@ mod tests {
             "cargo test 2>&1 | pcre2grep ' ok$'",
             "cargo test 2>&1 | perl -ne 'print if / ok$/'",
             "cargo test 2>&1 | ruby -ne 'print if / ok$/'",
+            "cargo test 2>&1 | /usr/bin/env grep ' ok$'",
+            "cargo test 2>&1 | /usr/bin/env LC_ALL=C grep ' ok$'",
         ] {
             assert_eq!(trim(command, &listed), None, "{command}");
         }

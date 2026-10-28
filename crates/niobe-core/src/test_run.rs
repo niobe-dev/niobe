@@ -579,12 +579,14 @@ pub(crate) struct Wrapper {
 }
 
 impl Wrapper {
+    /// The wrapper `word` names, by its name or by a path to it:
+    /// `/usr/bin/env cargo test` runs `cargo test` as `env cargo test` does.
     pub(crate) fn named(word: &str) -> Option<Wrapper> {
         let (takes_a_value, runs_nothing, operands): (
             &'static [&'static str],
             &'static [&'static str],
             usize,
-        ) = match word {
+        ) = match word.rsplit('/').next().unwrap_or(word) {
             "env" => (&["-u", "--unset", "-C", "--chdir"], &[], 0),
             "time" => (&["-f", "--format", "-o", "--output"], &[], 0),
             "nice" => (&["-n", "--adjustment"], &[], 0),
@@ -1398,6 +1400,26 @@ error: could not compile `demo` (lib test) due to 1 previous error
         ] {
             assert!(is_test_run(command), "{command:?} runs the tests");
         }
+    }
+
+    #[test]
+    fn a_wrapper_named_by_its_path_runs_the_command_after_it_as_it_does_by_its_name() {
+        for command in [
+            "/usr/bin/env cargo test",
+            "/usr/bin/env RUST_LOG=debug cargo test -p niobe-core",
+            "/usr/bin/time -p cargo test",
+            "/usr/bin/timeout 600 cargo test",
+            "/usr/bin/nice -n 10 cargo test",
+            "/usr/bin/sudo -u ci cargo test",
+        ] {
+            assert!(is_test_run(command), "{command:?} runs the tests");
+        }
+        assert!(!is_test_run("/usr/bin/command -v cargo test"));
+        assert!(!is_test_run("/usr/bin/env -u cargo test"));
+        assert_eq!(
+            counts("/usr/bin/env cargo test", PASSED, Some(0)),
+            counts("cargo test", PASSED, Some(0))
+        );
     }
 
     #[test]
