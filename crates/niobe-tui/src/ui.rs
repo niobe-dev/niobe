@@ -5035,9 +5035,11 @@ fn draw_changes(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
 
 /// One of the two panes that scroll and hold folding sections.
 ///
-/// The drawing is in two halves: the rows are built whole, and then the height
-/// the pane got decides which of them the operator sees. Building them all is
-/// what lets the pane know how far it can be scrolled.
+/// The drawing is in two halves: the rows are listed whole, which is what lets
+/// the pane know how far it can be scrolled, and then the height the pane got
+/// decides which of them the operator sees. A row that waits on
+/// [`PaneRow::line`] is laid out only once it is one of those, so a working
+/// tree of fifty thousand files costs a frame what a screenful does.
 fn draw_scrolling_pane(
     frame: &mut Frame,
     area: Rect,
@@ -5055,19 +5057,26 @@ fn draw_scrolling_pane(
         return;
     }
 
-    let PaneRows { mut rows, headers } = rows(app, usize::from(inner.width), theme);
+    let width = usize::from(inner.width);
+    let PaneRows { rows, headers } = rows(app, width, theme);
     let held = rows.len();
-    app.measured_pane(which, inner, held, usize::from(inner.height));
+    let height = usize::from(inner.height);
+    app.measured_pane(which, inner, held, height);
     app.measured_sections(which, headers.clone());
-    if let Some(cursor) = app.section_cursor(which) {
-        mark_cursor(&mut rows, &headers, cursor);
-    }
     let at = app.pane_scroll(which);
-    // Saturating rather than wrapping: a pane scrolled further than a `u16`
-    // can say would come back to the top.
-    let scroll = u16::try_from(at).unwrap_or(u16::MAX);
+    // Only what is on screen is laid out, and handed over from its first row
+    // rather than scrolled to, which also leaves no `u16` offset to run out.
+    let mut shown: Vec<Line<'static>> = rows
+        .into_iter()
+        .skip(at)
+        .take(height)
+        .map(|row| row.line(app, width, theme))
+        .collect();
+    if let Some(cursor) = app.section_cursor(which) {
+        mark_cursor(&mut shown, at, &headers, cursor);
+    }
 
-    frame.render_widget(Paragraph::new(rows).scroll((scroll, 0)), inner);
+    frame.render_widget(Paragraph::new(shown), inner);
     // The same treatment the transcript gets. A terminal has no pointer to
     // hover a pane with and nothing else to hint that one scrolls, so a pane
     // that scrolled invisibly would be a pane nobody scrolled, and the rows
@@ -5084,18 +5093,24 @@ fn draw_scrolling_pane(
 /// A scrolling pane's rows, with the row each section's header is on.
 #[derive(Default)]
 struct PaneRows {
-    rows: Vec<Line<'static>>,
+    rows: Vec<PaneRow>,
     headers: Vec<(Section, usize)>,
 }
 
 impl PaneRows {
     /// Rows that belong to no section, such as the branch above them.
     fn extend(&mut self, rows: impl IntoIterator<Item = Line<'static>>) {
-        self.rows.extend(rows);
+        self.rows.extend(rows.into_iter().map(PaneRow::Drawn));
     }
 
     /// A section's rows, the first of which is its header.
     fn section(&mut self, section: Section, rows: Vec<Line<'static>>) {
+        self.section_of(section, rows.into_iter().map(PaneRow::Drawn).collect());
+    }
+
+    /// A section's rows, some of which may wait to be laid out until they are
+    /// on screen; the first is its header.
+    fn section_of(&mut self, section: Section, rows: Vec<PaneRow>) {
         if !rows.is_empty() {
             self.headers.push((section, self.rows.len()));
         }
@@ -5103,15 +5118,44 @@ impl PaneRows {
     }
 }
 
+/// One row of a scrolling pane, laid out already or once it is on screen.
+enum PaneRow {
+    /// A row laid out as it was listed.
+    Drawn(Line<'static>),
+    /// A file of the working tree, by where it is in the repository's list,
+    /// with the bytes of its path its directory row already said.
+    WorkingFile { at: usize, under: usize },
+}
+
+impl PaneRow {
+    /// The row as drawn, `width` cells wide.
+    fn line(self, app: &App, width: usize, theme: &Theme) -> Line<'static> {
+        match self {
+            PaneRow::Drawn(line) => line,
+            PaneRow::WorkingFile { at, under } => match app.repo().working.get(at) {
+                Some(file) => working_file_row(file, under, width, theme),
+                None => Line::default(),
+            },
+        }
+    }
+}
+
 /// Draws the section cursor: the header's marker and name as a solid bar.
+/// `shown` are the rows on screen, the first of them the pane's row `from`.
 ///
 /// Reversed rather than painted, like the focused pane's title, so the cursor
 /// is there on a terminal with no colour.
-fn mark_cursor(rows: &mut [Line<'static>], headers: &[(Section, usize)], cursor: Section) {
+fn mark_cursor(
+    shown: &mut [Line<'static>],
+    from: usize,
+    headers: &[(Section, usize)],
+    cursor: Section,
+) {
     let span = headers
         .iter()
         .find(|(section, _)| *section == cursor)
-        .and_then(|(_, row)| rows.get_mut(*row))
+        .and_then(|(_, row)| row.checked_sub(from))
+        .and_then(|row| shown.get_mut(row))
         .and_then(|line| line.spans.first_mut());
     if let Some(span) = span {
         span.style = span.style.add_modifier(Modifier::REVERSED);
@@ -5130,7 +5174,7 @@ fn changes_rows(app: &App, width: usize, theme: &Theme) -> PaneRows {
     match &repo.branch {
         Some(branch) => {
             rows.extend([branch_row(branch, repo, width, theme)]);
-            rows.section(
+            rows.section_of(
                 Section::WorkingTree,
                 working_tree_rows(app, repo, width, theme),
             );
@@ -5304,12 +5348,15 @@ fn section_header(
 /// its lines counted as git counts them once it is added, with the file marked
 /// new. They are never mixed with the session's own counts, which are a
 /// different claim by a different party and have their own section below.
+///
+/// A file's row is left to [`PaneRow::line`], since only the rows on screen
+/// are laid out.
 fn working_tree_rows(
     app: &App,
     repo: &crate::app::Repo,
     width: usize,
     theme: &Theme,
-) -> Vec<Line<'static>> {
+) -> Vec<PaneRow> {
     // Git gives a binary file no line counts, and the header marks that the
     // way a file's own row does: a floor where some file had none, and a dash
     // where no file had any, never a zero standing in for the count.
@@ -5336,46 +5383,71 @@ fn working_tree_rows(
     };
 
     let folded = app.folded(Section::WorkingTree);
-    let mut rows = vec![section_header(
+    let mut rows = vec![PaneRow::Drawn(section_header(
         folded,
         "Working tree",
         summary,
         width,
         theme,
-    )];
+    ))];
     if folded {
         return rows;
     }
     // Nobody has looked yet, which is not the repository saying nothing
     // changed.
     if !repo.read {
-        rows.push(Line::from("  not read yet").style(Style::new().fg(theme.dim)));
+        rows.push(PaneRow::Drawn(
+            Line::from("  not read yet").style(Style::new().fg(theme.dim)),
+        ));
         return rows;
     }
     if repo.working.is_empty() {
-        rows.push(Line::from("  nothing changed yet").style(Style::new().fg(theme.dim)));
+        rows.push(PaneRow::Drawn(
+            Line::from("  nothing changed yet").style(Style::new().fg(theme.dim)),
+        ));
         return rows;
     }
 
+    // `grouped` keeps the files in the order the repository gave them, so
+    // the files' rows count through that list.
+    let mut at = 0;
     for row in tree::grouped(&repo.working) {
-        rows.push(match &row {
-            tree::Row::Dir(_) => Line::from(format!(
-                "  {}",
-                text::truncate_start(row.name(), width.saturating_sub(2))
-            ))
-            .style(Style::new().fg(theme.dim)),
-            tree::Row::File { file, .. } => counted_row(
-                FILE_INDENT,
-                row.name(),
-                Tag::new(file.new),
-                &measured('+', file.added),
-                &removed_of(file),
-                width,
-                theme,
+        rows.push(match row {
+            tree::Row::Dir(dir) => PaneRow::Drawn(
+                Line::from(format!(
+                    "  {}",
+                    text::truncate_start(&dir, width.saturating_sub(2))
+                ))
+                .style(Style::new().fg(theme.dim)),
             ),
+            tree::Row::File { under, .. } => {
+                let row = PaneRow::WorkingFile { at, under };
+                at += 1;
+                row
+            }
         });
     }
     rows
+}
+
+/// A working-tree file's row, its path less the `under` bytes the directory
+/// row above it already said.
+fn working_file_row(
+    file: &crate::app::WorkingFile,
+    under: usize,
+    width: usize,
+    theme: &Theme,
+) -> Line<'static> {
+    let row = tree::Row::File { file, under };
+    counted_row(
+        FILE_INDENT,
+        row.name(),
+        Tag::new(file.new),
+        &measured('+', file.added),
+        &removed_of(file),
+        width,
+        theme,
+    )
 }
 
 /// What a decision's time column is drawn in: `13:41` and a space.

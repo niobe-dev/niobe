@@ -669,7 +669,8 @@ Where tests live:
     megabyte prompt under the history dialog's cursor drawn against 16 ms — and the transcript of
     2,000 markdown replies exported to the clipboard, and a selection dragged across all of it
     copied, each against 16 ms — and a key typed into the transcript search over a 20 MB reply
-    against 50 ms. It is a test binary of its own and its
+    against 50 ms — and the Changes pane redrawn over a working tree of 50,000 new files against
+    16 ms. It is a test binary of its own and its
     tests take turns on a lock, so that nothing shares their cores, and each asserts the median
     of 31 frames so that a frame the scheduler interrupted cannot fail it. The frames are timed
     only in an optimised build, `cargo test --release -p niobe-tui --test frame_budget`, because

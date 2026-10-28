@@ -711,10 +711,10 @@ fn median_frame(app: &mut App, sizes: &[(u16, u16)]) -> Duration {
         .expect("FRAMES frames were timed")
 }
 
-/// A working tree far larger than the pane can show: the Changes pane builds
+/// A working tree far larger than the pane can show: the Changes pane lists
 /// every row it holds on every frame, because that is what tells it how far it
-/// can be scrolled. A big refactor is the case that makes that expensive, so
-/// it is the case that is timed.
+/// can be scrolled, and lays out the ones on screen. A big refactor is the
+/// case that makes that expensive, so it is the case that is timed.
 const BIG_WORKING_TREE: usize = 500;
 
 #[test]
@@ -745,12 +745,44 @@ fn a_large_working_tree_redraws_inside_a_frame_budget() {
     );
 }
 
+/// A working tree of a directory nobody ignored yet — a package manager's
+/// install, a build's output — where every file is new and the pane holds far
+/// more rows than a screen: what a frame costs must not grow with them.
+const HUGE_WORKING_TREE: usize = 50_000;
+
+#[test]
+#[cfg_attr(debug_assertions, ignore = "a frame is timed in an optimised build")]
+fn a_huge_working_tree_redraws_inside_a_frame_budget() {
+    let _alone = ALONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut app = running_session();
+    let mut repo = app.repo().clone();
+    repo.working = (0..HUGE_WORKING_TREE)
+        .map(|n| WorkingFile {
+            path: format!("node_modules/pkg-{:03}/lib/file_{n:05}.js", n / 64),
+            added: Some(n as u64 % 400),
+            removed: Some(0),
+            new: true,
+        })
+        .collect();
+    app.set_repo(repo);
+    let _ = screen(&mut app, 200, 60);
+
+    let median = median_frame(&mut app, &[(200, 60)]);
+
+    assert!(
+        median <= FRAME_BUDGET,
+        "the median frame with {HUGE_WORKING_TREE} changed files at 200x60 took \
+         {median:?}, over the {FRAME_BUDGET:?} budget"
+    );
+}
+
 /// A session busy enough that the Activity pane has to build every row it
 /// holds: four sub-agents and a dozen tools.
 ///
-/// The pane builds them all on every frame for the same reason the Changes
-/// pane does — that is what tells it how far it can be scrolled — so what it
-/// costs is timed rather than assumed.
+/// The pane builds them all on every frame, because that is what tells it
+/// how far it can be scrolled, so what it costs is timed rather than assumed.
 const BUSY_AGENTS: usize = 4;
 const BUSY_TOOLS: usize = 12;
 
