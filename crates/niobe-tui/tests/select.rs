@@ -592,3 +592,54 @@ fn a_click_on_a_window_too_small_to_draw_the_shell_presses_nothing_the_last_fram
         "a click on a blank window opened a menu"
     );
 }
+
+#[test]
+fn a_drag_let_go_after_the_window_was_resized_copies_nothing_it_did_not_cover() {
+    let mut app = replied(&rewrapped());
+    let frame = screen(&mut app, WIDTH, HEIGHT);
+    let (column, row) = cell_of(&frame, "niobe.toml");
+    app.on_mouse(mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        (column, row),
+    ));
+    app.on_mouse(mouse(
+        MouseEventKind::Drag(MouseButton::Left),
+        (column + 9, row),
+    ));
+
+    // Narrowed mid-drag, the transcript is wrapped on to other lines: the
+    // cells the drag held now hold other text.
+    let _ = screen(&mut app, 100, HEIGHT);
+    app.on_mouse(mouse(
+        MouseEventKind::Up(MouseButton::Left),
+        (column + 9, row),
+    ));
+
+    let copied = app.take_handoffs();
+    assert!(
+        copied.is_empty() || copied == vec![Handoff::Copy("niobe.toml".to_owned())],
+        "a resize mid-drag copied {copied:?}"
+    );
+}
+
+#[test]
+fn a_selection_marks_no_other_text_once_the_window_is_resized() {
+    let mut app = replied(&rewrapped());
+    let unmarked = common::paint(&mut app, 100, HEIGHT);
+    let frame = screen(&mut app, WIDTH, HEIGHT);
+    let (column, row) = cell_of(&frame, "niobe.toml");
+
+    drag(&mut app, (column, row), (column + 9, row));
+    let _ = app.take_handoffs();
+
+    assert_eq!(common::paint(&mut app, 100, HEIGHT), unmarked);
+}
+
+/// A reply whose first paragraph wraps on to more lines the narrower the
+/// window is, above a line naming `niobe.toml`.
+fn rewrapped() -> String {
+    format!(
+        "{}\n\nThe config lives in niobe.toml beside the manifest.",
+        "Every word of this paragraph moves when the window is resized. ".repeat(6)
+    )
+}

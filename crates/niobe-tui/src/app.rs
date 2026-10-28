@@ -3569,9 +3569,16 @@ impl App {
     /// on to another number of lines, and the same offset would put other
     /// lines under the view. Called by the draw before it lays the entries
     /// out.
+    ///
+    /// A selection, and a drag still under way, are let go of: they are
+    /// cells of the lines as last laid out, which hold other text once the
+    /// entries are wrapped again, so keeping them would mark, and copy on
+    /// letting go, what the operator never dragged over.
     pub(crate) fn lay_out_at(&mut self, width: usize) {
         if self.drawn.width().is_some_and(|last| last != width) {
             self.hold_view();
+            self.selection = None;
+            self.pressed = None;
         }
     }
 
