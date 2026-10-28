@@ -5046,7 +5046,8 @@ impl App {
     ///
     /// Not while a turn runs: the backend would hold it until the turn ends,
     /// and a `/clear` that lands after a turn the operator then went on
-    /// steering would clear what they meant to keep.
+    /// steering would clear what they meant to keep. Nor while a question
+    /// waits, for the same reason a prompt typed then is refused.
     fn can_send(&self, name: &str) -> Result<(), String> {
         if !self.attached {
             return Err(format!(
@@ -5061,6 +5062,16 @@ impl App {
         if self.working() {
             return Err(format!(
                 "/{name} waits for the running turn: let it end, or Esc to stop it"
+            ));
+        }
+        // A question can wait with no turn of this shell's running: one a
+        // sub-agent asks while it works on in the background, or one in a
+        // turn the backend started on its own. The backend is still holding
+        // that call, and a prompt typed now is refused for it; a command
+        // sent from a key would go where the prompt may not.
+        if self.asking().is_some() {
+            return Err(format!(
+                "/{name} waits for the question above: Esc to answer it first"
             ));
         }
         Ok(())
@@ -20788,5 +20799,46 @@ mod tests {
             "the Enter chose a session"
         );
         assert_eq!(app.take_opening(), Some(Target::Recorded("3".to_owned())));
+    }
+
+    /// A question can wait with no turn of this shell's running — a
+    /// sub-agent working on in the background, a turn the backend started on
+    /// its own — and the backend's own commands wait for it as a prompt
+    /// does: an F-key or a menu item sends no more past it than Enter does.
+    #[test]
+    fn a_backend_command_waits_for_a_question_put_aside_as_a_prompt_does() {
+        use crate::menu::Action;
+
+        let presses: [(&str, Opens); 3] = [
+            ("F2", |app| app.on_key(key(KeyCode::F(2)))),
+            ("F3", |app| app.on_key(key(KeyCode::F(3)))),
+            ("Session › Clear", |app| app.perform(Action::NewSession)),
+        ];
+        for (name, press) in presses {
+            let mut app = offering(&["clear", "compact"]);
+            app.apply(&prompt(Some("rm -rf build")));
+            app.on_key(key(KeyCode::Esc));
+            assert_eq!(app.ask_focus(), AskFocus::Deferred, "{name}");
+
+            press(&mut app);
+
+            assert_eq!(app.said(), [], "{name} reached past the question");
+            assert!(
+                app.hint().is_some_and(|hint| hint.contains("question")),
+                "{name}: {:?}",
+                app.hint()
+            );
+            app.on_key(key(KeyCode::Esc));
+            app.on_key(key(KeyCode::Enter));
+            assert_eq!(
+                app.said(),
+                [Event::PermissionResponse {
+                    id: "t1".into(),
+                    decision: PermissionDecision::Allow,
+                    message: None,
+                }],
+                "{name}: the question is still the one to answer"
+            );
+        }
     }
 }
