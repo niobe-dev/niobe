@@ -1252,9 +1252,10 @@ impl Fold {
         let content = record.content.as_ref().and_then(|content| content.as_str());
         match record.subtype.as_deref() {
             Some("compact_boundary") => {
-                self.out.push(translate::compacted(
-                    record.compact_metadata.unwrap_or_default(),
-                ));
+                let compacted = self
+                    .translator
+                    .compacted(record.compact_metadata.unwrap_or_default());
+                self.out.push(compacted);
                 self.compacted = true;
             }
             // A request that failed and was made again, which the live stream
@@ -3447,6 +3448,47 @@ mod tests {
             "the first process's response from its message, the second's from its accounting: \
              {events:?}"
         );
+    }
+
+    /// A compaction leaves the context the backend says it left, as it does
+    /// live: the window an accounting after it reports for the model is no
+    /// reason to put back the size of the conversation the model no longer
+    /// has, which would draw the meter as full again and the compaction's
+    /// row as having shrunk the context to what it held before.
+    #[test]
+    fn a_window_learnt_after_a_compaction_does_not_restate_what_it_compacted() {
+        let at = |stamp: &str, record: String| {
+            record.replacen('{', &format!(r#"{{"timestamp":"{stamp}","#), 1)
+        };
+        let events = imported(&[
+            &at("2026-09-30T05:00:00.000Z", prompt("first")),
+            &at(
+                "2026-09-30T05:00:01.000Z",
+                response("msg_1", "claude-opus-5", 150_000, 40),
+            ),
+            &at(
+                "2026-09-30T05:00:02.000Z",
+                r#"{"type":"system","subtype":"compact_boundary","compactMetadata":{"trigger":"manual","preTokens":150040,"postTokens":4282}}"#.to_owned(),
+            ),
+            &at("2026-09-30T09:00:30.000Z", prompt("second")),
+            r#"{"type":"cost-state","startTime":1790758820000,"totalCostUSD":0.01,"modelUsage":{"claude-opus-5":{"inputTokens":5,"outputTokens":7,"costUSD":0.01,"contextWindow":200000}}}"#,
+        ]);
+
+        let compacted = events
+            .iter()
+            .position(|event| matches!(event, Event::Compacted { .. }))
+            .expect("the boundary is read as a compaction");
+        let restated: Vec<u64> = events[compacted..]
+            .iter()
+            .filter_map(|event| match event {
+                Event::Context(context) => Some(context.tokens),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(restated, Vec::<u64>::new(), "{events:?}");
+        let state = niobe_core::SessionState::replay(&events);
+        assert_eq!(state.context().map(|context| context.tokens), Some(4_282));
+        assert!(state.context_is_a_floor());
     }
 
     /// A process that ended without an accounting between two that wrote

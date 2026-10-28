@@ -1455,14 +1455,8 @@ impl Translator {
                     self.reported_mode(mode, out);
                 }
             }
-            // The last request's size is of a conversation the model no
-            // longer has, so it is not restated with a window learnt after
-            // this: the next request's is the first figure of what is left,
-            // and the shell reads it as what the compaction shrank to.
             Some("compact_boundary") => {
-                self.compacting = false;
-                self.context = None;
-                out.push(compacted(system.compact_metadata.unwrap_or_default()));
+                out.push(self.compacted(system.compact_metadata.unwrap_or_default()));
             }
             Some("permission_denied") => self.denied(system, out),
             Some("task_notification") => self.task_notification(system, out),
@@ -1855,6 +1849,19 @@ impl Translator {
         self.checked_release = false;
         self.unread_said.clear();
         out.push(Event::Cleared);
+    }
+
+    /// The compaction the CLI reports with `metadata`, on the live stream or
+    /// in its own transcript, which both read through here.
+    ///
+    /// The last request's size is of a conversation the model no longer has,
+    /// so it is not restated with a window learnt after this: the next
+    /// request's is the first figure of what is left, and the shell reads it
+    /// as what the compaction shrank to.
+    pub(crate) fn compacted(&mut self, metadata: wire::CompactMetadata) -> Event {
+        self.compacting = false;
+        self.context = None;
+        compaction(metadata)
     }
 
     /// Records the model the session is on, producing a fresh [`SessionMeta`]
@@ -3533,9 +3540,8 @@ fn titled(outcome: wire::ControlOutcome) -> Option<Event> {
     })
 }
 
-/// The compaction the CLI reports with `metadata`, on the live stream or in
-/// its own transcript.
-pub(crate) fn compacted(metadata: wire::CompactMetadata) -> Event {
+/// The compaction the CLI reports with `metadata`, as an event.
+fn compaction(metadata: wire::CompactMetadata) -> Event {
     Event::Compacted {
         trigger: match metadata.trigger.as_deref() {
             Some("manual") => CompactTrigger::Manual,
