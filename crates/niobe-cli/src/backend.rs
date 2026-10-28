@@ -95,7 +95,8 @@ pub const STREAM_DIR_VAR: &str = "NIOBE_STREAM_DIR";
 /// The files hold the whole conversation, so they are never put where a
 /// `git add` could take them: a directory inside the repository at `root` is
 /// refused, as is one that is not given as a whole path. It is made where it
-/// is not there, and the path handed back is the real one.
+/// is not there, readable by the operator alone, and the path handed back is
+/// the real one.
 pub fn stream_tap(root: &Path, named: Option<OsString>) -> Result<Option<PathBuf>, String> {
     let Some(named) = named.filter(|named| !named.is_empty()) else {
         return Ok(None);
@@ -108,7 +109,7 @@ pub fn stream_tap(root: &Path, named: Option<OsString>) -> Result<Option<PathBuf
              repository"
         ));
     }
-    std::fs::create_dir_all(&path)
+    private_dir(&path)
         .map_err(|error| format!("{STREAM_DIR_VAR} is {shown}, which cannot be made: {error}"))?;
     let real = std::fs::canonicalize(&path)
         .map_err(|error| format!("{STREAM_DIR_VAR} is {shown}, which cannot be read: {error}"))?;
@@ -120,6 +121,23 @@ pub fn stream_tap(root: &Path, named: Option<OsString>) -> Result<Option<PathBuf
         ));
     }
     Ok(Some(real))
+}
+
+/// Makes `directory` and any parent it lacks readable by the operator alone,
+/// since what is kept in it holds every prompt and tool output. One that is
+/// there keeps its mode: the operator chose it.
+#[cfg(unix)]
+fn private_dir(directory: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(directory)
+}
+
+#[cfg(not(unix))]
+fn private_dir(directory: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(directory)
 }
 
 /// What a session is attached to.
@@ -1814,6 +1832,15 @@ mod tests {
             .expect("a directory outside the repository is fine")
             .expect("one was named");
         assert!(made.is_dir(), "{made:?}");
+        // What it will hold is every prompt and tool output: the operator's alone.
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&made)
+                .expect("the directory was made")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o700, "{made:?}");
+        }
 
         let inside = stream_tap(repository.path(), os(&repository.path().join("taps")))
             .expect_err("the repository is where it could be committed");
