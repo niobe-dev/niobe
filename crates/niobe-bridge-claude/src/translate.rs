@@ -2186,7 +2186,8 @@ impl Translator {
     ///   the file becomes and never what it was.
     ///
     /// The report's patch is of the whole file, so it settles both; an update
-    /// reported with no hunks at all wrote what was already there. Where no
+    /// reported with no hunks wrote what was already there only where the
+    /// file it reports holding before is what it holds now. Where no
     /// usable patch was reported — as for every sub-agent's call, whose
     /// results carry no report on the live stream — the counts stay unstated
     /// rather than filled in: the lines a `Write` wrote are not the lines it
@@ -4022,8 +4023,14 @@ fn reported_hunks(reported: Option<&serde_json::Value>, path: &str) -> Vec<Hunk>
 }
 
 /// What a `Write` over a file that was already there changed: the reported
-/// patch's counts, nothing where the CLI reported an update with no hunks —
-/// the file was written as it stood — and `None` where no usable patch says.
+/// patch's counts, nothing where the CLI reported an update with no hunks
+/// and the file it held before is what it holds now — it was written as it
+/// stood — and `None` where no usable patch says.
+///
+/// An empty patch alone is not that: Claude Code 2.1.310 sends one for a
+/// file past 10 MiB, which it does not diff and whose `originalFile` it
+/// leaves out, and for a diff that ran past its five-second limit, where the
+/// two texts differ. Either would read as a file that did not change.
 fn overwrite_changed(
     reported: Option<&serde_json::Value>,
     path: &str,
@@ -4035,6 +4042,7 @@ fn overwrite_changed(
     file_report(reported, path)
         .filter(|report| report.kind.as_deref() == Some("update"))
         .filter(|report| report.structured_patch.is_empty())
+        .filter(|report| report.original_file.is_some() && report.original_file == report.content)
         .map(|_| (0, 0))
 }
 
@@ -8603,6 +8611,41 @@ mod tests {
             vec![("f.txt".to_owned(), Some(0), Some(0))],
             "{events:?}"
         );
+    }
+
+    /// The CLI hands back an empty patch for two overwrites that did change
+    /// the file, read off Claude Code 2.1.310's `Write`: one over a file past
+    /// 10 MiB, which it does not diff and reports with no `originalFile`, and
+    /// one whose diff ran past its five-second limit, which it reports with
+    /// the `originalFile` it could not compare in time. Neither says by how
+    /// much the file changed, and neither changed it by nothing.
+    #[test]
+    fn an_overwrite_whose_empty_patch_the_cli_did_not_compute_is_unstated() {
+        for (original, why) in [
+            ("null", "a file too large for the CLI to diff"),
+            (r#""x\ny\nz\n""#, "a diff the CLI gave up on"),
+        ] {
+            let mut translator = translator().in_dir("/repo");
+            translator.line(&call(
+                "t1",
+                "Write",
+                r#"{"file_path":"/repo/f.txt","content":"a\nb\nc\n"}"#,
+            ));
+
+            let events = translator.line(&result_with(
+                "t1",
+                "The file /repo/f.txt has been updated successfully.",
+                &format!(
+                    r#"{{"type":"update","filePath":"/repo/f.txt","content":"a\nb\nc\n","structuredPatch":[],"originalFile":{original}}}"#
+                ),
+            ));
+
+            assert_eq!(
+                changes(&events),
+                vec![("f.txt".to_owned(), None, None)],
+                "{why}: {events:?}"
+            );
+        }
     }
 
     #[test]

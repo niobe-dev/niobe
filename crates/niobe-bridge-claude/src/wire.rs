@@ -451,6 +451,11 @@ pub(crate) struct FileReport {
     /// What a `Write` left in the file.
     #[serde(default)]
     pub(crate) content: Option<String>,
+    /// What the file held before a `Write` over it, with its `\r`s taken
+    /// off. `None` on a created file, and on one past 10 MiB, which the CLI
+    /// neither diffs nor sends back.
+    #[serde(default)]
+    pub(crate) original_file: Option<String>,
     /// The CLI's diff of the file before the call against the file after it,
     /// with three lines of context. Empty for a file that was created.
     #[serde(default)]
