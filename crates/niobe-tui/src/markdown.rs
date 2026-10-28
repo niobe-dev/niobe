@@ -523,7 +523,7 @@ impl<'t> Renderer<'t> {
         };
         let said = self.runs.since(at).unwrap_or_default();
         let own = said.trim_start_matches(IMAGE_MARK);
-        if destination.is_empty() || own == destination {
+        if destination.is_empty() || own == drawable(&destination) {
             return;
         }
         let dim = self.theme.dim;
@@ -535,7 +535,7 @@ impl<'t> Renderer<'t> {
     }
 
     fn run(&mut self, text: &str, style: Style, spacing: Spacing) {
-        self.runs.push(text, style, spacing);
+        self.runs.push(&drawable(text), style, spacing);
     }
 
     /// Puts a blank line before a block, unless it opens the reply, follows a
@@ -762,6 +762,24 @@ impl<'t> Renderer<'t> {
             self.lines.pop();
         }
         self.lines
+    }
+}
+
+/// `text` without its control characters, but for the whitespace ones, which
+/// the wrap reads as the blank between two words.
+///
+/// Ratatui draws nothing for a control character, yet lays the span after it
+/// out a cell further on for each one: it measures a span by its string's
+/// width, where a control character counts a cell, and draws it a grapheme at
+/// a time, where it counts none. So a reply holding an escape drew the styled
+/// word after it to the right of where it was measured, cut the end of its
+/// line at the pane's edge and put a table's columns out of line, and find
+/// and a selection marked cells other than the ones drawn.
+fn drawable(text: &str) -> Cow<'_, str> {
+    let dropped = |c: char| c.is_control() && !c.is_whitespace();
+    match text.contains(dropped) {
+        true => Cow::Owned(text.chars().filter(|c| !dropped(*c)).collect()),
+        false => Cow::Borrowed(text),
     }
 }
 
@@ -1469,5 +1487,40 @@ mod tests {
     fn a_centred_column_puts_the_odd_cell_of_padding_on_the_right() {
         let table = "| mids | z |\n|:----:|---|\n| b | y |";
         assert_eq!(drawn(table, 40), ["mids │ z", "─────┼──", " b   │ y"],);
+    }
+
+    /// What a terminal `width` cells wide shows of each of `lines`, read off
+    /// the cells ratatui drew them into.
+    fn on_screen(lines: &[Line<'static>], width: u16) -> Vec<String> {
+        use ratatui::widgets::Widget as _;
+        lines
+            .iter()
+            .map(|line| {
+                let area = ratatui::layout::Rect::new(0, 0, width, 1);
+                let mut buffer = ratatui::buffer::Buffer::empty(area);
+                line.clone().render(area, &mut buffer);
+                (0..width)
+                    .map(|x| buffer[(x, 0)].symbol().to_owned())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_owned()
+            })
+            .collect()
+    }
+
+    /// Ratatui draws nothing for a control character but moves the span after
+    /// it on by a cell for each one, so a reply holding an escape drew its
+    /// next styled word a cell to the right of where the shell measured it,
+    /// and cut its end at the pane's edge.
+    #[test]
+    fn a_control_character_in_a_reply_moves_no_word_after_it_and_cuts_none_at_the_edge() {
+        let source = "x\u{1b}\u{1b}\u{7}\u{1b} **end** `c\u{1b}d` e\n\n| k\u{1b}\u{1b} | v |\n|---|---|\n| a | b |";
+        let lines = render(source, 11, &CLASSIC);
+        let measured: Vec<String> = lines
+            .iter()
+            .map(|line| crate::select::shown(line).trim_end().to_owned())
+            .collect();
+        assert_eq!(measured[0], "x end cd e");
+        assert_eq!(on_screen(&lines, 11), measured);
     }
 }
