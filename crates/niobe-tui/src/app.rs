@@ -2355,6 +2355,8 @@ impl App {
             | Event::AgentSpawn { .. }
             | Event::AgentProgress { .. }
             | Event::AgentExit { .. }
+            | Event::BackgroundCommandStarted { .. }
+            | Event::BackgroundCommandEnded { .. }
             | Event::Commands { .. }
             | Event::McpServers { .. }
             | Event::Models { .. }
@@ -3115,6 +3117,10 @@ impl App {
             | Event::Commands { .. }
             | Event::McpServers { .. }
             | Event::Models { .. } => {}
+            // The command's end is told by the notice the backend reports
+            // beside it; the call's row already says it was moved to the
+            // background.
+            Event::BackgroundCommandStarted { .. } | Event::BackgroundCommandEnded { .. } => {}
 
             // Straight after its call's end, so in the same tick and at the
             // same clock: the moment the call finished.

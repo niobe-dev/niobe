@@ -200,6 +200,12 @@ fn one_of_each() -> Vec<Event> {
             context_tokens: Some(4_000),
             latest: Some(text("Reading a.rs")),
         },
+        Event::BackgroundCommandStarted {
+            id: ToolCallId::new("t9"),
+        },
+        Event::BackgroundCommandEnded {
+            id: ToolCallId::new("t9"),
+        },
         Event::AgentExit {
             id: AgentId::new("agent-8"),
             outcome: AgentOutcome::Cancelled,
@@ -300,6 +306,8 @@ fn every_variant_is_listed() {
             Event::AgentSpawn { .. } => "agent_spawn",
             Event::AgentProgress { .. } => "agent_progress",
             Event::AgentExit { .. } => "agent_exit",
+            Event::BackgroundCommandStarted { .. } => "background_command_started",
+            Event::BackgroundCommandEnded { .. } => "background_command_ended",
             Event::Commands { .. } => "commands",
             Event::McpServers { .. } => "mcp_servers",
             Event::Models { .. } => "models",
@@ -312,7 +320,7 @@ fn every_variant_is_listed() {
         assert!(!seen.contains(&name), "{name} is listed twice");
         seen.push(name);
     }
-    assert_eq!(seen.len(), 38, "every variant has one value: {seen:?}");
+    assert_eq!(seen.len(), 40, "every variant has one value: {seen:?}");
 }
 
 #[test]

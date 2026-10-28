@@ -76,6 +76,8 @@ impl Attention {
             | Event::ModelSelected { .. }
             | Event::AgentSpawn { .. }
             | Event::AgentProgress { .. }
+            | Event::BackgroundCommandStarted { .. }
+            | Event::BackgroundCommandEnded { .. }
             | Event::Commands { .. }
             | Event::McpServers { .. }
             | Event::Models { .. }

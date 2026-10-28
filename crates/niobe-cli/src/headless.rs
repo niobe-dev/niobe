@@ -19,10 +19,10 @@
 //! error with as much spent as the budget allowed — rather than off the
 //! backend's wording of it.
 //!
-//! A turn that finished with a sub-agent still working in the background is
-//! waited past: the agent's end starts a turn of the backend's own, and the
-//! run ends with the first turn that finishes with no sub-agent running, its
-//! reply the reply.
+//! A turn that finished with a sub-agent or a shell command still working in
+//! the background is waited past: the end of each starts a turn of the
+//! backend's own, and the run ends with the first turn that finishes with
+//! nothing left running in the background, its reply the reply.
 //!
 //! A run asked to stop while the turn is under way — a CI job's timeout, or
 //! Ctrl+C — asks the backend to stop the turn and gives it [`STOP_GRACE`] to
@@ -200,17 +200,18 @@ pub fn run(
                 Event::SessionLeft => Some(Outcome::Failed(
                     "the backend left before the turn ended".to_owned(),
                 )),
-                // A turn that finished with a sub-agent still working is not
-                // the end of the run: the CLI runs sub-agents in the
-                // background by default, and each one's end starts a turn of
-                // the CLI's own that answers with what it found. Ended here,
-                // the run would print "an agent is working" as its reply and
-                // stop the agent with the backend. One that failed ends the
-                // run as it stands, since nothing says another turn follows.
+                // A turn that finished with a sub-agent or a shell command
+                // still working is not the end of the run: the CLI runs
+                // sub-agents in the background by default, the model can put
+                // a command there, and each one's end starts a turn of the
+                // CLI's own that answers with what it came to. Ended here,
+                // the run would print "it is running" as its reply and stop
+                // the work with the backend. One that failed ends the run as
+                // it stands, since nothing says another turn follows.
                 Event::TurnEnded => match limited.take() {
                     Some(why) => Some(Outcome::Failed(why)),
                     None => match ended(failure.take(), &state, budget) {
-                        Outcome::Finished if !state.running_agents().is_empty() => None,
+                        Outcome::Finished if still_working(&state) => None,
                         ended => Some(ended),
                     },
                 },
@@ -240,6 +241,13 @@ pub fn run(
         started_at,
         state,
     }
+}
+
+/// Whether something the backend runs in the background is still going: a
+/// sub-agent or a shell command, whose end the backend answers in a turn of
+/// its own.
+fn still_working(state: &SessionState) -> bool {
+    !state.running_agents().is_empty() || !state.background_commands().is_empty()
 }
 
 /// Records why the run is stopping and asks the backend to stop the turn,
@@ -570,6 +578,26 @@ mod tests {
             Some(&said("said after the run's end")),
             "everything the backend said is still recorded"
         );
+    }
+
+    #[test]
+    fn a_turn_that_leaves_a_command_running_is_waited_past_to_the_turn_its_end_starts() {
+        let id = ToolCallId::new("toolu_bash");
+        let (turn, ..) = ran(
+            vec![
+                vec![
+                    Event::BackgroundCommandStarted { id: id.clone() },
+                    said("the tests are running"),
+                    Event::TurnEnded,
+                ],
+                vec![Event::BackgroundCommandEnded { id }],
+                vec![said("two tests failed"), Event::TurnEnded],
+            ],
+            &Allowlist::new(),
+            None,
+        );
+        assert_eq!(turn.outcome, Outcome::Finished);
+        assert_eq!(turn.reply, "two tests failed");
     }
 
     #[test]

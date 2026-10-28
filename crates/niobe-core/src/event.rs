@@ -1177,6 +1177,23 @@ pub enum Event {
         outcome: AgentOutcome,
     },
 
+    /// A shell command the backend moved to the background is running: the
+    /// call that started it has ended, and the command goes on until an
+    /// [`Event::BackgroundCommandEnded`] names the same call. The backend
+    /// takes its end as a prompt of its own, so a session with one running
+    /// has a turn still to come.
+    BackgroundCommandStarted {
+        /// The call that started the command.
+        id: ToolCallId,
+    },
+
+    /// The background command call `id` started has ended, however it
+    /// ended. How it went is in the notice the backend reports beside it.
+    BackgroundCommandEnded {
+        /// The call that started the command.
+        id: ToolCallId,
+    },
+
     /// Every command the backend offers to run from a prompt, as it now
     /// stands. Replaces the list before it whole: a backend sends it again
     /// when the list changes, and a command it no longer lists is one it will

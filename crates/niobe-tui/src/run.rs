@@ -719,6 +719,8 @@ fn send_produced(
             | SessionEvent::AgentSpawn { .. }
             | SessionEvent::AgentProgress { .. }
             | SessionEvent::AgentExit { .. }
+            | SessionEvent::BackgroundCommandStarted { .. }
+            | SessionEvent::BackgroundCommandEnded { .. }
             | SessionEvent::Commands { .. }
             | SessionEvent::Models { .. }
             | SessionEvent::TurnTotalDiffers { .. }

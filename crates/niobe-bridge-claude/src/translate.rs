@@ -1574,6 +1574,9 @@ impl Translator {
         let mut out = Vec::new();
         if let Some(command) = self.background.remove(id) {
             out.push(background_ended(&command, status, summary));
+            out.push(Event::BackgroundCommandEnded {
+                id: ToolCallId::new(id),
+            });
             return out;
         }
         if !self.is_agent(Some(id)) {
@@ -1991,13 +1994,19 @@ impl Translator {
                 true => string_at(&arguments, "command").map(str::to_owned),
                 false => None,
             };
+            let mut backgrounded = false;
             if outcome == ToolOutcome::Ok
                 && let Some(command) = &command
                 && moved_to_background(reported.as_ref())
             {
-                self.background.insert(tool_use_id.clone(), command.clone());
+                backgrounded = self
+                    .background
+                    .insert(tool_use_id.clone(), command.clone())
+                    .is_none();
             }
             let id = ToolCallId::new(tool_use_id);
+            let backgrounded =
+                backgrounded.then(|| Event::BackgroundCommandStarted { id: id.clone() });
             let tested = tested.map(|run| Event::TestRun {
                 id: id.clone(),
                 counts: run.counts,
@@ -2020,6 +2029,7 @@ impl Translator {
             });
             out.extend(change);
             out.extend(tested);
+            out.extend(backgrounded);
         }
     }
 
@@ -8398,11 +8408,31 @@ mod tests {
             "Bash",
             &format!(r#"{{"command":{}}}"#, serde_json::json!(command)),
         ));
-        translator.line(&result_with(
+        let launched = translator.line(&result_with(
             "toolu_bash",
             "Command running in background with ID: b1.",
             &shell_report(r#","backgroundTaskId":"b1""#),
         ));
+        assert_eq!(
+            launched.last(),
+            Some(&Event::BackgroundCommandStarted {
+                id: ToolCallId::new("toolu_bash")
+            }),
+            "the command goes on after its call: {launched:?}"
+        );
+    }
+
+    #[test]
+    fn a_command_that_finished_in_its_call_is_not_running_in_the_background() {
+        let mut translator = translator();
+        translator.line(&call("toolu_bash", "Bash", r#"{"command":"ls"}"#));
+        let ended = translator.line(&result_with("toolu_bash", "a.txt", &shell_report("")));
+        assert!(
+            !ended
+                .iter()
+                .any(|event| matches!(event, Event::BackgroundCommandStarted { .. })),
+            "{ended:?}"
+        );
     }
 
     fn command_notified(status: &str, summary: &str) -> String {
@@ -8424,10 +8454,15 @@ mod tests {
 
         assert_eq!(
             ended,
-            [Event::Notice {
-                message: "the background command `cargo test …` failed with exit code 101"
-                    .to_owned()
-            }]
+            [
+                Event::Notice {
+                    message: "the background command `cargo test …` failed with exit code 101"
+                        .to_owned()
+                },
+                Event::BackgroundCommandEnded {
+                    id: ToolCallId::new("toolu_bash")
+                }
+            ]
         );
         assert!(again.is_empty(), "{again:?}");
     }
@@ -8443,9 +8478,14 @@ mod tests {
 
         assert_eq!(
             events,
-            [Event::Notice {
-                message: "the background command `sleep 60` was stopped".to_owned()
-            }]
+            [
+                Event::Notice {
+                    message: "the background command `sleep 60` was stopped".to_owned()
+                },
+                Event::BackgroundCommandEnded {
+                    id: ToolCallId::new("toolu_bash")
+                }
+            ]
         );
     }
 

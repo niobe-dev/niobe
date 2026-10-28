@@ -189,6 +189,38 @@ fn a_sub_agent_working_in_the_background_is_waited_for_and_its_answer_is_the_rep
     );
 }
 
+/// A `claude` whose turn puts a shell command in the background, in the
+/// shapes `background-commands.jsonl` recorded from 2.1.309: the call returns
+/// at once with the task's id in its report, the turn ends, and the command's
+/// end starts a turn of the CLI's own that says how it went.
+const RUNS_IN_THE_BACKGROUND_CLAUDE: &str = "#!/bin/sh\n\
+    read -r first\n\
+    read -r turn\n\
+    printf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"model\":\"claude-sonnet-5\",\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_b\",\"name\":\"Bash\",\"input\":{\"command\":\"cargo test\",\"run_in_background\":true}}]},\"parent_tool_use_id\":null}'\n\
+    printf '%s\\n' '{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"tool_use_id\":\"toolu_b\",\"type\":\"tool_result\",\"is_error\":false,\"content\":\"Command running in background with ID: b1. You will be notified when it completes.\"}]},\"parent_tool_use_id\":null,\"tool_use_result\":{\"stdout\":\"\",\"stderr\":\"\",\"interrupted\":false,\"isImage\":false,\"noOutputExpected\":false,\"backgroundTaskId\":\"b1\"}}'\n\
+    printf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"model\":\"claude-sonnet-5\",\"id\":\"msg_2\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"The tests are running in the background.\"}]},\"parent_tool_use_id\":null}'\n\
+    printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"The tests are running in the background.\",\"total_cost_usd\":0.1,\"usage\":{\"input_tokens\":10,\"output_tokens\":5,\"cache_read_input_tokens\":0,\"cache_creation_input_tokens\":0}}'\n\
+    sleep 1\n\
+    printf '%s\\n' '{\"type\":\"system\",\"subtype\":\"task_notification\",\"tool_use_id\":\"toolu_b\",\"status\":\"failed\",\"summary\":\"Background command \\\"Run the tests\\\" failed with exit code 101\"}'\n\
+    printf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"model\":\"claude-sonnet-5\",\"id\":\"msg_3\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"cargo test failed: two tests in fetch.rs.\"}]},\"parent_tool_use_id\":null}'\n\
+    printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"cargo test failed: two tests in fetch.rs.\",\"total_cost_usd\":0.3,\"usage\":{\"input_tokens\":20,\"output_tokens\":15,\"cache_read_input_tokens\":0,\"cache_creation_input_tokens\":0}}'\n\
+    while read -r line; do :; done\n";
+
+#[test]
+fn a_command_running_in_the_background_is_waited_for_and_the_turn_its_end_starts_is_the_reply() {
+    let setup = Setup::new(RUNS_IN_THE_BACKGROUND_CLAUDE, METERED);
+    let output = setup.run(&["-p", "run the tests", "--json"]);
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+
+    let printed = json(&output);
+    assert_eq!(printed["outcome"], "finished");
+    assert_eq!(
+        printed["reply"], "cargo test failed: two tests in fetch.rs.",
+        "what the command came to is what the run was for: {printed:#}"
+    );
+    assert_eq!(printed["cost"]["reported_usd"], 0.3);
+}
+
 #[test]
 fn a_prompt_no_rule_allows_is_refused_and_the_agent_is_told_why() {
     let setup = Setup::new(ASKS_CLAUDE, METERED);

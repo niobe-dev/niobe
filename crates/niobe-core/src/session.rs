@@ -657,6 +657,9 @@ pub struct SessionState {
     /// second end.
     ended_agents: BTreeSet<AgentId>,
     peak_running_agents: u64,
+    /// The calls whose shell command the backend moved to the background
+    /// and has not said ended.
+    background_commands: BTreeSet<ToolCallId>,
     errors: u64,
     /// What the backend's own turn totals carried beyond what the turns'
     /// messages reported, summed over the session.
@@ -988,6 +991,13 @@ impl SessionState {
                 self.peak_running_agents = self.peak_running_agents.max(running);
             }
 
+            Event::BackgroundCommandStarted { id } => {
+                self.background_commands.insert(id.clone());
+            }
+            Event::BackgroundCommandEnded { id } => {
+                self.background_commands.remove(id);
+            }
+
             // A sub-agent's own figures are what a pane draws beside it. Its
             // context size is not a spend, and its tokens are already in the
             // session's usage records, so nothing here counts them again.
@@ -1097,6 +1107,8 @@ impl SessionState {
         let agents = std::mem::take(&mut self.running_agents);
         self.agents_interrupted = self.agents_interrupted.saturating_add(agents.len() as u64);
         self.ended_agents.extend(agents);
+        // The backend's commands end with it, and no end of theirs will come.
+        self.background_commands.clear();
     }
 
     /// Records every call the ending turn left running as cut short: the
@@ -1208,6 +1220,9 @@ impl SessionState {
             agents_spawned: running,
             peak_running_agents: running,
             running_agents,
+            // A command in the background is the backend's, not the
+            // conversation's, and goes on past a clear as an agent does.
+            background_commands: std::mem::take(&mut self.background_commands),
             tools: ToolTotals {
                 started: in_flight_tools.len() as u64,
                 ..ToolTotals::default()
@@ -1607,6 +1622,12 @@ impl SessionState {
     /// Sub-agents running now.
     pub fn running_agents(&self) -> &BTreeSet<AgentId> {
         &self.running_agents
+    }
+
+    /// The calls whose shell command is running in the background, which
+    /// the backend will take up again in a turn of its own once it ends.
+    pub fn background_commands(&self) -> &BTreeSet<ToolCallId> {
+        &self.background_commands
     }
 
     /// The most sub-agents that ran at once.
@@ -3074,6 +3095,27 @@ mod tests {
         assert_eq!(state.agents_cancelled(), 1);
         assert_eq!(state.running_agents().len(), 1);
         assert_eq!(state.peak_running_agents(), 3);
+    }
+
+    #[test]
+    fn a_background_command_runs_past_its_turn_until_its_end_or_the_backends() {
+        let id = ToolCallId::new("toolu_bash");
+        let mut state = SessionState::new();
+        state.apply(&Event::BackgroundCommandStarted { id: id.clone() });
+        state.apply(&Event::TurnEnded);
+        assert!(
+            state.background_commands().contains(&id),
+            "the turn's end does not end the command"
+        );
+        state.apply(&Event::BackgroundCommandEnded { id: id.clone() });
+        assert!(state.background_commands().is_empty());
+
+        state.apply(&Event::BackgroundCommandStarted { id });
+        state.apply(&Event::SessionLeft);
+        assert!(
+            state.background_commands().is_empty(),
+            "the backend's commands end with it"
+        );
     }
 
     #[test]
