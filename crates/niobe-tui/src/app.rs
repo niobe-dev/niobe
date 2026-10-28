@@ -8989,12 +8989,18 @@ impl App {
     ///
     /// A walk through the prompts already under way keeps the ones it started
     /// with, so the prompt on screen does not change under the operator.
+    ///
+    /// The open dialog's cursor stays on the row it was on, wherever the load
+    /// lists it: opening the dialog asks for a load, which lands while the
+    /// operator moves through what the last one listed, and a session started
+    /// since, listed above theirs, would otherwise have Enter open another.
     pub fn set_past(&mut self, past: crate::history::Past) {
+        let on = self.browser_row();
         self.past = Some(past);
         // Wrapping, not saturating: the count is told apart, never read as
         // a size, and one that stopped would stop telling loads apart.
         self.past_loads = self.past_loads.wrapping_add(1);
-        self.keep_browser_cursor();
+        self.find_browser_row(on);
     }
 
     /// Whether a load has landed, so that an empty list is one that is empty
@@ -9188,6 +9194,41 @@ impl App {
             Some(View::Sessions) => self.session_rows().len(),
             None => 0,
         }
+    }
+
+    /// The row under the open dialog's cursor, as what tells it from the
+    /// others: a prompt's text, which the dialog lists once, or a session.
+    fn browser_row(&self) -> Option<BrowserRow> {
+        let browser = self.browser.as_ref()?;
+        match browser.view {
+            View::Prompts => self
+                .prompt_rows()
+                .get(browser.at)
+                .map(|row| BrowserRow::Prompt(row.text.clone())),
+            View::Sessions => self
+                .session_rows()
+                .get(browser.at)
+                .map(|row| BrowserRow::Session(row.target.clone())),
+        }
+    }
+
+    /// Puts the dialog's cursor back on `on`, after what it lists changed
+    /// under it, where it is still listed; on a row it lists, where not.
+    fn find_browser_row(&mut self, on: Option<BrowserRow>) {
+        let found = match on {
+            Some(BrowserRow::Prompt(text)) => {
+                self.prompt_rows().iter().position(|row| row.text == text)
+            }
+            Some(BrowserRow::Session(target)) => self
+                .session_rows()
+                .iter()
+                .position(|row| row.target == target),
+            None => None,
+        };
+        if let (Some(at), Some(browser)) = (found, self.browser.as_mut()) {
+            browser.at = at;
+        }
+        self.keep_browser_cursor();
     }
 
     /// Keeps the dialog's cursor on a row it lists, after what it lists
@@ -9521,6 +9562,15 @@ const NO_RECORD_HINT: &str =
 
 /// Rows PageUp and PageDown move the history dialog's cursor by.
 const BROWSER_PAGE: usize = 10;
+
+/// What tells the row under the history dialog's cursor from the others, so
+/// the cursor can be found on it again after the rows change.
+enum BrowserRow {
+    /// A prompt, by its text: the dialog lists each text once.
+    Prompt(String),
+    /// A session; `None` for the one open now.
+    Session(Option<Target>),
+}
 
 /// Backspace, Delete, Left or Right on the composer, taking what the
 /// operator sees as one character — a letter and the accents on it, an
@@ -20333,6 +20383,77 @@ mod tests {
         app.on_key(key(KeyCode::Enter));
         assert!(app.should_quit(), "this session ends");
         assert_eq!(app.take_opening(), Some(Target::Recorded("3".to_owned())));
+    }
+
+    fn sessions_past(ids: &[&str]) -> crate::history::Past {
+        crate::history::Past {
+            prompts: Vec::new(),
+            sessions: ids
+                .iter()
+                .map(|id| crate::history::PastSession {
+                    target: Target::Recorded((*id).to_owned()),
+                    last: None,
+                    first_prompt: None,
+                    title: None,
+                    open_elsewhere: false,
+                })
+                .collect(),
+            unread: None,
+        }
+    }
+
+    /// Opening the dialog reads the history again, and the read lands while
+    /// the operator is already moving through what the last one listed: a
+    /// session started since is listed above the one they are on, and Enter
+    /// has to open the one they chose, not the one that moved under them.
+    #[test]
+    fn a_load_landing_under_the_cursor_keeps_it_on_the_session_chosen() {
+        let mut app = remembering(&[], &["3", "2"]);
+        app.perform(crate::menu::Action::Resume);
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Down));
+        let chosen = app
+            .session_rows()
+            .get(app.browser().map_or(0, |b| b.at))
+            .and_then(|row| row.target.clone());
+        assert_eq!(chosen, Some(Target::Recorded("2".to_owned())));
+
+        app.set_past(sessions_past(&["4", "3", "2"]));
+        app.on_key(key(KeyCode::Enter));
+
+        assert_eq!(app.take_opening(), Some(Target::Recorded("2".to_owned())));
+    }
+
+    #[test]
+    fn a_load_landing_under_the_cursor_keeps_it_on_the_prompt_chosen() {
+        let mut app = remembering(&[("older", "2"), ("oldest", "1")], &["2", "1"]);
+        app.on_key(ctrl('r'));
+        app.on_key(key(KeyCode::Down));
+
+        let mut past = sessions_past(&["3", "2", "1"]);
+        past.prompts = vec![
+            earlier("newer", "3"),
+            earlier("older", "2"),
+            earlier("oldest", "1"),
+        ];
+        app.set_past(past);
+        app.on_key(key(KeyCode::Enter));
+
+        assert_eq!(app.composed(), "oldest");
+    }
+
+    /// The row the cursor was on is gone from what the load found: the
+    /// cursor stays where it was, on a row still listed.
+    #[test]
+    fn a_load_that_drops_the_row_under_the_cursor_keeps_the_cursor_on_the_list() {
+        let mut app = remembering(&[], &["3", "2"]);
+        app.perform(crate::menu::Action::Resume);
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Down));
+
+        app.set_past(sessions_past(&["3"]));
+
+        assert_eq!(app.browser().map(|b| b.at), Some(1));
     }
 
     #[test]
