@@ -1187,9 +1187,14 @@ impl Translator {
                 (true, Some(answer)) => out.push(not_rewound(&prompt, answer.error)),
                 (_, _) => out.push(not_rewound(&prompt, outcome.error)),
             },
-            Rewind::Real { prompt, would } => out.push(match taken {
-                true => rewound(&prompt, &would),
-                false => not_rewound(&prompt, outcome.error),
+            Rewind::Real { prompt, would } => out.push(match (taken, outcome.response) {
+                (true, Some(answer)) => match (answer.can_rewind, answer.skipped_links) {
+                    (Some(false), _) => not_rewound(&prompt, answer.error),
+                    (_, Some(skipped)) if skipped > 0 => partly_rewound(&prompt, &would, skipped),
+                    (_, _) => rewound(&prompt, &would),
+                },
+                (true, None) => rewound(&prompt, &would),
+                (false, _) => not_rewound(&prompt, outcome.error),
             }),
         }
     }
@@ -3313,6 +3318,23 @@ fn rewound(prompt: &str, would: &Would) -> Event {
         }
     };
     Event::Notice { message }
+}
+
+/// What the session is told where the CLI put the files back as they were
+/// before `prompt` but left `skipped` of them as they are: which is not said,
+/// so the dry run's list is named whole and its line counts, which do not
+/// allow for what was left, are not.
+fn partly_rewound(prompt: &str, would: &Would, skipped: u64) -> Event {
+    let left = match would.files.is_empty() {
+        true => format!("{skipped} file{}", if skipped == 1 { "" } else { "s" }),
+        false => format!("{skipped} of {}", would.files.join(", ")),
+    };
+    warn(format!(
+        "not every file was put back as it was before \"{prompt}\": the CLI left {left} as \
+         it is, for a link or other file that is not a regular one at its path, or a \
+         directory that moved since; the rest went back. The conversation keeps everything \
+         said since."
+    ))
 }
 
 /// What the session is told where the CLI would not put the files back as
@@ -6931,6 +6953,59 @@ mod tests {
                           said since."
                     .to_owned()
             }]
+        );
+    }
+
+    /// Claude Code 2.1.310 skips a tracked file whose path is now a link or
+    /// another file that is not a regular one, or whose directory no longer
+    /// resolves where it did, and counts it in `skippedLinks` on the rewind
+    /// itself — a dry run never says so — while still answering it as done.
+    #[test]
+    fn a_rewind_that_skipped_files_for_link_safety_says_they_were_not_all_put_back() {
+        let mut translator = Translator::new("max").in_dir("/repo");
+        translator.asked_to_rewind("niobe-1", "niobe-2", "p-1", "make mean() return 0");
+
+        translator.line(
+            r#"{"type":"control_response","response":{"subtype":"success","request_id":"niobe-1","response":{"canRewind":true,"filesChanged":["/repo/CLAUDE.md","/repo/stats.py"],"insertions":3,"deletions":2}}}"#,
+        );
+        translator.take_requests();
+        let done = translator.line(
+            r#"{"type":"control_response","response":{"subtype":"success","request_id":"niobe-2","response":{"canRewind":true,"skippedLinks":1}}}"#,
+        );
+
+        assert_eq!(
+            warnings(&done),
+            [
+                "not every file was put back as it was before \"make mean() return 0\": the \
+                 CLI left 1 of CLAUDE.md, stats.py as it is, for a link or other file that is \
+                 not a regular one at its path, or a directory that moved since; the rest went \
+                 back. The conversation keeps everything said since."
+            ]
+        );
+        assert!(
+            !done
+                .iter()
+                .any(|event| matches!(event, Event::Notice { .. })),
+            "{done:?}"
+        );
+    }
+
+    #[test]
+    fn a_rewind_answered_as_done_that_says_it_could_not_is_not_said_as_done() {
+        let mut translator = Translator::new("max");
+        translator.asked_to_rewind("niobe-1", "niobe-2", "p-1", "fix it");
+
+        translator.line(
+            r#"{"type":"control_response","response":{"subtype":"success","request_id":"niobe-1","response":{"canRewind":true,"filesChanged":["a.py"],"insertions":1,"deletions":0}}}"#,
+        );
+        translator.take_requests();
+        let done = translator.line(
+            r#"{"type":"control_response","response":{"subtype":"success","request_id":"niobe-2","response":{"canRewind":false,"error":"Failed to rewind: disk full"}}}"#,
+        );
+
+        assert_eq!(
+            warnings(&done),
+            ["no files were put back as they were before \"fix it\": Failed to rewind: disk full"]
         );
     }
 

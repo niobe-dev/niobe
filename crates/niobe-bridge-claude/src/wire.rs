@@ -966,6 +966,14 @@ pub(crate) struct ControlAnswer {
     pub(crate) deletions: Option<u64>,
     /// Why `rewind_files` cannot put the files back, where it cannot.
     pub(crate) error: Option<String>,
+    /// How many of the files a rewind itself was to put back it left as they
+    /// are, finding a link or another file that is not a regular one at the
+    /// path, or a directory that no longer resolves where it did. Claude Code
+    /// 2.1.310 documents it as set only on the rewind, never on a dry run,
+    /// whose counts do not allow for it, and answers the rewind as done all
+    /// the same.
+    #[serde(rename = "skippedLinks")]
+    pub(crate) skipped_links: Option<u64>,
 }
 
 /// `conversation_reset`: the CLI dropped the conversation and started a new
