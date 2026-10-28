@@ -668,7 +668,8 @@ Where tests live:
     against 16 ms, and keys read together against a linear ratio — and a
     100,000-line file written from scratch, applied and drawn against 50 ms — and a key in the
     history dialog over 20,000 remembered prompts, landed and drawn against 16 ms — and a
-    megabyte prompt under the history dialog's cursor drawn against 16 ms — and the transcript of
+    megabyte prompt under the history dialog's cursor drawn against 16 ms — and a mebibyte memory
+    file opened and paged in the Memory view against 16 ms — and the transcript of
     2,000 markdown replies exported to the clipboard, and a selection dragged across all of it
     copied, each against 16 ms — and a key typed into the transcript search over a 20 MB reply
     against 50 ms — and the Changes pane redrawn over a working tree of 50,000 new files against

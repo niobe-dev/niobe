@@ -1409,3 +1409,69 @@ fn a_selection_across_a_long_session_is_copied_inside_a_frame_budget() {
          {median:?}, over the {FRAME_BUDGET:?} budget"
     );
 }
+
+/// How large a memory file the Memory view is timed reading: the most the
+/// binary reads of one, a mebibyte.
+const LARGE_MEMORY: usize = 1 << 20;
+
+/// A memory file as large as the binary reads is opened with Enter in the
+/// Memory view and paged through: what is wrapped is what is on screen, so
+/// the frame costs a screenful whether the mebibyte is short lines or one
+/// line. Each frame is a key and the draw after it: opening the file, or a
+/// page down through it.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "a frame is timed in an optimised build")]
+fn a_mebibyte_memory_file_opens_and_pages_inside_a_frame_budget() {
+    let _alone = ALONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let lines = "- run the gate before every commit, and say what it found\n";
+    let shapes = [
+        ("short lines", lines.repeat(LARGE_MEMORY / lines.len())),
+        ("one line", "word ".repeat(LARGE_MEMORY / 5)),
+    ];
+    for (shape, text) in shapes {
+        let mut app = running_session();
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        app.on_key(key(KeyCode::F(8)));
+        assert!(app.take_memory_request(), "F8 asked for no read");
+        app.set_memory(vec![niobe_tui::MemoryFile {
+            scope: niobe_tui::memory::Scope::Project,
+            path: "CLAUDE.md".to_owned(),
+            named: "CLAUDE.md".to_owned(),
+            depth: 0,
+            bytes: Some(text.len() as u64),
+            text: Some(text),
+            note: None,
+            editable: None,
+        }]);
+        app.on_key(key(KeyCode::Enter));
+        let _ = screen(&mut app, 200, 60);
+
+        let mut frames: Vec<Duration> = (0..FRAMES)
+            .map(|frame| {
+                let started = Instant::now();
+                if frame % 8 == 0 {
+                    app.on_key(key(KeyCode::Esc));
+                    app.on_key(key(KeyCode::Enter));
+                } else {
+                    app.on_key(key(KeyCode::PageDown));
+                }
+                let _ = screen(&mut app, 200, 60);
+                started.elapsed()
+            })
+            .collect();
+        assert!(
+            app.memory().is_some_and(|view| view.reading().is_some()),
+            "{shape}: the file is open, or nothing is timed"
+        );
+        frames.sort_unstable();
+        let median = frames[FRAMES / 2];
+
+        assert!(
+            median <= FRAME_BUDGET,
+            "{shape}: the median frame reading a {LARGE_MEMORY}-byte memory file took \
+             {median:?}, over the {FRAME_BUDGET:?} budget"
+        );
+    }
+}

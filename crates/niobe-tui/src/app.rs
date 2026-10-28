@@ -4814,11 +4814,11 @@ impl App {
         }
     }
 
-    /// Told by the draw how far the memory file being read can scroll: see
-    /// [`crate::memory::View::measured`].
-    pub(crate) fn measured_memory(&mut self, max_scroll: usize) {
+    /// Told by the draw how wide the memory file being read is drawn and
+    /// how many of its lines show: see [`crate::memory::View::measured`].
+    pub(crate) fn measured_memory(&mut self, width: usize, room: usize) {
         if let Some(view) = self.memory.as_mut() {
-            view.measured(max_scroll);
+            view.measured(width, room);
         }
     }
 
@@ -18481,7 +18481,7 @@ mod tests {
         read(&mut app, b"jj\x1b[B\r", Instant::now());
 
         assert_eq!(app.composed(), "draft");
-        assert_eq!(app.memory().and_then(|view| view.reading), Some((1, 0)));
+        assert_eq!(app.memory().and_then(|view| view.reading()), Some(1));
     }
 
     #[test]
@@ -18774,7 +18774,7 @@ mod tests {
         ]);
         app.on_key(key(KeyCode::Down));
         app.on_key(key(KeyCode::Enter));
-        assert_eq!(app.memory().and_then(|view| view.reading), Some((1, 0)));
+        assert_eq!(app.memory().and_then(|view| view.reading()), Some(1));
         assert_eq!(app.take_handoffs(), []);
 
         app.on_key(key(KeyCode::Char('e')));

@@ -202,6 +202,17 @@ impl Detail {
         }
     }
 
+    /// A page of `text` under `title` read as written, with `none` standing
+    /// where there is no text: a line too long for the view breaks at the
+    /// last cell that fits and every space is kept, as markdown whose nested
+    /// lists and code blocks say what they say by their indentation needs.
+    pub fn verbatim(title: &str, text: &str, none: &'static str) -> Self {
+        Self {
+            words: false,
+            ..Self::page(title, text, none)
+        }
+    }
+
     /// What the dialog is drawn under.
     pub(crate) fn title(&self) -> &str {
         &self.title
@@ -337,7 +348,7 @@ impl Detail {
 
     /// The lines on screen, `room` of them at `width` at most, each with
     /// whether it is a heading or a note rather than the text.
-    fn visible(&self, width: usize, room: usize) -> Vec<(String, Kind)> {
+    pub(crate) fn visible(&self, width: usize, room: usize) -> Vec<(String, Kind)> {
         let (first, skip) = self.top;
         let mut shown = Vec::new();
         for at in first..self.rows.len() {
@@ -361,7 +372,7 @@ impl Detail {
 
 /// How a line of the view is drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Kind {
+pub(crate) enum Kind {
     Heading,
     Note,
     Text,
