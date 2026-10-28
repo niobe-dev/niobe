@@ -3416,8 +3416,9 @@ impl App {
     ///
     /// Nine agents working at once interleave their calls row by row, which
     /// is when it happened but not what any one agent did; grouped, each
-    /// agent's work reads top to bottom. The session's own rows, what anyone
-    /// said and every turn's boundary stay where they were.
+    /// agent's work reads top to bottom: its words, its calls, its edits and
+    /// what was refused it. The session's own rows and replies and every
+    /// turn's boundary stay where they were.
     pub fn group_by_agent(&mut self) {
         self.hold_view();
         self.by_agent = !self.by_agent;

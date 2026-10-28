@@ -2788,11 +2788,12 @@ pub(crate) struct Arrangement<'a> {
 /// words, its calls and its refused calls, and nothing of the session's.
 ///
 /// As they happened, unless `grouped`: then within each turn — between one
-/// prompt or turn's rule and the next — every sub-agent's rows are drawn
-/// together under a heading, at the place that agent first did something.
-/// The session's own entries, anything an agent did that is not a row of
-/// the calls table, and the turn's boundaries stay where they were. Where
-/// `notable_only`, the routine entries are left out, see [`notable`].
+/// prompt or turn's rule and the next — every sub-agent's entries are drawn
+/// together under a heading, at the place that agent first did something:
+/// its words, its calls — an edit with its diff among them — and the calls
+/// refused it. The session's own entries and the turn's boundaries stay
+/// where they were. Where `notable_only`, the routine entries are left out,
+/// see [`notable`].
 pub(crate) fn order(
     entries: &[Entry],
     grouped: bool,
@@ -2854,7 +2855,12 @@ fn by_agent(entries: &[Entry], grouped: bool) -> Vec<Slot> {
     order
 }
 
-/// One turn's entries, each sub-agent's rows drawn together.
+/// One turn's entries, each sub-agent's drawn together.
+///
+/// Every entry an agent's tag is on goes under its heading — a call with a
+/// diff under it and a call refused before it ran as much as a read — since
+/// grouped, no row draws its tag: one left among the session's rows would
+/// read as the session's own.
 fn grouped_turn(entries: &[Entry], turn: std::ops::Range<usize>) -> Vec<Slot> {
     enum Place {
         One(usize),
@@ -2866,8 +2872,7 @@ fn grouped_turn(entries: &[Entry], turn: std::ops::Range<usize>) -> Vec<Slot> {
         let Some(entry) = entries.get(at) else {
             continue;
         };
-        let grouped = is_row(entry) || entry.kind == EntryKind::SubAgent;
-        match entry.agent.as_deref().filter(|_| grouped) {
+        match entry.agent.as_deref() {
             Some(tag) => match groups.iter_mut().find(|(group, _)| *group == tag) {
                 Some((_, rows)) => rows.push(at),
                 None => {
@@ -9025,6 +9030,104 @@ mod tests {
         assert!(
             rows[6].contains("m1.rs"),
             "the session's own row stays: {grouped:?}"
+        );
+    }
+
+    /// An agent's edit, drawn with its diff under it, and a call of its the
+    /// operator refused before it ran are that agent's work as much as its
+    /// reads: grouped, they are drawn under its heading and counted there,
+    /// not left among the session's own rows, where the grouping draws no
+    /// tag on a row and they would read as the session's.
+    #[test]
+    fn grouped_by_agent_an_agents_edit_and_refusal_are_drawn_under_its_heading() {
+        use niobe_core::event::{AgentId, Event, PermissionDecision, ToolOutcome};
+        let mut app = App::new(crate::app::Repo::default());
+        app.apply(&Event::UserMessage {
+            text: "go".to_owned(),
+        });
+        app.apply(&Event::AgentSpawn {
+            id: AgentId::new("toolu_a"),
+            parent: None,
+            kind: Some("Explore".to_owned()),
+            label: "Explore: fix a".to_owned(),
+        });
+        let start = |id: &str, name: &str, agent: Option<&str>| Event::ToolCallStart {
+            id: id.into(),
+            name: name.to_owned(),
+            input: String::new(),
+            summary: Some(format!("{id}.rs")),
+            agent: agent.map(AgentId::new),
+        };
+        app.apply(&start("a1", "Read", Some("toolu_a")));
+        app.apply(&start("m1", "Read", None));
+        app.apply(&start("a2", "Write", Some("toolu_a")));
+        app.apply(&Event::ToolCallEnd {
+            id: "a2".into(),
+            name: "Write".to_owned(),
+            input: String::new(),
+            output: String::new(),
+            bytes: 0,
+            outcome: ToolOutcome::Ok,
+            summary: Some("a2.rs".to_owned()),
+            exit_code: None,
+            error: None,
+            command: None,
+            untrimmed: None,
+        });
+        app.apply(&Event::FileChange {
+            path: "a2.rs".to_owned(),
+            added: Some(1),
+            removed: Some(0),
+            hunks: vec![niobe_core::diff::Hunk::created("one\n").expect("a line to write")],
+            scope: niobe_core::event::ChangeScope::Project,
+        });
+        app.apply(&Event::PermissionRequest {
+            id: "a3".into(),
+            tool: "Bash".to_owned(),
+            input: "rm -rf /".to_owned(),
+            target: Some("rm -rf /".to_owned()),
+            proposal: None,
+            reason: None,
+            agent: Some(AgentId::new("toolu_a")),
+        });
+        app.apply(&Event::PermissionResponse {
+            id: "a3".into(),
+            decision: PermissionDecision::Deny,
+            message: None,
+        });
+        app.apply(&start("m2", "Grep", None));
+
+        let index = |head: &str, meta: &str| {
+            app.entries()
+                .iter()
+                .position(|entry| entry.head == head && entry.meta.contains(meta))
+                .expect("the entry is in the transcript")
+        };
+        let (read, session, write, denied, grep) = (
+            index("Read", ""),
+            app.entries()
+                .iter()
+                .rposition(|entry| entry.head == "Read")
+                .expect("the session's read"),
+            index("Write", ""),
+            index("denied", "Bash"),
+            index("Grep", ""),
+        );
+        let user = 0;
+        assert_eq!(
+            order(app.entries(), true, false, None),
+            vec![
+                Slot::Entry(user),
+                Slot::Heading {
+                    first: read,
+                    calls: 2
+                },
+                Slot::Entry(read),
+                Slot::Entry(write),
+                Slot::Entry(denied),
+                Slot::Entry(session),
+                Slot::Entry(grep),
+            ]
         );
     }
 
