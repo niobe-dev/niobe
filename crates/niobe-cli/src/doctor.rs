@@ -133,6 +133,11 @@ pub struct Facts {
     pub codex: Option<Tool>,
     /// The config files looked in, the user's first.
     pub config: Vec<ConfigFile>,
+    /// Whether the config files load together. Where they do not, the rest
+    /// of the report is still gathered, since a broken config is one of the
+    /// things it is run to find, and [`Facts::shapes`] says which file does
+    /// not read.
+    pub loads: bool,
     /// The repository's config, where it sets what only a trusted file may
     /// and has not been trusted.
     pub untrusted: Option<PathBuf>,
@@ -339,13 +344,26 @@ fn config_rows(facts: &Facts) -> Vec<Row> {
         .iter()
         .map(|file| {
             let shown = shown_path(&file.path, &facts.homes);
-            let detail = match file.exists {
-                true => shown,
-                false => format!("{shown} (not there)"),
-            };
-            Row::ok("config", detail)
+            match (file.exists, unreadable(facts, &file.path)) {
+                (_, true) => Row::problem(
+                    "config",
+                    Status::Fail,
+                    format!("{shown} does not read as a config"),
+                    UNREADABLE_FIX,
+                ),
+                (true, false) => Row::ok("config", shown),
+                (false, false) => Row::ok("config", format!("{shown} (not there)")),
+            }
         })
         .collect();
+    if !facts.loads && !rows.iter().any(|row| row.status == Status::Fail) {
+        rows.push(Row::problem(
+            "config",
+            Status::Fail,
+            "the config files do not load together",
+            UNREADABLE_FIX,
+        ));
+    }
     if facts.implied {
         rows.push(Row::ok(
             "profile",
@@ -364,6 +382,19 @@ fn config_rows(facts: &Facts) -> Vec<Row> {
         ));
     }
     rows
+}
+
+/// What to do about a config that does not load. Why it does not is left to
+/// `niobe profiles` to say: the reason quotes the file's text, which may be a
+/// value this report must not hold.
+const UNREADABLE_FIX: &str = "`niobe profiles` names the line and key it stops at; fix it there";
+
+/// Whether the config file at `path` was found not to read as a config.
+fn unreadable(facts: &Facts, path: &Path) -> bool {
+    facts
+        .shapes
+        .iter()
+        .any(|shape| shape.path == path && shape.state == ShapeState::Unreadable)
 }
 
 fn terminal_row(facts: &Facts) -> Row {
@@ -576,12 +607,18 @@ fn codex_login(path: &Path) -> Login {
     }
 }
 
-/// What this machine and this repository say, gathered once.
+/// What this machine and this repository say, gathered once. `config` is the
+/// config as it loaded, or `None` where it did not, which is reported as a row
+/// that fails rather than in place of the report.
 pub fn gather(
-    config: &crate::config::Loaded,
+    config: Option<&crate::config::Loaded>,
     root: &Path,
     recorded: impl Fn(&str) -> bool,
 ) -> Facts {
+    let searched = match config {
+        Some(loaded) => loaded.searched.clone(),
+        None => crate::config::searched(root),
+    };
     let path_var = std::env::var_os("PATH");
     let claude = find_on_path("claude", path_var.as_deref()).map(|path| {
         let version = version_of(&path);
@@ -609,16 +646,16 @@ pub fn gather(
         niobe: niobe_core::VERSION,
         claude,
         codex,
-        config: config
-            .searched
+        config: searched
             .iter()
             .map(|path| ConfigFile {
                 path: path.clone(),
                 exists: path.exists(),
             })
             .collect(),
-        untrusted: config.untrusted.as_ref().map(|u| u.path.clone()),
-        implied: config.implied,
+        loads: config.is_some(),
+        untrusted: config.and_then(|loaded| loaded.untrusted.as_ref().map(|u| u.path.clone())),
+        implied: config.is_some_and(|loaded| loaded.implied),
         term: std::env::var("TERM").ok().filter(|term| !term.is_empty()),
         colorterm: std::env::var("COLORTERM")
             .ok()
@@ -628,8 +665,7 @@ pub fn gather(
         ssh: std::env::var_os("SSH_CONNECTION").is_some() || std::env::var_os("SSH_TTY").is_some(),
         homes: homes(std::env::var_os("HOME").map(PathBuf::from)),
         target: format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS),
-        shapes: config
-            .searched
+        shapes: searched
             .iter()
             .map(|path| Shape {
                 path: path.clone(),
@@ -658,19 +694,10 @@ fn newest_session_errors(root: &Path) -> Option<u64> {
 /// The report as a block to paste into an issue, gathered now for the
 /// repository at `root`: the same JSON `niobe doctor --json` prints.
 pub fn block(root: &Path, recorded: impl Fn(&str) -> bool) -> String {
-    match crate::config::load(root) {
-        Ok(loaded) => {
-            let facts = gather(&loaded, root, recorded);
-            let rows = rows(&facts);
-            serde_json::to_string_pretty(&json(&rows, &facts)).unwrap_or_else(|_| "{}".to_owned())
-        }
-        Err(_) => json!({
-            "niobe": niobe_core::VERSION,
-            "target": format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS),
-            "config": "does not read",
-        })
-        .to_string(),
-    }
+    let loaded = crate::config::load(root).ok();
+    let facts = gather(loaded.as_ref(), root, recorded);
+    let rows = rows(&facts);
+    serde_json::to_string_pretty(&json(&rows, &facts)).unwrap_or_else(|_| "{}".to_owned())
 }
 
 fn terminal_size() -> Option<(u16, u16)> {
@@ -709,6 +736,7 @@ mod tests {
                     exists: false,
                 },
             ],
+            loads: true,
             untrusted: None,
             implied: false,
             term: Some("xterm-256color".to_owned()),
@@ -846,6 +874,50 @@ mod tests {
         let rows = rows(&none);
 
         assert!(named(&rows, "profile").detail.contains("implied"));
+    }
+
+    #[test]
+    fn a_config_file_that_does_not_read_fails_its_row_and_names_where_to_learn_why() {
+        let mut broken = facts();
+        broken.loads = false;
+        broken.shapes = vec![Shape {
+            path: PathBuf::from("/home/me/.config/niobe/config.toml"),
+            state: ShapeState::Unreadable,
+        }];
+
+        let rows = rows(&broken);
+
+        let config: Vec<&Row> = rows.iter().filter(|row| row.name == "config").collect();
+        assert_eq!(config.len(), 2, "{rows:?}");
+        assert_eq!(config[0].status, Status::Fail);
+        assert_eq!(
+            config[0].detail,
+            "~/.config/niobe/config.toml does not read as a config"
+        );
+        assert!(
+            config[0]
+                .fix
+                .as_deref()
+                .is_some_and(|fix| fix.contains("`niobe profiles`")),
+            "{rows:?}"
+        );
+        assert_eq!(config[1].status, Status::Ok);
+        assert!(failed(&rows));
+    }
+
+    #[test]
+    fn a_config_that_does_not_load_for_another_reason_still_fails_a_row() {
+        let rows = rows(&Facts {
+            loads: false,
+            ..facts()
+        });
+
+        let failing: Vec<&Row> = rows
+            .iter()
+            .filter(|row| row.name == "config" && row.status == Status::Fail)
+            .collect();
+        assert_eq!(failing.len(), 1, "{rows:?}");
+        assert_eq!(failing[0].detail, "the config files do not load together");
     }
 
     #[test]

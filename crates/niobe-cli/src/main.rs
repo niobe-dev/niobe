@@ -1693,11 +1693,12 @@ fn list_profiles(profile: Option<&str>) -> Result<(), String> {
 }
 
 /// Prints what a first session needs and what is missing, as text or as the
-/// JSON an issue carries, and fails where a session could not run.
+/// JSON an issue carries, and fails where a session could not run. A config
+/// that does not load is one of the rows, not the end of the report.
 fn run_doctor(json: bool) -> Result<(), String> {
-    let loaded = config::load(&repo::root(&cwd()?))?;
     let root = repo::root(&cwd()?);
-    let facts = doctor::gather(&loaded, &root, backend::claude_release_recorded);
+    let loaded = config::load(&root).ok();
+    let facts = doctor::gather(loaded.as_ref(), &root, backend::claude_release_recorded);
     let rows = doctor::rows(&facts);
     if json {
         say!("{}", printable::json(&doctor::json(&rows, &facts)));

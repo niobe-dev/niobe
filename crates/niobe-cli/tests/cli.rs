@@ -1319,6 +1319,59 @@ fn doctor_without_claude_on_path_fails_with_the_fix_and_the_json_says_the_same()
     assert_eq!(claude["status"], serde_json::json!("fail"));
 }
 
+/// A config file that does not parse is what the doctor is run for: the
+/// report still comes, the file a row that fails, and the rest of the
+/// machine's rows beside it — as JSON too, with nothing of the file's text.
+#[test]
+fn doctor_reports_a_config_that_does_not_parse_as_a_failing_row_and_goes_on() {
+    let setup = Configured::new(
+        "[profiles.w]\nbackend = \"claude\"\nenv = { KEY = \"hunter2-secret\" \n",
+        "",
+    );
+    let run = |args: &[&str]| {
+        niobe_command(
+            setup.repo.path(),
+            setup.user.path(),
+            &setup.repo.path().join("c"),
+            args,
+        )
+        .env("PATH", setup.repo.path().join("nothing-here"))
+        .output()
+        .expect("the niobe binary runs")
+    };
+
+    let text = run(&["doctor"]);
+    let said = stdout(&text);
+    assert_eq!(text.status.code(), Some(1), "{said}{}", stderr(&text));
+    assert!(said.contains("fail  claude"), "{said}{}", stderr(&text));
+    assert!(said.contains("fail  config"), "{said}");
+    assert!(said.contains("niobe profiles"), "{said}");
+
+    let json = run(&["doctor", "--json"]);
+    let out = stdout(&json);
+    assert!(!out.contains("hunter2"), "{out}");
+    let report: serde_json::Value = serde_json::from_str(&out).expect("the report is JSON");
+    assert_eq!(report["ok"], serde_json::json!(false));
+    let user = setup.user_config().display().to_string();
+    let config = report["rows"]
+        .as_array()
+        .and_then(|rows| {
+            rows.iter()
+                .find(|row| row["name"] == "config" && row["status"] == "fail")
+        })
+        .expect("a failing config row is there");
+    assert!(
+        config["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.starts_with(&user)),
+        "{config}"
+    );
+    assert_eq!(
+        report["config"][0]["state"],
+        serde_json::json!("does not parse")
+    );
+}
+
 /// `HOME` spelled through a link, as `/home` is on FreeBSD and on hosts that
 /// mount home directories elsewhere, while the working directory is read
 /// back as the path the link resolves to: the repository is still under the

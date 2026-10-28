@@ -317,6 +317,19 @@ pub fn load(root: &Path) -> Result<Loaded, String> {
     load_from(user, root)
 }
 
+/// The files [`load`] looks in for the repository rooted at `root`, lowest
+/// precedence first, whether or not they exist: what `niobe doctor` reports
+/// on where they do not load together.
+pub fn searched(root: &Path) -> Vec<PathBuf> {
+    user_path(
+        std::env::var_os("XDG_CONFIG_HOME"),
+        std::env::var_os("HOME"),
+    )
+    .into_iter()
+    .chain([repo::config_path(root)])
+    .collect()
+}
+
 /// The config a session runs under in a repository with no config of its
 /// own: the user's file, or the implied profile where there is none — what
 /// `niobe bench` runs each task's turn under, since each runs in a copy made
