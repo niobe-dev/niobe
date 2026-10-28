@@ -225,6 +225,51 @@ fn a_file_the_sessions_changed_that_git_still_lists_as_changed_is_left_open() {
     assert!(!page.contains("unrelated.txt"), "{page}");
 }
 
+/// Runs `git` in `root` with an identity of its own, so that a commit needs
+/// no configuration from the machine running the test.
+fn git(root: &Path, args: &[&str]) {
+    let ran = Command::new("git")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args([
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=test@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+        ])
+        .args(args)
+        .current_dir(root)
+        .output()
+        .expect("git runs");
+    assert!(
+        ran.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
+}
+
+#[test]
+fn a_file_the_sessions_changed_that_git_holds_renamed_and_uncommitted_is_left_open() {
+    let (_dir, root) = repository();
+    std::fs::remove_dir_all(root.join(".git")).expect("the stand-in .git is removed");
+    git(&root, &["init", "-q"]);
+    let body = "def fetch():\n    return [1, 2, 3]\n\n\ndef main():\n    print(fetch())\n";
+    std::fs::write(root.join("old.py"), body).expect("a file can be written");
+    git(&root, &["add", "old.py"]);
+    git(&root, &["commit", "-q", "-m", "start"]);
+    std::fs::create_dir_all(root.join("catalog")).expect("a directory can be made");
+    git(&root, &["mv", "old.py", "catalog/fetch.py"]);
+
+    let page = printed(&root);
+
+    assert!(
+        page.contains("- 1 file the sessions changed is not committed: `catalog/fetch.py`\n"),
+        "{page}"
+    );
+}
+
 #[test]
 fn a_repository_with_nothing_recorded_says_so_in_one_line() {
     let dir = tempfile::tempdir().expect("a temporary directory can be created");

@@ -760,10 +760,58 @@ fn unchanged(last: &Repo, repo: &Repo) -> bool {
 /// The files the working tree of the repository at `root` holds changed or
 /// untracked, as git names them from the root, read once; `None` where git
 /// cannot read it.
+///
+/// A file git sees as renamed is named by both its paths, each a file of its
+/// own: what was at the old one and what is at the new one are both
+/// uncommitted, and `old => new`, as the Changes pane shows it, is the name of
+/// neither.
 pub fn uncommitted(root: &Path) -> Option<Vec<String>> {
-    let repo = read(root, "", &mut Counts::default()).ok()?;
-    Some(repo.working.into_iter().map(|file| file.path).collect())
+    let status = branch_status(&git(root, STATUS).ok()?);
+    let against = match status.head {
+        Some(_) => "HEAD".to_owned(),
+        None => empty_tree(root).ok()?,
+    };
+    let mut paths: Vec<String> = changes(&numstat(root, &against).ok()?)
+        .into_iter()
+        .flat_map(|change| match change.path {
+            Changed::Path(path) => vec![path],
+            Changed::Renamed { from, to } => vec![from, to],
+        })
+        .collect();
+    paths.extend(
+        tagged(&git(root, LISTED).ok()?)
+            .into_iter()
+            .filter(|(untracked, _)| *untracked)
+            .map(|(_, path)| path),
+    );
+    Some(paths)
 }
+
+/// `git status`, for the branch header alone. The per-file lines are
+/// discarded — what the tree did to each file is counted from
+/// `git diff --numstat`, which the header does not carry — so git is told not
+/// to go looking for untracked ones, which is the part of the scan that grows
+/// with the tree. Nor into a submodule's working tree: that is a repository
+/// with a config of its own, which the `git` run inside it to look would read
+/// and run the filters of.
+const STATUS: &[&str] = &[
+    "status",
+    "--porcelain=v2",
+    "--branch",
+    "--untracked-files=no",
+    "--ignore-submodules=dirty",
+];
+
+/// `git ls-files`, every file the tree holds, tracked or not and not ignored.
+/// `-t` tags each with what git holds of it, which is what says a file is new.
+const LISTED: &[&str] = &[
+    "ls-files",
+    "-z",
+    "-t",
+    "--cached",
+    "--others",
+    "--exclude-standard",
+];
 
 /// Everything the shell shows about the repository at `root`, in one pass.
 ///
@@ -772,22 +820,7 @@ pub fn uncommitted(root: &Path) -> Option<Vec<String>> {
 fn read(root: &Path, name: &str, counts: &mut Counts) -> Result<Repo, String> {
     let started = Instant::now();
     let began = SystemTime::now();
-    let status = branch_status(&git(
-        root,
-        // The per-file lines are discarded — what the tree did to each file is
-        // counted from `git diff --numstat`, which the header does not carry —
-        // so git is told not to go looking for untracked ones, which is the
-        // part of the scan that grows with the tree. Nor into a submodule's
-        // working tree: that is a repository with a config of its own, which
-        // the `git` run inside it to look would read and run the filters of.
-        &[
-            "status",
-            "--porcelain=v2",
-            "--branch",
-            "--untracked-files=no",
-            "--ignore-submodules=dirty",
-        ],
-    )?);
+    let status = branch_status(&git(root, STATUS)?);
 
     let mut working = match &status.head {
         Some(_) => working_tree(&numstat(root, "HEAD")?),
@@ -805,20 +838,9 @@ fn read(root: &Path, name: &str, counts: &mut Counts) -> Result<Repo, String> {
     };
 
     // Listed from the root, which is where the agent runs and the operator's
-    // commands do, so each path is the one both would name the file by. `-t`
-    // tags each with what git holds of it, which is what says a file is new:
-    // this is the one scan of the tree for untracked files, and it serves both.
-    let tree = tagged(&git(
-        root,
-        &[
-            "ls-files",
-            "-z",
-            "-t",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-        ],
-    )?);
+    // commands do, so each path is the one both would name the file by: this
+    // is the one scan of the tree for untracked files, and it serves both.
+    let tree = tagged(&git(root, LISTED)?);
     let last = std::mem::take(counts);
     working.extend(
         tree.iter()
@@ -1066,8 +1088,43 @@ fn branch_status(status: &str) -> Branch {
 /// own. A binary file has `-` for both counts, because git counts no lines in
 /// one, which is not the same as counting none.
 fn working_tree(numstat: &str) -> Vec<WorkingFile> {
+    changes(numstat)
+        .into_iter()
+        .map(|change| WorkingFile {
+            path: match change.path {
+                Changed::Path(path) => path,
+                // Shown the way `git diff --numstat` shows a rename without
+                // `-z`, so the pane says the same thing the operator's own
+                // `git` would.
+                Changed::Renamed { from, to } => format!("{from} => {to}"),
+            },
+            added: change.added,
+            removed: change.removed,
+            new: false,
+        })
+        .collect()
+}
+
+/// One record of `git diff --numstat -z`.
+struct Change {
+    path: Changed,
+    added: Option<u64>,
+    removed: Option<u64>,
+}
+
+/// Which file a [`Change`] is of.
+enum Changed {
+    /// A file changed where it is.
+    Path(String),
+    /// A file git sees as moved, from where it was to where it is.
+    Renamed { from: String, to: String },
+}
+
+/// The records of `git diff --numstat -z`, each with both halves of a rename
+/// kept apart, which `old => new` written as one name would not.
+fn changes(numstat: &str) -> Vec<Change> {
     let mut fields = numstat.split('\0');
-    let mut files = Vec::new();
+    let mut changes = Vec::new();
 
     while let Some(record) = fields.next() {
         let mut record = record.splitn(3, '\t');
@@ -1078,24 +1135,22 @@ fn working_tree(numstat: &str) -> Vec<WorkingFile> {
             continue;
         };
         let path = match path.is_empty() {
-            false => path.to_owned(),
+            false => Changed::Path(path.to_owned()),
             true => match (fields.next(), fields.next()) {
-                // Shown the way `git diff --numstat` shows a rename without
-                // `-z`, so the pane says the same thing the operator's own
-                // `git` would.
-                (Some(from), Some(to)) => format!("{from} => {to}"),
+                (Some(from), Some(to)) => Changed::Renamed {
+                    from: from.to_owned(),
+                    to: to.to_owned(),
+                },
                 _ => continue,
             },
         };
-
-        files.push(WorkingFile {
+        changes.push(Change {
             path,
             added: added.parse().ok(),
             removed: removed.parse().ok(),
-            new: false,
         });
     }
-    files
+    changes
 }
 
 /// Runs one `git` command in `root` and hands back what it printed.
@@ -1622,6 +1677,25 @@ mod tests {
                     new: false,
                 },
             ]
+        );
+    }
+
+    /// A rename is the pane's one row, `old => new`, and two files to a
+    /// caller asking which are uncommitted: neither path is the other's.
+    #[test]
+    fn a_file_renamed_and_not_committed_is_uncommitted_under_both_its_paths() {
+        let dir = repository();
+        let work = dir.path().join("work");
+        run(&work, &["mv", "kept.txt", "moved.txt"]);
+        std::fs::write(work.join("loose.txt"), "x\n").expect("the file is written");
+
+        let pane = read(&work, "work", &mut Counts::default()).expect("the repository reads");
+        let paths: Vec<String> = pane.working.into_iter().map(|file| file.path).collect();
+        assert_eq!(paths, ["kept.txt => moved.txt", "loose.txt"]);
+
+        assert_eq!(
+            uncommitted(&work).expect("the repository reads"),
+            ["kept.txt", "moved.txt", "loose.txt"]
         );
     }
 
