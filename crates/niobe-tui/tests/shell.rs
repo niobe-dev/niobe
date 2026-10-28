@@ -7189,3 +7189,41 @@ fn an_entry_above_the_view_that_grows_leaves_the_lines_being_read_in_view() {
     );
     assert!(!app.follows_tail());
 }
+
+/// Esc puts the view back on the lines it was on when the search opened,
+/// though the calls above them were folded while it was open: the place is
+/// what the view was on, not how many lines down it was.
+#[test]
+fn esc_puts_the_view_back_on_the_same_lines_after_the_calls_above_were_folded() {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let scrolled_back = || {
+        let mut app = running_session();
+        for n in 0..40 {
+            app.apply(&Event::AssistantMessage {
+                text: format!("reply {n}, read back"),
+                agent: None,
+            });
+        }
+        let _ = screen(&mut app, 200, 30);
+        press(&mut app, KeyCode::PageUp);
+        let _ = screen(&mut app, 200, 30);
+        app
+    };
+    let fold = |app: &mut App| app.on_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
+
+    let mut unsearched = scrolled_back();
+    fold(&mut unsearched);
+    let expected = screen(&mut unsearched, 200, 30);
+
+    let mut searched = scrolled_back();
+    ctrl_f(&mut searched);
+    let _ = screen(&mut searched, 200, 30);
+    fold(&mut searched);
+    let folded = screen(&mut searched, 200, 30);
+    assert!(!folded.contains("├ catalog/fetch.ts"), "{folded}");
+    press(&mut searched, KeyCode::Esc);
+    let after = screen(&mut searched, 200, 30);
+
+    assert_eq!(after, expected, "Esc put the view on other lines");
+}

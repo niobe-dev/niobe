@@ -3034,7 +3034,7 @@ pub(crate) struct Place {
 /// at its end — and takes some away, and what is still drawn of the entry is
 /// found by what it reads. The entry is named by its place in the transcript
 /// rather than where it is drawn, which grouping the rows by agent changes.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct Anchor {
     entry: usize,
     heading: bool,

@@ -1738,6 +1738,14 @@ struct Find {
     /// Where the view was when the search opened — the first line drawn and
     /// whether it followed the tail — which is where Esc puts it back.
     from: (usize, bool),
+    /// The line at the top of the view when the search opened, named by
+    /// what it was drawn from, where the view did not follow the tail.
+    ///
+    /// Folding the calls, opening the diffs, a resize or a reply drawn on to
+    /// more lines while the search is open all move that line further down
+    /// or up the transcript, so the number in `from` is a line of other
+    /// text by the time Esc puts the view back; this is what finds it again.
+    from_anchor: Option<crate::ui::Anchor>,
     /// Which of the places the last draw found the query is the one stepped
     /// to: its number among them, and which match it is, which is what keeps
     /// it when lines above it come and go. `None` until a draw has found the
@@ -2426,6 +2434,7 @@ impl App {
         self.transcript_drawn = None;
         if let Some(find) = &mut self.find {
             find.from = (0, true);
+            find.from_anchor = None;
             find.current = None;
         }
         self.first_prompt_unsent = false;
@@ -7275,7 +7284,12 @@ impl App {
         let Some(find) = self.find.as_mut() else {
             return;
         };
-        let bottom = find.from.0.saturating_add(viewport);
+        let top = find
+            .from_anchor
+            .as_ref()
+            .and_then(|anchor| self.drawn.line_of(anchor))
+            .unwrap_or(find.from.0);
+        let bottom = top.saturating_add(viewport);
         let at = match find.current {
             _ if found.is_empty() => None,
             Some((at, _)) if !changed => Some(at),
@@ -7329,18 +7343,30 @@ impl App {
         query.set_wrap_mode(WrapMode::WordOrGlyph);
         query.set_placeholder_text("Find in the transcript");
         paint_composer(&mut query, &self.theme);
+        // A switch pressed before this has already held the view's line,
+        // which the lines last drawn no longer say.
+        let from_anchor = match self.follow {
+            true => None,
+            false => self.held.clone().or_else(|| self.drawn.anchor(self.scroll)),
+        };
         self.find = Some(Find {
             query,
             from: (self.scroll(), self.follow),
+            from_anchor,
             current: None,
             revealed: true,
         });
     }
 
-    /// Closes the search and puts the view back where it was when it opened.
+    /// Closes the search and puts the view back where it was when it opened:
+    /// on the same line of the same entry, found again by the next draw as
+    /// a switch's held line is, however the lines above it changed since.
     fn close_find(&mut self) {
         if let Some(find) = self.find.take() {
             (self.scroll, self.follow) = find.from;
+            if find.from_anchor.is_some() {
+                self.held = find.from_anchor;
+            }
         }
     }
 
