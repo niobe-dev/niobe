@@ -149,6 +149,46 @@ fn the_json_is_the_shape_the_published_schema_names() {
     assert_eq!(printed["cost"]["complete"], true);
 }
 
+/// A `claude` whose turn spawns a sub-agent in the background, as the CLI
+/// does by default: the turn ends while the agent works, and the agent's end
+/// starts a turn of the CLI's own, which answers with what the agent found.
+/// `total_cost_usd` is the session's running total, as ever.
+const SPAWNS_IN_THE_BACKGROUND_CLAUDE: &str = "#!/bin/sh\n\
+    read -r first\n\
+    read -r turn\n\
+    printf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"model\":\"claude-sonnet-5\",\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_a\",\"name\":\"Agent\",\"input\":{\"subagent_type\":\"reviewer\",\"description\":\"Review fetch.py\",\"prompt\":\"review fetch.py\"}}]},\"parent_tool_use_id\":null}'\n\
+    printf '%s\\n' '{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"tool_use_id\":\"toolu_a\",\"type\":\"tool_result\",\"content\":\"Async agent launched successfully.\"}]},\"parent_tool_use_id\":null,\"tool_use_result\":{\"status\":\"async_launched\"}}'\n\
+    printf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"model\":\"claude-sonnet-5\",\"id\":\"msg_2\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"A reviewer is running in the background.\"}]},\"parent_tool_use_id\":null}'\n\
+    printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"A reviewer is running in the background.\",\"total_cost_usd\":0.1,\"usage\":{\"input_tokens\":10,\"output_tokens\":5,\"cache_read_input_tokens\":0,\"cache_creation_input_tokens\":0}}'\n\
+    sleep 1\n\
+    printf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"model\":\"claude-sonnet-5\",\"id\":\"msg_3\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"fetch.py drops the etag\"}]},\"parent_tool_use_id\":\"toolu_a\"}'\n\
+    printf '%s\\n' '{\"type\":\"system\",\"subtype\":\"task_notification\",\"tool_use_id\":\"toolu_a\",\"status\":\"completed\",\"summary\":\"fetch.py drops the etag\"}'\n\
+    printf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"model\":\"claude-sonnet-5\",\"id\":\"msg_4\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"The review found one bug: fetch.py drops the etag.\"}]},\"parent_tool_use_id\":null}'\n\
+    printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"The review found one bug: fetch.py drops the etag.\",\"total_cost_usd\":0.3,\"usage\":{\"input_tokens\":20,\"output_tokens\":15,\"cache_read_input_tokens\":0,\"cache_creation_input_tokens\":0}}'\n\
+    while read -r line; do :; done\n";
+
+#[test]
+fn a_sub_agent_working_in_the_background_is_waited_for_and_its_answer_is_the_reply() {
+    let setup = Setup::new(SPAWNS_IN_THE_BACKGROUND_CLAUDE, METERED);
+    let output = setup.run(&["-p", "review fetch.py", "--json"]);
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+
+    let printed = json(&output);
+    assert_eq!(printed["outcome"], "finished");
+    assert_eq!(
+        printed["reply"], "The review found one bug: fetch.py drops the etag.",
+        "the turn the agent's end started is what the run was for: {printed:#}"
+    );
+    assert_eq!(printed["cost"]["reported_usd"], 0.3);
+
+    let listed = setup.run(&["cost", "--json"]);
+    let sessions = json(&listed)["sessions"].clone();
+    assert_eq!(
+        sessions[0]["cost"]["reported_usd"], 0.3,
+        "the store holds what the run printed: {sessions}"
+    );
+}
+
 #[test]
 fn a_prompt_no_rule_allows_is_refused_and_the_agent_is_told_why() {
     let setup = Setup::new(ASKS_CLAUDE, METERED);

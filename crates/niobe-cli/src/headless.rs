@@ -19,6 +19,11 @@
 //! error with as much spent as the budget allowed — rather than off the
 //! backend's wording of it.
 //!
+//! A turn that finished with a sub-agent still working in the background is
+//! waited past: the agent's end starts a turn of the backend's own, and the
+//! run ends with the first turn that finishes with no sub-agent running, its
+//! reply the reply.
+//!
 //! A run asked to stop while the turn is under way — a CI job's timeout, or
 //! Ctrl+C — asks the backend to stop the turn and gives it [`STOP_GRACE`] to
 //! close it, so the turn's last figures are recorded; such a turn failed.
@@ -158,7 +163,9 @@ pub fn run(
         for (at, event) in events.iter().enumerate() {
             keep(journal, &mut state, event);
             let ending = match event {
-                Event::AssistantMessage { text, agent: None } => {
+                // What the backend says after the run's end is recorded, and
+                // is not the reply the run printed.
+                Event::AssistantMessage { text, agent: None } if outcome.is_none() => {
                     reply.clone_from(text);
                     None
                 }
@@ -193,10 +200,20 @@ pub fn run(
                 Event::SessionLeft => Some(Outcome::Failed(
                     "the backend left before the turn ended".to_owned(),
                 )),
-                Event::TurnEnded => Some(match limited.take() {
-                    Some(why) => Outcome::Failed(why),
-                    None => ended(failure.take(), &state, budget),
-                }),
+                // A turn that finished with a sub-agent still working is not
+                // the end of the run: the CLI runs sub-agents in the
+                // background by default, and each one's end starts a turn of
+                // the CLI's own that answers with what it found. Ended here,
+                // the run would print "an agent is working" as its reply and
+                // stop the agent with the backend. One that failed ends the
+                // run as it stands, since nothing says another turn follows.
+                Event::TurnEnded => match limited.take() {
+                    Some(why) => Some(Outcome::Failed(why)),
+                    None => match ended(failure.take(), &state, budget) {
+                        Outcome::Finished if !state.running_agents().is_empty() => None,
+                        ended => Some(ended),
+                    },
+                },
                 _ => None,
             };
             // A warning is the turn's failure only where the turn ends on it:
@@ -502,6 +519,81 @@ mod tests {
             None,
         );
         assert_eq!(turn.reply, "mine");
+    }
+
+    fn said(text: &str) -> Event {
+        Event::AssistantMessage {
+            text: text.to_owned(),
+            agent: None,
+        }
+    }
+
+    #[test]
+    fn a_turn_that_leaves_a_sub_agent_running_is_waited_past_to_the_turn_its_end_starts() {
+        let agent = niobe_core::event::AgentId::from("toolu_a");
+        let spawned = Event::AgentSpawn {
+            id: agent.clone(),
+            parent: None,
+            kind: Some("reviewer".to_owned()),
+            label: "review fetch.py".to_owned(),
+        };
+        let exited = Event::AgentExit {
+            id: agent,
+            outcome: niobe_core::event::AgentOutcome::Completed,
+        };
+        let (turn, _, journal) = ran(
+            vec![
+                vec![
+                    spawned,
+                    said("a reviewer is running"),
+                    cost(0.1),
+                    Event::TurnEnded,
+                ],
+                vec![],
+                vec![exited],
+                vec![
+                    said("the review found one bug"),
+                    cost(0.2),
+                    Event::TurnEnded,
+                    said("said after the run's end"),
+                ],
+            ],
+            &Allowlist::new(),
+            None,
+        );
+
+        assert_eq!(turn.outcome, Outcome::Finished);
+        assert_eq!(turn.reply, "the review found one bug");
+        assert!((turn.state.totals().reported_cost_usd - 0.3).abs() < 1e-9);
+        assert_eq!(
+            journal.0.last(),
+            Some(&said("said after the run's end")),
+            "everything the backend said is still recorded"
+        );
+    }
+
+    #[test]
+    fn a_turn_that_failed_with_a_sub_agent_running_ends_the_run_as_it_stands() {
+        let spawned = Event::AgentSpawn {
+            id: niobe_core::event::AgentId::from("toolu_a"),
+            parent: None,
+            kind: None,
+            label: "review fetch.py".to_owned(),
+        };
+        let (turn, ..) = ran(
+            vec![vec![
+                spawned,
+                warning("the turn ended as `error_during_execution`: overloaded"),
+                Event::TurnEnded,
+            ]],
+            &Allowlist::new(),
+            None,
+        );
+        assert!(
+            matches!(turn.outcome, Outcome::Failed(_)),
+            "{:?}",
+            turn.outcome
+        );
     }
 
     #[test]
