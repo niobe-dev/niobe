@@ -5982,6 +5982,16 @@ impl App {
         }
     }
 
+    /// The windows the session's fold holds, where they are the selected
+    /// account's: none where the session's record holds them under a profile
+    /// other than the one it was taken up again under. The Usage pane and
+    /// Cost & usage both read the levels here, so neither shows another
+    /// account's.
+    fn account_windows(&self) -> Option<&UsageWindows> {
+        let elsewhere = self.windows_recorded && self.windows_of_another_profile();
+        self.session.usage_windows().filter(|_| !elsewhere)
+    }
+
     /// The plan's windows as the Usage pane draws them.
     ///
     /// What this session's backend reported, where it has since the session
@@ -5997,12 +6007,11 @@ impl App {
     /// rows waiting for it. None of that on an account known to be metered,
     /// which has no plan windows.
     pub fn plan_windows(&self) -> PlanWindows {
-        let folded = self.session.usage_windows().copied();
+        let folded = self.account_windows().copied();
         let recorded = match (folded, self.windows_recorded) {
             (Some(windows), false) => {
                 return PlanWindows::Reported(since_reset(windows, self.read_at()));
             }
-            (Some(_), true) if self.windows_of_another_profile() => None,
             (Some(windows), true) => self.windows_at.map(|at| (windows, at)),
             (None, _) => None,
         };
@@ -9005,7 +9014,7 @@ impl App {
     /// `now` is seconds since the Unix epoch, taken by the caller so that the
     /// wording can be asserted against a fixed clock.
     pub fn cost_hint(&self, now: u64) -> String {
-        let Some(windows) = self.session.usage_windows() else {
+        let Some(windows) = self.account_windows() else {
             return "Cost & usage — the usage breakdown is not implemented yet".to_owned();
         };
         let mut parts = Vec::new();
@@ -14925,6 +14934,41 @@ mod tests {
             "{:?}",
             app.hint()
         );
+    }
+
+    /// The Usage pane draws none of the levels a session recorded under one
+    /// profile once it is taken up again under another, since they are
+    /// another account's; Cost & usage reads the same levels out, so it
+    /// withholds them too.
+    #[test]
+    fn cost_and_usage_reads_out_no_window_another_profile_recorded() {
+        const NOW: u64 = 1_789_000_000;
+        let resumed_under = |profile: &str| {
+            let mut app = app();
+            app.apply(&Event::SessionMeta(SessionMeta {
+                backend: Backend::Claude,
+                profile: "max".to_owned(),
+                model: "claude-opus-5".to_owned(),
+                backend_session: None,
+            }));
+            app.apply(&Event::UsageWindows(windows(NOW)));
+            app.resumed();
+            app.with_profile(SelectedProfile {
+                name: profile.to_owned(),
+                backend: Backend::Claude,
+                models: Vec::new(),
+                billing: None,
+            })
+        };
+
+        assert!(
+            resumed_under("max")
+                .cost_hint(NOW)
+                .contains("5h window 33%"),
+            "the profile's own levels are read out"
+        );
+        let other = resumed_under("company").cost_hint(NOW);
+        assert!(!other.contains("window"), "{other}");
     }
 
     #[test]
