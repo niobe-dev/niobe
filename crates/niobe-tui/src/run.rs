@@ -372,6 +372,9 @@ fn event_loop<B: Backend<Error = io::Error>>(
             if let Some(repo) = watch.look() {
                 app.set_repo(repo);
             }
+            if let Some(began) = watch.failed() {
+                app.tree_read_failed(began);
+            }
             // Before the draw, so that a prompt a standing rule already answers is
             // never on screen for the frame it takes to answer it.
             app.settle_rules();

@@ -4223,6 +4223,28 @@ impl App {
         false
     }
 
+    /// Takes word that a read of the working tree that began at `began`
+    /// failed, from the event loop, which has it from the watch.
+    ///
+    /// A turn's end waits on a read that began after it, and one that began
+    /// then and failed is all it will get: the next read that works may come
+    /// only once the next turn has changed the tree, and held against the
+    /// tree this turn began on it would name that turn's changes as this
+    /// one's. So the watch ends, saying nothing, and the next turn begins
+    /// its own. A read that fails while the turn runs needs nothing: the
+    /// turn's start is still waited on, and a watch that never had it ends
+    /// with the turn.
+    pub fn tree_read_failed(&mut self, began: Instant) {
+        if self
+            .tree_watch
+            .as_ref()
+            .and_then(|watch| watch.ended)
+            .is_some_and(|asked| began >= asked)
+        {
+            self.tree_watch = None;
+        }
+    }
+
     /// The notice of what `turn` changed outside the edit tools.
     fn say_outside(&mut self, turn: usize, changed: &[Outside]) {
         let side = |count: Option<u64>| count.map_or_else(|| "—".to_owned(), |n| n.to_string());
@@ -13931,6 +13953,53 @@ mod tests {
         app.settle_tree(at(15));
 
         assert!(outside(&app).is_empty(), "{:?}", outside(&app));
+    }
+
+    /// A read asked for at a turn's end that failed is the only answer that
+    /// read gets. Waited on still, the watch would hold the tree the turn
+    /// began on until a read worked again — after the next turn had changed
+    /// it — and name that turn's changes as this one's.
+    #[test]
+    fn a_failed_read_at_a_turns_end_names_nothing_and_leaves_the_next_turn_its_own_watch() {
+        let start = Instant::now();
+        let at = |ms| start + Duration::from_millis(ms);
+        let mut app = app();
+        app.apply(&Event::UserMessage {
+            text: "explain it".to_owned(),
+        });
+        app.settle_tree(at(0));
+        app.set_repo(tree_read(at(1), &[]));
+        app.settle_tree(at(2));
+        app.apply(&Event::TurnEnded);
+        assert!(app.settle_tree(at(3)), "an ended turn asks for the tree");
+        app.tree_read_failed(at(4));
+        app.settle_tree(at(5));
+
+        app.apply(&Event::UserMessage {
+            text: "format it".to_owned(),
+        });
+        assert!(
+            app.settle_tree(at(6)),
+            "the next turn asks for the tree it began on"
+        );
+        app.set_repo(tree_read(at(7), &[file("src/lib.rs", 4, 1)]));
+        app.settle_tree(at(8));
+        app.apply(&Event::TurnEnded);
+        app.settle_tree(at(9));
+        app.set_repo(tree_read(
+            at(10),
+            &[file("src/lib.rs", 4, 1), file("src/main.rs", 2, 2)],
+        ));
+        app.settle_tree(at(11));
+
+        let said = outside(&app);
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert_eq!(said[0].meta, "turn 2 · 1 file");
+        assert!(
+            !said[0].body.contains("lib.rs"),
+            "the file changed before the turn began is not its: {}",
+            said[0].body
+        );
     }
 
     /// The backend runs at the repository's root, so an edit names a file
