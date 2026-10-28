@@ -7487,7 +7487,9 @@ impl App {
 
     /// Handles one mouse report: a click or a wheel notch gives the keyboard
     /// to the pane under the pointer, the wheel then scrolls it, and a click on
-    /// the way back down returns the transcript to its newest line.
+    /// the way back down returns the transcript to its newest line. With a
+    /// dialog or a menu open, the wheel is that dialog's, and moves nothing
+    /// under it.
     ///
     /// Over the transcript, a drag selects what it covers and letting go
     /// copies it, and a click that does not drag opens the link under it: a
@@ -7502,7 +7504,7 @@ impl App {
 
     /// [`App::on_mouse`], before the question it may have uncovered is told.
     fn on_mouse_under(&mut self, mouse: ratatui::crossterm::event::MouseEvent) {
-        use ratatui::crossterm::event::{MouseButton, MouseEventKind};
+        use ratatui::crossterm::event::{KeyCode, MouseButton, MouseEventKind};
 
         // Below the smallest window the frame says only that it is too small.
         // Where the bars, a menu's list and the transcript were is what the
@@ -7510,6 +7512,21 @@ impl App {
         // the operator cannot see — the F-key bar's Quit among them.
         if self.too_small {
             self.pressed = None;
+            return;
+        }
+
+        // What is open over the session takes the wheel, as it takes the
+        // keys: a notch that moved the transcript or a pane under a dialog
+        // would move what the operator cannot see, and leave the dialog they
+        // are reading where it was.
+        let notch = match mouse.kind {
+            MouseEventKind::ScrollUp => Some(KeyCode::Up),
+            MouseEventKind::ScrollDown => Some(KeyCode::Down),
+            _ => None,
+        };
+        if let (Some(notch), Some(overlay)) = (notch, self.overlay())
+            && self.wheel_over(overlay, notch)
+        {
             return;
         }
 
@@ -7551,6 +7568,39 @@ impl App {
             MouseEventKind::Up(MouseButton::Left) => self.let_go(),
             _ => {}
         }
+    }
+
+    /// One notch of the wheel, `notch` the arrow it moves as, over `overlay`:
+    /// the view that scrolls a page of text moves the lines a notch moves the
+    /// transcript, and a list moves its cursor one row, as the arrow does. A
+    /// menu is not moved by it. Returns whether `overlay` took the notch: the
+    /// search does not, since it is on the bar and the transcript it steps
+    /// through is in view.
+    fn wheel_over(&mut self, overlay: Overlay, notch: ratatui::crossterm::event::KeyCode) -> bool {
+        use ratatui::crossterm::event::{KeyEvent, KeyModifiers};
+
+        let arrow = KeyEvent::new(notch, KeyModifiers::NONE);
+        match overlay {
+            Overlay::Search => return false,
+            Overlay::Menu => {}
+            Overlay::Sheet => {
+                for _ in 0..Self::WHEEL_LINES {
+                    self.on_sheet_key(arrow);
+                }
+            }
+            Overlay::Detail => {
+                if let Some(detail) = self.detail.as_mut() {
+                    for _ in 0..Self::WHEEL_LINES {
+                        let _ = detail.on_key(arrow);
+                    }
+                }
+            }
+            Overlay::Memory => self.on_memory_key(arrow),
+            Overlay::Mcp => self.on_mcp_key(arrow),
+            Overlay::History => self.on_browser_key(arrow),
+            Overlay::List => self.on_pick_key(arrow),
+        }
+        true
     }
 
     /// The transcript cell at a place on the screen, or `None` where the
@@ -18465,6 +18515,75 @@ mod tests {
 
             assert_eq!(app.composed(), before, "{overlay:?}");
         }
+    }
+
+    #[test]
+    fn a_wheel_notch_over_anything_open_moves_nothing_under_it() {
+        for overlay in Overlay::ALL {
+            if overlay == Overlay::Search {
+                // The search is on the bar, and the transcript it steps
+                // through is in view: the wheel scrolls that as it would.
+                continue;
+            }
+            let (mut app, _) = opened(overlay);
+            app.measured_session(Rect::new(0, 1, 60, 28));
+            app.measured(100, 20);
+            app.measured_pane(Pane::Changes, Rect::new(62, 8, 30, 10), 40, 10);
+            let transcript = app.scroll();
+
+            // Up over the transcript, which follows its tail, and down over
+            // the Changes pane, which is at its top: each would move.
+            for (column, row, kind) in [
+                (10, 5, MouseEventKind::ScrollUp),
+                (70, 12, MouseEventKind::ScrollDown),
+            ] {
+                app.on_mouse(MouseEvent {
+                    kind,
+                    column,
+                    row,
+                    modifiers: KeyModifiers::NONE,
+                });
+            }
+
+            assert_eq!(
+                app.scroll(),
+                transcript,
+                "{overlay:?}: the transcript moved"
+            );
+            assert_eq!(
+                app.pane_scroll(Pane::Changes),
+                0,
+                "{overlay:?}: a pane moved"
+            );
+            assert_eq!(app.focus(), Focus::Session, "{overlay:?}: the keys moved");
+            assert_eq!(app.overlay(), Some(overlay), "{overlay:?} closed");
+        }
+    }
+
+    #[test]
+    fn a_wheel_notch_over_a_call_read_whole_scrolls_it() {
+        let mut app = app().attached();
+        let output: String = (1..=200).map(|n| format!("line {n}\n")).collect();
+        read_call(&mut app, "t1", "README.md", &output);
+        app.pick_call();
+        app.on_key(key(KeyCode::Enter));
+        let top = |app: &App| {
+            app.detail()
+                .expect("the call is open")
+                .visible(80, 10)
+                .first()
+                .map(|(line, _)| line.clone())
+        };
+        let before = top(&app);
+
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 10,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        });
+
+        assert_ne!(top(&app), before, "the call's view did not move");
     }
 
     #[test]
