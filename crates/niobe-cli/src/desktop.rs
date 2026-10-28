@@ -9,11 +9,14 @@
 //! shell may not.
 //!
 //! Text goes on the clipboard through the program the platform has for it:
-//! `pbcopy` on macOS, `wl-copy`, `xclip` or `xsel` on Linux, the first that is
-//! installed. A link is opened with `open` on macOS and `xdg-open` on Linux,
-//! and only an `http` or `https` one, or a config file that is a regular file
-//! and not a link as it is handed over: the opener runs what a `file:` link
-//! or a script names and mounts what an `smb:` one does.
+//! `pbcopy` on macOS, and on Linux `wl-copy` where `WAYLAND_DISPLAY` names a
+//! compositor and `xclip` or `xsel` where `DISPLAY` names an X server, the
+//! first of those that is installed. A copier whose display server is not
+//! running would start, take the text and lose it. A link is opened with
+//! `open` on macOS and `xdg-open` on Linux, and only an `http` or `https`
+//! one, or a config file that is a regular file and not a link as it is
+//! handed over: the opener runs what a `file:` link or a script names and
+//! mounts what an `smb:` one does.
 //! Each runs with no terminal — its output and errors dropped — so nothing it
 //! says can land on the screen the shell draws on, and in a process group of
 //! its own, so a browser it starts is not ended with the session's terminal.
@@ -30,6 +33,7 @@
 //! `.command`, `.tool` or `.desktop` file a repository named rather than show
 //! it.
 
+use std::ffi::OsStr;
 use std::io::Write;
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
@@ -109,15 +113,36 @@ fn platform_editor() -> Program {
 /// The programs that put text on the clipboard on this platform, in the order
 /// they are tried.
 fn platform_copiers() -> Vec<Program> {
-    if cfg!(target_os = "macos") {
-        vec![Program::new("pbcopy", &[])]
-    } else {
-        vec![
-            Program::new("wl-copy", &[]),
-            Program::new("xclip", &["-selection", "clipboard"]),
-            Program::new("xsel", &["--clipboard", "--input"]),
-        ]
+    copiers_for(
+        cfg!(target_os = "macos"),
+        std::env::var_os("WAYLAND_DISPLAY").as_deref(),
+        std::env::var_os("DISPLAY").as_deref(),
+    )
+}
+
+/// The copiers for a session on macOS where `macos` says so, or else under
+/// the Wayland compositor `wayland` names and the X server `display` names.
+///
+/// A Linux copier is tried only where its display server is running: one
+/// that cannot reach a clipboard still starts and takes the text, then exits
+/// with an error nothing reports. `wl-copy` installed beside an X
+/// session, or either over SSH, would then be the copier chosen and the text
+/// would be lost, while the next copier, which could have taken it, is never
+/// tried. A variable that is set and empty names no display.
+fn copiers_for(macos: bool, wayland: Option<&OsStr>, display: Option<&OsStr>) -> Vec<Program> {
+    if macos {
+        return vec![Program::new("pbcopy", &[])];
     }
+    let named = |var: Option<&OsStr>| var.is_some_and(|value| !value.is_empty());
+    let mut copiers = Vec::new();
+    if named(wayland) {
+        copiers.push(Program::new("wl-copy", &[]));
+    }
+    if named(display) {
+        copiers.push(Program::new("xclip", &["-selection", "clipboard"]));
+        copiers.push(Program::new("xsel", &["--clipboard", "--input"]));
+    }
+    copiers
 }
 
 /// The program that opens a link on this platform.
@@ -214,6 +239,12 @@ impl System {
     /// The first copier that is installed, started with its input piped,
     /// or why none could be.
     fn start_copier(&self) -> Result<Child, String> {
+        if self.copiers.is_empty() {
+            return Err(
+                "neither WAYLAND_DISPLAY nor DISPLAY names a display whose clipboard to copy to"
+                    .to_owned(),
+            );
+        }
         for copier in &self.copiers {
             match copier.start(&[], true) {
                 Ok(child) => return Ok(child),
@@ -362,6 +393,48 @@ mod tests {
         };
         assert_eq!(desktop.copy("line one\nline two"), Ok(()));
         assert_eq!(written(&out), "line one\nline two");
+    }
+
+    fn copier_names(macos: bool, wayland: Option<&str>, display: Option<&str>) -> Vec<String> {
+        copiers_for(macos, wayland.map(OsStr::new), display.map(OsStr::new))
+            .iter()
+            .map(|program| program.name.clone())
+            .collect()
+    }
+
+    #[test]
+    fn a_linux_copier_is_tried_only_where_its_display_server_is_running() {
+        assert_eq!(
+            copier_names(false, None, Some(":0")),
+            ["xclip", "xsel"],
+            "under X, wl-copy is installed alongside but cannot reach a clipboard"
+        );
+        assert_eq!(copier_names(false, Some("wayland-0"), None), ["wl-copy"]);
+        assert_eq!(
+            copier_names(false, Some("wayland-0"), Some(":0")),
+            ["wl-copy", "xclip", "xsel"]
+        );
+        assert_eq!(
+            copier_names(false, Some(""), Some("")),
+            Vec::<String>::new(),
+            "an empty variable names no display"
+        );
+        assert_eq!(copier_names(true, None, None), ["pbcopy"]);
+    }
+
+    #[test]
+    fn a_session_with_no_display_to_copy_to_says_so_rather_than_name_programs() {
+        let mut desktop = System {
+            copiers: copiers_for(false, None, None),
+            opener: sh("true"),
+            editor: sh("true"),
+            diagnostics: None,
+        };
+        let refused = desktop
+            .copy("text")
+            .expect_err("there is no clipboard to copy to");
+        assert!(refused.contains("WAYLAND_DISPLAY"), "{refused}");
+        assert!(refused.contains("DISPLAY"), "{refused}");
     }
 
     #[test]
