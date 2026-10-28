@@ -8274,9 +8274,8 @@ impl App {
             // follows it back: the Enter after it has to send it.
             _ => {
                 self.focus = Focus::Session;
-                if let Some(typed) = typed_char(key)
-                    && !self.composer_has_room_for(typed.len_utf8())
-                {
+                let more = bytes_added(&self.composer, key);
+                if more > 0 && !self.composer_has_room_for(more) {
                     return;
                 }
                 let before = self.composer.cursor();
@@ -9826,6 +9825,22 @@ fn typed_char(key: ratatui::crossterm::event::KeyEvent) -> Option<char> {
     match (key.code, key.modifiers) {
         (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) if !c.is_control() => Some(c),
         _ => None,
+    }
+}
+
+/// The bytes `key` puts into `composer` through its editor's own bindings:
+/// the character typed, the text Ctrl+Y gives back of what Ctrl+U, Ctrl+K
+/// or Ctrl+W deleted, or the line Ctrl+M opens where the terminal tells it
+/// from Enter. Every way text goes in is held to [`COMPOSER_CAP`].
+fn bytes_added(composer: &TextArea<'static>, key: ratatui::crossterm::event::KeyEvent) -> usize {
+    use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+
+    let ctrl =
+        key.modifiers.contains(KeyModifiers::CONTROL) && !key.modifiers.contains(KeyModifiers::ALT);
+    match key.code {
+        KeyCode::Char('y') if ctrl => composer.yank_text().len(),
+        KeyCode::Char('m') if ctrl => 1,
+        _ => typed_char(key).map_or(0, char::len_utf8),
     }
 }
 
@@ -12845,6 +12860,38 @@ mod tests {
         app.on_key(key(KeyCode::Char('b')));
         assert_eq!(app.composed().len(), COMPOSER_CAP);
         assert!(app.composed().ends_with("ab"));
+    }
+
+    /// The editor's own Ctrl+Y gives back what Ctrl+U, Ctrl+K or Ctrl+W
+    /// deleted, as often as it is pressed: each is text going in, held to the
+    /// cap as a paste is.
+    #[test]
+    fn ctrl_y_that_would_take_the_prompt_past_its_cap_is_refused() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+        let mut app = app();
+        app.on_paste(&"a".repeat(COMPOSER_CAP / 2 + 1));
+        app.on_key(ctrl('u'));
+        assert_eq!(app.composed(), "");
+
+        app.on_key(ctrl('y'));
+        assert_eq!(app.composed().len(), COMPOSER_CAP / 2 + 1);
+        app.on_key(ctrl('y'));
+        assert_eq!(app.composed().len(), COMPOSER_CAP / 2 + 1);
+        assert_eq!(app.hint(), Some(TOO_LONG_HINT));
+    }
+
+    /// Ctrl+M reaches the shell as itself where the terminal tells it from
+    /// Enter, and the editor opens a line on it: a byte held to the cap as
+    /// Ctrl+J's is.
+    #[test]
+    fn ctrl_m_into_a_prompt_at_its_cap_is_refused() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut app = app();
+        app.on_paste(&"a".repeat(COMPOSER_CAP));
+        app.on_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::CONTROL));
+        assert_eq!(app.composed().len(), COMPOSER_CAP);
+        assert_eq!(app.hint(), Some(TOO_LONG_HINT));
     }
 
     #[test]
