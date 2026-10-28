@@ -1786,6 +1786,10 @@ struct TreeWatch {
     before: Option<Vec<WorkingFile>>,
     /// When the shell asked for the tree the turn ended on, once it has.
     ended: Option<Instant>,
+    /// Whether a `!` command of the operator's ran while the watch was held:
+    /// what it changed reads in the tree as the turn's would, and nothing
+    /// tells the two apart, so the turn is named for none of it.
+    operator_ran: bool,
 }
 
 /// How many files a notice of changes outside the edit tools names before it
@@ -2171,6 +2175,11 @@ impl App {
         // count it too.
         let repeated_end =
             matches!(event, Event::ToolCallEnd { id, .. } if self.session.call_ended(id));
+        if let (Event::ToolCallStart { name, .. }, Some(watch)) = (event, self.tree_watch.as_mut())
+            && name == crate::shell::OPERATOR_SHELL
+        {
+            watch.operator_ran = true;
+        }
         self.session.apply(event);
         // The fold carries no times, so when each decision was stated is kept
         // here: the ones the event added get this moment, and a clear that
@@ -4185,17 +4194,25 @@ impl App {
     /// no working tree to read. A file is told by its line counts against
     /// the last commit, so a change that leaves them as they were — a line
     /// replaced by one of the same count in a file already changed — is not
-    /// seen, and nothing is said that the counts do not show.
+    /// seen, and nothing is said that the counts do not show. Nor is anything
+    /// said of a turn during which a `!` command of the operator's ran: what
+    /// that command changed cannot be told from what the turn did.
     pub fn settle_tree(&mut self, now: Instant) -> bool {
         let ended = self.session.turns().len();
         let Some(watch) = self.tree_watch.as_mut() else {
             if self.session.turn_running() {
                 self.turn_edits.clear();
+                let operator_ran = self
+                    .session
+                    .in_flight_tools()
+                    .values()
+                    .any(|name| name.as_str() == crate::shell::OPERATOR_SHELL);
                 self.tree_watch = Some(TreeWatch {
                     ended_before: ended,
                     asked: now,
                     before: None,
                     ended: None,
+                    operator_ran,
                 });
                 return true;
             }
@@ -4228,7 +4245,10 @@ impl App {
         if !fresh(asked_end) {
             return false;
         }
-        let changed = changed_outside(before, &self.repo.working, &self.turn_edits);
+        let changed = match watch.operator_ran {
+            true => Vec::new(),
+            false => changed_outside(before, &self.repo.working, &self.turn_edits),
+        };
         let turn = watch.ended_before.saturating_add(1);
         self.tree_watch = None;
         if !changed.is_empty() {
@@ -14187,6 +14207,82 @@ mod tests {
         app.settle_tree(at(15));
 
         assert!(outside(&app).is_empty(), "{:?}", outside(&app));
+    }
+
+    /// A `!` command is the operator's, not the turn's: what it changed while
+    /// the turn ran cannot be told from what the turn changed, so the turn is
+    /// named for none of it.
+    #[test]
+    fn a_file_a_bang_command_changed_while_the_turn_ran_is_not_named_as_the_turns() {
+        let began = Instant::now();
+        let at = |ms| began + Duration::from_millis(ms);
+        let mut app = app();
+        app.apply(&Event::UserMessage {
+            text: "explain it".to_owned(),
+        });
+        app.settle_tree(at(0));
+        app.set_repo(tree_read(at(1), &[]));
+        app.settle_tree(at(2));
+        app.apply(&start(
+            "op1",
+            crate::shell::OPERATOR_SHELL,
+            "cargo fmt",
+            None,
+        ));
+        app.apply(&end("op1", crate::shell::OPERATOR_SHELL));
+        app.apply(&Event::TurnEnded);
+        app.settle_tree(at(3));
+        app.set_repo(tree_read(at(4), &[file("src/main.rs", 2, 2)]));
+        app.settle_tree(at(5));
+        app.settle_tree(at(6));
+
+        assert!(outside(&app).is_empty(), "{:?}", outside(&app));
+    }
+
+    #[test]
+    fn a_file_a_bang_command_running_when_the_turn_began_changed_is_not_named_as_the_turns() {
+        let began = Instant::now();
+        let at = |ms| began + Duration::from_millis(ms);
+        let mut app = app();
+        app.apply(&start(
+            "op1",
+            crate::shell::OPERATOR_SHELL,
+            "cargo fmt",
+            None,
+        ));
+        app.apply(&Event::UserMessage {
+            text: "explain it".to_owned(),
+        });
+        app.settle_tree(at(0));
+        app.set_repo(tree_read(at(1), &[]));
+        app.settle_tree(at(2));
+        app.apply(&end("op1", crate::shell::OPERATOR_SHELL));
+        app.apply(&Event::TurnEnded);
+        app.settle_tree(at(3));
+        app.set_repo(tree_read(at(4), &[file("src/main.rs", 2, 2)]));
+        app.settle_tree(at(5));
+        app.settle_tree(at(6));
+
+        assert!(outside(&app).is_empty(), "{:?}", outside(&app));
+
+        // The next turn, with no command of the operator's, is named again.
+        app.apply(&Event::UserMessage {
+            text: "format it".to_owned(),
+        });
+        app.settle_tree(at(7));
+        app.set_repo(tree_read(at(8), &[file("src/main.rs", 2, 2)]));
+        app.settle_tree(at(9));
+        app.apply(&Event::TurnEnded);
+        app.settle_tree(at(10));
+        app.set_repo(tree_read(
+            at(11),
+            &[file("src/main.rs", 2, 2), file("src/lib.rs", 1, 0)],
+        ));
+        app.settle_tree(at(12));
+        app.settle_tree(at(13));
+        let said = outside(&app);
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert_eq!(said[0].meta, "turn 2 · 1 file");
     }
 
     /// A read asked for at a turn's end that failed is the only answer that
