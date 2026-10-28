@@ -2445,10 +2445,24 @@ impl App {
     /// a backend started again does not carry it on, so nothing would ever
     /// report its end: left running, it would read as working for the rest
     /// of the session.
+    ///
+    /// Taken up again from a record that marks no look, the cut is part of
+    /// reading that record back, as what it holds is: the turn stopped
+    /// before the session was opened, and is no news on the first key.
     pub fn leave(&mut self) {
         if self.session.turn_running() || !self.session.running_agents().is_empty() {
             self.produce(Event::SessionLeft);
+            if self.returned && !self.looked_recorded {
+                self.mark_read_back();
+            }
         }
+    }
+
+    /// Takes the mark a catch-up counts from at what has been read back,
+    /// for a record that marks no look of its own.
+    fn mark_read_back(&mut self) {
+        self.looked = Mark::of(&self.session);
+        self.caught_up = self.looked.clone();
     }
 
     /// Records that everything folded in so far was read back from this
@@ -2482,10 +2496,10 @@ impl App {
         // key back, the process that ran it having ended while they were
         // away. A record that marks no look was kept before looks were kept,
         // and what it holds was there to read before it was left.
-        if !self.looked_recorded {
-            self.looked = Mark::of(&self.session);
+        match self.looked_recorded {
+            true => self.caught_up = self.looked.clone(),
+            false => self.mark_read_back(),
         }
-        self.caught_up = self.looked.clone();
         self.looked_stale = true;
         self.returned = true;
     }
@@ -10457,6 +10471,33 @@ mod tests {
         app.tick(left + AWAY, None);
         app.on_key(key(KeyCode::Char('x')));
         assert!(app.sheet().is_none(), "the record was there to read before");
+        assert_eq!(app.composed(), "x");
+    }
+
+    /// A record that stops in the middle of a turn has that turn closed where
+    /// it stops, as part of reading it back: the cut is the record's, from
+    /// before the session was opened, and no news on the first key back.
+    #[test]
+    fn a_turn_closed_where_a_record_with_no_look_stops_is_not_news() {
+        let mut app = laid_out();
+        app.apply(&said("clean up"));
+        app.apply(&changed("src/lib.rs"));
+        app.apply(&Event::AgentSpawn {
+            id: AgentId::from("a1"),
+            parent: None,
+            kind: None,
+            label: "look".to_owned(),
+        });
+        app.resumed();
+        app.leave();
+        let left = Instant::now();
+        app.tick(left, None);
+        app.on_key(key(KeyCode::Char('x')));
+        assert!(
+            app.sheet().is_none(),
+            "the record was there to read before: {:?}",
+            app.sheet().map(|sheet| &sheet.rows)
+        );
         assert_eq!(app.composed(), "x");
     }
 
