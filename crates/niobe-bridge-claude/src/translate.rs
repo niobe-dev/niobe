@@ -516,9 +516,9 @@ pub struct Translator {
     /// What the CLI's last answer to `mcp_status` said of each server, by
     /// name, which every later `init` lists again without.
     mcp_said: BTreeMap<String, McpServer>,
-    /// The servers the last `init` listed, and how each stood: what an answer
-    /// that omits one is read against.
-    mcp_listed: BTreeMap<String, McpStatus>,
+    /// The servers the last `init` listed, as they were said: what an answer
+    /// that omits one is read against, and what it is listed as meanwhile.
+    mcp_listed: Vec<McpServer>,
     /// The servers the last answer left out, and how each stood when it did:
     /// one that still stands so is not asked about again for the omission.
     mcp_omitted: BTreeMap<String, McpStatus>,
@@ -657,7 +657,7 @@ impl Translator {
             rewinds: BTreeMap::new(),
             requests: Vec::new(),
             mcp_said: BTreeMap::new(),
-            mcp_listed: BTreeMap::new(),
+            mcp_listed: Vec::new(),
             mcp_omitted: BTreeMap::new(),
             mcp_status_wanted: false,
             mcp_status_refused: false,
@@ -1226,19 +1226,31 @@ impl Translator {
 
     /// The servers as the CLI's answer to `mcp_status` has them, kept for
     /// every later `init` to be read against.
+    ///
+    /// The event replaces the list the shell shows, so a server the last
+    /// `init` listed and the answer leaves out is listed still, as that
+    /// `init` had it and where it had it: the CLI has not stopped running it,
+    /// it only said nothing of it.
     fn mcp_status(&mut self, servers: Vec<wire::McpServerStatus>) -> Event {
-        let servers: Vec<McpServer> = servers.into_iter().map(mcp_server_status).collect();
-        self.mcp_omitted = self
+        let answered: Vec<McpServer> = servers.into_iter().map(mcp_server_status).collect();
+        let named = |name: &str| answered.iter().any(|server| server.name == name);
+        let omitted: Vec<McpServer> = self
             .mcp_listed
             .iter()
-            .filter(|(name, _)| !servers.iter().any(|server| &server.name == *name))
-            .map(|(name, status)| (name.clone(), status.clone()))
+            .filter(|listed| !named(&listed.name))
+            .cloned()
             .collect();
-        self.mcp_said = servers
+        self.mcp_omitted = omitted
+            .iter()
+            .map(|server| (server.name.clone(), server.status.clone()))
+            .collect();
+        self.mcp_said = answered
             .iter()
             .map(|server| (server.name.clone(), server.clone()))
             .collect();
-        Event::McpServers { servers }
+        Event::McpServers {
+            servers: in_listed_order(&self.mcp_listed, answered, omitted),
+        }
     }
 
     /// The servers an `init` lists, with what the CLI last said of each in
@@ -1247,11 +1259,8 @@ impl Translator {
     /// as it did then. One that stands otherwise is asked about again.
     fn mcp_servers(&mut self, servers: Vec<wire::McpServer>, tools: &[String]) -> Event {
         let mut listed = Vec::with_capacity(servers.len());
-        self.mcp_listed.clear();
         for server in mcp_servers(servers, tools) {
             let said = self.mcp_said.get(&server.name);
-            self.mcp_listed
-                .insert(server.name.clone(), server.status.clone());
             // A server the answer left out has nothing said of it to be read
             // against, and asking again would be told the same: it is asked
             // about once for each way it stands.
@@ -1271,6 +1280,7 @@ impl Translator {
                 None => server,
             });
         }
+        self.mcp_listed = listed.clone();
         Event::McpServers { servers: listed }
     }
 
@@ -4120,6 +4130,29 @@ fn mcp_servers(servers: Vec<wire::McpServer>, tools: &[String]) -> Vec<McpServer
             reports_as: None,
         })
         .collect()
+}
+
+/// The servers an answer to `mcp_status` named, with those the last `init`
+/// listed that it left out, in the order that `init` listed them; a server
+/// only the answer names comes after, in the answer's order.
+fn in_listed_order(
+    listed: &[McpServer],
+    mut answered: Vec<McpServer>,
+    mut omitted: Vec<McpServer>,
+) -> Vec<McpServer> {
+    let mut servers = Vec::with_capacity(answered.len().saturating_add(omitted.len()));
+    for server in listed {
+        let take = |from: &mut Vec<McpServer>| {
+            from.iter()
+                .position(|said| said.name == server.name)
+                .map(|at| from.remove(at))
+        };
+        if let Some(said) = take(&mut answered).or_else(|| take(&mut omitted)) {
+            servers.push(said);
+        }
+    }
+    servers.append(&mut answered);
+    servers
 }
 
 /// One server as the answer to `mcp_status` has it.
@@ -9335,6 +9368,48 @@ error: could not compile `demo` (lib test) due to 1 previous error";
             translator.take_mcp_status_wanted(),
             "a server that changed is asked about"
         );
+    }
+
+    /// The answer replaces the list the shell shows, so a server it leaves out
+    /// would vanish from the MCP view until the next turn's `init`, though
+    /// the CLI still has it configured and its tools are still the model's.
+    #[test]
+    fn a_server_the_answer_left_out_is_still_listed_as_the_last_init_had_it() {
+        let mut translator = Translator::new("max");
+        translator.line(
+            r#"{"type":"system","subtype":"init","session_id":"s","tools":["mcp__ghost__look"],"mcp_servers":[{"name":"ghost","status":"connected","source":"user"},{"name":"docs","status":"failed","source":"project"}]}"#,
+        );
+        translator.asked_for_mcp_status("niobe-2");
+        let events = translator.line(STATUS_FAILED);
+
+        let Some(Event::McpServers { servers }) = events
+            .iter()
+            .find(|event| matches!(event, Event::McpServers { .. }))
+        else {
+            panic!("no server list: {events:?}");
+        };
+        let listed: Vec<(&str, &McpStatus, &[String])> = servers
+            .iter()
+            .map(|server| {
+                (
+                    server.name.as_str(),
+                    &server.status,
+                    server.tools.as_slice(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                (
+                    "ghost",
+                    &McpStatus::Connected,
+                    ["look".to_owned()].as_slice()
+                ),
+                ("docs", &McpStatus::Failed, [].as_slice()),
+            ]
+        );
+        assert_eq!(servers[1].error.as_deref(), Some("ECONNREFUSED"));
     }
 
     /// One server's entry is not worth the whole `init`: its session id and
