@@ -603,6 +603,38 @@ fn the_session_list_names_the_claude_sessions_this_repository_can_carry_on() {
     );
 }
 
+/// A conversation a niobe session drove is in the CLI's store too. Listed
+/// there as well, it read as one more session `--resume` would read in, when
+/// its id opens the niobe session that carries it: one conversation, two rows.
+#[test]
+fn the_session_list_names_a_conversation_niobe_carries_on_once() {
+    let setup = Configured::new("", "");
+    let claude = claude_config_with_the_transcript(setup.repo.path());
+    std::fs::create_dir(setup.repo.path().join(".niobe")).expect("a .niobe directory");
+    let store = Store::open(&setup.repo.path().join(".niobe").join("sessions.db"))
+        .expect("a store opens in a temporary directory");
+    let session = store.create_session().expect("a session is created");
+    let log = format!(
+        "{{\"type\":\"user_message\",\"text\":\"carried here\"}}\n\
+         {{\"type\":\"session_meta\",\"backend\":\"claude\",\"profile\":\"max\",\
+         \"model\":\"claude-sonnet-5\",\"backend_session\":\"{TRANSCRIPT_SESSION}\"}}\n"
+    );
+    for event in read_log(&log).expect("the log parses") {
+        store.append(session, &event).expect("an append succeeds");
+    }
+    drop(store);
+
+    let output = setup.run_with_claude_sessions(claude.path(), &["sessions"]);
+    let out = stdout(&output);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(out.contains("carried here"), "{out}");
+    assert!(
+        !out.contains(TRANSCRIPT_SESSION),
+        "the conversation niobe session {session} carries was listed again:\n{out}"
+    );
+}
+
 #[test]
 fn a_claude_session_folds_into_the_history_and_the_bill_the_cli_recorded() {
     let setup = Configured::new("", "");

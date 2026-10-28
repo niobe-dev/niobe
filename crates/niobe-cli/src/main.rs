@@ -1372,19 +1372,30 @@ fn list_sessions() -> Result<(), String> {
         .as_ref()
         .and_then(|loaded| loaded.select(None).ok().flatten());
 
-    let recorded = match repo::read_existing_store(&root)? {
-        Some(store) => store.sessions().map_err(|e| e.to_string())?,
-        None => Vec::new(),
+    let (recorded, carried) = match repo::read_existing_store(&root)? {
+        Some(store) => (
+            store.sessions().map_err(|e| e.to_string())?,
+            store.conversations().map_err(|e| e.to_string())?,
+        ),
+        None => (Vec::new(), Vec::new()),
     };
     // The CLI's sessions are listed where they can be read; where they
-    // cannot, that is said under niobe's own rather than hiding them.
+    // cannot, that is said under niobe's own rather than hiding them. A
+    // conversation a niobe session carries is listed once, as that session:
+    // its id opens that session rather than reading it in again.
     let (imported, unread) = match backend::recorded(
         selected.as_ref(),
         &root,
         std::env::var_os(niobe_bridge_claude::transcript::CONFIG_DIR_VAR),
         std::env::var_os("HOME"),
     ) {
-        Ok(imported) => (imported, None),
+        Ok(imported) => (
+            imported
+                .into_iter()
+                .filter(|session| !carried.iter().any(|(_, id)| *id == session.id))
+                .collect::<Vec<_>>(),
+            None,
+        ),
         Err(error) => (Vec::new(), Some(error)),
     };
 
@@ -2174,7 +2185,8 @@ SESSIONS:
 
     niobe sessions lists two kinds. The first is niobe's own, by the number the
     store gave them. The second is the sessions the claude CLI recorded at the
-    root of this repository, by the id it calls them by. The CLI keeps a
+    root of this repository, by the id it calls them by, but for those a niobe
+    session carries on, which are listed once, by its number. The CLI keeps a
     session under the directory it was started in and resumes it only from
     there, and niobe runs it at the root, so one started in a subdirectory is
     not listed and cannot be carried on here. --resume with one of those
