@@ -222,6 +222,9 @@ pub enum StoreError {
     SessionOpen(SessionId),
     /// The file that marks a session as being recorded could not be opened.
     Hold(std::io::Error),
+    /// The store's write-ahead log, at this path, holds events not yet merged
+    /// into the store, and SQLite can read the store here only without it.
+    LogUnread(std::path::PathBuf),
 }
 
 impl std::fmt::Display for StoreError {
@@ -249,6 +252,12 @@ impl std::fmt::Display for StoreError {
                  it without taking it over"
             ),
             Self::Hold(e) => write!(f, "cannot mark the session as open: {e}"),
+            Self::LogUnread(log) => write!(
+                f,
+                "{} holds the last events recorded, not yet merged into the session \
+                 store, and they can be read only where its directory can be written",
+                log.display()
+            ),
         }
     }
 }
@@ -259,7 +268,10 @@ impl std::error::Error for StoreError {
             Self::Sqlite(e) => Some(e),
             Self::Encode(e) | Self::Decode { source: e, .. } => Some(e),
             Self::Hold(e) => Some(e),
-            Self::UnsupportedSchema { .. } | Self::NoSuchSession(_) | Self::SessionOpen(_) => None,
+            Self::UnsupportedSchema { .. }
+            | Self::NoSuchSession(_)
+            | Self::SessionOpen(_)
+            | Self::LogUnread(_) => None,
         }
     }
 }
@@ -309,8 +321,12 @@ impl Store {
     /// the file is opened read-only, and where SQLite cannot read a WAL file
     /// that way either — a clean close leaves no `-shm` beside it, and one
     /// cannot be made in a directory that is not writable — it is read as
-    /// immutable: as it is on disk, with no locking, which is right because
+    /// immutable: the file alone, with no locking, which is right because
     /// nothing can be writing to it. A store opened this way refuses writes.
+    /// Read that way, SQLite passes over the write-ahead log, so a store
+    /// with a `-wal` that holds anything — what a killed niobe last recorded,
+    /// not yet merged into the file — is refused with
+    /// [`StoreError::LogUnread`] rather than read short of it.
     ///
     /// A file that is there is looked at before anything is written to it:
     /// one holding the schema this build reads is opened to read, and a file
@@ -358,6 +374,9 @@ impl Store {
         match Self::readable(Connection::open_with_flags(path, flags)?) {
             Err(StoreError::Sqlite(error)) if refused_a_write(&error) => {}
             opened => return opened,
+        }
+        if let Some(log) = unmerged_log(path) {
+            return Err(StoreError::LogUnread(log));
         }
         Self::readable(Connection::open_with_flags(immutable_uri(path), flags)?)
     }
@@ -694,6 +713,19 @@ fn refused_a_write(error: &rusqlite::Error) -> bool {
         rusqlite::Error::SqliteFailure(failure, _)
             if matches!(failure.code, rusqlite::ErrorCode::ReadOnly | rusqlite::ErrorCode::CannotOpen)
     )
+}
+
+/// The write-ahead log beside the store at `path`, where it holds anything.
+///
+/// A store closed cleanly has none: the last connection merges the log into
+/// the file and removes it. One that is there and not empty is what a niobe
+/// killed while recording left, and it holds events the file does not.
+fn unmerged_log(path: &Path) -> Option<std::path::PathBuf> {
+    let mut log = path.as_os_str().to_owned();
+    log.push("-wal");
+    let log = std::path::PathBuf::from(log);
+    let size = std::fs::metadata(&log).ok()?.len();
+    (size > 0).then_some(log)
 }
 
 /// The `file:` URI that opens `path` as immutable, with every byte a URI

@@ -267,6 +267,57 @@ fn a_read_only_store_is_read_as_it_is() {
     assert_eq!(events, [user("kept")]);
 }
 
+/// A niobe that was killed leaves the events it last recorded in the store's
+/// write-ahead log beside the file, and a copy of the store can arrive
+/// without the log's shared-memory index. Where the directory cannot be
+/// written, that index cannot be made, and SQLite will read the file only as
+/// immutable — which reads the file alone, as though the log were not there.
+/// Read that way the store is short of every event the log holds, so it is
+/// refused, naming the log, rather than listed without them.
+#[cfg(unix)]
+#[test]
+fn a_read_only_store_whose_log_holds_events_is_refused_rather_than_read_without_them() {
+    let (_dir, path) = scratch();
+    let (_copy_dir, copy) = scratch();
+    let mut first = Recorder::new(Store::open(&path).expect("the store opens"));
+    first
+        .record(&user("merged into the file"))
+        .expect("a session in a temporary store takes an event");
+    drop(first);
+    let mut second = Recorder::new(Store::open(&path).expect("the store opens"));
+    second
+        .record(&user("still in the log"))
+        .expect("a session in a temporary store takes an event");
+    // Copied while the second recorder is still open, as a kill leaves it,
+    // but without the index: the file and its log alone.
+    let log = |store: &Path| PathBuf::from(format!("{}-wal", store.display()));
+    std::fs::copy(&path, &copy).expect("the store file copies");
+    std::fs::copy(log(&path), log(&copy)).expect("the store's log copies");
+    drop(second);
+    assert!(
+        std::fs::metadata(log(&copy))
+            .expect("the log was copied")
+            .len()
+            > 0,
+        "the copied log holds the second session"
+    );
+    let Some(_read_only) = ReadOnly::new(&copy) else {
+        return;
+    };
+
+    match Store::open_to_read(&copy) {
+        Ok(store) => assert_eq!(
+            store.sessions().expect("the list reads").len(),
+            2,
+            "a store read at all is read with its log"
+        ),
+        Err(error) => assert!(
+            error.to_string().contains("-wal"),
+            "the refusal names the log it could not read: {error}"
+        ),
+    }
+}
+
 #[test]
 fn a_store_opened_to_read_that_can_be_written_is_read_too() {
     let (_dir, path) = scratch();
