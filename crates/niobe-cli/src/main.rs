@@ -460,10 +460,7 @@ fn shell(profile: Option<&str>, asked: &Asked) -> Result<Option<Target>, String>
             watch: &mut watching,
             shell: &mut commands,
             images: &mut images_for(&root),
-            desktop: &mut desktop::System::new().reporting({
-                let root = root.clone();
-                move || doctor::block(&root, backend::claude_release_recorded)
-            }),
+            desktop: &mut desktop_for(&root),
             history: &mut history_for(&root, selected.as_ref()),
             memory: &mut memory::Files::at(
                 root.clone(),
@@ -537,6 +534,15 @@ fn history_for(
 /// is the agent's.
 fn images_for(root: &Path) -> images::Clipboard {
     images::Clipboard::at(root, std::env::var_os("HOME").map(PathBuf::from))
+}
+
+/// The desktop a session at `root` runs on, able to report a bug with the
+/// diagnostics `niobe doctor` gathers there: a session carried on, or opened
+/// from the history dialog, is as much the operator's as a new one, and
+/// Help › Report a bug is offered in each.
+fn desktop_for(root: &Path) -> desktop::System {
+    let root = root.to_path_buf();
+    desktop::System::new().reporting(move || doctor::block(&root, backend::claude_release_recorded))
 }
 
 /// The operator's `!` commands, run at `root` — where the agent runs, so a
@@ -704,7 +710,7 @@ fn resume(
             watch: &mut watching,
             shell: &mut commands,
             images: &mut images_for(&root),
-            desktop: &mut desktop::System::new(),
+            desktop: &mut desktop_for(&root),
             history: &mut history_for(&root, selected.as_ref()),
             memory: &mut memory::Files::at(
                 root.clone(),
@@ -949,7 +955,7 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<Option<
             watch: &mut watching,
             shell: &mut commands,
             images: &mut images_for(&root),
-            desktop: &mut desktop::System::new(),
+            desktop: &mut desktop_for(&root),
             history: &mut history_for(&root, selected.as_ref()),
             memory: &mut memory::Files::at(
                 root.clone(),

@@ -2205,6 +2205,117 @@ fn an_imported_session_starts_its_cli_on_its_transcript_and_in_its_mode() {
     assert!(started.contains("--permission-mode plan"), "{started}");
 }
 
+/// Puts in `cwd`'s `bin`, beside the stand-in `claude`, a stand-in for every
+/// program the shell copies with or opens a link with, so that a report
+/// writes what it would copy to `copied` and the link it would open to
+/// `opened`, both in `cwd`, rather than to the machine's clipboard and browser.
+fn put_stand_in_desktop(cwd: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = cwd.join("bin");
+    let copier = format!("#!/bin/sh\ncat > '{}'\n", cwd.join("copied").display());
+    let opener = format!(
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
+        cwd.join("opened").display()
+    );
+    for (name, script) in [
+        ("pbcopy", &copier),
+        ("wl-copy", &copier),
+        ("xclip", &copier),
+        ("xsel", &copier),
+        ("open", &opener),
+        ("xdg-open", &opener),
+    ] {
+        let path = bin.join(name);
+        std::fs::write(&path, script).expect("the stand-in is written");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+            .expect("the stand-in is made executable");
+    }
+}
+
+/// Asks the shell, started on the stand-ins in `repo` under `home` as
+/// `configure` adds to, for a bug report once `before` has seen it open, and
+/// gives back the diagnostics it copied for the report.
+fn reported_from(
+    repo: &Path,
+    home: &Path,
+    configure: impl Fn(&mut Command),
+    before: impl Fn(&Terminal),
+) -> String {
+    let (terminal, slave) = Terminal::open();
+    let mut command = shell_driving_the_stand_in(&slave, repo, home);
+    configure(&mut command);
+    let mut shell = command.spawn().expect("the niobe binary runs");
+    // The command holds its own copies of the terminal, which would keep the
+    // pty open after the shell has ended.
+    drop(command);
+    before(&terminal);
+    terminal.typed(b"/bug\r");
+    let copied = written(&repo.join("copied"));
+    let opened = written(&repo.join("opened"));
+    terminal.typed(CTRL_Q);
+    let (_, status) = ended(&mut shell);
+    let (drawn, _) = released(terminal, slave);
+    assert!(status.success(), "ended with {status}: {drawn}");
+    assert!(opened.contains("/issues/new"), "{opened}");
+    copied
+}
+
+/// A session carried on — by `--resume`, or from the history dialog, which
+/// opens one the same way — reports a bug with the same diagnostics a new
+/// one does: Help › Report a bug is no less needed in a session that has
+/// been going for days.
+#[test]
+fn a_resumed_session_reports_a_bug_with_its_diagnostics() {
+    let repo = repo();
+    let home = stand_in(repo.path(), WRITES_DOWN_ITS_ARGUMENTS_CLAUDE);
+    put_stand_in_desktop(repo.path());
+    {
+        let (terminal, slave) = Terminal::open();
+        let mut shell = shell_driving_the_stand_in(&slave, repo.path(), home.path())
+            .spawn()
+            .expect("the niobe binary runs");
+        terminal.shows(OPENING_FRAME);
+        terminal.typed(b"go\r");
+        terminal.shows("answered-the-turn");
+        terminal.typed(CTRL_Q);
+        let (_, status) = ended(&mut shell);
+        let (drawn, _) = released(terminal, slave);
+        assert!(status.success(), "ended with {status}: {drawn}");
+    }
+
+    let copied = reported_from(
+        repo.path(),
+        home.path(),
+        |command| {
+            command.args(["--resume", "1"]);
+        },
+        |terminal| terminal.shows("answered-the-turn"),
+    );
+    assert!(copied.contains("\"niobe\""), "{copied}");
+}
+
+/// A session read in from the CLI's own transcript reports a bug with the
+/// same diagnostics a new one does.
+#[test]
+fn an_imported_session_reports_a_bug_with_its_diagnostics() {
+    let repo = repo();
+    let home = stand_in(repo.path(), WRITES_DOWN_ITS_ARGUMENTS_CLAUDE);
+    put_stand_in_desktop(repo.path());
+    let claude = claude_config_with_the_transcript(repo.path());
+
+    let copied = reported_from(
+        repo.path(),
+        home.path(),
+        |command| {
+            command
+                .env("CLAUDE_CONFIG_DIR", claude.path())
+                .args(["--resume", TRANSCRIPT_SESSION]);
+        },
+        |terminal| terminal.shows("Done: the catalog response carries an etag."),
+    );
+    assert!(copied.contains("\"niobe\""), "{copied}");
+}
+
 /// A session read in from the CLI's own transcript was there to read before
 /// it was opened, as a session resumed from Niobe's own record is: what
 /// happened since the operator last looked is what happens from here, not
