@@ -884,10 +884,8 @@ fn a_claude_session_read_in_bills_what_its_stored_copy_does() {
         .expect("the niobe binary runs");
     terminal.shows("Added the test.");
     prompt_recorded(repo.path(), "and a test");
-    // The turn the record stops in is cut as the session opens, which the
-    // catch-up sheet counts, so the first key may be spent closing it.
-    terminal.typed(CTRL_Q);
-    terminal.shows("Since you last looked");
+    // The turn the record stops in is cut as the session opens, which is part
+    // of reading the record back rather than news, so the first key quits.
     terminal.typed(CTRL_Q);
     let (_, status) = ended(&mut shell);
     drop(slave);
