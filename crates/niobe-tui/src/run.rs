@@ -198,8 +198,8 @@ fn open(app: App, around: Around<'_>) -> io::Result<(Ended, App)> {
     let shutdown = Shutdown::install()?.hands_back_signals_when_dropped()?;
     let mut wait = Wait::on_the_terminal();
 
-    // Read once: the timezone is a file on disk and the loop asks for the time
-    // ten times a second.
+    // It asks for the machine's timezone at each reading, so a zone changed
+    // mid-session is the one the next frame is drawn in.
     let clock = crate::clock::Clock::system();
     // The same clock the loop stamps events with, so that a moment an event
     // names — when a window comes back — is read in the timezone the rest of

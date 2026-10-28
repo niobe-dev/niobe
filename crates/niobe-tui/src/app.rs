@@ -4129,8 +4129,8 @@ impl App {
     /// The same shell, reading the moments its events name — when a window
     /// comes back — in the timezone this clock keeps.
     ///
-    /// The event loop reads the machine's timezone once and hands it over;
-    /// without it the shell draws no local times at all, rather than times in
+    /// The event loop hands over the clock it reads the time by, which asks
+    /// for the machine's timezone at each reading; without it the shell draws no local times at all, rather than times in
     /// a timezone nobody chose.
     #[must_use]
     pub fn with_clock(mut self, clock: Clock) -> Self {

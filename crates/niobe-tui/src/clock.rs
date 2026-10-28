@@ -198,20 +198,59 @@ impl Stamp {
 
 /// Reads the wall clock, in the timezone the machine says it is in.
 ///
-/// The timezone is read once, when the clock is made, rather than on every
-/// tick: it is a file on disk, and the event loop asks for the time ten times
-/// a second.
-#[derive(Debug, Clone)]
+/// The machine's timezone is asked for at every reading rather than once when
+/// the clock is made: a session stays open while the operator flies east or
+/// changes the zone in the system's settings, and a clock that kept the zone
+/// it started in would draw the wall clock and every reset time hours off from
+/// the one on their wall. Asking is cheap — the timezone library keeps the
+/// answer for a few minutes and only then looks at the disk again — so the
+/// event loop's ten readings a second cost a lock each.
+#[derive(Clone)]
 pub struct Clock {
-    zone: Option<jiff::tz::TimeZone>,
+    zone: Zone,
+}
+
+/// Where a clock gets the timezone a reading is resolved in.
+#[derive(Clone)]
+enum Zone {
+    /// The machine's own, asked for again at every reading.
+    System,
+    /// One offset from UTC, which never moves.
+    Fixed(jiff::tz::TimeZone),
+    /// Whatever the test's function answers at the moment of the reading.
+    #[cfg(test)]
+    Asked(std::sync::Arc<dyn Fn() -> Option<jiff::tz::TimeZone> + Send + Sync>),
+}
+
+impl Zone {
+    /// The timezone a reading made now is resolved in, where there is one.
+    fn now(&self) -> Option<jiff::tz::TimeZone> {
+        match self {
+            Self::System => jiff::tz::TimeZone::try_system().ok(),
+            Self::Fixed(zone) => Some(zone.clone()),
+            #[cfg(test)]
+            Self::Asked(ask) => ask(),
+        }
+    }
+}
+
+impl fmt::Debug for Clock {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let zone = match &self.zone {
+            Zone::System => "system",
+            Zone::Fixed(_) => "fixed",
+            #[cfg(test)]
+            Zone::Asked(_) => "asked",
+        };
+        f.debug_struct("Clock").field("zone", &zone).finish()
+    }
 }
 
 impl Clock {
-    /// A clock in the machine's own timezone, where it names one.
+    /// A clock in the machine's own timezone, where it names one, and in the
+    /// one it names at the moment of each reading.
     pub fn system() -> Self {
-        Self {
-            zone: jiff::tz::TimeZone::try_system().ok(),
-        }
+        Self { zone: Zone::System }
     }
 
     /// A clock at a fixed offset from UTC, in seconds east of it, or `None`
@@ -223,14 +262,23 @@ impl Clock {
     pub fn fixed(offset_seconds: i32) -> Option<Self> {
         let offset = jiff::tz::Offset::from_seconds(offset_seconds).ok()?;
         Some(Self {
-            zone: Some(jiff::tz::TimeZone::fixed(offset)),
+            zone: Zone::Fixed(jiff::tz::TimeZone::fixed(offset)),
         })
     }
 
-    /// Whether the machine named a timezone, and so whether stamps from this
-    /// clock carry a time of day.
+    /// A clock in whichever timezone `ask` answers with, for a test that
+    /// moves the machine to another zone mid-session.
+    #[cfg(test)]
+    fn asking(ask: impl Fn() -> Option<jiff::tz::TimeZone> + Send + Sync + 'static) -> Self {
+        Self {
+            zone: Zone::Asked(std::sync::Arc::new(ask)),
+        }
+    }
+
+    /// Whether the machine names a timezone now, and so whether stamps from
+    /// this clock carry a time of day.
     pub fn knows_the_zone(&self) -> bool {
-        self.zone.is_some()
+        self.zone.now().is_some()
     }
 
     /// A stamp for now.
@@ -257,7 +305,7 @@ impl Clock {
     /// the machine's own calendar puts it on rather than on one counted from
     /// today's offset.
     fn local(&self, at: SystemTime) -> Option<LocalMoment> {
-        let zone = self.zone.clone()?;
+        let zone = self.zone.now()?;
         let seconds =
             i64::try_from(at.duration_since(SystemTime::UNIX_EPOCH).ok()?.as_secs()).ok()?;
         let offset = zone.to_offset(jiff::Timestamp::from_second(seconds).ok()?);
@@ -620,6 +668,41 @@ mod tests {
         let now = Stamp::new(SystemTime::UNIX_EPOCH + Duration::from_secs(100), None);
         let later = Stamp::new(SystemTime::UNIX_EPOCH + Duration::from_secs(200), None);
         assert_eq!(upcoming(now, later), None);
+    }
+
+    /// The machine moved: the operator flew east with the session open, or
+    /// changed the zone in the system's settings. A clock that kept the zone
+    /// it started in would draw the wall clock, and every reset time, hours
+    /// off from the one on the operator's wall.
+    #[test]
+    fn a_reading_after_the_machine_changes_its_timezone_is_in_the_new_one() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let moved = Arc::new(AtomicBool::new(false));
+        let clock = Clock::asking({
+            let moved = Arc::clone(&moved);
+            move || {
+                let hours = match moved.load(Ordering::SeqCst) {
+                    false => 1,
+                    true => 9,
+                };
+                let offset = jiff::tz::Offset::from_seconds(hours * 3_600).ok()?;
+                Some(jiff::tz::TimeZone::fixed(offset))
+            }
+        });
+        // Noon UTC on the first day of 1970.
+        let noon = SystemTime::UNIX_EPOCH + Duration::from_secs(12 * 3_600);
+        let before = clock.at(noon).local().map(|time| time.to_string());
+        moved.store(true, Ordering::SeqCst);
+        let after = clock.at(noon).local().map(|time| time.to_string());
+
+        assert_eq!(before.as_deref(), Some("13:00"));
+        assert_eq!(
+            after.as_deref(),
+            Some("21:00"),
+            "read in the zone the machine left"
+        );
     }
 
     #[test]
