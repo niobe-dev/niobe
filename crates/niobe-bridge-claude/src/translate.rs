@@ -558,6 +558,10 @@ pub struct Translator {
     /// The call each permission prompt the CLI has asked is about, by the
     /// id the CLI asked it under, so that a prompt it withdraws is known.
     open_requests: BTreeMap<String, ToolCallId>,
+    /// Whether the last turn's end said a prompt is queued behind it, which
+    /// the CLI starts as a turn straight after; `None` until a turn's end is
+    /// read, and again once taken.
+    turn_follows: Option<bool>,
     /// Messages whose usage arrived before anything named their model — a
     /// `message_delta` with no `message_start` ahead of it, before `init` —
     /// held until the turn's `result` says which id billed them. Filed under
@@ -670,6 +674,7 @@ impl Translator {
             unread_said: BTreeSet::new(),
             short: BTreeSet::new(),
             open_requests: BTreeMap::new(),
+            turn_follows: None,
             unattributed: Vec::new(),
             windows: BTreeMap::new(),
             context: None,
@@ -923,6 +928,19 @@ impl Translator {
     /// know what the CLI calls the question.
     pub fn take_asked(&mut self) -> Vec<Asked> {
         std::mem::take(&mut self.asked)
+    }
+
+    /// Whether the turn whose end was read since the last call has another
+    /// behind it: a prompt the operator sent while it ran, still in the CLI's
+    /// queue, which the CLI starts as soon as it has written the end. `None`
+    /// where no turn ended since.
+    ///
+    /// Separate from the events for the reason [`Translator::take_asked`]
+    /// is: [`Event::TurnEnded`] ends the turn the shell shows, and only
+    /// whatever decides whether a CLI that stops now took a turn with it
+    /// needs to know that another has begun.
+    pub fn take_turn_follows(&mut self) -> Option<bool> {
+        self.turn_follows.take()
     }
 
     /// The calls whose prompts the CLI withdrew since the last call, oldest
@@ -2579,6 +2597,7 @@ impl Translator {
     }
 
     fn result(&mut self, outcome: wire::Outcome, out: &mut Vec<Event>) {
+        self.turn_follows = Some(outcome.queued_turn_count.unwrap_or(0) > 0);
         let interrupted = outcome.interrupted();
         let shown_limit = self.usage_limit.take();
         let limit_words = limit_in(&outcome, shown_limit.as_deref());
@@ -6676,6 +6695,28 @@ mod tests {
                 "{tool} {input}"
             );
         }
+    }
+
+    #[test]
+    fn a_turns_end_says_whether_a_queued_prompt_follows_it_and_an_unreadable_count_says_none() {
+        let mut translator = translator();
+        assert_eq!(translator.take_turn_follows(), None);
+
+        for (count, follows) in [("2", true), ("0", false), ("\"two\"", false), ("-1", false)] {
+            let events = translator.line(&format!(
+                r#"{{"type":"result","subtype":"success","is_error":false,"queued_turn_count":{count}}}"#
+            ));
+            assert_eq!(
+                events.last(),
+                Some(&Event::TurnEnded),
+                "{count}: {events:?}"
+            );
+            assert_eq!(translator.take_turn_follows(), Some(follows), "{count}");
+            assert_eq!(translator.take_turn_follows(), None, "{count}");
+        }
+
+        translator.line(r#"{"type":"result","subtype":"success","is_error":false}"#);
+        assert_eq!(translator.take_turn_follows(), Some(false));
     }
 
     #[test]

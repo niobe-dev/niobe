@@ -1497,6 +1497,8 @@ impl Fold {
                 result: None,
                 errors: Vec::new(),
                 terminal_reason: None,
+                // A transcript read back runs nothing, so no turn follows.
+                queued_turn_count: None,
             }));
         if spans_turns {
             billed.retain(|event| !matches!(event, Event::TurnEnded));

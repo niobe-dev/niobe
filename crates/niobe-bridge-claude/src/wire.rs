@@ -869,6 +869,15 @@ where
     }))
 }
 
+/// A whole number where there is one, and nothing where there is anything
+/// else: a count that cannot be read is not worth losing the whole line over.
+fn lenient_count<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(serde_json::Value::deserialize(deserializer)?.as_u64())
+}
+
 /// A `control_request`: the CLI asking Niobe to decide something.
 ///
 /// `request_id` is what an answer is addressed to, and it is the CLI's own id
@@ -1037,6 +1046,12 @@ pub(crate) struct Outcome {
     /// `aborted_streaming` for a turn an interrupt stopped while a call ran
     /// and while a reply was being written, as recorded from 2.1.285.
     pub(crate) terminal_reason: Option<String>,
+    /// How many of the operator's prompts the CLI still holds queued as this
+    /// turn ends: sent while it ran and not taken into it, each started as a
+    /// turn of its own once this end is written. Absent where the CLI does
+    /// not say, and read as nothing where it is not a whole number.
+    #[serde(default, deserialize_with = "lenient_count")]
+    pub(crate) queued_turn_count: Option<u64>,
 }
 
 impl Outcome {

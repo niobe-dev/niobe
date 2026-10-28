@@ -592,6 +592,10 @@ pub struct Session {
     /// started over, which is a session with no title yet: the next prompt
     /// that is not a command is asked about again.
     cleared: Arc<AtomicBool>,
+    /// Set by the thread reading the CLI to whether the last turn's end said
+    /// a prompt is queued behind it, before that end goes out: see
+    /// [`Session::turn_open`].
+    turn_follows: Arc<AtomicBool>,
     /// Whether [`Options::ask_title`] was on when the session started, which
     /// is what a clear puts back.
     titles_wanted: bool,
@@ -639,7 +643,8 @@ pub struct Session {
     /// the first then leaves the second standing.
     model_changes: Vec<ModelChange>,
     model_answers: ModelAnswers,
-    /// Whether a turn was sent that the CLI has not ended. A CLI stopped then
+    /// Whether a turn was sent that the CLI has not ended, or one the CLI
+    /// started from a prompt queued behind the last end. A CLI stopped then
     /// took the turn with it, and the session is not carried on.
     turn_open: bool,
     /// Whether the CLI was stopped by a signal between turns, with
@@ -748,6 +753,8 @@ impl Session {
         let wants_mcp_status = Arc::clone(&mcp_status_wanted);
         let cleared = Arc::new(AtomicBool::new(false));
         let was_cleared = Arc::clone(&cleared);
+        let turn_follows = Arc::new(AtomicBool::new(false));
+        let queued_behind = Arc::clone(&turn_follows);
         let out_tap = tap.clone();
         let reader = std::thread::spawn(move || {
             let mut stdout = BufReader::new(stdout);
@@ -837,6 +844,11 @@ impl Session {
                 if events.iter().any(|event| matches!(event, Event::Cleared)) {
                     was_cleared.store(true, Ordering::Release);
                 }
+                // Before the end goes out, for the reason the prompts above
+                // are: the drain that takes the end reads this beside it.
+                if let Some(follows) = translator.take_turn_follows() {
+                    queued_behind.store(follows, Ordering::Release);
+                }
                 // A line's events go out together, so that no drain takes
                 // the first of them without the rest: a call the CLI refused
                 // by itself is a prompt and its refusal, and a drain that
@@ -877,6 +889,7 @@ impl Session {
             follow_ups,
             mcp_status_wanted,
             cleared,
+            turn_follows,
             titles_wanted: options.ask_title,
             stderr: kept,
             threads: vec![reader, errors, writer],
@@ -1287,8 +1300,11 @@ impl Session {
         if let Event::ModeSelected { mode } = event {
             self.next.mode = *mode;
         }
+        // A prompt sent while the turn ran and still queued is the CLI's next
+        // turn, started as soon as it wrote this end: a CLI stopped now took
+        // that turn with it, and nothing will end it.
         if matches!(event, Event::TurnEnded) {
-            self.turn_open = false;
+            self.turn_open = self.turn_follows.load(Ordering::Acquire);
         }
         if let Event::AgentSpawn { id, .. } = event {
             self.running_agents.insert(id.clone());
@@ -4045,6 +4061,76 @@ read -r rest
             "{events:#?}"
         );
         assert!(session.next().is_none());
+    }
+
+    /// A prompt sent while a turn runs waits in the CLI's queue, and the
+    /// turn's `result` counts it in `queued_turn_count`: the CLI starts it
+    /// as the next turn as soon as it has written that end. Stopped then, the
+    /// CLI took that turn with it, so the session ends under it rather than
+    /// being carried on as though nothing were running.
+    #[cfg(unix)]
+    #[test]
+    fn a_cli_stopped_while_a_queued_prompt_runs_ends_the_session_under_that_turn() {
+        let first_ended = r#"printf '%s\n' '{"type":"system","subtype":"init","session_id":"s-9","model":"claude-sonnet-5","permissionMode":"default"}' '{"type":"result","subtype":"success","is_error":false,"session_id":"s-9","queued_turn_count":1}'"#;
+        let (mut session, _dir) = started_with(
+            &format!(
+                "read -r initialize\nread -r first\nread -r second\n{first_ended}\nexit 143\n"
+            ),
+            |options| options.carry_on = true,
+        );
+        session
+            .send("list the files", &[])
+            .expect("the turn is queued");
+        session
+            .send("and count them", &[])
+            .expect("the second turn is queued");
+        let events = drained_to_the_end(&mut session);
+
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, Event::TurnEnded))
+                .count(),
+            1,
+            "{events:#?}"
+        );
+        assert!(
+            matches!(events.last(), Some(Event::Error { fatal: true, message })
+                if message == "the `claude` session was stopped by SIGTERM (exit status 143) and said nothing."),
+            "{events:#?}"
+        );
+        assert!(session.next().is_none());
+    }
+
+    /// The count is what says a turn follows, not that two prompts were
+    /// sent: a prompt the CLI took into the turn already running is not
+    /// queued, and the turn's end, counting none, is the end of both.
+    #[cfg(unix)]
+    #[test]
+    fn a_prompt_taken_into_the_running_turn_leaves_nothing_running_after_its_end() {
+        let both_ended = r#"printf '%s\n' '{"type":"system","subtype":"init","session_id":"s-9","model":"claude-sonnet-5","permissionMode":"default"}' '{"type":"result","subtype":"success","is_error":false,"session_id":"s-9","queued_turn_count":0}'"#;
+        let (mut session, _dir) = started_with(
+            &format!(
+                "read -r initialize\nread -r first\nread -r second\n{both_ended}\nread -r model\nexit 143\n"
+            ),
+            |options| options.carry_on = true,
+        );
+        session
+            .send("list the files", &[])
+            .expect("the turn is queued");
+        session
+            .send("and count them", &[])
+            .expect("the second turn is queued");
+        drained_until(&mut session, |event| matches!(event, Event::TurnEnded));
+        session.set_model("haiku").expect("the request is queued");
+        let events = drained_to_the_end(&mut session);
+
+        assert!(
+            matches!(events.last(), Some(Event::Notice { message })
+                if message.starts_with("the `claude` CLI was stopped by SIGTERM (exit status 143) while no turn was running.")),
+            "{events:#?}"
+        );
+        assert!(session.next().is_some());
     }
 
     /// A CLI that leaves with a turn under way, however quietly, has ended
