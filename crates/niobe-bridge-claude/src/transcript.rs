@@ -3529,6 +3529,48 @@ mod tests {
         assert_eq!(counted, (2 + 3 + 5, 10 + 40 + 7), "{events:?}");
     }
 
+    /// The lost process spent money no accounting recorded: the next
+    /// accounting's cost covers its own process alone, so the session's
+    /// figure is the two accountings' and a floor under what was spent, not
+    /// the whole of it.
+    #[test]
+    fn a_process_lost_between_two_accountings_leaves_the_session_cost_a_floor() {
+        let at = |stamp: &str, record: String| {
+            record.replacen('{', &format!(r#"{{"timestamp":"{stamp}","#), 1)
+        };
+        let events = imported(&[
+            &at("2026-09-30T05:00:00.000Z", prompt("first")),
+            &at(
+                "2026-09-30T05:00:01.000Z",
+                response("msg_1", "claude-opus-5", 2, 10),
+            ),
+            r#"{"type":"cost-state","startTime":1790744390000,"totalCostUSD":0.01,"modelUsage":{"claude-opus-5":{"inputTokens":2,"outputTokens":10,"costUSD":0.01}}}"#,
+            &at("2026-09-30T07:00:00.000Z", prompt("second")),
+            &at(
+                "2026-09-30T07:00:01.000Z",
+                response("msg_2", "claude-opus-5", 3, 40),
+            ),
+            &at("2026-09-30T09:00:30.000Z", prompt("third")),
+            &at(
+                "2026-09-30T09:00:31.000Z",
+                response("msg_3", "claude-opus-5", 5, 7),
+            ),
+            r#"{"type":"cost-state","startTime":1790758820000,"totalCostUSD":0.03,"modelUsage":{"claude-opus-5":{"inputTokens":7,"outputTokens":17,"costUSD":0.03}}}"#,
+        ]);
+
+        let state = niobe_core::SessionState::replay(&events);
+        let totals = state.totals();
+        assert!(
+            (totals.reported_cost_usd - 0.03).abs() < 1e-9,
+            "{}",
+            totals.reported_cost_usd
+        );
+        assert!(
+            !totals.cost_fully_reported(),
+            "the lost process's 43 tokens are in no cost, yet the session reads as whole: {events:#?}"
+        );
+    }
+
     #[test]
     fn a_response_written_over_several_records_is_counted_once_by_its_last() {
         let record = |at: &str, output: u64, block: &str| {

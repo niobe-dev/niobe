@@ -741,7 +741,21 @@ impl Translator {
     /// has been reported it would take them off its own spend. Where `spent`
     /// is unknown, the next bill is counted as [`Translator::resuming`]
     /// counts one.
+    ///
+    /// What those messages cost is in no bill, so a model that has any is
+    /// short from here on as a resumed session's unknown spend leaves it:
+    /// the next bill's settlement covers every record of the model, theirs
+    /// among them, and would read the session's figure as whole.
     pub(crate) fn restarted_from(&mut self, spent: &Spent) {
+        let lost = self.reported.iter().filter_map(|(model, seen)| {
+            let restored = spent
+                .by_model
+                .get(model)
+                .map(|reported| reported.tokens)
+                .unwrap_or_default();
+            (!restored.beyond(seen.tokens).is_empty()).then(|| model.clone())
+        });
+        self.short.extend(lost.collect::<Vec<_>>());
         self.reported = spent.by_model.clone();
         self.restored_unknown = spent.unknown.is_some();
     }
