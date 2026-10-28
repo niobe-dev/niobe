@@ -555,7 +555,10 @@ exactly the `persistedOutputSize` its report named, recorded byte for byte
 (which is why it carries no header). The CLI keeps such files in its session's
 `tool-results/` directory and gives the model a `<persisted-output>` block
 with the first 2 KB in their place. `tests/transcript.rs` folds the call and
-its result as the CLI's own transcript recorded them, pointed at this file.
+its result as the CLI's own transcript recorded them, pointed at a copy of
+this file laid out where the CLI keeps it,
+`projects/<project>/<session>/tool-results/`: the bridge reads a saved output
+from no other place.
 
 It does this only for a command that succeeded. A failed command's output is
 cut to about 10 KB instead, by characters and from the middle, around a line

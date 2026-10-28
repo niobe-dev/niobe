@@ -95,7 +95,7 @@
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use niobe_core::diff::{self, Hunk, Line};
 use niobe_core::event::{
@@ -2105,7 +2105,12 @@ impl Translator {
             };
 
             let untrimmed = match (outcome, name == SHELL_TOOL) {
-                (ToolOutcome::Ok, true) => untrimmed(reported.as_ref(), self.read_spilled),
+                (ToolOutcome::Ok, true) => untrimmed(
+                    reported.as_ref(),
+                    &tool_use_id,
+                    self.cwd.as_deref(),
+                    self.read_spilled,
+                ),
                 _ => None,
             };
             let bytes = untrimmed.as_ref().map_or(bytes, |whole| whole.len() as u64);
@@ -3867,20 +3872,60 @@ fn test_run(
 
 /// The whole of what a shell command printed, where Niobe's hook trimmed what
 /// the model read of it: the file the hook names in the result, read with
-/// `read` as long as it holds the bytes the hook said it wrote. Only a file
-/// named `<id>.txt` in a `.niobe/trim` directory is read, which is where the
-/// hook writes, so a result naming any other path reads nothing.
-fn untrimmed(reported: Option<&serde_json::Value>, read: Option<ReadSpilled>) -> Option<String> {
+/// `read` as long as it holds the bytes the hook said it wrote.
+///
+/// The path is only the line's word, so only the file the hook writes for
+/// this call is read: `<repository>/.niobe/trim/<call id>.txt`, where the
+/// session runs in that repository. A result naming any other path — the
+/// CLI's credentials, another call's output, another repository's — reads
+/// nothing.
+fn untrimmed(
+    reported: Option<&serde_json::Value>,
+    call: &str,
+    cwd: Option<&Path>,
+    read: Option<ReadSpilled>,
+) -> Option<String> {
     let report = serde_json::from_value::<wire::ShellReport>(reported?.clone()).ok()?;
     let path = PathBuf::from(report.niobe_raw_output_path?);
-    let dir = path.parent()?;
-    let kept = path.extension()? == "txt"
+    let mut up = path.ancestors();
+    let (_, dir, niobe, root) = (up.next()?, up.next()?, up.next()?, up.next()?);
+    let kept = plain(&path)
+        && path.file_name()? == format!("{call}.txt").as_str()
         && dir.file_name()? == "trim"
-        && dir.parent()?.file_name()? == ".niobe";
+        && niobe.file_name()? == ".niobe"
+        && cwd?.starts_with(root);
     if !kept {
         return None;
     }
     read?(&path, report.niobe_raw_output_size?)
+}
+
+/// Whether `path` is where the CLI saves a shell output too large to hand
+/// over: a `.txt` file in a session's `tool-results` directory under its
+/// `projects` directory, `<config>/projects/<project>/<session>/tool-results/`.
+/// The path is only the line's word, so a result naming any other file — the
+/// CLI's credentials among them — reads nothing.
+fn saved_by_the_cli(path: &Path) -> bool {
+    let mut up = path.ancestors().skip(1);
+    let (dir, projects) = (up.next(), up.nth(2));
+    plain(path)
+        && path.extension().is_some_and(|ext| ext == "txt")
+        && dir
+            .and_then(Path::file_name)
+            .is_some_and(|name| name == "tool-results")
+        && projects
+            .and_then(Path::file_name)
+            .is_some_and(|name| name == "projects")
+}
+
+/// Whether `path` is absolute and names each directory it passes through,
+/// with no `..` that would take it out of the directories its names say it
+/// is in.
+fn plain(path: &Path) -> bool {
+    path.is_absolute()
+        && path
+            .components()
+            .all(|part| matches!(part, Component::RootDir | Component::Normal(_)))
 }
 
 /// The whole of what a shell command printed, where it can be had.
@@ -3905,8 +3950,12 @@ fn whole_output<'a>(
             return None;
         }
         if let Some(path) = report.persisted_output_path {
+            let path = Path::new(&path);
+            if !saved_by_the_cli(path) {
+                return None;
+            }
             let read = read_spilled?;
-            return read(Path::new(&path), report.persisted_output_size?).map(Cow::Owned);
+            return read(path, report.persisted_output_size?).map(Cow::Owned);
         }
     }
     let marked_cut = output.lines().any(|line| {
@@ -9198,18 +9247,25 @@ test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
     /// that tests running at once count apart.
     static READS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 
-    /// Stands in for the file system: `/whole.txt` holds [`PASSING_RUN`],
-    /// `/preview.txt` holds its first part, and nothing else exists.
+    /// Stands in for the file system: `whole.txt` in the CLI's
+    /// `tool-results` directory holds [`PASSING_RUN`], `preview.txt` there
+    /// its first part, and so does every other path named here, which is
+    /// what a test that a path is never asked for needs.
     fn read_spilled(path: &Path, size: u64) -> Option<String> {
         READS
             .lock()
             .expect("no test panics holding it")
             .push(path.to_owned());
         let text = match path.to_str()? {
-            "/whole.txt" | "/once.txt" | "/repo/.niobe/trim/t1.txt" | "/repo/trim/t1.txt" => {
-                PASSING_RUN
-            }
-            "/preview.txt" => PASSING_RUN.get(..200)?,
+            "/c/projects/-repo/s-1/tool-results/whole.txt"
+            | "/c/projects/-repo/s-1/tool-results/once.txt"
+            | "/repo/.niobe/trim/t1.txt"
+            | "/repo/.niobe/trim/t2.txt"
+            | "/elsewhere/.niobe/trim/t1.txt"
+            | "/repo/trim/t1.txt"
+            | "/home/u/.claude/settings.json"
+            | "/home/u/.claude/.credentials.txt" => PASSING_RUN,
+            "/c/projects/-repo/s-1/tool-results/preview.txt" => PASSING_RUN.get(..200)?,
             _ => return None,
         };
         (text.len() as u64 == size).then(|| text.to_owned())
@@ -9270,7 +9326,9 @@ test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 
     #[test]
     fn an_output_niobe_trimmed_carries_its_whole_and_is_sized_and_counted_by_it() {
-        let mut translator = translator().reading_spilled_with(read_spilled);
+        let mut translator = translator()
+            .in_dir("/repo")
+            .reading_spilled_with(read_spilled);
         shell_call(&mut translator);
 
         let events = translator.line(&trimmed_by_niobe(
@@ -9293,7 +9351,9 @@ test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
             ("/repo/trim/t1.txt", PASSING_RUN.len()),
             ("/repo/.niobe/trim/t1.txt", PASSING_RUN.len() + 1),
         ] {
-            let mut translator = translator().reading_spilled_with(read_spilled);
+            let mut translator = translator()
+                .in_dir("/repo")
+                .reading_spilled_with(read_spilled);
             shell_call(&mut translator);
 
             let events = translator.line(&trimmed_by_niobe(path, size));
@@ -9304,12 +9364,75 @@ test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
         }
     }
 
+    /// A result names its whole output by a path the line carries, so a line
+    /// that names a file the CLI or Niobe's hook never writes there — the
+    /// CLI's credentials, another repository's outputs, another call's —
+    /// asks nothing of the file system.
+    #[test]
+    fn a_trimmed_output_is_read_only_as_this_calls_file_in_this_sessions_repository() {
+        for (cwd, path) in [
+            ("/repo", "/home/u/.claude/settings.json"),
+            ("/repo", "/home/u/.claude/.credentials.txt"),
+            ("/repo", "/repo/.niobe/trim/t2.txt"),
+            ("/repo", "/elsewhere/.niobe/trim/t1.txt"),
+            ("/repo", "/repo/.niobe/trim/../trim/t1.txt"),
+            ("/repo", "repo/.niobe/trim/t1.txt"),
+        ] {
+            let mut translator = translator().in_dir(cwd).reading_spilled_with(read_spilled);
+            shell_call(&mut translator);
+            let before = reads_of(path);
+
+            let events = translator.line(&trimmed_by_niobe(path, PASSING_RUN.len()));
+
+            assert_eq!(ended_call(&events).2, None, "{path}");
+            assert_eq!(reads_of(path), before, "{path} was asked for");
+        }
+    }
+
+    #[test]
+    fn a_trimmed_output_is_read_from_the_repository_a_session_runs_below() {
+        let mut translator = translator()
+            .in_dir("/repo/crates/app")
+            .reading_spilled_with(read_spilled);
+        shell_call(&mut translator);
+
+        let events = translator.line(&trimmed_by_niobe(
+            "/repo/.niobe/trim/t1.txt",
+            PASSING_RUN.len(),
+        ));
+
+        assert_eq!(ended_call(&events).2, Some(PASSING_RUN));
+    }
+
+    #[test]
+    fn a_saved_output_is_read_only_from_the_clis_tool_results_directory() {
+        for path in [
+            "/home/v/.claude/settings.json",
+            "/home/v/.claude/.credentials.txt",
+            "/c/projects/-repo/s-1/tool-results/../../../../home/v/.claude/.credentials.txt",
+            "c/projects/-repo/s-1/tool-results/whole.txt",
+            "/c/elsewhere/-repo/s-1/tool-results/whole.txt",
+        ] {
+            let mut translator = translator().reading_spilled_with(read_spilled);
+            shell_call(&mut translator);
+            let before = reads_of(path);
+
+            let events = translator.line(&spilled(path, PASSING_RUN.len()));
+
+            assert_eq!(test_runs(&events), [(None, Some(0))], "{path}");
+            assert_eq!(reads_of(path), before, "{path} was asked for");
+        }
+    }
+
     #[test]
     fn a_test_run_the_cli_saved_to_a_file_is_read_from_that_file() {
         let mut translator = translator().reading_spilled_with(read_spilled);
         shell_call(&mut translator);
 
-        let events = translator.line(&spilled("/whole.txt", PASSING_RUN.len()));
+        let events = translator.line(&spilled(
+            "/c/projects/-repo/s-1/tool-results/whole.txt",
+            PASSING_RUN.len(),
+        ));
 
         let counts = TestCounts {
             passed: 2,
@@ -9323,9 +9446,15 @@ test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
     #[test]
     fn a_saved_test_run_whose_file_is_not_the_whole_run_is_not_read() {
         for (path, size) in [
-            ("/missing.txt", PASSING_RUN.len()),
-            ("/whole.txt", PASSING_RUN.len() + 1),
-            ("/preview.txt", 200),
+            (
+                "/c/projects/-repo/s-1/tool-results/missing.txt",
+                PASSING_RUN.len(),
+            ),
+            (
+                "/c/projects/-repo/s-1/tool-results/whole.txt",
+                PASSING_RUN.len() + 1,
+            ),
+            ("/c/projects/-repo/s-1/tool-results/preview.txt", 200),
         ] {
             let mut translator = translator().reading_spilled_with(read_spilled);
             shell_call(&mut translator);
@@ -9341,7 +9470,10 @@ test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
         let mut translator = translator();
         shell_call(&mut translator);
 
-        let events = translator.line(&spilled("/whole.txt", PASSING_RUN.len()));
+        let events = translator.line(&spilled(
+            "/c/projects/-repo/s-1/tool-results/whole.txt",
+            PASSING_RUN.len(),
+        ));
 
         assert_eq!(test_runs(&events), [(None, Some(0))]);
     }
@@ -9350,14 +9482,26 @@ test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
     fn a_saved_file_is_read_once_and_only_for_a_test_run() {
         let mut translator = translator().reading_spilled_with(read_spilled);
         shell_call(&mut translator);
-        translator.line(&spilled("/once.txt", PASSING_RUN.len()));
+        translator.line(&spilled(
+            "/c/projects/-repo/s-1/tool-results/once.txt",
+            PASSING_RUN.len(),
+        ));
         // The same result again finds no call waiting on it.
-        translator.line(&spilled("/once.txt", PASSING_RUN.len()));
+        translator.line(&spilled(
+            "/c/projects/-repo/s-1/tool-results/once.txt",
+            PASSING_RUN.len(),
+        ));
         translator.line(&call("t2", "Bash", r#"{"command":"cat big.log"}"#));
-        translator.line(&spilled("/other.txt", PASSING_RUN.len()).replace(r#""t1""#, r#""t2""#));
+        translator.line(
+            &spilled(
+                "/c/projects/-repo/s-1/tool-results/other.txt",
+                PASSING_RUN.len(),
+            )
+            .replace(r#""t1""#, r#""t2""#),
+        );
 
-        assert_eq!(reads_of("/once.txt"), 1);
-        assert_eq!(reads_of("/other.txt"), 0);
+        assert_eq!(reads_of("/c/projects/-repo/s-1/tool-results/once.txt"), 1);
+        assert_eq!(reads_of("/c/projects/-repo/s-1/tool-results/other.txt"), 0);
     }
 
     /// How the CLI cuts a failed command's output: by characters, from the

@@ -820,13 +820,25 @@ fn saved_run() -> PathBuf {
 }
 
 /// The test runs a transcript of [`SAVED_RUN`] reports, with its report
-/// naming `saved` and `size`.
+/// naming `saved` and `size`. The file is copied to where the CLI keeps it,
+/// its session's `tool-results/` under its `projects/` directory, since the
+/// bridge reads a saved output from nowhere else; where `saved` is missing,
+/// the report names a file that is missing there too.
 fn saved_test_runs(saved: &Path, size: u64) -> Vec<(Option<TestCounts>, Option<i32>)> {
     let dir = tempfile::tempdir().expect("a temporary directory can be made");
-    let path = dir
+    let session = "f9e80817-ed99-446a-ad84-62e8d1cc9018";
+    let path = dir.path().join(format!("{session}.jsonl"));
+    let results = dir
         .path()
-        .join("f9e80817-ed99-446a-ad84-62e8d1cc9018.jsonl");
-    let saved = saved.to_str().expect("the fixture path is UTF-8");
+        .join("projects/-repo")
+        .join(session)
+        .join("tool-results");
+    std::fs::create_dir_all(&results).expect("the temporary directory is writable");
+    let laid = results.join(saved.file_name().expect("the fixture names a file"));
+    if saved.exists() {
+        std::fs::copy(saved, &laid).expect("the fixture is copied");
+    }
+    let saved = laid.to_str().expect("the temporary path is UTF-8");
     let text: String = SAVED_RUN
         .iter()
         .map(|record| {

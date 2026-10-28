@@ -7,11 +7,14 @@
 //! Past about 30 KB the CLI gives the model the first 2 KB of the output and
 //! writes all of it to a file of its own, under its config directory in the
 //! session's `tool-results/`. The result's report names the file and how many
-//! bytes went into it. That file is the CLI's output, not a credential: this
-//! reads nothing the operator could not `cat`, and only a file the CLI named.
+//! bytes went into it. That file is the CLI's output, not a credential: the
+//! translator hands this only a path of that shape, so a line naming any
+//! other file — the CLI's credentials among them — has nothing read.
 //!
 //! The same reading serves the file Niobe's own hook writes the whole of an
-//! output it trimmed to, named in the result the same way.
+//! output it trimmed to, named in the result the same way, which the
+//! translator hands over only as this call's file under the session's
+//! repository's `.niobe/trim/`.
 //!
 //! The byte count is what says the file is still the one written for that
 //! result. Across 186 saved outputs on the machine this was written on, every
