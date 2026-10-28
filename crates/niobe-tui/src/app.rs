@@ -6716,9 +6716,9 @@ impl App {
                 .is_some_and(|_| self.ask_focus != AskFocus::Deferred)
     }
 
-    /// The `@` word at the end of which the cursor sits, while the list of
-    /// files for it is open: only while the operator is typing into the
-    /// composer, and not for a word the list was closed for.
+    /// The `@` word the cursor is in, while the list of files for it is open:
+    /// only while the operator is typing into the composer, and not for a
+    /// word the list was closed for.
     fn mention(&self) -> Option<crate::mention::Mention> {
         if !self.typing_a_prompt() {
             return None;
@@ -6747,9 +6747,9 @@ impl App {
         }
     }
 
-    /// The `/` word the cursor is at the end of, while the list of the
-    /// backend's commands for it is open: only while the operator is typing
-    /// into the composer, and not for a word the list was closed for.
+    /// The `/` word the cursor is in, while the list of the backend's commands
+    /// for it is open: only while the operator is typing into the composer,
+    /// and not for a word the list was closed for.
     fn slash(&self) -> Option<crate::slash::Slash> {
         if !self.typing_a_prompt() {
             return None;
@@ -6789,11 +6789,10 @@ impl App {
         // holds it, as `keybindings-help` holds `help`: Enter is the shell's.
         if (key.code, key.modifiers) == (KeyCode::Enter, KeyModifiers::NONE)
             && self.slash().is_some_and(|slash| {
-                slash.typed == chosen
+                let word = slash.word();
+                word == chosen
                     || (slash.opens_the_prompt()
-                        && crate::menu::TYPED
-                            .iter()
-                            .any(|typed| typed.name == slash.typed))
+                        && crate::menu::TYPED.iter().any(|typed| typed.name == word))
             })
         {
             return false;
@@ -6814,16 +6813,46 @@ impl App {
         true
     }
 
-    /// Replaces what was typed after the `/` at the cursor with `name`, and a
-    /// space after it for what the command takes.
+    /// Replaces the word after the `/` the cursor is in — what was typed
+    /// before the cursor and the rest of it after — with `name`, and a space
+    /// after it for what the command takes.
     fn name_command(&mut self, name: &str) {
         let Some(slash) = self.slash() else {
             return;
         };
-        for _ in slash.typed.chars() {
+        self.replace_word(&slash.typed, &slash.after, name);
+    }
+
+    /// Replaces `typed`, the characters before the cursor, and `after`, those
+    /// after it, with `with` and a blank, the cursor left past the blank.
+    ///
+    /// An `@` or `/` word the cursor is inside is replaced whole: what is
+    /// picked for it stands for the word, and the letters after the cursor
+    /// left behind would read as a word of their own. A blank already after
+    /// the word is the one it gets, rather than a second beside it.
+    fn replace_word(&mut self, typed: &str, after: &str, with: &str) {
+        use ratatui_textarea::CursorMove;
+
+        for _ in after.chars() {
+            self.composer.delete_next_char();
+        }
+        for _ in typed.chars() {
             self.composer.delete_char();
         }
-        self.composer.insert_str(format!("{name} "));
+        self.composer.insert_str(with);
+        let ratatui_textarea::DataCursor(row, column) = self.composer.cursor();
+        let blank_follows = self
+            .composer
+            .lines()
+            .get(row)
+            .and_then(|line| line.chars().nth(column))
+            .is_some_and(char::is_whitespace);
+        match blank_follows {
+            true => self.composer.move_cursor(CursorMove::Forward),
+            false => {
+                self.composer.insert_char(' ');
+            }
+        }
         self.offer_selected = 0;
     }
 
@@ -6871,19 +6900,18 @@ impl App {
         true
     }
 
-    /// Replaces what was typed after the `@` with `file`, written as the
-    /// backend reads a mention ([`crate::mention::written`]), and a space
-    /// after it so the next word is not taken for more of the path.
+    /// Replaces the word after the `@` the cursor is in with `file`, written
+    /// as the backend reads a mention ([`crate::mention::written`]), and a
+    /// space after it so the next word is not taken for more of the path.
     fn name_file(&mut self, file: &str) {
         let Some(mention) = self.mention() else {
             return;
         };
-        for _ in mention.typed.chars() {
-            self.composer.delete_char();
-        }
-        self.composer
-            .insert_str(format!("{} ", crate::mention::written(file)));
-        self.offer_selected = 0;
+        self.replace_word(
+            &mention.typed,
+            &mention.after,
+            &crate::mention::written(file),
+        );
     }
 
     /// Whether the composer holds a command for the operator's own shell

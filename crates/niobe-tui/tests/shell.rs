@@ -5369,6 +5369,45 @@ fn enter_on_another_command_than_the_one_typed_in_full_puts_that_one_in_the_prom
     assert!(app.take_produced().is_empty());
 }
 
+/// The list under a `/` or an `@` word is open with the cursor inside the
+/// word, ranked by what is before the cursor; what it puts in the prompt
+/// stands for the whole word, so the letters after the cursor do not stay
+/// behind as a word of their own.
+#[test]
+fn a_pick_made_with_the_cursor_inside_the_word_replaces_the_whole_word() {
+    use ratatui::crossterm::event::KeyCode;
+
+    let mut app = session_with_commands().attached();
+    type_keys(&mut app, "/compact");
+    press(&mut app, KeyCode::Left);
+    press(&mut app, KeyCode::Enter);
+    let sent = app.take_produced();
+    assert!(
+        sent.iter().any(|event| matches!(
+            event,
+            Event::UserMessage { text } if text == "/compact"
+        )),
+        "the word holds the command in full, so Enter sends it: {sent:?} with {:?} left",
+        app.composed()
+    );
+
+    let mut app = session_with_commands();
+    type_keys(&mut app, "/autoc please");
+    for _ in 0.." please".len() + 3 {
+        press(&mut app, KeyCode::Left);
+    }
+    press(&mut app, KeyCode::Tab);
+    assert_eq!(app.composed(), "/autocompact please");
+
+    let mut app = session_with_files();
+    type_keys(&mut app, "see @catalog/fet now");
+    for _ in 0.." now".len() + 2 {
+        press(&mut app, KeyCode::Left);
+    }
+    press(&mut app, KeyCode::Tab);
+    assert_eq!(app.composed(), "see @catalog/fetch.ts now");
+}
+
 /// A session whose backend lists `/compact`, which it runs only where a
 /// prompt opens with it, and the skills `review` and `reveal`, which it takes
 /// named anywhere in a prompt.

@@ -12,30 +12,41 @@
 //! after a space, which is what keeps an address such as `ops@example.com`
 //! from opening a list.
 
-/// The `@` word that ends at the cursor.
+/// The `@` word the cursor is in, after its `@`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Mention {
     /// The line of the prompt it is on.
     pub(crate) row: usize,
     /// The column of its `@`, in characters.
     pub(crate) at: usize,
-    /// What has been typed after the `@`, up to the cursor.
+    /// What has been typed after the `@`, up to the cursor: what the files
+    /// are ranked by.
     pub(crate) typed: String,
+    /// The rest of the word, after the cursor, which a file picked for it
+    /// replaces along with what was typed.
+    pub(crate) after: String,
 }
 
 /// The `@` word the cursor at `cursor` — a line and a column in characters —
-/// is at the end of, if it is at the end of one.
+/// is in, after its `@`.
 pub(crate) fn at_cursor(lines: &[String], cursor: (usize, usize)) -> Option<Mention> {
     let (row, column) = cursor;
     let line = lines.get(row)?;
-    let before = line.get(..byte_of_column(line, column)?)?;
+    let (before, after) = line.split_at_checked(byte_of_column(line, column)?)?;
     let word = before.rsplit(char::is_whitespace).next()?;
     let typed = word.strip_prefix('@')?;
     Some(Mention {
         row,
         at: column - word.chars().count(),
         typed: typed.to_owned(),
+        after: rest_of_word(after).to_owned(),
     })
+}
+
+/// What of `after`, the text after a cursor, is still the word the cursor
+/// is in: up to the first blank.
+pub(crate) fn rest_of_word(after: &str) -> &str {
+    after.split(char::is_whitespace).next().unwrap_or_default()
 }
 
 /// A listed path as it goes in after the `@`, in the form Claude Code reads
@@ -232,6 +243,7 @@ mod tests {
                 row: 0,
                 at: 8,
                 typed: "src/ma".to_owned(),
+                after: String::new(),
             })
         );
         assert_eq!(
@@ -240,6 +252,7 @@ mod tests {
                 row: 0,
                 at: 0,
                 typed: String::new(),
+                after: String::new(),
             })
         );
         assert_eq!(
@@ -268,11 +281,13 @@ mod tests {
                 row: 0,
                 at: 5,
                 typed: "ünï".to_owned(),
+                after: String::new(),
             })
         );
         assert_eq!(
-            at_cursor(&lines("@über more"), (0, 3)).map(|m| m.typed),
-            Some("üb".to_owned())
+            at_cursor(&lines("@über more"), (0, 3)).map(|m| (m.typed, m.after)),
+            Some(("üb".to_owned(), "er".to_owned())),
+            "the rest of the word after the cursor is read up to its blank"
         );
         assert_eq!(at_cursor(&lines("@é"), (0, 3)), None, "past the line");
     }

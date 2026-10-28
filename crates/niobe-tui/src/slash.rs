@@ -21,15 +21,19 @@
 
 use niobe_core::event::SlashCommand;
 
-/// The `/` word the cursor is at the end of.
+/// The `/` word the cursor is in, after its `/`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Slash {
     /// The line of the prompt it is on.
     pub(crate) row: usize,
     /// The column of its `/`, in characters.
     pub(crate) at: usize,
-    /// What has been typed after the `/`, up to the cursor.
+    /// What has been typed after the `/`, up to the cursor: what the
+    /// commands are ranked by.
     pub(crate) typed: String,
+    /// The rest of the word, after the cursor, which a command picked for it
+    /// replaces along with what was typed.
+    pub(crate) after: String,
 }
 
 impl Slash {
@@ -39,6 +43,11 @@ impl Slash {
         (self.row, self.at) == (0, 0)
     }
 
+    /// The whole word after the `/`, on both sides of the cursor.
+    pub(crate) fn word(&self) -> String {
+        format!("{}{}", self.typed, self.after)
+    }
+
     /// Whether `command` can be named where this `/` is.
     pub(crate) fn can_name(&self, command: &SlashCommand) -> bool {
         self.opens_the_prompt() || command.mid_prompt
@@ -46,24 +55,25 @@ impl Slash {
 }
 
 /// The `/` word the cursor at `cursor` — a line and a column in characters —
-/// is at the end of, where the `/` starts a word and nothing typed after it
-/// is a `/` too.
+/// is in, where the `/` starts a word and nothing else in it is a `/` too.
 ///
-/// Only the word is read, back from the cursor to the blank before it, so a
-/// key typed into a long prompt does not walk the whole of it.
+/// Only the word is read, from the blank before it to the blank after it,
+/// so a key typed into a long prompt does not walk the whole of it.
 pub(crate) fn at_cursor(lines: &[String], cursor: (usize, usize)) -> Option<Slash> {
     let (row, column) = cursor;
     let line = lines.get(row)?;
-    let before = line.get(..crate::mention::byte_of_column(line, column)?)?;
+    let (before, after) = line.split_at_checked(crate::mention::byte_of_column(line, column)?)?;
     let word = before.rsplit(char::is_whitespace).next()?;
     let typed = word.strip_prefix('/')?;
-    if typed.contains('/') {
+    let after = crate::mention::rest_of_word(after);
+    if typed.contains('/') || after.contains('/') {
         return None;
     }
     Some(Slash {
         row,
         at: column - word.chars().count(),
         typed: typed.to_owned(),
+        after: after.to_owned(),
     })
 }
 
@@ -227,6 +237,7 @@ mod tests {
             row: 0,
             at: 0,
             typed: typed.to_owned(),
+            after: String::new(),
         }
     }
 
@@ -269,6 +280,12 @@ mod tests {
         assert_eq!(typed("/rév", (0, 0)), None);
         assert_eq!(typed("/ré", (0, 4)), None, "past the line");
         assert_eq!(typed("é /rév", (0, 5)), Some("ré".to_owned()));
+        assert_eq!(
+            at_cursor(&lines("/rév now"), (0, 3)).map(|slash| slash.word()),
+            Some("rév".to_owned()),
+            "the word runs on past the cursor to its blank"
+        );
+        assert_eq!(typed("/re/x", (0, 3)), None, "a path past the cursor");
     }
 
     #[test]
