@@ -1567,6 +1567,10 @@ pub struct App {
     mcp: Option<crate::mcp::View>,
     /// One tool call read whole, while it is open.
     detail: Option<crate::detail::Detail>,
+    /// Where in `recorded` the call the open view reads is, so that its end
+    /// arriving while the view is open shows in it. `None` where the view
+    /// reads a page rather than a call.
+    detail_call: Option<usize>,
     /// Every tool call of the conversation, in the order they started, with
     /// what the view of one shows: the transcript keeps what a row draws,
     /// and this the arguments and the output the row was drawn from.
@@ -2087,6 +2091,7 @@ impl App {
             overview_wanted: false,
             mcp: None,
             detail: None,
+            detail_call: None,
             recorded: Vec::new(),
             call_at: BTreeMap::new(),
             mcp_reconnects: Vec::new(),
@@ -2382,6 +2387,7 @@ impl App {
         self.cut_entries.clear();
         self.recorded.clear();
         self.call_at.clear();
+        self.detail_call = None;
         self.only_agent = None;
         self.agent_entries.clear();
         let running = self.session.running_agents();
@@ -2741,6 +2747,7 @@ impl App {
                     (output, *bytes, *outcome),
                     untrimmed.as_deref(),
                 );
+                self.show_end_in_detail(recorded);
                 let gate = self.gate(id);
                 // An end that came after its call was cut short ends the call
                 // on its own row, as the fold counts it finished.
@@ -4553,6 +4560,26 @@ impl App {
         }
     }
 
+    /// Opens the view of the call at `at` in `recorded`, where there is one.
+    fn open_call(&mut self, at: usize) {
+        if let Some((_, call)) = self.recorded.get(at) {
+            self.detail = Some(crate::detail::Detail::of(call));
+            self.detail_call = Some(at);
+        }
+    }
+
+    /// Shows the end of the call at `at` in `recorded` in the open view,
+    /// where the view reads that call: opened while it ran, it would
+    /// otherwise go on saying it runs.
+    fn show_end_in_detail(&mut self, at: usize) {
+        if self.detail_call != Some(at) {
+            return;
+        }
+        if let (Some(detail), Some((_, call))) = (self.detail.as_mut(), self.recorded.get(at)) {
+            detail.ended(call);
+        }
+    }
+
     /// Opens the list of the session's sub-agents, on the newest, to narrow
     /// the transcript to one; or, where it is narrowed, draws everything
     /// again; or says there are no sub-agents yet.
@@ -4731,12 +4758,9 @@ impl App {
                 self.only_agent = Some(chosen.into());
             }
             Purpose::Call => {
-                let call = chosen
-                    .parse::<usize>()
-                    .ok()
-                    .and_then(|at| self.recorded.get(at));
-                if let Some((_, call)) = call {
-                    self.detail = Some(crate::detail::Detail::of(call));
+                let call = chosen.parse::<usize>().ok();
+                if let Some(at) = call {
+                    self.open_call(at);
                 }
             }
         }
@@ -5039,6 +5063,7 @@ impl App {
     /// asks for it: written each time it opens, so the session running now is
     /// in it as far as it has gone.
     fn open_overview(&mut self) {
+        self.detail_call = None;
         self.detail = Some(crate::detail::Detail::page(
             crate::overview::TITLE,
             "",
@@ -7618,11 +7643,7 @@ impl App {
             return;
         };
         match calls {
-            1 => {
-                if let Some((_, call)) = self.recorded.get(first) {
-                    self.detail = Some(crate::detail::Detail::of(call));
-                }
-            }
+            1 => self.open_call(first),
             _ => {
                 self.pick_call();
                 if let Some(picker) = self.picking.as_mut() {
@@ -18165,6 +18186,88 @@ mod tests {
 
         let detail = app.detail().expect("the call is listed");
         assert_eq!(detail.text(), "{\"command\":\"ls\"}Cargo.toml");
+    }
+
+    /// Starts Bash call `id` running `command`.
+    fn bash_started(app: &mut App, id: &str, command: &str) {
+        app.apply(&Event::ToolCallStart {
+            id: id.into(),
+            name: "Bash".to_owned(),
+            input: format!("{{\"command\":\"{command}\"}}"),
+            summary: Some(command.to_owned()),
+            agent: None,
+        });
+    }
+
+    /// Ends Bash call `id`, started running `command`, with `output`.
+    fn bash_ended(app: &mut App, id: &str, command: &str, output: &str) {
+        app.apply(&Event::ToolCallEnd {
+            id: id.into(),
+            name: "Bash".to_owned(),
+            input: format!("{{\"command\":\"{command}\"}}"),
+            output: output.to_owned(),
+            bytes: output.len() as u64,
+            outcome: ToolOutcome::Ok,
+            summary: Some(command.to_owned()),
+            exit_code: Some(0),
+            error: None,
+            command: Some(command.to_owned()),
+            untrimmed: None,
+        });
+    }
+
+    #[test]
+    fn a_call_open_while_it_runs_shows_its_output_once_it_ends() {
+        let mut app = app();
+        bash_started(&mut app, "t1", "cargo test");
+        app.perform(crate::menu::Action::Calls);
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(
+            app.detail().map(crate::detail::Detail::text),
+            Some("{\"command\":\"cargo test\"}"),
+            "the running call is open, with no output yet"
+        );
+
+        bash_ended(&mut app, "t1", "cargo test", "test result: ok");
+
+        let detail = app.detail().expect("the view stays open");
+        assert_eq!(
+            detail.text(),
+            "{\"command\":\"cargo test\"}test result: ok",
+            "the open view still says the call is running after it ended"
+        );
+    }
+
+    #[test]
+    fn another_calls_end_leaves_the_open_call_as_it_is() {
+        let mut app = app();
+        bash_started(&mut app, "t1", "cargo test");
+        bash_started(&mut app, "t2", "ls");
+        app.perform(crate::menu::Action::Calls);
+        app.on_key(key(KeyCode::Up));
+        app.on_key(key(KeyCode::Enter));
+
+        bash_ended(&mut app, "t2", "ls", "Cargo.toml");
+
+        assert_eq!(
+            app.detail().map(crate::detail::Detail::text),
+            Some("{\"command\":\"cargo test\"}")
+        );
+    }
+
+    #[test]
+    fn a_call_open_across_a_clear_is_not_replaced_by_the_new_conversations_call() {
+        let mut app = app();
+        bash_started(&mut app, "t1", "cargo test");
+        app.perform(crate::menu::Action::Calls);
+        app.on_key(key(KeyCode::Enter));
+        app.apply(&Event::Cleared);
+        bash_started(&mut app, "t9", "ls");
+
+        bash_ended(&mut app, "t9", "ls", "Cargo.toml");
+
+        let shown = app.detail().map(crate::detail::Detail::text);
+        assert_ne!(shown, Some("{\"command\":\"ls\"}Cargo.toml"));
     }
 
     #[test]

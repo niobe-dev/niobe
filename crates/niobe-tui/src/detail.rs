@@ -173,6 +173,18 @@ impl Detail {
         }
     }
 
+    /// The view of `call` again, now that its end has arrived, scrolled
+    /// where it was: the arguments above the output are the rows they were.
+    pub fn ended(&mut self, call: &Recorded) {
+        let (top, drawn) = (self.top, self.drawn);
+        *self = Self::of(call);
+        self.drawn = drawn;
+        self.top = (top.0.min(self.rows.len().saturating_sub(1)), top.1);
+        if let Some((width, room)) = drawn {
+            self.top = self.top.min(self.end(width, room));
+        }
+    }
+
     /// A page of `text` under `title`, read whole as a call is, with `none`
     /// standing where there is no text.
     pub fn page(title: &str, text: &str, none: &'static str) -> Self {
@@ -510,6 +522,26 @@ mod tests {
         let lines = shown(&Detail::of(&running), 60, 20);
 
         assert_eq!(lines[3..], ["output", "still running"]);
+    }
+
+    #[test]
+    fn an_end_arriving_while_the_view_is_open_shows_where_it_said_still_running() {
+        let input: String = (1..=10).map(|n| format!("{n}\n")).collect();
+        let mut running = call(input.trim_end(), "");
+        running.ended = None;
+        let mut detail = Detail::of(&running);
+        detail.measured(40, 5);
+        detail.on_key(key(KeyCode::Down));
+        detail.on_key(key(KeyCode::Down));
+
+        detail.ended(&call(input.trim_end(), "passed"));
+
+        assert_eq!(shown(&detail, 40, 5), ["2", "3", "4", "5", "6"]);
+        detail.on_key(key(KeyCode::End));
+        assert_eq!(
+            shown(&detail, 40, 5)[2..],
+            ["", "output · 6 bytes", "passed"]
+        );
     }
 
     #[test]
