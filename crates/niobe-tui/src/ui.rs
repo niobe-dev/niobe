@@ -4046,7 +4046,7 @@ fn usage_figure_columns(app: &App) -> usize {
 /// A label set in the Usage pane's label column `columns` wide: cut to leave
 /// the column of gap, and padded to the column.
 fn usage_label(label: &str, columns: usize) -> String {
-    text::pad(&text::truncate(label, columns.saturating_sub(1)), columns)
+    text::pad_owned(text::truncate(label, columns.saturating_sub(1)), columns)
 }
 
 /// What a share is drawn in: three columns for the figure and the sign, one
@@ -6061,7 +6061,7 @@ fn draw_fkeys(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         let room = usize::from(width).saturating_sub(key.chars().count() + 1);
         spans.push(Span::styled(key.clone(), key_style));
         spans.push(Span::styled(
-            text::pad(&text::truncate(label, room), room),
+            text::pad_owned(text::truncate(label, room), room),
             stopped(app.can(*action)),
         ));
         spans.push(Span::styled(" ", bar));
