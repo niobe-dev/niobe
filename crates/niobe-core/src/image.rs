@@ -313,7 +313,9 @@ mod tests {
         let at_limit = MAX_ENCODED_BYTES / 4 * 3;
         let mut data = PNG.to_vec();
         data.resize(at_limit, 0);
-        assert!(Image::from_bytes(data.clone()).is_ok());
+        let image = Image::from_bytes(data.clone()).expect("an image at the limit is valid");
+        assert_eq!(image.media_type(), MediaType::Png);
+        assert_eq!(image.data().len(), at_limit);
 
         data.push(0);
         assert_eq!(
