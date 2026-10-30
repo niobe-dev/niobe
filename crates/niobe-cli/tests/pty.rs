@@ -501,7 +501,6 @@ fn shell_command(slave: &File, cwd: &Path) -> Command {
         // A test that wants a `claude` puts one first on this, and one that
         // does not must not start whatever this machine has installed.
         .env("PATH", "/usr/bin:/bin")
-        .env("DISPLAY", ":0")
         .env_remove("COLORTERM")
         // Which notification the shell sends is read off it, and the
         // terminal running the tests is not the one under test.
