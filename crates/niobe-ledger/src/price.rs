@@ -431,4 +431,46 @@ mod tests {
             long.cost(&overflowing_usage)
         );
     }
+
+    #[test]
+    fn a_request_with_prompt_exactly_at_long_context_threshold_uses_standard_rates_while_one_token_above_uses_long_context_rates()
+     {
+        let long_rates = Rates {
+            input: rate(8_000_000),
+            output: rate(30_000_000),
+            cache_read: rate(800_000),
+            cache_write: rate(10_000_000),
+            cache_write_1h: Some(rate(16_000_000)),
+        };
+        let price = Price {
+            from: Date::new(2026, 1, 1).expect("valid date"),
+            rates: rates(),
+            long_context: Some(LongContext {
+                above: 200_000,
+                rates: long_rates,
+            }),
+            fast: None,
+        };
+
+        let at_exact_threshold = Usage {
+            input: 100_000,
+            cache_read: 50_000,
+            cache_write: 50_000,
+            output: 100,
+            ..usage()
+        };
+        let one_token_above = Usage {
+            input: 100_001,
+            ..at_exact_threshold.clone()
+        };
+
+        assert_eq!(
+            price.cost(&at_exact_threshold),
+            rates().cost(&at_exact_threshold)
+        );
+        assert_eq!(
+            price.cost(&one_token_above),
+            long_rates.cost(&one_token_above)
+        );
+    }
 }
