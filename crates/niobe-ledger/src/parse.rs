@@ -818,4 +818,30 @@ mod tests {
             "p.toml:2: model[0].ids[1]: `m-1` is listed twice"
         );
     }
+
+    #[test]
+    fn a_price_table_rejects_scientific_notation_and_non_decimal_numbers_for_rates() {
+        let text = one_model(
+            "from = 2026-07-24\ninput = 1e3\noutput = 25\ncache_read = 0.5\ncache_write = 6.25\n",
+        );
+        assert_eq!(
+            error(&text),
+            "p.toml:6: model[0].price[0].input: `1e3`: expected dollars per million tokens as a decimal with at most six places, such as `2.50`"
+        );
+    }
+
+    #[test]
+    fn an_invalid_fast_mode_multiple_such_as_string_or_negative_is_rejected_with_line_number() {
+        let text_string = one_model(&format!("{PRICE}fast = \"2\"\n"));
+        assert_eq!(
+            error(&text_string),
+            "p.toml:10: model[0].price[0].fast: expected a number, found a string"
+        );
+
+        let text_neg = one_model(&format!("{PRICE}fast = -2\n"));
+        assert_eq!(
+            error(&text_neg),
+            "p.toml:10: model[0].price[0].fast: `-2`: expected dollars per million tokens as a decimal with at most six places, such as `2.50`"
+        );
+    }
 }
