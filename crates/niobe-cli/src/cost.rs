@@ -230,7 +230,8 @@ fn table(sessions: &[Folded]) -> Vec<String> {
     lines.push(String::new());
     lines.push(
         "The cost is the money each backend reported: `≥` where some of a session's records \
-         carry none, `older recording` where they do not say what a reported cost covers, \
+         carry none or a sub-agent worked after the last reported cost, `older recording` \
+         where they do not say what a reported cost covers, \
          and `—` on a plan, or where nothing said how a session was billed."
             .to_owned(),
     );

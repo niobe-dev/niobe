@@ -98,11 +98,17 @@ fn cost(session: &SessionState, prices: Option<&dyn niobe_tui::Prices>) -> Strin
     if t.records == 0 || t.cost_fully_reported() {
         return label;
     }
-    let owed = format!(
-        "{label} — {} of {} usage records no reported cost covers",
-        grouped(t.records_unsettled),
-        grouped(t.records)
-    );
+    let mut owed = label;
+    if t.records_unsettled > 0 {
+        owed = format!(
+            "{owed} — {} of {} usage records no reported cost covers",
+            grouped(t.records_unsettled),
+            grouped(t.records)
+        );
+    }
+    if t.agent_work_unbilled {
+        owed = format!("{owed} — a sub-agent worked after the last reported cost");
+    }
     if !t.settlement_unrecorded() {
         return owed;
     }
@@ -289,6 +295,33 @@ mod tests {
             summary[0],
             "tokens      3,000 — 2,400 in · 600 out · 0 cache read · 0 cache write"
         );
+    }
+
+    #[test]
+    fn a_sub_agent_at_work_after_the_last_bill_makes_the_cost_a_floor_and_says_so() {
+        let worked = Event::AssistantMessage {
+            text: "still reading".to_owned(),
+            agent: Some(niobe_core::event::AgentId::new("toolu_agent")),
+        };
+        let summary = lines(&folded(&[usage(Some(0.25)), worked]));
+        assert_eq!(
+            summary[1],
+            "cost        ≥$0.25 — a sub-agent worked after the last reported cost"
+        );
+        // The next bill takes in what the agent spent.
+        let mut bill = usage(Some(0.5));
+        if let Event::Usage(usage) = &mut bill {
+            usage.settles_model = Some(true);
+        }
+        let billed = lines(&folded(&[
+            usage(Some(0.25)),
+            Event::AssistantMessage {
+                text: "done".to_owned(),
+                agent: Some(niobe_core::event::AgentId::new("toolu_agent")),
+            },
+            bill,
+        ]));
+        assert_eq!(billed[1], "cost        $0.75");
     }
 
     #[test]

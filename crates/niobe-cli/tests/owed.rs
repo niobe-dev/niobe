@@ -216,3 +216,45 @@ fn a_message_of_two_requests_under_the_threshold_is_priced_at_standard_rates() {
     assert_usd(estimate, 0.1308);
     assert_eq!(niobe_tui::session_cost(&state, Some(&prices)), "~$0.13");
 }
+
+/// The recording in which three sub-agents ran in the background, recorded
+/// from Claude Code 2.1.278, whose agents' messages reach the stream whole
+/// and carry no count the bridge can read: what they spent arrives only in
+/// the next `result`'s bill.
+const SUB_AGENTS: &str = include_str!("../../niobe-bridge-claude/tests/fixtures/sub-agents.jsonl");
+
+/// The session's cost as the Usage pane labels it, once the recording has
+/// been read up to and including the line at `index` (counted from 0).
+fn sub_agents_cost_after(index: usize) -> String {
+    let mut translator = niobe_bridge_claude::Translator::new("max");
+    let events: Vec<Event> = SUB_AGENTS
+        .split('\n')
+        .take(index + 1)
+        .filter(|line| !line.trim().is_empty())
+        .flat_map(|line| translator.line(line))
+        .collect();
+    niobe_tui::session_cost(&SessionState::replay(&events), Some(&bundled()))
+}
+
+/// A sub-agent at work after the last bill is spending money no figure on
+/// screen holds yet, so the cost reads as at least what was billed until
+/// the next bill takes the agent's spend in.
+///
+/// The figures are the recording's own `total_cost_usd`, read with
+/// `jq 'select(.type=="result") | .total_cost_usd' sub-agents.jsonl`: $0.27226665
+/// at the `result` on line 216 (index 215), $0.689141 on line 420 (index 419)
+/// and $0.86552395 on the last, line 600 (index 599). Between the first two
+/// the reviewers' `assistant` lines run from index 216 on, and the main
+/// agent's next message starts at index 267.
+#[test]
+fn the_cost_is_a_floor_while_a_sub_agent_works_after_the_last_bill() {
+    assert_eq!(sub_agents_cost_after(215), "$0.27");
+    assert_eq!(sub_agents_cost_after(266), "≥$0.27");
+    let before_the_bill = sub_agents_cost_after(418);
+    assert!(
+        before_the_bill.starts_with('≥'),
+        "an agent was at work since the last bill, yet the cost reads {before_the_bill}"
+    );
+    assert_eq!(sub_agents_cost_after(419), "$0.69");
+    assert_eq!(sub_agents_cost_after(599), "$0.87");
+}

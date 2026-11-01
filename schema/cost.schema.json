@@ -157,7 +157,7 @@
               "minimum": 0
             },
             "complete": {
-              "description": "Whether every usage record is covered by a reported cost, so that reported_usd is the bill rather than a floor.",
+              "description": "Whether every usage record is covered by a reported cost and no sub-agent worked after the last one, so that reported_usd is the bill rather than a floor. A backend can report what a sub-agent spent only in its next bill.",
               "type": "boolean"
             },
             "records": {

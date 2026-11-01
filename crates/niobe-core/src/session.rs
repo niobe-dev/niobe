@@ -96,6 +96,17 @@ pub struct Totals {
     /// spent tokens and was billed nothing is absent rather than at zero: what
     /// it cost is unknown, and a consumer prices it or says so.
     pub reported_cost_by_model: BTreeMap<String, f64>,
+    /// Whether a sub-agent has been at work since the last reported cost
+    /// settled what was owed.
+    ///
+    /// A backend can bill an agent's work without reporting its tokens as it
+    /// goes — the `claude` CLI streams a sub-agent's messages whole, with no
+    /// count to read, and states what the agent spent only in its next bill —
+    /// so an agent at work is money no usage record holds yet. While this is
+    /// set, [`Totals::reported_cost_usd`] and anything valued beside it are a
+    /// floor, not the bill. The next settlement clears it, since a bill is the
+    /// backend's running total and takes in everything spent before it.
+    pub agent_work_unbilled: bool,
 }
 
 /// The records of one model that no reported cost covers.
@@ -186,8 +197,11 @@ impl Totals {
     /// Whether a reported cost covers every usage record, i.e. whether
     /// [`Totals::reported_cost_usd`] is the whole bill and may be shown as a
     /// measurement rather than a floor.
+    ///
+    /// Not while a sub-agent has worked since the last bill
+    /// ([`Totals::agent_work_unbilled`]): what it spent is in no record yet.
     pub fn cost_fully_reported(&self) -> bool {
-        self.records_unsettled == 0
+        self.records_unsettled == 0 && !self.agent_work_unbilled
     }
 
     /// Whether the floor may be lower than the bill only because the session
@@ -195,7 +209,7 @@ impl Totals {
     /// as owed for was quite possibly covered. Read off the records, not off
     /// the day they were made. `false` where nothing is owed for.
     pub fn settlement_unrecorded(&self) -> bool {
-        !self.cost_fully_reported() && self.costs_unsaid > 0
+        self.records_unsettled > 0 && self.costs_unsaid > 0
     }
 
     fn add(&mut self, usage: &Usage) {
@@ -224,6 +238,7 @@ impl Totals {
         let cost = reported_cost(usage);
         if usage.settles_model == Some(true) && cost.is_some() {
             self.clear_unsettled(&usage.model);
+            self.agent_work_unbilled = false;
         }
         if usage.settles_model.is_none() && cost.is_some() {
             bump(&mut self.costs_unsaid);
@@ -829,6 +844,7 @@ impl SessionState {
             } => {
                 self.agents_said.insert(agent.clone(), text.clone());
                 self.decided(text, Some(agent));
+                self.agent_worked();
             }
 
             Event::ToolCallStart {
@@ -846,6 +862,7 @@ impl SessionState {
                 }
                 if let Some(agent) = agent {
                     self.agent_calls.insert(id.clone(), agent.clone());
+                    self.agent_worked();
                 }
             }
 
@@ -1215,6 +1232,17 @@ impl SessionState {
                         agent: agent.cloned(),
                     }),
             );
+    }
+
+    /// Notes that a sub-agent did something a backend bills for — wrote a
+    /// message or called a tool — which no usage record may hold until the
+    /// next bill: see [`Totals::agent_work_unbilled`]. Usage is taken to be
+    /// billed the way the session was last said to be, as each record is.
+    fn agent_worked(&mut self) {
+        self.totals.agent_work_unbilled = true;
+        if self.billing == Some(Billing::Metered) {
+            self.metered.agent_work_unbilled = true;
+        }
     }
 
     fn started_over(&mut self) -> Self {
@@ -1778,6 +1806,84 @@ mod tests {
         };
         usage.settles_model = Some(true);
         Event::Usage(usage)
+    }
+
+    fn agent_said(text: &str) -> Event {
+        Event::AssistantMessage {
+            text: text.to_owned(),
+            agent: Some(AgentId::new("toolu_agent")),
+        }
+    }
+
+    /// A sub-agent whose backend reports its spend only in the next bill is
+    /// money no record holds while it works: the cost is a floor from its
+    /// first message or call until a bill settles, and whole again after.
+    #[test]
+    fn a_sub_agent_at_work_after_the_last_bill_leaves_the_cost_short_until_the_next() {
+        let billed = [usage(100, 10, None), settlement("opus-5", 0.25)];
+        assert!(SessionState::replay(&billed).totals().cost_fully_reported());
+
+        let calls = Event::ToolCallStart {
+            id: ToolCallId::new("toolu_read"),
+            name: "Read".to_owned(),
+            input: "{}".to_owned(),
+            summary: None,
+            agent: Some(AgentId::new("toolu_agent")),
+        };
+        for worked in [agent_said("reading"), calls] {
+            let mut state = SessionState::replay(&billed);
+            state.apply(&worked);
+            let totals = state.totals();
+            assert!(totals.agent_work_unbilled, "{worked:?}");
+            assert!(!totals.cost_fully_reported(), "{worked:?}");
+            assert_eq!(totals.records_unsettled, 0, "{worked:?}");
+            assert!(!totals.settlement_unrecorded(), "{worked:?}");
+
+            state.apply(&settlement("opus-5", 0.5));
+            assert!(state.totals().cost_fully_reported(), "{worked:?}");
+        }
+
+        // The session's own agent is reported as it goes: its message is no
+        // spend left out.
+        let mut own = SessionState::replay(&billed);
+        own.apply(&Event::AssistantMessage {
+            text: "done".to_owned(),
+            agent: None,
+        });
+        assert!(own.totals().cost_fully_reported());
+
+        // A cost that is not a sum of money settles nothing, the agent's
+        // spend included.
+        let mut nonsense = SessionState::replay(&billed);
+        nonsense.apply(&agent_said("reading"));
+        nonsense.apply(&settlement("opus-5", f64::NAN));
+        assert!(nonsense.totals().agent_work_unbilled);
+    }
+
+    /// A clear starts the money over, and with it what an agent left
+    /// unbilled; the metered part is short only where the work was metered.
+    #[test]
+    fn an_agents_unbilled_work_starts_over_at_a_clear_and_follows_the_billing() {
+        let mut state = SessionState::replay(&[
+            Event::Billing {
+                billing: Billing::Metered,
+            },
+            settlement("opus-5", 0.25),
+            agent_said("reading"),
+        ]);
+        assert!(state.metered_totals().agent_work_unbilled);
+        state.apply(&Event::Cleared);
+        assert!(!state.totals().agent_work_unbilled);
+        assert!(state.totals().cost_fully_reported());
+
+        let plan = SessionState::replay(&[
+            Event::Billing {
+                billing: Billing::Plan,
+            },
+            agent_said("reading"),
+        ]);
+        assert!(plan.totals().agent_work_unbilled);
+        assert!(!plan.metered_totals().agent_work_unbilled);
     }
 
     #[test]

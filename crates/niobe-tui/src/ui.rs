@@ -6193,16 +6193,19 @@ const METERED_PART: &str = "metered part";
 ///
 /// Each label says exactly how much is known:
 ///
-/// * `$1.15` — every record is covered by a cost the backend reported.
+/// * `$1.15` — every record is covered by a cost the backend reported, and
+///   no sub-agent has worked since.
 /// * `~$1.15` — some are not, and `prices` valued all of them, so the figure
 ///   is what was reported plus an estimate at published rates.
 /// * `≥~$1.15` — some are not, `prices` valued the models it lists and not
-///   the rest, so the figure is what was reported plus the estimate for the
-///   priced models: a floor that is itself partly an estimate. Counting the
-///   priced models' estimate keeps the session from reading less than one of
-///   its own models' `~$` rows.
-/// * `≥$1.15` — some are not and none of them could be valued, so the figure
-///   is a floor of reported money only.
+///   the rest, or a sub-agent has worked since the last bill and spent what
+///   no record holds, so the figure is what was reported plus the estimate
+///   for what could be valued: a floor that is itself partly an estimate.
+///   Counting the priced models' estimate keeps the session from reading
+///   less than one of its own models' `~$` rows.
+/// * `≥$1.15` — some are not and none of them could be valued, or a
+///   sub-agent has worked since the last bill and nothing is owed that could
+///   be, so the figure is a floor of reported money only.
 /// * `unpriced` — nothing was reported and nothing could be valued.
 /// * `—` — there is no usage at all. Never a zero.
 ///
@@ -6397,7 +6400,9 @@ enum Valued {
 ///
 /// A model the sheet does not list leaves the sum short of what is owed, so it
 /// is [`Valued::Part`] and read as a floor: an understated total shown as an
-/// estimate is worse than an honest floor.
+/// estimate is worse than an honest floor. So is every figure while a
+/// sub-agent has worked since the last bill
+/// ([`Totals::agent_work_unbilled`]): what it spent is in no record to value.
 fn value_unsettled(totals: &Totals, prices: Option<&dyn Prices>) -> Valued {
     let Some(prices) = prices else {
         return Valued::Nothing;
@@ -6412,7 +6417,8 @@ fn value_unsettled(totals: &Totals, prices: Option<&dyn Prices>) -> Valued {
             None => unpriced = true,
         }
     }
-    match (priced, unpriced) {
+    let short = unpriced || totals.agent_work_unbilled;
+    match (priced, short) {
         (_, false) => Valued::All(sum),
         (true, true) => Valued::Part(sum),
         (false, true) => Valued::Nothing,

@@ -254,6 +254,9 @@ struct Model {
     by_model: std::collections::BTreeMap<String, u64>,
     /// How the session was last said to be billed, which a clear keeps.
     billing: Option<Billing>,
+    /// Whether a sub-agent wrote or called anything since the last record
+    /// that settled a cost which is a sum of money, or since the last clear.
+    agent_unbilled: bool,
     /// Tokens folded while the session was last said to be billed by use.
     metered: u64,
     /// The last request's prompt and model, or a compaction's floor.
@@ -324,9 +327,11 @@ impl Model {
                 self.ended.remove(id);
                 self.running_agents.insert(id.clone());
             }
+            Event::AssistantMessage { agent: Some(_), .. } => self.agent_unbilled = true,
             Event::ToolCallStart {
                 id, name, agent, ..
             } => {
+                self.agent_unbilled |= agent.is_some();
                 let agent = agent
                     .clone()
                     .or_else(|| self.running_calls.get(id).and_then(|(_, a)| a.clone()));
@@ -351,6 +356,12 @@ impl Model {
                 self.in_turn = 0;
             }
             Event::Usage(usage) => {
+                let money = usage
+                    .cost_usd
+                    .is_some_and(|cost| cost.is_finite() && cost >= 0.0);
+                if usage.settles_model == Some(true) && money {
+                    self.agent_unbilled = false;
+                }
                 *self.by_model.entry(usage.model.clone()).or_default() += tokens(usage);
                 if self.billing == Some(Billing::Metered) {
                     self.metered += tokens(usage);
@@ -427,6 +438,12 @@ fn check(seed: u64, at: usize, event: &Event, state: &SessionState, model: &Mode
     );
     let owed: usize = totals.unsettled.values().map(|o| o.records().len()).sum();
     assert_eq!(owed as u64, totals.records_unsettled, "owed, {}", why());
+    assert_eq!(
+        totals.cost_fully_reported(),
+        totals.records_unsettled == 0 && !model.agent_unbilled,
+        "whole while an agent's work is unbilled, {}",
+        why()
+    );
     assert!(
         totals.unsettled.values().all(|o| !o.records().is_empty()),
         "an owed model with no records, {}",
