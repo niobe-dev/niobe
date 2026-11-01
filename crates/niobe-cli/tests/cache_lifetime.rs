@@ -143,3 +143,40 @@ fn dropping_the_lifetime_prices_every_write_at_the_five_minute_rate() {
     // recording of six messages. The share is not a rounding difference.
     assert_usd(0.002_973 - flattened, 0.000_202_5);
 }
+
+/// One message that took two API requests, as Claude Code 2.1.278 streams
+/// it: the `message_start` splits the first request's writes beside its
+/// total, and the `message_delta` sums both requests and splits them only
+/// per request. The first request bought its 200 writes for five minutes and
+/// the second its 300 for an hour, so the message's writes are priced at
+/// both rates, not at the first request's alone.
+#[test]
+fn a_message_of_two_requests_prices_each_requests_writes_at_its_own_lifetime() {
+    let table = PriceTable::bundled().expect("the bundled price table parses");
+    let mut translator = Translator::new("metered");
+    let lines = [
+        r#"{"type":"system","subtype":"init","session_id":"s-1","model":"claude-sonnet-5"}"#,
+        r#"{"type":"stream_event","event":{"type":"message_start","message":{"model":"claude-sonnet-5","usage":{"input_tokens":4,"cache_creation_input_tokens":200,"cache_read_input_tokens":1000,"cache_creation":{"ephemeral_5m_input_tokens":200,"ephemeral_1h_input_tokens":0},"output_tokens":1}}}}"#,
+        r#"{"type":"stream_event","event":{"type":"message_delta","usage":{"input_tokens":10,"cache_creation_input_tokens":500,"cache_read_input_tokens":3000,"output_tokens":90,"iterations":[{"input_tokens":4,"output_tokens":40,"cache_read_input_tokens":1000,"cache_creation_input_tokens":200,"cache_creation":{"ephemeral_5m_input_tokens":200,"ephemeral_1h_input_tokens":0},"type":"message"},{"input_tokens":6,"output_tokens":50,"cache_read_input_tokens":2000,"cache_creation_input_tokens":300,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":300},"type":"message"}]}}}"#,
+    ];
+    let records: Vec<niobe_core::Usage> = lines
+        .iter()
+        .flat_map(|line| translator.line(line))
+        .filter_map(|event| match event {
+            Event::Usage(usage) => Some(usage),
+            _ => None,
+        })
+        .collect();
+    let [message] = records.as_slice() else {
+        panic!("one message, one record: {records:?}");
+    };
+    assert_eq!(
+        (message.cache_write, message.cache_write_1h),
+        (500, Some(300))
+    );
+
+    // Claude Sonnet 5: 10×2.00 + 90×10.00 + 3000×0.20 + 200×2.50 + 300×4.00
+    //   = 20 + 900 + 600 + 500 + 1200 = 3220 millionths of a dollar. Every
+    //   write at the first request's five minutes would be 2770.
+    assert_usd(usd(&table, message), 0.003_220);
+}

@@ -683,10 +683,15 @@ impl Usage {
                 delta.cache_creation_input_tokens,
                 self.cache_creation_input_tokens,
             ),
-            cache_creation: delta
-                .cache_creation
-                .clone()
-                .or_else(|| self.cache_creation.clone()),
+            // The start's split is of its first request alone. Where the
+            // delta splits its writes per request instead, the start's would
+            // win over those in `cache_write_1h` and give the whole
+            // message's writes the first request's lifetime.
+            cache_creation: match (&delta.cache_creation, delta.splits_requests()) {
+                (Some(split), _) => Some(split.clone()),
+                (None, true) => None,
+                (None, false) => self.cache_creation.clone(),
+            },
             iterations: match delta.iterations.is_empty() {
                 true => self.iterations.clone(),
                 false => delta.iterations.clone(),
@@ -738,6 +743,14 @@ impl Usage {
             ),
         };
         input.saturating_add(read).saturating_add(write)
+    }
+
+    /// Whether any request the message took says how its writes split by
+    /// lifetime.
+    fn splits_requests(&self) -> bool {
+        self.iterations
+            .iter()
+            .any(|iteration| iteration.cache_creation.is_some())
     }
 
     /// Of the cache writes, the ones bought for an hour rather than for the
@@ -1359,6 +1372,41 @@ mod tests {
         .expect("a message_delta's usage");
 
         assert_eq!(usage.cache_write_1h(), Some(10_059));
+    }
+
+    /// A message of two requests, in the shapes Claude Code 2.1.278 streams:
+    /// the `message_start` splits the first request's 200 writes, all for
+    /// five minutes, beside its total; the `message_delta` sums both
+    /// requests' 500 and splits them only per request, the second's 300 for
+    /// an hour. The start's split describes one request of the two, so read
+    /// beside the delta's total it would price the hour's 300 writes at the
+    /// five-minute rate.
+    #[test]
+    fn a_message_of_several_requests_splits_its_writes_by_every_request_not_the_first() {
+        let start = usage(
+            r#"{"input_tokens":4,"cache_creation_input_tokens":200,"cache_read_input_tokens":1000,"cache_creation":{"ephemeral_5m_input_tokens":200,"ephemeral_1h_input_tokens":0},"output_tokens":1}"#,
+        );
+        let delta = usage(
+            r#"{"input_tokens":10,"cache_creation_input_tokens":500,"cache_read_input_tokens":3000,"output_tokens":90,"iterations":[{"input_tokens":4,"output_tokens":40,"cache_read_input_tokens":1000,"cache_creation_input_tokens":200,"cache_creation":{"ephemeral_5m_input_tokens":200,"ephemeral_1h_input_tokens":0},"type":"message"},{"input_tokens":6,"output_tokens":50,"cache_read_input_tokens":2000,"cache_creation_input_tokens":300,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":300},"type":"message"}]}"#,
+        );
+
+        let whole = start.completed_by(&delta);
+
+        assert_eq!(whole.cache_creation_input_tokens, 500);
+        assert_eq!(whole.cache_write_1h(), Some(300));
+    }
+
+    /// Where the delta says nothing of the lifetimes, beside its total or in
+    /// any request, the start's split is all there is, and it is kept.
+    #[test]
+    fn a_message_delta_with_no_split_keeps_the_one_its_start_gave() {
+        let start = usage(
+            r#"{"input_tokens":2,"cache_creation_input_tokens":40,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":40},"output_tokens":1}"#,
+        );
+
+        let whole = start.completed_by(&usage(r#"{"output_tokens":5}"#));
+
+        assert_eq!(whole.cache_write_1h(), Some(40));
     }
 
     #[test]
