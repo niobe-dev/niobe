@@ -1691,14 +1691,15 @@ enum Line {
     /// it sent (`api-request`, `api-request-blob`, `api-request-shape`: the
     /// parameters, messages and system prompt, and no usage) and the note a
     /// forked agent's file opens with of where its context came from
-    /// (`fork-context-ref`).
+    /// (`fork-context-ref`), and the list of the tools a process used that
+    /// the CLI writes beside its accounting from 2.1.312 (`tools-used`).
     ///
     /// Read off every record type present across the transcripts on the
-    /// machine this was written on — twenty-two in all — rather than off the
+    /// machine this was written on — twenty-three in all — rather than off the
     /// types one session happened to produce. Seven of them are read
     /// (`assistant`, `user`, `cost-state`, `permission-mode`, `ai-title`,
     /// `attachment`, `system`), the operator's own title (`custom-title`) is
-    /// not and is reported, and the other fourteen are here. A type left out is a warning entry per record in front
+    /// not and is reported, and the other fifteen are here. A type left out is a warning entry per record in front
     /// of the operator, for a record that says nothing: `bridge-session` alone
     /// stood in fifteen thousand of them, and the request copies, which every
     /// transcript from 2.1.300 holds, in 66,884 records across 171 sessions and their
@@ -1717,7 +1718,8 @@ enum Line {
         alias = "last-prompt",
         alias = "mode",
         alias = "pr-link",
-        alias = "queue-operation"
+        alias = "queue-operation",
+        alias = "tools-used"
     )]
     Aside,
     #[serde(other)]
@@ -2898,6 +2900,30 @@ mod tests {
         ]);
 
         assert_eq!(events, []);
+    }
+
+    /// The list of tools a process used, which the CLI writes beside its
+    /// accounting from 2.1.312: furniture, and nothing the fold reads.
+    #[test]
+    fn the_clis_list_of_the_tools_it_used_is_passed_over_in_silence() {
+        let session = [
+            prompt("list the files"),
+            response("msg_1", "claude-opus-5", 3, 40),
+            r#"{"type":"cost-state","startTime":1790744390000,"totalCostUSD":0.01,"modelUsage":{"claude-opus-5":{"inputTokens":3,"outputTokens":40,"costUSD":0.01}}}"#.to_owned(),
+        ];
+        let tools_used = r#"{"type":"tools-used","tools":["Bash"],"sessionId":"s-1"}"#;
+        let without: Vec<&str> = session.iter().map(String::as_str).collect();
+        let with: Vec<&str> = without
+            .iter()
+            .copied()
+            .chain([
+                tools_used,
+                r#"{"type":"tools-used","tools":["Bash","ToolSearch"],"sessionId":"s-1"}"#,
+            ])
+            .collect();
+
+        assert_eq!(imported(&with), imported(&without));
+        assert_eq!(folded(&[tools_used]), []);
     }
 
     #[test]
