@@ -357,27 +357,11 @@ fn keep_store_unpublished(root: &Path) -> Result<(), String> {
     if !matches!(ignored(root), Some((1, _))) {
         return Ok(());
     }
-    let exclude = git_status(root, &["rev-parse", "--git-path", "info/exclude"])
-        .filter(|(code, _)| *code == 0)
-        .map(|(_, path)| root.join(path.trim_end()))
-        .ok_or_else(|| not_ignored(&store))?;
-    let written = (|| {
-        if let Some(dir) = exclude.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&exclude)?;
-        use std::io::Write as _;
-        // A first line of its own: the file may not end in a newline.
-        write!(
-            file,
-            "\n# Written by niobe: the session store is not for commits.\n"
-        )?;
-        let rule = ignore_rule(&store);
-        write!(file, "/{rule}\n/{rule}-*\n")
-    })();
+    let rule = ignore_rule(&store);
+    let written = exclude(
+        root,
+        &format!("# Written by niobe: the session store is not for commits.\n/{rule}\n/{rule}-*\n"),
+    );
     if written.is_err() || !matches!(ignored(root), Some((0, _))) {
         return Err(not_ignored(&store));
     }
@@ -416,29 +400,53 @@ pub fn keep_trim_unpublished(root: &Path) -> Result<(), String> {
         return Ok(());
     }
     let refused = || not_ignored_trim(&in_tree);
-    let exclude = git_status(root, &["rev-parse", "--git-path", "info/exclude"])
-        .filter(|(code, _)| *code == 0)
-        .map(|(_, path)| root.join(path.trim_end()))
-        .ok_or_else(refused)?;
-    let written = (|| {
-        if let Some(dir) = exclude.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&exclude)?;
-        use std::io::Write as _;
-        write!(
-            file,
-            "\n# Written by niobe: trimmed outputs and settings copies are not for commits.\n/{}/\n",
+    let written = exclude(
+        root,
+        &format!(
+            "# Written by niobe: trimmed outputs and settings copies are not for commits.\n/{}/\n",
             ignore_rule(&in_tree)
-        )
-    })();
+        ),
+    );
     if written.is_err() || !matches!(ignored(root), Some((0, _))) {
         return Err(refused());
     }
     Ok(())
+}
+
+/// Appends `rules` to the `info/exclude` of the repository rooted at `root`,
+/// which is the operator's alone and never committed, on a line of its own.
+///
+/// Refused where that file, or the `info` directory it is in, is a link: a
+/// `.git` that did not come from a clone can be anything, and a link there
+/// would choose which file of the operator's own the rules are appended to —
+/// a shell's startup file, say, which runs a line as a command, and a rule
+/// holds the name of whatever directory a repository's `.niobe` leads to.
+/// Git reads the file through a link all the same, so it would say the
+/// store is ignored once the rules were written there.
+fn exclude(root: &Path, rules: &str) -> std::io::Result<()> {
+    let refused =
+        |what: &str| std::io::Error::new(std::io::ErrorKind::InvalidInput, what.to_owned());
+    let path = git_status(root, &["rev-parse", "--git-path", "info/exclude"])
+        .filter(|(code, _)| *code == 0)
+        .map(|(_, path)| root.join(path.trim_end()))
+        .ok_or_else(|| refused("git names no info/exclude"))?;
+    let is_link = |path: &Path| {
+        std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink())
+    };
+    let dir = path
+        .parent()
+        .ok_or_else(|| refused("info/exclude is in no directory"))?;
+    if is_link(dir) || is_link(&path) {
+        return Err(refused("info/exclude is a link"));
+    }
+    std::fs::create_dir_all(dir)?;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)?;
+    use std::io::Write as _;
+    // A first line of its own: the file may not end in a newline.
+    write!(file, "\n{rules}")
 }
 
 /// Refuses a trim directory, named `in_tree` as git names it, holding a file
@@ -2404,6 +2412,68 @@ mod tests {
         open_or_create_store(dir.path()).expect("no repository, nothing to publish through");
 
         assert!(store_path(dir.path()).exists());
+    }
+
+    /// A file of the operator's outside the repository at `work`, and the
+    /// repository's `.git/info/exclude` — or, where `whole_dir`, its
+    /// `.git/info` — made a link to it, as a tree that did not come from a
+    /// clone can hold.
+    #[cfg(unix)]
+    fn exclude_linked_out(work: &Path, whole_dir: bool) -> (tempfile::TempDir, PathBuf) {
+        let outside = tempfile::tempdir().expect("a temporary directory can be created");
+        let mine = outside.path().join("exclude");
+        std::fs::write(&mine, "mine\n").expect("the file is written");
+        let info = work.join(".git").join("info");
+        match whole_dir {
+            true => {
+                std::fs::remove_dir_all(&info).expect("git made the directory");
+                std::os::unix::fs::symlink(outside.path(), &info).expect("the link is made");
+            }
+            false => {
+                let _absent = std::fs::remove_file(info.join("exclude"));
+                std::fs::create_dir_all(&info).expect("the directory is made");
+                std::os::unix::fs::symlink(&mine, info.join("exclude")).expect("the link is made");
+            }
+        }
+        (outside, mine)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_store_rule_is_not_written_through_an_exclude_file_linked_out_of_the_repository() {
+        for whole_dir in [false, true] {
+            let dir = repository();
+            let work = dir.path().join("work");
+            std::fs::create_dir_all(work.join(DIR)).expect("the directory is made");
+            std::fs::write(work.join(DIR).join(".gitignore"), "# nothing\n")
+                .expect("the file is written");
+            let (_outside, mine) = exclude_linked_out(&work, whole_dir);
+
+            let said = open_or_create_store(&work)
+                .expect_err("a store nothing ignores is refused rather than ignored elsewhere");
+
+            assert!(said.contains("is not ignored by git"), "{said}");
+            assert_eq!(
+                std::fs::read_to_string(&mine).expect("the operator's file is there"),
+                "mine\n",
+                "nothing was written into a file outside the repository (info linked: {whole_dir})"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_trim_rule_is_not_written_through_an_exclude_file_linked_out_of_the_repository() {
+        let (_dir, work) = clone_with(&[("trim/.gitignore", "# nothing is ignored here\n")]);
+        let (_outside, mine) = exclude_linked_out(&work, false);
+
+        let said = trim_writes(&work).expect_err("a trim directory nothing ignores is refused");
+
+        assert!(said.contains("is not ignored by git"), "{said}");
+        assert_eq!(
+            std::fs::read_to_string(&mine).expect("the operator's file is there"),
+            "mine\n"
+        );
     }
 
     #[cfg(unix)]
