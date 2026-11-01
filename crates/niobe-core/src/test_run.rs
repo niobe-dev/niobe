@@ -887,6 +887,10 @@ fn whole_run(output: &str) -> Option<TestCounts> {
         }
         state = match (state, Line::of(line)) {
             (_, Line::Other) => state,
+            // `cargo test -v` names each `rustc` and build script it starts
+            // while building as it names a test binary later: part of the
+            // build, which only `Finished` ends.
+            (Block::Building, Line::Invocation) => Block::Building,
             (Block::Building | Block::Between | Block::DocTests, Line::Finished) => Block::Between,
             (Block::Between | Block::DocTests, Line::Header | Line::Invocation) => {
                 Block::Headed { doc: false }
@@ -1647,6 +1651,29 @@ error: test failed, to rerun pass `--lib`
             failed("cargo test -v", cut, Some(101)),
             "a cut failing run failed too"
         );
+    }
+
+    /// What `cargo test -v` prints before [`VERBOSE_PASS`] when it has a
+    /// crate to build, recorded with cargo 1.91 on 1 November 2026: a
+    /// `Running` line per `rustc` it starts, in the form it names a test
+    /// binary by. The paths are scrubbed and each command's arguments cut.
+    const VERBOSE_BUILD: &str = "       Dirty demo v0.1.0 (/repo): the file `src/lib.rs` has changed (1793568199.622850000s, 2m 12s after last build at 1793568067.034249803s)
+   Compiling demo v0.1.0 (/repo)
+     Running `/home/user/.rustup/toolchains/stable/bin/rustc --crate-name demo --edition=2024 src/lib.rs --error-format=json --test -C metadata=129a324ba4da494e`
+     Running `/home/user/.rustup/toolchains/stable/bin/rustc --crate-name demo --edition=2024 src/lib.rs --error-format=json --crate-type lib -C metadata=97e611cb28738c43`
+     Running `/home/user/.rustup/toolchains/stable/bin/rustc --crate-name it --edition=2024 tests/it.rs --error-format=json --test -C metadata=9568dda0da9ad79c`
+";
+
+    #[test]
+    fn a_verbose_run_that_built_its_crates_first_is_read_like_one_that_built_nothing() {
+        let built = format!("{VERBOSE_BUILD}{VERBOSE_PASS}");
+        let passed = counts("cargo test -v", &built, Some(0)).expect("a whole verbose run is read");
+        assert_eq!((passed.passed, passed.failed, passed.suites), (4, 0, 3));
+
+        let built = format!("{VERBOSE_BUILD}{VERBOSE_FAIL}");
+        let failing =
+            counts("cargo test -v", &built, Some(101)).expect("a whole failing run is read");
+        assert_eq!((failing.passed, failing.failed, failing.suites), (1, 1, 1));
     }
 
     #[test]
