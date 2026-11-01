@@ -18,7 +18,7 @@ use std::time::SystemTime;
 
 use niobe_core::event::Event;
 use niobe_core::session::{DecisionRecord, SessionState};
-use niobe_store::{SessionId, StoredEvent};
+use niobe_store::{SessionId, Store, StoredEvent};
 
 use crate::args::Narrowing;
 use crate::repo;
@@ -96,18 +96,8 @@ pub fn read(root: &Path) -> Result<Vec<Folded>, String> {
     let Some(store) = repo::read_existing_store(root)? else {
         return Ok(Vec::new());
     };
-    let mut records = Vec::new();
-    for summary in store.sessions().map_err(|e| e.to_string())? {
-        let stored = store.events(summary.id).map_err(|e| e.to_string())?;
-        records.push((summary.id, summary.started_at, stored));
-    }
-    // The store lists the newest first; a record of what was built reads
-    // from the start, and a record's conversations in the order they ran.
-    records.sort_by_key(|(id, _, _)| *id);
-    let (mut folded, bounds): (Vec<Folded>, Vec<Bounds>) = records
-        .iter()
-        .flat_map(|(id, created, stored)| fold(*id, *created, stored, SessionState::new()))
-        .unzip();
+    let records = records(&store)?;
+    let (mut folded, bounds): (Vec<Folded>, Vec<Bounds>) = fold_each(&records);
     let matched = matched_clears(&folded, &bounds);
     for &(before, clearing) in &matched {
         carry_over(&mut folded, &bounds, &records, before, clearing);
@@ -120,6 +110,71 @@ pub fn read(root: &Path) -> Result<Vec<Folded>, String> {
     Ok(folded)
 }
 
+/// Every record the store holds, with when it was created and its events,
+/// oldest first: a record of what was built reads from the start, and a
+/// record's conversations in the order they ran.
+fn records(store: &Store) -> Result<Vec<Record>, String> {
+    let mut records = Vec::new();
+    for summary in store.sessions().map_err(|e| e.to_string())? {
+        let stored = store.events(summary.id).map_err(|e| e.to_string())?;
+        records.push((summary.id, summary.started_at, stored));
+    }
+    // The store lists the newest first.
+    records.sort_by_key(|(id, _, _)| *id);
+    Ok(records)
+}
+
+/// Each record's conversations folded on their own, with their bounds.
+fn fold_each(records: &[Record]) -> (Vec<Folded>, Vec<Bounds>) {
+    records
+        .iter()
+        .flat_map(|(id, created, stored)| fold(*id, *created, stored, SessionState::new()))
+        .unzip()
+}
+
+/// The events of the records that the conversation `session` opens on went
+/// on from, oldest first, so that folded before `session`'s own they leave
+/// it what the shell had when the clear opened it: a sub-agent still
+/// running, its call, a question waiting, the operator's command. None where
+/// `session` does not open on a clear, or no record's running turn is the
+/// one its clear went on with.
+///
+/// Matched as [`read`] matches them, so `--resume` and `niobe cost` agree on
+/// which conversation a clear went on from; and only from a record whose last
+/// conversation it is, since a record that holds a clear of its own after it
+/// did not end where the clear began.
+pub fn carried_into(store: &Store, session: SessionId) -> Result<Vec<StoredEvent>, String> {
+    let records = records(store)?;
+    let (folded, bounds) = fold_each(&records);
+    let matched = matched_clears(&folded, &bounds);
+    let mut chain = Vec::new();
+    let mut opening = bounds.iter().position(|b| b.key == (session, 0));
+    while let Some(clearing) = opening {
+        let Some(&(before, _)) = matched.iter().find(|(_, opened)| *opened == clearing) else {
+            break;
+        };
+        let Some(&Bounds { key: (id, _), .. }) = bounds.get(before) else {
+            break;
+        };
+        let last_of_its_record = bounds.get(before + 1).is_none_or(|next| next.key.0 != id);
+        if !last_of_its_record {
+            break;
+        }
+        chain.push(id);
+        // Earlier ids only, so the walk ends.
+        opening = bounds.iter().position(|b| b.key == (id, 0));
+    }
+    Ok(chain
+        .iter()
+        .rev()
+        .filter_map(|id| records.iter().find(|(record, _, _)| record == id))
+        .flat_map(|(_, _, stored)| stored.iter().cloned())
+        .collect())
+}
+
+/// A record as the store holds it: its id, when it was created and its events.
+type Record = (SessionId, SystemTime, Vec<StoredEvent>);
+
 /// Folds again the record that opens on the clear at `clearing`, from the
 /// state of the session at `before` the clear went on from.
 ///
@@ -129,7 +184,7 @@ pub fn read(root: &Path) -> Result<Vec<Folded>, String> {
 fn carry_over(
     folded: &mut [Folded],
     bounds: &[Bounds],
-    records: &[(SessionId, SystemTime, Vec<StoredEvent>)],
+    records: &[Record],
     before: usize,
     clearing: usize,
 ) {

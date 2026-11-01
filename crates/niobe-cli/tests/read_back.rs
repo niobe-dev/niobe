@@ -331,3 +331,111 @@ fn every_recording_reads_back_as_it_ran() {
         .collect();
     assert!(differ.is_empty(), "{}", differ.join("\n\n"));
 }
+
+/// What `niobe` prints for `args`, run in `dir`, without the line that says
+/// where the events came from.
+fn print(dir: &Path, args: &[&str]) -> String {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_niobe"))
+        .args(args)
+        .current_dir(dir)
+        .env("XDG_CONFIG_HOME", dir.join("no-user-config"))
+        .env("CLAUDE_CONFIG_DIR", dir.join("no-claude-sessions"))
+        .env_remove("HOME")
+        .output()
+        .expect("the binary runs");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .skip(1)
+        .map(|line| format!("{line}\n"))
+        .collect()
+}
+
+/// A sub-agent's call that runs across a clear goes on in the conversation
+/// the clear opened, and the live shell counts it there: started before the
+/// clear and finished after it, by an agent spawned and completed. The store
+/// keeps that conversation as a session of its own that opens on the clear,
+/// so the start is in the session before. `--resume` of it prints what the
+/// shell showed — which is what the whole log, replayed as one, folds to —
+/// and not an end with no start or an agent completed that never spawned.
+#[test]
+fn a_call_running_across_a_clear_reads_back_as_the_shell_counted_it() {
+    use niobe_core::event::{AgentOutcome, ToolOutcome};
+    let read = |id: &str| Event::ToolCallStart {
+        id: id.into(),
+        name: "Read".to_owned(),
+        input: String::new(),
+        summary: None,
+        agent: Some("a1".into()),
+    };
+    let read_ended = |id: &str| Event::ToolCallEnd {
+        id: id.into(),
+        name: "Read".to_owned(),
+        input: String::new(),
+        output: String::new(),
+        bytes: 64,
+        outcome: ToolOutcome::Ok,
+        summary: None,
+        exit_code: None,
+        error: None,
+        command: None,
+        untrimmed: None,
+    };
+    let events = [
+        Event::UserMessage {
+            text: "look around".to_owned(),
+        },
+        Event::AgentSpawn {
+            id: "a1".into(),
+            parent: None,
+            kind: None,
+            label: "explorer".to_owned(),
+        },
+        read("a1c"),
+        Event::UserMessage {
+            text: "/clear".to_owned(),
+        },
+        Event::Cleared,
+        read_ended("a1c"),
+        Event::AgentExit {
+            id: "a1".into(),
+            outcome: AgentOutcome::Completed,
+        },
+        Event::TurnEnded,
+    ];
+
+    let dir = tempfile::tempdir().expect("a scratch directory");
+    std::fs::create_dir(dir.path().join(".git")).expect("a .git directory is made");
+    std::fs::create_dir(dir.path().join(".niobe")).expect("a .niobe directory is made");
+    let path = dir.path().join(".niobe").join("sessions.db");
+    let mut recorder = Recorder::new(Store::open(&path).expect("the store opens"));
+    let mut log = String::new();
+    for (n, event) in events.iter().enumerate() {
+        // The journal starts a session of its own at a clear, as the binary's does.
+        if matches!(event, Event::Cleared) {
+            recorder.start_over();
+        }
+        recorder
+            .record_at(event, arrived(n))
+            .expect("the store keeps the event");
+        log.push_str(&format!(
+            "{}\n",
+            serde_json::to_value(event).expect("an event is JSON")
+        ));
+    }
+    let cleared = recorder.session().expect("the clear opened a session");
+    assert!(cleared.get() > 1, "the clear started a session of its own");
+    std::fs::write(dir.path().join("log.jsonl"), log).expect("the log is written");
+
+    let resumed = print(dir.path(), &["--resume", &cleared.get().to_string()]);
+    let replayed = print(dir.path(), &["replay", "log.jsonl"]);
+    assert!(
+        resumed.contains("tool calls  1 finished · 0 failed · 0 denied\n"),
+        "{resumed}"
+    );
+    assert_eq!(resumed, replayed);
+}

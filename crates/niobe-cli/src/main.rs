@@ -618,6 +618,20 @@ fn resume(
         Taken::Held(recorder) => recorder.events(),
     }
     .map_err(|e| e.to_string())?;
+    // A conversation a clear opened is a session of its own in the store,
+    // but it went on with what the session the clear was typed in still had
+    // running, as the shell folded it live: that session is folded first, so
+    // an agent's call that ends here has the start it had on screen.
+    let carried = match stored.first() {
+        Some(first) if matches!(first.event, Event::Cleared) => {
+            let store = match &taken {
+                Taken::Read(store) => store,
+                Taken::Held(recorder) => recorder.store(),
+            };
+            overview::carried_into(store, session)?
+        }
+        Some(_) | None => Vec::new(),
+    };
     let spent = Spent::of(
         usage_times(stored.iter().map(|s| (&s.event, Some(s.at)))),
         (!piped).then(today),
@@ -648,7 +662,12 @@ fn resume(
     // At the times the store recorded, not at the time it was read: a session
     // resumed on Thursday did not happen on Thursday.
     let clock = niobe_tui::clock::Clock::system();
-    app.extend_at(stored.iter().map(|s| (&s.event, clock.at(s.at))));
+    app.extend_at(
+        carried
+            .iter()
+            .chain(&stored)
+            .map(|s| (&s.event, clock.at(s.at))),
+    );
     // What the record says the plan's windows stood at is a reading from
     // when it was recorded, drawn dated until the backend reports again.
     app.resumed();
