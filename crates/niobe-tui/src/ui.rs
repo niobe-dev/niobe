@@ -2848,7 +2848,7 @@ pub(crate) fn order(
         None => by_agent(entries, grouped),
     };
     match notable_only {
-        true => notable(entries, order),
+        true => notable(entries, order, grouped && only.is_none()),
         false => order,
     }
 }
@@ -2858,8 +2858,12 @@ pub(crate) fn order(
 ///
 /// A heading over a sub-agent's rows stays where every row under it is
 /// left out: it says what the agent did, in a line, and the count under it
-/// says how much of that is left out.
-fn notable(entries: &[Entry], order: Vec<Slot>) -> Vec<Slot> {
+/// says how much of that is left out. Where `grouped`, a run is one agent's
+/// rows or the session's, never both: the group ends where the session's
+/// rows start again with no heading between, and a count running on past
+/// it would add the session's rows to what the heading says its agent did.
+fn notable(entries: &[Entry], order: Vec<Slot>, grouped: bool) -> Vec<Slot> {
+    let agent = |at: usize| entries.get(at).and_then(|entry| entry.agent.as_deref());
     let mut shown: Vec<Slot> = Vec::with_capacity(order.len());
     for slot in order {
         let routine = match slot {
@@ -2869,7 +2873,11 @@ fn notable(entries: &[Entry], order: Vec<Slot>) -> Vec<Slot> {
             Slot::Heading { .. } | Slot::Hidden { .. } => false,
         };
         match (routine, slot, shown.last_mut()) {
-            (true, _, Some(Slot::Hidden { count, .. })) => *count += 1,
+            (true, Slot::Entry(at), Some(Slot::Hidden { first, count }))
+                if !grouped || agent(*first) == agent(at) =>
+            {
+                *count = count.saturating_add(1);
+            }
             (true, Slot::Entry(first), _) => shown.push(Slot::Hidden { first, count: 1 }),
             _ => shown.push(slot),
         }
@@ -8991,6 +8999,65 @@ mod tests {
             rows.iter()
                 .any(|row| row.starts_with("… 1 routine entry hidden")),
             "the read after the reply is counted where it was: {text}"
+        );
+    }
+
+    /// Grouped by agent and notable only, the count under an agent's heading
+    /// is of that agent's rows alone: the session's routine rows after the
+    /// group are counted where they are, on a row of their own, not added
+    /// to what the heading says the agent left out.
+    #[test]
+    fn grouped_and_notable_only_the_count_under_a_heading_is_the_agents_alone() {
+        use niobe_core::event::{AgentId, Event};
+        let mut app = App::new(crate::app::Repo::default());
+        app.apply(&Event::UserMessage {
+            text: "go".to_owned(),
+        });
+        app.apply(&Event::AgentSpawn {
+            id: AgentId::new("toolu_a"),
+            parent: None,
+            kind: Some("Explore".to_owned()),
+            label: "Explore: look".to_owned(),
+        });
+        let start = |id: &str, agent: Option<&str>| Event::ToolCallStart {
+            id: id.into(),
+            name: if agent.is_some() { "Read" } else { "Grep" }.to_owned(),
+            input: String::new(),
+            summary: Some(format!("{id}.rs")),
+            agent: agent.map(AgentId::new),
+        };
+        app.apply(&start("a1", Some("toolu_a")));
+        app.apply(&start("m1", None));
+
+        let at = |head: &str| {
+            app.entries()
+                .iter()
+                .position(|entry| entry.head == head)
+                .expect("the entry is in the transcript")
+        };
+        let (agents, session) = (at("Read"), at("Grep"));
+        let order = order(app.entries(), true, true, None);
+        assert_eq!(
+            order[1..3],
+            [
+                Slot::Heading {
+                    first: agents,
+                    calls: 1
+                },
+                Slot::Hidden {
+                    first: agents,
+                    count: 1
+                },
+            ],
+            "{order:?}"
+        );
+        assert_eq!(
+            order.get(3),
+            Some(&Slot::Hidden {
+                first: session,
+                count: 1
+            }),
+            "the session's own row is counted on its own: {order:?}"
         );
     }
 
