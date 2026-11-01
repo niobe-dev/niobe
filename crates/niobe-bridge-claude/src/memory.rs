@@ -39,8 +39,9 @@
 //! opened, and is listed without being read ([`Withheld`]) where it is in the
 //! CLI's configuration directory and not markdown — its sign-in is kept there
 //! — or under a hidden entry of the home directory. A file the repository
-//! holds, and what it imports, is read only inside the repository or as one
-//! of the CLI's markdown files, because a cloned repository's `@path` would
+//! holds, and what it imports however many files deep — through the CLI's
+//! markdown too — is read only inside the repository or as one of the CLI's
+//! markdown files, because a cloned repository's `@path` would
 //! otherwise choose what on the machine is read and shown; the auto-memory
 //! index's entries only beside it. The operator's own files outside the
 //! repository import from anywhere else.
@@ -348,7 +349,7 @@ impl Found {
             withheld: None,
         });
         let from = path.parent().unwrap_or(Path::new(""));
-        let held = Held::to_repository(self.places.in_repository(&real));
+        let held = held.for_imports_of(self.places.in_repository(&real));
         for import in imports {
             if let Some(target) = resolve(&import, from, lookup.home) {
                 self.add(Scope::Imported, &target, depth + 1, &held, lookup);
@@ -494,6 +495,19 @@ impl Held {
         match inside {
             true => Self::Repository,
             false => Self::Free,
+        }
+    }
+
+    /// How the imports of a file named as `self` says are held, where the
+    /// file really is `inside` the repository or not. What the repository
+    /// named, it named the imports of too, wherever the file lies: the CLI's
+    /// markdown it may read holds the agent's own plans and notes and the
+    /// plugins it cloned, which a repository can steer, so a file there does
+    /// not hand the imports back to the operator.
+    fn for_imports_of(&self, inside: bool) -> Self {
+        match self {
+            Self::Free => Self::to_repository(inside),
+            Self::Repository | Self::To(_) => self.clone(),
         }
     }
 }
@@ -1202,6 +1216,31 @@ mod tests {
         assert_eq!(
             (shared.text.as_deref(), shared.withheld),
             (Some("shared notes\n"), None)
+        );
+    }
+
+    /// A markdown file in the CLI's directory is read when the repository
+    /// imports it, but what that file imports is still the repository's
+    /// choice: markdown there is not all the operator's — the agent writes
+    /// its plans and notes there, and a plugin's marketplace is cloned there.
+    #[test]
+    fn what_a_repository_reaches_through_the_clis_markdown_is_held_to_the_repository() {
+        let (_dir, home, config, repo) = signed_in();
+        write(&home.join("Documents").join("secret.txt"), "TOP SECRET\n");
+        write(
+            &config.join("plans").join("plan.md"),
+            "@~/Documents/secret.txt\n",
+        );
+        write(&repo.join("CLAUDE.md"), "@~/.claude/plans/plan.md\n");
+
+        let found = found_in(&home, &config, &repo);
+
+        let plan = listed(&found, &config.join("plans").join("plan.md"));
+        assert_eq!(plan.text.as_deref(), Some("@~/Documents/secret.txt\n"));
+        let secret = listed(&found, &home.join("Documents").join("secret.txt"));
+        assert_eq!(
+            (secret.text.as_deref(), secret.withheld),
+            (None, Some(Withheld::Outside))
         );
     }
 
