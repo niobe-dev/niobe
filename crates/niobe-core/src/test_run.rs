@@ -27,6 +27,11 @@
 //! binary by the command that runs it rather than by its target, and the
 //! doc-tests by the `rustdoc` command under their own header.
 //!
+//! The doc-tests are one binary however many summaries they print: an edition
+//! 2024 crate's are run as those rustdoc merges into one program and those it
+//! cannot, a `compile_fail` one among them, each set with a block of its own
+//! under the one `Doc-tests` header.
+//!
 //! A quiet run, `cargo test -q`, is a test run whose counts are never read:
 //! it prints no line saying where the build ended, so its whole output and
 //! the last part of it look the same. Colour codes cargo puts around its
@@ -726,10 +731,6 @@ fn failures_closed_at(lines: &[&str], at: usize) -> Option<FailedTests> {
     let (before, from) = lines.split_at_checked(at)?;
     let (closing, after) = from.split_first()?;
     let summary = Summary::of(closing).filter(|summary| summary.failed > 0)?;
-    let binary = after
-        .iter()
-        .find(|line| !line.is_empty() && !is_doc_tests_timing(line))
-        .and_then(|line| rerun_as(line))?;
     let (blank, list) = before.split_last()?;
     if !blank.is_empty() {
         return None;
@@ -739,10 +740,40 @@ fn failures_closed_at(lines: &[&str], at: usize) -> Option<FailedTests> {
         .iter()
         .map(|line| failing_test(line).map(str::to_owned))
         .collect::<Option<_>>()?;
-    (tests.len() as u64 == summary.failed).then_some(FailedTests {
+    if tests.len() as u64 != summary.failed {
+        return None;
+    }
+    let doc_tests = tests.iter().all(|test| is_doc_test(test));
+    let binary = named_after(after, doc_tests)?;
+    Some(FailedTests {
         binary: binary.to_owned(),
         tests,
     })
+}
+
+/// The arguments cargo names a binary with after its summary, which `after`
+/// follows: its first line that is not blank or rustdoc's timing line. For
+/// the doc-tests that is past the further sets of them rustdoc runs under
+/// the same header, each from its `running <n> tests` to its summary.
+fn named_after<'a>(after: &[&'a str], doc_tests: bool) -> Option<&'a str> {
+    let mut lines = after.iter();
+    while let Some(line) = lines.next() {
+        if line.is_empty() || is_doc_tests_timing(line) {
+            continue;
+        }
+        if doc_tests && running(line).is_some() {
+            lines.find(|line| Summary::of(line).is_some())?;
+            continue;
+        }
+        return rerun_as(line);
+    }
+    None
+}
+
+/// Whether a test's name is a doc-test's, `src/lib.rs - add (line 3)`: a
+/// unit or integration test is named by its path, which has no spaces.
+fn is_doc_test(name: &str) -> bool {
+    name.contains(" - ") && name.contains(" (line ") && name.ends_with(')')
 }
 
 /// rustdoc's `all doctests ran in 0.87s; merged doctests compilation took
@@ -796,7 +827,7 @@ fn tests_started(output: &str) -> bool {
         }
         match Line::of(line) {
             Line::Finished => built = true,
-            Line::Header | Line::Invocation => headed = built,
+            Line::Header | Line::DocTestsHeader | Line::Invocation => headed = built,
             Line::Running(_) => started |= headed,
             Line::Result(_) | Line::Other => {}
         }
@@ -856,30 +887,59 @@ fn whole_run(output: &str) -> Option<TestCounts> {
         }
         state = match (state, Line::of(line)) {
             (_, Line::Other) => state,
-            (Block::Building | Block::Between, Line::Finished) => Block::Between,
-            (Block::Between, Line::Header | Line::Invocation) => Block::Headed,
+            (Block::Building | Block::Between | Block::DocTests, Line::Finished) => Block::Between,
+            (Block::Between | Block::DocTests, Line::Header | Line::Invocation) => {
+                Block::Headed { doc: false }
+            }
+            (Block::Between | Block::DocTests, Line::DocTestsHeader) => Block::Headed { doc: true },
             // `cargo test -v` names the `rustdoc` it runs on a line of its
             // own, under the `Doc-tests` header of the block it belongs to.
             // Only that line: a header straight after a header is a block
             // cut out of the middle of the run.
-            (Block::Headed, Line::Invocation) => Block::Headed,
-            (Block::Headed, Line::Running(tests)) => Block::Running(tests),
-            (Block::Running(tests), Line::Result(result)) if result.total() == Some(tests) => {
+            (Block::Headed { doc }, Line::Invocation) => Block::Headed { doc },
+            (Block::Headed { doc }, Line::Running(tests)) => Block::Running {
+                tests,
+                doc,
+                first: true,
+            },
+            // rustdoc runs the doc-tests it merges into one binary apart from
+            // those it cannot, such as a `compile_fail` one, each set with a
+            // summary of its own under the one header.
+            (Block::DocTests, Line::Running(tests)) => Block::Running {
+                tests,
+                doc: true,
+                first: false,
+            },
+            (Block::Running { tests, doc, first }, Line::Result(result))
+                if result.total() == Some(tests) =>
+            {
                 counts.passed = counts.passed.saturating_add(result.passed);
                 counts.failed = counts.failed.saturating_add(result.failed);
                 counts.ignored = counts.ignored.saturating_add(result.ignored);
-                counts.suites = counts.suites.saturating_add(1);
-                Block::Between
+                if first {
+                    counts.suites = counts.suites.saturating_add(1);
+                }
+                match doc {
+                    true => Block::DocTests,
+                    false => Block::Between,
+                }
             }
             // A test's own output can say anything, including words that look
             // like these, but only as a whole line with nothing around it
             // would it be mistaken for one; that is a run nobody can read.
-            (Block::Building | Block::Between | Block::Headed | Block::Running(_), _) => {
+            (
+                Block::Building
+                | Block::Between
+                | Block::DocTests
+                | Block::Headed { .. }
+                | Block::Running { .. },
+                _,
+            ) => {
                 return None;
             }
         };
     }
-    (state == Block::Between && counts.suites > 0).then_some(counts)
+    (matches!(state, Block::Between | Block::DocTests) && counts.suites > 0).then_some(counts)
 }
 
 /// Where in a `cargo test` run the output has got to.
@@ -889,10 +949,17 @@ enum Block {
     Building,
     /// Between two test binaries, or after the last.
     Between,
-    /// A binary's header, and nothing it printed yet.
-    Headed,
-    /// A binary running this many tests, with no summary yet.
-    Running(u64),
+    /// After a summary of the doc-tests, where another set of them may
+    /// follow under the same header, or anything that may follow
+    /// [`Block::Between`].
+    DocTests,
+    /// A binary's header, and nothing it printed yet; `doc` where it is the
+    /// doc-tests'.
+    Headed { doc: bool },
+    /// A binary running this many tests, with no summary yet; `doc` where
+    /// they are doc-tests, and `first` where they are the first set run
+    /// under their header, which the binary is counted with.
+    Running { tests: u64, doc: bool, first: bool },
 }
 
 /// The lines of a `cargo test` output that say where the run is.
@@ -900,9 +967,10 @@ enum Block {
 enum Line {
     /// `    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.31s`
     Finished,
-    /// `     Running unittests src/lib.rs (target/debug/deps/…)` or
-    /// `   Doc-tests demo`.
+    /// `     Running unittests src/lib.rs (target/debug/deps/…)`.
     Header,
+    /// `   Doc-tests demo`.
+    DocTestsHeader,
     /// ``     Running `/repo/target/debug/deps/demo-…` ``, as `cargo test
     /// -v` names a binary, or the `rustdoc` it runs the doc-tests with.
     Invocation,
@@ -926,6 +994,8 @@ impl Line {
                     Line::Finished
                 } else if is_header(words) {
                     Line::Header
+                } else if is_doc_tests_header(words) {
+                    Line::DocTestsHeader
                 } else if is_invocation(words) {
                     Line::Invocation
                 } else {
@@ -949,14 +1019,18 @@ fn is_invocation(words: &str) -> bool {
         .is_some_and(|rest| rest.len() > 1 && rest.ends_with('`'))
 }
 
-/// `Running <what> (<binary>)` or `Doc-tests <crate>`.
+/// `Running <what> (<binary>)`.
 fn is_header(words: &str) -> bool {
-    match words.strip_prefix("Running ") {
-        Some(rest) => rest.contains(" (") && rest.ends_with(')'),
-        None => words
-            .strip_prefix("Doc-tests ")
-            .is_some_and(|name| !name.is_empty() && !name.contains(' ')),
-    }
+    words
+        .strip_prefix("Running ")
+        .is_some_and(|rest| rest.contains(" (") && rest.ends_with(')'))
+}
+
+/// `Doc-tests <crate>`.
+fn is_doc_tests_header(words: &str) -> bool {
+    words
+        .strip_prefix("Doc-tests ")
+        .is_some_and(|name| !name.is_empty() && !name.contains(' '))
 }
 
 /// The count in `running <n> tests`, or `running 1 test`.
@@ -1841,6 +1915,116 @@ test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; 
 all doctests ran in 0.87s; merged doctests compilation took 0.38s
 error: doctest failed, to rerun pass `--doc`
 ";
+
+    // Recorded from `cargo test` 1.91 on an edition 2024 crate with two
+    // doc-tests rustdoc merges into one binary and a `compile_fail` one it
+    // cannot, which it runs on its own: one `Doc-tests` header, a block for
+    // each.
+    const DOC_BLOCKS_PASSED: &str =
+        "    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.83s
+     Running unittests src/lib.rs (target/debug/deps/dtdemo-27a842ebed4233b0)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests dtdemo
+
+running 2 tests
+test src/lib.rs - add (line 1) ... ok
+test src/lib.rs - add (line 5) ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+
+running 1 test
+test src/lib.rs - add (line 9) - compile fail ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+all doctests ran in 1.52s; merged doctests compilation took 0.62s
+";
+
+    // The same crate with a merged doc-test and the `compile_fail` one both
+    // failing.
+    const DOC_BLOCKS_FAILED: &str =
+        "    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.34s
+     Running unittests src/lib.rs (target/debug/deps/dtdemo-27a842ebed4233b0)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests dtdemo
+
+running 2 tests
+test src/lib.rs - add (line 1) ... FAILED
+test src/lib.rs - add (line 5) ... ok
+
+failures:
+
+---- src/lib.rs - add (line 1) stdout ----
+Test executable failed (exit status: 101).
+
+stderr:
+
+thread 'main' (10087171) panicked at /tmp/rustdoctest8MOMxA/doctest_bundle_2024.rs:6:1:
+assertion `left == right` failed
+  left: 3
+ right: 4
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+
+failures:
+    src/lib.rs - add (line 1)
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+
+running 1 test
+test src/lib.rs - add (line 9) - compile fail ... FAILED
+
+failures:
+
+---- src/lib.rs - add (line 9) stdout ----
+Test compiled successfully, but it's marked `compile_fail`.
+
+failures:
+    src/lib.rs - add (line 9)
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.28s
+
+all doctests ran in 1.21s; merged doctests compilation took 0.39s
+error: doctest failed, to rerun pass `--doc`
+";
+
+    #[test]
+    fn doc_tests_run_in_several_blocks_are_counted_whole_as_one_binary() {
+        assert_eq!(
+            counts("cargo test", DOC_BLOCKS_PASSED, Some(0)),
+            counted(3, 0, 0, 2)
+        );
+        assert_eq!(
+            counts("cargo test", DOC_BLOCKS_FAILED, Some(101)),
+            counted(1, 2, 0, 2)
+        );
+    }
+
+    #[test]
+    fn a_block_after_one_that_is_not_the_doc_tests_is_a_run_nobody_can_read() {
+        let headless = DOC_BLOCKS_PASSED.replace("   Doc-tests dtdemo\n\n", "");
+        assert_eq!(counts("cargo test", &headless, Some(0)), None);
+    }
+
+    #[test]
+    fn each_failing_doc_test_block_is_named_with_the_doc_tests() {
+        let named = failures(DOC_BLOCKS_FAILED);
+        assert_eq!(named.len(), 2, "both blocks' lists are whole");
+        assert!(named.iter().all(|list| list.binary == "--doc"));
+        assert_eq!(named[0].tests, ["src/lib.rs - add (line 1)"]);
+        assert_eq!(named[1].tests, ["src/lib.rs - add (line 9)"]);
+    }
 
     #[test]
     fn a_doc_test_that_failed_is_named_with_the_doc_tests() {
