@@ -389,3 +389,75 @@ fn a_session_that_ended_on_a_clear_is_not_left_open_in_the_middle_of_a_turn() {
         "{page}"
     );
 }
+
+/// A sub-agent still running when the conversation is cleared goes on in the
+/// conversation the clear started, as the live fold carries it there: the
+/// session before the clear did not leave it open, and the one after reports
+/// whether it ever ended.
+#[test]
+fn a_sub_agent_running_across_a_clear_is_left_open_only_where_it_never_ended() {
+    use niobe_core::{AgentOutcome, Event};
+
+    let dir = tempfile::tempdir().expect("a temporary directory can be created");
+    let root = dir.path().join("catalog");
+    std::fs::create_dir_all(root.join(".git")).expect("a .git directory can be made");
+    std::fs::create_dir(root.join(".niobe")).expect("a .niobe directory can be made");
+    let store = Store::open(&root.join(".niobe").join("sessions.db"))
+        .expect("a store opens in a temporary directory");
+    let prompt = |text: &str| Event::UserMessage {
+        text: text.to_owned(),
+    };
+    let spawned = |id: &str| Event::AgentSpawn {
+        id: id.into(),
+        parent: None,
+        kind: None,
+        label: "explorer".to_owned(),
+    };
+    let at = |minutes: u64| UNIX_EPOCH + Duration::from_millis(RECORDED_ON_MS + minutes * 60_000);
+    let record = |events: Vec<(Event, u64)>| {
+        let session = store.create_session().expect("a session is created");
+        for (event, minutes) in events {
+            store
+                .append_at(session, &event, at(minutes))
+                .expect("an append succeeds");
+        }
+    };
+    // Session 1 is cleared with one agent running, which ends in session 2.
+    record(vec![
+        (prompt("look around"), 0),
+        (spawned("a1"), 1),
+        (Event::TurnEnded, 1),
+        (prompt("/clear"), 3),
+    ]);
+    record(vec![
+        (Event::Cleared, 3),
+        (Event::TurnEnded, 3),
+        (
+            Event::AgentExit {
+                id: "a1".into(),
+                outcome: AgentOutcome::Completed,
+            },
+            4,
+        ),
+    ]);
+    // Session 3 is cleared with one agent running, which session 4 never
+    // hears the end of.
+    record(vec![
+        (prompt("look again"), 10),
+        (spawned("a2"), 11),
+        (Event::TurnEnded, 11),
+        (prompt("/clear"), 13),
+    ]);
+    record(vec![(Event::Cleared, 13), (Event::TurnEnded, 13)]);
+
+    let page = printed(&root);
+
+    assert!(
+        page.contains(
+            "## Left open\n\n\
+             - Session 4: 1 sub-agent never reported an end — `niobe --resume 4`\n\
+             - Whether what the sessions changed is committed could not be read from git.\n"
+        ),
+        "{page}"
+    );
+}

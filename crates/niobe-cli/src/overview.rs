@@ -43,7 +43,9 @@ pub struct Folded {
     /// Whether its last turn went on in a session a clear opened: the prompt
     /// that typed the clear is the last of this session's record, and the
     /// turn's end is the first of the next one's, so the turn this fold
-    /// leaves running did not stop.
+    /// leaves running did not stop. What else it had open at the clear — a
+    /// sub-agent running, a question waiting — went on there too, and is
+    /// that session's to end.
     pub cleared: bool,
     /// What it had open when the process it ran in was left, where nothing
     /// after that took it up again: the fold ends a turn there, cut, and
@@ -83,35 +85,86 @@ impl Open {
 /// only what was spent after its last clear: each of its conversations is
 /// folded as a session of its own instead, under the record's id, as the
 /// store now keeps them.
+///
+/// A session the store started at a clear is folded on from the session the
+/// clear was typed in, as the shell folded it live: what a clear carries into
+/// the new conversation — a sub-agent still running, a question still
+/// waiting — is that conversation's from then on, so it is the one that
+/// reports whether it ever ended, and the session before it left nothing of
+/// it open.
 pub fn read(root: &Path) -> Result<Vec<Folded>, String> {
     let Some(store) = repo::read_existing_store(root)? else {
         return Ok(Vec::new());
     };
-    let mut read = Vec::new();
+    let mut records = Vec::new();
     for summary in store.sessions().map_err(|e| e.to_string())? {
         let stored = store.events(summary.id).map_err(|e| e.to_string())?;
-        read.extend(fold(summary.id, summary.started_at, &stored));
+        records.push((summary.id, summary.started_at, stored));
     }
     // The store lists the newest first; a record of what was built reads
     // from the start, and a record's conversations in the order they ran.
-    read.sort_by_key(|(_, bounds)| bounds.key);
-    let (mut folded, bounds): (Vec<Folded>, Vec<Bounds>) = read.into_iter().unzip();
-    mark_cleared(&mut folded, &bounds);
+    records.sort_by_key(|(id, _, _)| *id);
+    let (mut folded, bounds): (Vec<Folded>, Vec<Bounds>) = records
+        .iter()
+        .flat_map(|(id, created, stored)| fold(*id, *created, stored, SessionState::new()))
+        .unzip();
+    let matched = matched_clears(&folded, &bounds);
+    for &(before, clearing) in &matched {
+        carry_over(&mut folded, &bounds, &records, before, clearing);
+    }
+    for (before, _) in matched {
+        if let Some(session) = folded.get_mut(before) {
+            session.cleared = true;
+        }
+    }
     Ok(folded)
+}
+
+/// Folds again the record that opens on the clear at `clearing`, from the
+/// state of the session at `before` the clear went on from.
+///
+/// Only a record that opens on its clear: a conversation a clear opened
+/// inside a record, which a store written before the store split sessions
+/// at a clear holds, was already folded on through that clear.
+fn carry_over(
+    folded: &mut [Folded],
+    bounds: &[Bounds],
+    records: &[(SessionId, SystemTime, Vec<StoredEvent>)],
+    before: usize,
+    clearing: usize,
+) {
+    let Some((id, 0)) = bounds.get(clearing).map(|bounds| bounds.key) else {
+        return;
+    };
+    let (Some(start), Some((_, created, stored))) = (
+        folded.get(before).map(|session| session.state.clone()),
+        records.iter().find(|(record, _, _)| *record == id),
+    ) else {
+        return;
+    };
+    let again = fold(id, *created, stored, start);
+    for (place, (session, _)) in folded.iter_mut().skip(clearing).zip(again) {
+        *place = session;
+    }
 }
 
 /// The conversations of the record `id`, each from the clear that opened it,
 /// or from the record's start, to the event before the next clear, folded,
 /// with their bounds. A record with no events is one conversation of none.
 ///
-/// One fold runs through the whole record, as it ran live, and each
-/// conversation is what it held just before the clear that ended it: what a
-/// clear keeps — how the session is billed, its profile and model, the plan's
-/// windows — is said once in a record, before the first clear, and the
-/// conversations after it are still billed by it.
-fn fold(id: SessionId, created: SystemTime, stored: &[StoredEvent]) -> Vec<(Folded, Bounds)> {
+/// One fold runs through the whole record, as it ran live, from `start`, and
+/// each conversation is what it held just before the clear that ended it:
+/// what a clear keeps — how the session is billed, its profile and model, the
+/// plan's windows — is said once in a record, before the first clear, and
+/// the conversations after it are still billed by it.
+fn fold(
+    id: SessionId,
+    created: SystemTime,
+    stored: &[StoredEvent],
+    start: SessionState,
+) -> Vec<(Folded, Bounds)> {
     let mut folded = Vec::new();
-    let mut state = SessionState::new();
+    let mut state = start;
     let mut decided_at = Vec::new();
     let mut first: Option<&StoredEvent> = None;
     let mut last: Option<&StoredEvent> = None;
@@ -209,7 +262,20 @@ struct Bounds {
 }
 
 /// Marks each session whose running turn a later session's clear went on
-/// with, `bounds[i]` being `folded[i]`'s.
+/// with, `bounds[i]` being `folded[i]`'s: see [`matched_clears`].
+#[cfg(test)]
+fn mark_cleared(folded: &mut [Folded], bounds: &[Bounds]) {
+    for (before, _) in matched_clears(folded, bounds) {
+        if let Some(session) = folded.get_mut(before) {
+            session.cleared = true;
+        }
+    }
+}
+
+/// Each session whose running turn a later session's clear went on with, by
+/// its place in `folded`, beside the place of the session that clear opened,
+/// `bounds[i]` being `folded[i]`'s; in the order of the sessions the clears
+/// opened.
 ///
 /// The store keeps no link between the two: the journal starts a session at
 /// the clear and nothing else. So each session that opens on a clear is
@@ -217,32 +283,36 @@ struct Bounds {
 /// before the clear, of those created before it and not matched already:
 /// another shell's session can come between the two in the store's
 /// numbering, but not between the prompt that typed a clear and the clear.
-fn mark_cleared(folded: &mut [Folded], bounds: &[Bounds]) {
-    let mut clears: Vec<(SystemTime, (SessionId, usize))> = bounds
+fn matched_clears(folded: &[Folded], bounds: &[Bounds]) -> Vec<(usize, usize)> {
+    let mut clears: Vec<(SystemTime, (SessionId, usize), usize)> = bounds
         .iter()
-        .filter_map(|bounds| match bounds.first {
-            Some((at, true)) => Some((at, bounds.key)),
+        .enumerate()
+        .filter_map(|(index, bounds)| match bounds.first {
+            Some((at, true)) => Some((at, bounds.key, index)),
             Some((_, false)) | None => None,
         })
         .collect();
     clears.sort_unstable();
-    for (cleared_at, clearing) in clears {
+    let mut matched: Vec<(usize, usize)> = Vec::new();
+    for (cleared_at, clearing, at) in clears {
         let before = folded
             .iter()
             .zip(bounds)
             .enumerate()
-            .filter(|(_, (session, bounds))| {
+            .filter(|(index, (session, bounds))| {
                 bounds.key < clearing
-                    && !session.cleared
+                    && !matched.iter().any(|(before, _)| before == index)
                     && session.state.turn_running()
                     && bounds.last.is_some_and(|last| last <= cleared_at)
             })
             .max_by_key(|(_, (_, bounds))| (bounds.last, bounds.key))
             .map(|(index, _)| index);
-        if let Some(session) = before.and_then(|index| folded.get_mut(index)) {
-            session.cleared = true;
+        if let Some(before) = before {
+            matched.push((before, at));
         }
     }
+    matched.sort_unstable_by_key(|(_, clearing)| *clearing);
+    matched
 }
 
 /// The page, for the shell's overview: written on a thread of its own each
@@ -522,14 +592,18 @@ fn left_open(sessions: &[Folded], uncommitted: Option<&[String]>) -> Vec<String>
         .iter()
         .filter_map(|session| {
             let s = &session.state;
-            let open = session.left.unwrap_or_else(|| Open::of(s));
+            // What a clear went on with is the next conversation's to end.
+            let open = match session.cleared {
+                true => Open::default(),
+                false => session.left.unwrap_or_else(|| Open::of(s)),
+            };
             let mut what = Vec::new();
             if open.questions > 0 {
                 what.push(format!(
                     "stopped waiting on {}",
                     counted(open.questions as u64, "question", "questions")
                 ));
-            } else if open.turn && !session.cleared {
+            } else if open.turn {
                 what.push("stopped in the middle of a turn".to_owned());
             }
             if s.test_run().is_some_and(|run| run.failed) {
@@ -1157,7 +1231,7 @@ mod tests {
 
     fn read_whole(id: u32, events: Vec<Event>) -> Folded {
         let id = id.to_string().parse().expect("a number is a session id");
-        let mut read = fold(id, UNIX_EPOCH, &stored(events));
+        let mut read = fold(id, UNIX_EPOCH, &stored(events), SessionState::new());
         assert_eq!(read.len(), 1, "one conversation");
         read.remove(0).0
     }
