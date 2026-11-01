@@ -61,7 +61,8 @@ struct Machine<'a> {
     wait: &'a mut Wait,
     clock: &'a crate::clock::Clock,
     /// Hands the terminal back, stops the process, and takes the terminal
-    /// again once the process is continued; or, for a stop the process could
+    /// again once the process is continued, where no signal sent while it was
+    /// stopped ends the session; or, for a stop the process could
     /// not catch, takes the terminal again as it finds it.
     suspend: &'a mut dyn FnMut(Hold) -> io::Result<()>,
     /// Writes the bytes that call the operator back — a bell, a desktop
@@ -72,7 +73,9 @@ struct Machine<'a> {
 /// What the loop asks of the terminal around a stop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Hold {
-    /// Hand it back, stop, and take it again when continued.
+    /// Hand it back, stop, and take it again when continued — unless a
+    /// signal sent while stopped ends the session, which leaves it handed
+    /// back.
     Suspend,
     /// Take it again after a stop nothing caught.
     Reassert,
@@ -229,10 +232,21 @@ fn open(app: App, around: Around<'_>) -> io::Result<(Ended, App)> {
     // the operator is at their shell, and is on screen when they come back.
     let mut suspend = |hold: Hold| -> io::Result<()> {
         match hold {
+            // A signal that ends the session, sent while it was stopped, ends
+            // it where it stands: bash's `kill %1` sends a stopped job SIGTERM
+            // and then SIGCONT, and a terminal that hangs up sends it SIGHUP
+            // and SIGCONT. The terminal was handed back at the stop and is
+            // the operator's shell's; taken again, the screen would be drawn
+            // over their prompt for the moment before the quit, and a job in
+            // the background that sets the terminal's modes is stopped again
+            // by the SIGTTOU that sends it, so the signal would not end it.
             Hold::Suspend => {
                 guard.suspend()?;
                 stop_until_continued()?;
-                guard.resume()
+                match shutdown.requested() {
+                    Some(_) => Ok(()),
+                    None => guard.resume(),
+                }
             }
             Hold::Reassert => guard.reassert(),
             Hold::Lend => guard.suspend(),
@@ -439,18 +453,7 @@ fn event_loop<B: Backend<Error = io::Error>>(
                 }
             }
 
-            match machine.shutdown.requested() {
-                None => {}
-                Some(Stop::Requested) => app.quit(),
-                // SIGHUP is the terminal going away, reported by the kernel rather
-                // than by the wait: a session in the session that owns the terminal
-                // is told twice, and whichever telling arrives first is the one that
-                // says what this session ended as.
-                Some(Stop::TerminalGone) => {
-                    ended = Ended::TerminalGone;
-                    app.quit();
-                }
-            }
+            quit_on_signal(app, machine.shutdown, &mut ended);
 
             // Both are read, so that a Ctrl+Z and a SIGTSTP arriving in one tick
             // are one stop rather than a second waiting for the continue.
@@ -458,6 +461,9 @@ fn event_loop<B: Backend<Error = io::Error>>(
             let suspended = suspend && !app.should_quit();
             if suspended {
                 (machine.suspend)(Hold::Suspend)?;
+                // A signal sent while the shell was stopped is the session's
+                // end, and the terminal it left handed back is not drawn on.
+                quit_on_signal(app, machine.shutdown, &mut ended);
             }
             // After a stop the screen holds whatever was drawn on it meanwhile, and
             // a draw sends only what changed since the last frame. A resize to the
@@ -486,6 +492,23 @@ fn event_loop<B: Backend<Error = io::Error>>(
         ended = Ended::Open(target);
     }
     Ok(ended)
+}
+
+/// Quits on what a signal has asked of the session, if one has, and says in
+/// `ended` why the session ended.
+fn quit_on_signal(app: &mut App, shutdown: &Shutdown, ended: &mut Ended) {
+    match shutdown.requested() {
+        None => {}
+        Some(Stop::Requested) => app.quit(),
+        // SIGHUP is the terminal going away, reported by the kernel rather
+        // than by the wait: a session in the session that owns the terminal
+        // is told twice, and whichever telling arrives first is the one that
+        // says what this session ended as.
+        Some(Stop::TerminalGone) => {
+            *ended = Ended::TerminalGone;
+            app.quit();
+        }
+    }
 }
 
 /// Calls the operator back, where something since the last pass calls for

@@ -4060,3 +4060,60 @@ fn ctrl_z_suspends_the_shell_as_a_sigtstp_would() {
         terminal.typed(CTRL_Z);
     });
 }
+
+/// Stops the shell with a SIGTSTP, then sends it `ending` and a SIGCONT, as
+/// bash's `kill %1` does to a stopped job and as the kernel does to a stopped
+/// job whose terminal hangs up, and asserts that the shell ends without
+/// taking the terminal again.
+///
+/// The terminal was handed back at the stop and belongs to the operator's
+/// shell. Taken again, the alternate screen, raw mode and the keyboard push
+/// would land over the operator's prompt for the moment before the quit — and
+/// a job in the background that sets the terminal's modes is stopped again by
+/// the SIGTTOU that sends it, so the signal meant to end it would leave it
+/// stopped instead.
+fn a_signal_sent_while_stopped_ends_the_shell_where_it_stands(path: &str, ending: Signal) {
+    let repo = repo();
+    let (terminal, slave) = Terminal::open();
+    let mut shell = shell_on(&slave, repo.path());
+    terminal.shows(OPENING_FRAME);
+
+    signal(&shell, Signal::TSTP);
+    stopped(&shell);
+    terminal.caught_up();
+    let continued = terminal.mark();
+    signal(&shell, ending);
+    signal(&shell, Signal::CONT);
+
+    let (took, status) = ended(&mut shell);
+    let (drawn, cooked) = released(terminal, slave);
+
+    assert!(
+        took < DEADLINE,
+        "the shell took {took:?} to act on {path}, over the {DEADLINE:?} it has"
+    );
+    assert!(status.success(), "{path} ended the shell with {status}");
+    assert!(cooked, "on {path} the shell left the terminal in raw mode");
+    let after = &drawn[continued..];
+    assert!(
+        !after.contains(ENTER_ALTERNATE_SCREEN) && !after.contains(KEYBOARD_ON),
+        "on {path} the shell took back the terminal it had handed to the operator's shell \
+         before it ended: {after:?}"
+    );
+}
+
+#[test]
+fn a_sigterm_sent_while_stopped_ends_the_shell_without_taking_the_terminal_again() {
+    a_signal_sent_while_stopped_ends_the_shell_where_it_stands(
+        "a SIGTERM while stopped",
+        Signal::TERM,
+    );
+}
+
+#[test]
+fn a_hangup_while_stopped_ends_the_shell_without_taking_the_terminal_again() {
+    a_signal_sent_while_stopped_ends_the_shell_where_it_stands(
+        "a hangup while stopped",
+        Signal::HUP,
+    );
+}
