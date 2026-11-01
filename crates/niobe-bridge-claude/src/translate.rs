@@ -4189,7 +4189,10 @@ fn target_of(input: &serde_json::Value) -> Option<String> {
 /// but a shell command that asks to leave the CLI's sandbox reaches what the
 /// same command inside it cannot, and `Bash(cargo test)` was not written
 /// about that. Such a call has no target, so only a rule for the whole tool
-/// answers it and the operator is asked otherwise.
+/// answers it and the operator is asked otherwise. So does one that widens
+/// the sandbox's network to the hosts in its `allowed_domains`, and one that
+/// names another machine to run on in `_host` — each read as the CLI reads
+/// it (see [`reaches_further`]).
 ///
 /// The same holds for a tool whose schema is not the CLI's own — an MCP
 /// server's, or one added since — where nothing here knows what the other
@@ -4197,14 +4200,43 @@ fn target_of(input: &serde_json::Value) -> Option<String> {
 /// and a `path` beside an `owner` and a `repo` is a file in that repository.
 /// Its target is named only where it is the call's one argument.
 fn rule_target(tool: &str, input: &serde_json::Value) -> Option<String> {
-    let unsandboxed =
-        input.get("dangerouslyDisableSandbox") == Some(&serde_json::Value::Bool(true));
     let unread = !CLI_TARGETED_TOOLS.contains(&tool)
         && input.as_object().is_some_and(|fields| fields.len() != 1);
-    match unsandboxed || unread {
+    match reaches_further(input) || unread {
         true => None,
         false => target_of(input),
     }
+}
+
+/// Whether a call asks the CLI to let it reach what the same call without
+/// these arguments could not: out of the sandbox, to hosts past the sandbox's
+/// network list, or onto another machine.
+///
+/// Read the way the CLI reads them, not the way the schema spells them: the
+/// CLI takes the strings `"true"` and `"false"` for its flags, and anything
+/// but an empty list of hosts or a blank machine name is erred on as asking —
+/// an extra question is the cost of that, a rule let past its text the cost
+/// of the other way.
+fn reaches_further(input: &serde_json::Value) -> bool {
+    use serde_json::Value;
+    let unsandboxed = matches!(
+        input.get("dangerouslyDisableSandbox"),
+        Some(Value::Bool(true))
+    ) || matches!(
+        input.get("dangerouslyDisableSandbox"),
+        Some(Value::String(flag)) if flag == "true"
+    );
+    let more_hosts = match input.get("allowed_domains") {
+        None | Some(Value::Null) => false,
+        Some(Value::Array(hosts)) => !hosts.is_empty(),
+        Some(_) => true,
+    };
+    let elsewhere = match input.get("_host") {
+        None | Some(Value::Null) => false,
+        Some(Value::String(machine)) => !machine.trim().is_empty(),
+        Some(_) => true,
+    };
+    unsandboxed || more_hosts || elsewhere
 }
 
 /// The first line of a shell command, marked as cut where there is more.
@@ -6682,6 +6714,43 @@ mod tests {
         assert!(!rules.allows("Bash", target.as_deref()));
         rules.insert(niobe_core::permission::Rule::tool("Bash"));
         assert!(rules.allows("Bash", target.as_deref()));
+    }
+
+    /// A call can ask the CLI to reach past what the same call would reach
+    /// as written: out of the sandbox with the flag spelt as the string the
+    /// CLI reads as `true`, to hosts beyond the sandbox's network list with
+    /// `allowed_domains`, or onto another machine with `_host`. A rule about
+    /// the command or the path was written about none of that, so the call
+    /// has no target; the same call without the extra reach keeps its own.
+    #[test]
+    fn a_call_asking_to_reach_further_than_its_target_is_not_answered_by_a_rule_for_the_target() {
+        for input in [
+            r#"{"command":"cargo test","dangerouslyDisableSandbox":"true"}"#,
+            r#"{"command":"cargo test","allowed_domains":["evil.example"]}"#,
+            r#"{"command":"cargo test","_host":"build-box"}"#,
+        ] {
+            assert_eq!(target_asked("Bash", input), None, "{input}");
+        }
+        assert_eq!(
+            target_asked(
+                "Edit",
+                r#"{"file_path":"/repo/a.rs","old_string":"a","new_string":"b","_host":"prod"}"#
+            ),
+            None
+        );
+
+        for input in [
+            r#"{"command":"cargo test","dangerouslyDisableSandbox":false}"#,
+            r#"{"command":"cargo test","dangerouslyDisableSandbox":"false"}"#,
+            r#"{"command":"cargo test","allowed_domains":[]}"#,
+            r#"{"command":"cargo test","_host":""}"#,
+        ] {
+            assert_eq!(
+                target_asked("Bash", input).as_deref(),
+                Some("cargo test"),
+                "{input}"
+            );
+        }
     }
 
     fn target_asked(tool: &str, input: &str) -> Option<String> {
