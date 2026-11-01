@@ -8043,6 +8043,39 @@ mod tests {
         assert_eq!(rows_of(&app, 66), vec!["5h   5% ▓░░░░░░░░░░░".to_owned()]);
     }
 
+    /// A report that names no window says only whether the plan spends
+    /// beyond its fee: the levels the record held are still a reading from
+    /// when it was recorded, and stay dated, not drawn as this session's own.
+    #[test]
+    fn a_report_naming_no_window_leaves_the_recorded_levels_dated() {
+        let mut app = resumed(UsageWindows {
+            five_hour: Some(window(0.83, None)),
+            seven_day: None,
+            using_overage: false,
+            overage: niobe_core::event::Overage::Unreported,
+        });
+        app.apply(&niobe_core::event::Event::UsageWindows(UsageWindows {
+            five_hour: None,
+            seven_day: None,
+            using_overage: false,
+            overage: niobe_core::event::Overage::Allowed,
+        }));
+
+        assert!(
+            matches!(app.plan_windows(), PlanWindows::Carried { .. }),
+            "{:?}",
+            app.plan_windows()
+        );
+        assert_eq!(
+            rows_of(&app, 66),
+            vec![
+                "5h     83% ▓▓▓▓▓▓▓▓▓▓░░".to_owned(),
+                "extra — · allowed".to_owned(),
+                "as of Tue 13:02, before this session".to_owned(),
+            ]
+        );
+    }
+
     /// An earlier session under the same profile that saw the windows later
     /// than the resumed one's record did is the newer reading, and is the one
     /// drawn; and the other way round.

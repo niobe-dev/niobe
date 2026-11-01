@@ -2220,7 +2220,12 @@ impl App {
             .resize(self.session.decisions().len(), self.at);
         self.reconnect_answered(event);
         self.rewind_answered(event);
-        if matches!(event, Event::UsageWindows(_)) {
+        // Only a report that measured a window dates the levels: one that
+        // names none leaves them standing in the fold, and they are still the
+        // reading they were, from when that was taken and by whom.
+        if let Event::UsageWindows(windows) = event
+            && !windows.is_empty()
+        {
             self.windows_at = self.at;
             self.windows_recorded = false;
             self.windows_profile = self
