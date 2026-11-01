@@ -7111,7 +7111,13 @@ impl App {
             (Ok(_), _) if self.shell_mode => {
                 self.hint = Some(NO_IMAGE_IN_A_COMMAND_HINT.to_owned());
             }
+            // Numbered past every placeholder the composer already shows —
+            // one a recalled prompt brought from an earlier session, or one
+            // typed or pasted — none of which this image is: under one of
+            // their numbers, that placeholder would name it too, and taking
+            // its own out of the prompt would still send it.
             (Ok(image), _) => {
+                self.images.seen(&self.composed());
                 let placeholder = self.images.attach(image);
                 self.hint = None;
                 self.insert_into_composer(&format!("{placeholder} "));
@@ -20790,6 +20796,53 @@ mod tests {
         );
         assert_eq!(app.take_turn_images(), [png(b"b")]);
         assert_eq!(app.composed(), "draft");
+    }
+
+    /// A recalled prompt can hold a placeholder an earlier session numbered,
+    /// which no image of this one is behind. An image attached to it is
+    /// numbered past it: under the same number, the old placeholder would
+    /// name the new image, and deleting the new placeholder would still send
+    /// the image the operator took out.
+    #[test]
+    fn an_image_attached_to_a_recalled_prompt_is_numbered_past_its_placeholders() {
+        let mut app = remembering(&[("compare [Image #1] with the mock", "3")], &["3"]).attached();
+        app.on_key(key(KeyCode::Up));
+        typed(&mut app, " ");
+        app.fetched(Fetched {
+            source: Source::Clipboard,
+            image: Ok(png(b"b")),
+        });
+        assert_eq!(
+            app.composed(),
+            "compare [Image #1] with the mock [Image #2] "
+        );
+
+        for _ in "[Image #2] ".chars() {
+            app.on_key(key(KeyCode::Backspace));
+        }
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(
+            app.said(),
+            [Event::UserMessage {
+                text: "compare [Image #1] with the mock ".to_owned()
+            }]
+        );
+        assert!(
+            app.take_turn_images().is_empty(),
+            "the image taken out of the prompt went with it by the old placeholder"
+        );
+    }
+
+    /// A placeholder typed or pasted into the draft names no image either.
+    #[test]
+    fn an_image_is_numbered_past_a_placeholder_typed_into_the_draft() {
+        let mut app = app();
+        typed(&mut app, "see [Image #4] ");
+        app.fetched(Fetched {
+            source: Source::Clipboard,
+            image: Ok(png(b"a")),
+        });
+        assert_eq!(app.composed(), "see [Image #4] [Image #5] ");
     }
 
     #[test]

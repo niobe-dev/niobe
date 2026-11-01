@@ -192,8 +192,9 @@ impl Attachments {
         self.composing = draft;
     }
 
-    /// Numbers the next image past every placeholder in `text`, a prompt this
-    /// session already holds.
+    /// Numbers the next image past every placeholder in `text`: a prompt this
+    /// session already holds, or the one being written, whose placeholders
+    /// may stand for no image at all.
     pub(crate) fn seen(&mut self, text: &str) {
         if let Some(&highest) = placeholders_in(text).iter().max() {
             self.last = self.last.max(highest);
