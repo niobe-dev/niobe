@@ -191,7 +191,7 @@ fn prompt_of(text: &str) -> String {
 /// would be one whose every edit waits on a prompt nobody is there to answer.
 ///
 /// `side` tells this run's copies from another's in the same bench, so that
-/// an `--ab` run's second pass does not clear a copy its first one kept.
+/// the copies an `--ab` run kept read as the pass that kept them.
 ///
 /// A signal `stopped` reports ends the turn, or the check, where it stands:
 /// the turn is passed the signal, as `niobe -p` run on its own would have
@@ -204,8 +204,21 @@ pub fn run(
     side: &str,
     stopped: Stopped,
 ) -> Ran {
-    let work = scratch(&format!("{side}{}", task.name));
     let started = Instant::now();
+    let work = match scratch(&format!("{side}{}", task.name)) {
+        Ok(work) => work,
+        Err(e) => {
+            return Ran {
+                name: task.name.clone(),
+                passed: false,
+                ended: Ended::Unreported(format!(
+                    "a directory for the task's copy could not be made: {e}"
+                )),
+                wall: started.elapsed(),
+                kept: None,
+            };
+        }
+    };
     let laid_out = lay_out(&task.dir.join("files"), &work).and_then(|()| work.canonicalize());
     let ended = match laid_out {
         Ok(copy) => {
@@ -262,12 +275,60 @@ fn inside(tool: &str, dir: &Path) -> Vec<String> {
         .collect()
 }
 
-/// A directory of its own for `name`'s copy, outside any repository, emptied
-/// of what an earlier bench left there.
-fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("niobe-bench-{}-{name}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    dir
+/// How many names [`scratch_in`] tries before it gives up.
+const SCRATCH_TRIES: u32 = 100;
+
+/// A directory of its own for `name`'s copy, outside any repository.
+fn scratch(name: &str) -> io::Result<PathBuf> {
+    scratch_in(&std::env::temp_dir(), name)
+}
+
+/// A new, empty directory under `parent` for `name`'s copy, made by this call
+/// and readable by this user alone.
+///
+/// The name is one anybody can work out — the process id and the task's
+/// name — and the system's temporary directory is shared on Linux, where
+/// another user can leave a directory or a link at it first and, with the
+/// directory sticky, keep it there. A copy laid out in what was found would
+/// run the turn in a directory someone else chose, with the CLI's project
+/// settings and hooks they left in it, and allow the turn's edits wherever
+/// the link leads. So a name already taken is passed over for the next
+/// rather than emptied or reused, which also keeps a copy an earlier bench
+/// kept.
+fn scratch_in(parent: &Path, name: &str) -> io::Result<PathBuf> {
+    let base = format!("niobe-bench-{}-{name}", std::process::id());
+    for attempt in 0..SCRATCH_TRIES {
+        let dir = match attempt {
+            0 => parent.join(&base),
+            n => parent.join(format!("{base}-{n}")),
+        };
+        match private_dir(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        format!(
+            "{} and the next {} names after it are taken",
+            parent.join(base).display(),
+            SCRATCH_TRIES - 1
+        ),
+    ))
+}
+
+/// Makes `dir`, which must not exist yet — not even as a link — for this
+/// user alone.
+#[cfg(unix)]
+fn private_dir(dir: &Path) -> io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    fs::DirBuilder::new().mode(0o700).create(dir)
+}
+
+#[cfg(not(unix))]
+fn private_dir(dir: &Path) -> io::Result<()> {
+    fs::DirBuilder::new().create(dir)
 }
 
 /// Copies the directory `from` to `to`, made a repository of its own so that
@@ -757,6 +818,52 @@ fn minutes(duration: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What another user of a shared temporary directory can leave at the
+    /// name a task's copy would take: a directory this user cannot empty, with
+    /// project settings for the CLI in it.
+    fn planted(parent: &Path, name: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = parent.join(format!("niobe-bench-{}-{name}", std::process::id()));
+        let claude = dir.join(".claude");
+        fs::create_dir_all(&claude).expect("the planted directory is made");
+        fs::write(claude.join("settings.json"), "{\"hooks\":{}}").expect("settings are planted");
+        fs::set_permissions(&claude, fs::Permissions::from_mode(0o555))
+            .expect("the planted settings are made read-only");
+        dir
+    }
+
+    #[test]
+    fn a_tasks_copy_is_laid_out_in_a_directory_of_its_own_and_never_in_one_found_at_its_name() {
+        use std::os::unix::fs::PermissionsExt;
+        let parent = tempfile::tempdir().expect("a temporary directory can be created");
+        let found = planted(parent.path(), "fix-parser");
+        let linked_to = tempfile::tempdir().expect("a temporary directory can be created");
+        let link = parent
+            .path()
+            .join(format!("niobe-bench-{}-link", std::process::id()));
+        std::os::unix::fs::symlink(linked_to.path(), &link).expect("a link is planted");
+
+        let copy = scratch_in(parent.path(), "fix-parser").expect("a directory is made");
+        let beside_link = scratch_in(parent.path(), "link").expect("a directory is made");
+
+        let made = |dir: &Path| {
+            fs::symlink_metadata(dir).is_ok_and(|meta| meta.is_dir())
+                && fs::read_dir(dir).is_ok_and(|mut entries| entries.next().is_none())
+        };
+        assert!(
+            made(&copy),
+            "the copy went into {} as found",
+            copy.display()
+        );
+        assert!(
+            made(&beside_link),
+            "the copy went through the link at {}",
+            beside_link.display()
+        );
+        assert_ne!(copy, found);
+        let _ = fs::set_permissions(found.join(".claude"), fs::Permissions::from_mode(0o755));
+    }
 
     #[test]
     fn a_prompt_is_its_file_less_the_header_the_file_opens_with() {
