@@ -732,13 +732,16 @@ impl SessionState {
     /// beginning is not marked, so the turn is counted, as one the fold never
     /// saw begin, from where the last one ended. A sub-agent working on after
     /// its turn ended opens nothing, and nor does the reply in the turn that
-    /// typed a clear, which is no turn of the conversation it starts.
+    /// typed a clear, which is no turn of the conversation it starts. A
+    /// command the operator ran with `!` is recorded as a call of no agent's,
+    /// and is not the agent's either: the backend is never told of it.
     fn opens_a_turn(&self, event: &Event) -> bool {
         let answers = matches!(
             event,
-            Event::AssistantDelta { .. }
-                | Event::AssistantMessage { agent: None, .. }
-                | Event::ToolCallStart { agent: None, .. }
+            Event::AssistantDelta { .. } | Event::AssistantMessage { agent: None, .. }
+        ) || matches!(
+            event,
+            Event::ToolCallStart { agent: None, name, .. } if name != OPERATOR_SHELL
         );
         answers && !self.turn_running && !self.clear_open
     }
@@ -4469,6 +4472,32 @@ mod tests {
             state.apply(&opens);
             assert!(state.turn_running(), "{opens:?} opened no turn");
         }
+    }
+
+    /// A `!` command is the operator's, not the agent's: run between turns
+    /// it is no turn, and the prompt after it opens one of its own.
+    #[test]
+    fn an_operators_command_between_turns_opens_no_turn() {
+        let mut state = SessionState::replay(&[prompt(), cached(100, 10, 0, 0), Event::TurnEnded]);
+        state.apply(&start("op1", OPERATOR_SHELL, None));
+        assert!(
+            !state.turn_running(),
+            "the operator's command opened a turn"
+        );
+        state.apply(&ended_ok("op1", OPERATOR_SHELL));
+        assert!(!state.turn_running());
+
+        state.apply(&cached(40, 0, 0, 0));
+        state.apply(&prompt());
+        state.apply(&cached(50, 5, 0, 0));
+        state.apply(&Event::TurnEnded);
+        let turns: Vec<(u64, Option<u64>)> = state
+            .turns()
+            .iter()
+            .map(|turn| (turn.number, turn.tokens))
+            .collect();
+        assert_eq!(turns, [(1, Some(110)), (2, Some(55))]);
+        assert!(!state.turn_running());
     }
 
     #[test]
