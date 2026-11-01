@@ -8872,7 +8872,9 @@ impl App {
 
     /// The operator first, then the newest call still running, then the reply
     /// being written: the first of them there is, is what the turn is waiting
-    /// on.
+    /// on. A `!` command the operator ran is none of them: the backend is
+    /// never told of it, so the turn waits on nothing it does, and a reply
+    /// goes on streaming above its row.
     fn doing(&self) -> String {
         if !self.session.pending_permissions().is_empty() {
             return "waiting on you".to_owned();
@@ -8880,11 +8882,28 @@ impl App {
         if self.session.compacting() {
             return COMPACTING.to_owned();
         }
-        let running = self.tool_entries.values().max().and_then(|&(at, index)| {
-            let entry = self.entries.get(at)?;
-            Some((&entry.head, &entry.calls.get(index)?.what))
-        });
-        match (running, self.entries.last()) {
+        let operators = |id: &ToolCallId| {
+            self.session
+                .in_flight_tools()
+                .get(id)
+                .is_some_and(|name| name.as_str() == crate::shell::OPERATOR_SHELL)
+        };
+        let running = self
+            .tool_entries
+            .iter()
+            .filter(|(id, _)| !operators(id))
+            .map(|(_, place)| place)
+            .max()
+            .and_then(|&(at, index)| {
+                let entry = self.entries.get(at)?;
+                Some((&entry.head, &entry.calls.get(index)?.what))
+            });
+        let last = self
+            .entries
+            .iter()
+            .rev()
+            .find(|entry| !is_operators_command(entry));
+        match (running, last) {
             (Some((head, what)), _) => format!("running {head}  {what}"),
             (None, Some(last)) if last.kind == EntryKind::Agent && last.streaming => {
                 "writing".to_owned()
@@ -16200,6 +16219,49 @@ mod tests {
         app.apply(&Event::TurnEnded);
         app.tick(t0 + Duration::from_secs(13), None);
         assert_eq!(app.activity(), None);
+    }
+
+    /// The operator's `!` command is not the turn's: the backend is never
+    /// told of it, and the turn waits on nothing it does.
+    #[test]
+    fn a_command_the_operator_runs_during_a_turn_is_not_what_the_turn_is_doing() {
+        let mut app = sent(app().attached().runs_commands(), "fix it");
+        typed(&mut app, "!git status");
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(app.take_commands().len(), 1, "the command was run");
+        assert_eq!(
+            app.activity().map(|a| a.doing).as_deref(),
+            Some("thinking"),
+            "the agent is still thinking"
+        );
+
+        app.apply(&start(
+            "t1",
+            "Bash",
+            r#"{"command":"cargo test"}"#,
+            Some("cargo test"),
+        ));
+        typed(&mut app, "!git log");
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(app.take_commands().len(), 1, "the second command was run");
+        assert_eq!(
+            app.activity().map(|a| a.doing).as_deref(),
+            Some("running Bash  cargo test"),
+            "the agent's own call is what the turn waits on"
+        );
+
+        app.apply(&end("t1", "Bash"));
+        app.apply(&Event::AssistantDelta {
+            text: "All green".to_owned(),
+        });
+        typed(&mut app, "!git diff");
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(app.take_commands().len(), 1, "the third command was run");
+        assert_eq!(
+            app.activity().map(|a| a.doing).as_deref(),
+            Some("writing"),
+            "the reply goes on streaming under the command's row"
+        );
     }
 
     #[test]
