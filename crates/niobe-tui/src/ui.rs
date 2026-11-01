@@ -866,16 +866,19 @@ fn draw_menu(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
 fn menu_spans(open: Option<usize>, theme: &Theme) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     for (at, menu) in crate::menu::MENUS.iter().enumerate() {
-        let plain = match open == Some(at) {
-            true => Style::new().fg(theme.menu_bg).bg(theme.menu_fg),
-            false => Style::new().fg(theme.menu_fg),
+        let (plain, hot) = match open == Some(at) {
+            true => (
+                Style::new().fg(theme.menu_bg).bg(theme.menu_fg),
+                theme.open_menu_hot(),
+            ),
+            false => (Style::new().fg(theme.menu_fg), theme.hot),
         };
         let mut chars = menu.name.chars();
         let first = chars.next().unwrap_or(' ');
         spans.push(Span::styled(" ", plain));
         spans.push(Span::styled(
             first.to_string(),
-            plain.fg(theme.hot).bold().underlined(),
+            plain.fg(hot).bold().underlined(),
         ));
         spans.push(Span::styled(chars.as_str().to_owned(), plain));
         spans.push(Span::styled(" ", plain));

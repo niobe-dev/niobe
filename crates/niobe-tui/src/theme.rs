@@ -1081,6 +1081,18 @@ impl Theme {
         Some(self)
     }
 
+    /// The colour the open menu's hot letter is drawn in, on the inverted
+    /// title's [`Theme::menu_fg`]: the accent, unless the accent is that very
+    /// colour, as Neo's 24-bit table has it, when the letter would vanish.
+    /// Then it is the title's own text colour, and the bold underline it is
+    /// drawn with still marks it, as a menu's cursor row marks its hot letter.
+    pub fn open_menu_hot(&self) -> Color {
+        match self.hot == self.menu_fg {
+            true => self.menu_bg,
+            false => self.hot,
+        }
+    }
+
     /// This theme under another name, which is how the menu bar and the theme
     /// list call it.
     #[must_use]

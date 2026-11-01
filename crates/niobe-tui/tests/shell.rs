@@ -6298,6 +6298,34 @@ fn every_menu_title_keeps_its_hot_letter_and_the_open_one_is_inverted_in_every_t
     }
 }
 
+/// The open menu's title is inverted, and its hot letter is drawn on the
+/// colour the menu row's text is otherwise drawn in: where a palette's accent
+/// is that colour, the letter is drawn in the title's own and stays marked by
+/// its weight and underline.
+#[test]
+fn an_open_menus_hot_letter_is_never_drawn_on_its_own_colour() {
+    for theme in THEMES {
+        for depth in [Depth::Sixteen, Depth::TrueColour] {
+            let mut app = running_session().with_depth(depth).with_theme(theme);
+            app.on_key(alt('v'));
+            let (row, cells) = menu_row(&mut app);
+            let at = title_at(&row, "View");
+            assert_ne!(
+                cells[at].fg, cells[at].bg,
+                "{} at {depth:?}: the open menu's `V` is drawn on its own colour",
+                theme.name
+            );
+            assert!(
+                cells[at]
+                    .add_modifier
+                    .contains(ratatui::style::Modifier::UNDERLINED),
+                "{} at {depth:?}: the hot letter is still marked",
+                theme.name
+            );
+        }
+    }
+}
+
 #[test]
 fn an_open_menu_in_classic_is_painted_in_far_managers_colours() {
     let mut app = running_session()
