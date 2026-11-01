@@ -243,6 +243,26 @@ fn the_table_reads_a_plan_as_a_dash_and_a_floor_with_its_mark() {
     );
 }
 
+#[test]
+fn a_day_after_every_session_says_none_is_among_them_rather_than_that_none_was_recorded() {
+    // The store holds three sessions, all on 18 September 2026.
+    let (_dir, root) = repository();
+    let none = "No session recorded in this repository is among the sessions started on \
+                2026-09-19 or later.\n";
+    for format in [&[][..], &["--by-day"], &["--by-turn"]] {
+        let args: Vec<&str> = format
+            .iter()
+            .copied()
+            .chain(["--since", "2026-09-19"])
+            .collect();
+        assert_eq!(cost(&root, &args), none, "{args:?}");
+    }
+    assert!(
+        cost(&root, &["--since", "2026-09-18"]).lines().count() > 1,
+        "the sessions of the day itself are kept"
+    );
+}
+
 /// A repository holding the recorded session with each of its turns ended
 /// where the next prompt begins and at the end of the log, since the
 /// recording predates the event that says a turn ended.

@@ -22,7 +22,8 @@ use niobe_core::session::{SessionState, Totals};
 use niobe_tui::{Billed, OLDER_RECORDING, cost_of};
 use serde_json::{Map, Value, json};
 
-use crate::overview::Folded;
+use crate::args::Narrowing;
+use crate::overview::{Folded, none_kept};
 use crate::sessions::civil_from_days;
 use crate::summary::grouped;
 
@@ -53,9 +54,18 @@ const CSV_HEADER: &str = "id,started_at,billing,input,output,cache_read,cache_wr
                           cache_write_1h,cache_write_unsplit,reasoning,tokens,reported_usd,cost_complete,\
                           records,records_uncovered,older_recording";
 
-/// What `sessions` print as, one line per element.
-pub fn lines(repository: &str, sessions: &[Folded], format: Format) -> Vec<String> {
+/// What `sessions` print as, one line per element: those `narrowing` kept
+/// of the sessions recorded, which a table with none to list says.
+pub fn lines(
+    repository: &str,
+    sessions: &[Folded],
+    narrowing: Narrowing,
+    format: Format,
+) -> Vec<String> {
     match format {
+        Format::Table | Format::Days | Format::Turns if sessions.is_empty() => {
+            vec![none_kept(narrowing)]
+        }
         Format::Table => table(sessions),
         Format::Days => days(sessions),
         Format::Turns => turns(sessions),
@@ -196,9 +206,6 @@ fn csv_row(folded: &Folded) -> String {
 }
 
 fn table(sessions: &[Folded]) -> Vec<String> {
-    if sessions.is_empty() {
-        return vec!["No sessions recorded in this repository.".to_owned()];
-    }
     let id_width = sessions
         .iter()
         .map(|s| s.id.to_string().len())
@@ -236,9 +243,6 @@ fn table(sessions: &[Folded]) -> Vec<String> {
 /// A session that never said its profile is counted under `—`, and a day
 /// none of whose sessions reported any usage has `—` for its tokens.
 fn days(sessions: &[Folded]) -> Vec<String> {
-    if sessions.is_empty() {
-        return vec!["No sessions recorded in this repository.".to_owned()];
-    }
     let mut by_day: BTreeMap<(String, String), (u64, Option<u64>)> = BTreeMap::new();
     for folded in sessions {
         let day = rfc3339(folded.started_at)
@@ -287,9 +291,6 @@ fn days(sessions: &[Folded]) -> Vec<String> {
 /// before the first prompt or between turns — so that a session's rows add
 /// up to its total and nothing is left unattributed.
 fn turns(sessions: &[Folded]) -> Vec<String> {
-    if sessions.is_empty() {
-        return vec!["No sessions recorded in this repository.".to_owned()];
-    }
     let id_width = sessions
         .iter()
         .map(|s| s.id.to_string().len())
@@ -391,7 +392,7 @@ mod tests {
         ];
 
         assert_eq!(
-            lines("repo", &sessions, Format::Days),
+            lines("repo", &sessions, Narrowing::default(), Format::Days),
             [
                 "DAY         PROFILE  SESSIONS        TOKENS",
                 "2026-09-18  max             1             7",
@@ -436,7 +437,7 @@ mod tests {
         let sessions = [first, session(12, 1_789_732_900, 40)];
 
         assert_eq!(
-            lines("repo", &sessions, Format::Turns),
+            lines("repo", &sessions, Narrowing::default(), Format::Turns),
             [
                 "SESSION  TURN        TOKENS",
                 "      1     1         1,000",
@@ -455,7 +456,7 @@ mod tests {
     #[test]
     fn the_turns_table_of_no_sessions_says_so() {
         assert_eq!(
-            lines("repo", &[], Format::Turns),
+            lines("repo", &[], Narrowing::default(), Format::Turns),
             ["No sessions recorded in this repository."]
         );
     }
@@ -463,8 +464,32 @@ mod tests {
     #[test]
     fn the_days_table_of_no_sessions_says_so() {
         assert_eq!(
-            lines("repo", &[], Format::Days),
+            lines("repo", &[], Narrowing::default(), Format::Days),
             ["No sessions recorded in this repository."]
+        );
+    }
+
+    #[test]
+    fn a_table_narrowed_to_no_session_says_what_kept_them_out() {
+        let since = niobe_ledger::Date::new(2026, 10, 1).expect("a real day");
+        let narrowing = Narrowing {
+            last: Some(3),
+            since: Some(since),
+        };
+        for format in [Format::Table, Format::Days, Format::Turns] {
+            assert_eq!(
+                lines("repo", &[], narrowing, format),
+                [
+                    "No session recorded in this repository is among the newest 3 sessions \
+                  started on 2026-10-01 or later."
+                ],
+                "{format:?}"
+            );
+        }
+        assert_eq!(
+            lines("repo", &[], narrowing, Format::Csv),
+            [CSV_HEADER],
+            "a CSV of none is its header"
         );
     }
 
@@ -499,7 +524,7 @@ mod tests {
     #[test]
     fn a_session_that_reported_no_usage_has_a_dash_for_its_tokens_not_a_zero() {
         let sessions = [unreported(1, 1_789_732_800), session(2, 1_789_732_900, 0)];
-        let table = lines("repo", &sessions, Format::Table);
+        let table = lines("repo", &sessions, Narrowing::default(), Format::Table);
         // The first measured nothing; the second reported a record of no
         // tokens, which is a measured zero.
         assert_eq!(
@@ -521,7 +546,7 @@ mod tests {
             session(4, 1_789_732_800 + 43_300, 40),
         ];
         assert_eq!(
-            lines("repo", &sessions, Format::Days)[1..3],
+            lines("repo", &sessions, Narrowing::default(), Format::Days)[1..3],
             [
                 "2026-09-18  —               2             —",
                 "2026-09-19  —               2            40",

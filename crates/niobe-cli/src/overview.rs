@@ -351,6 +351,16 @@ fn kept(narrowing: Narrowing) -> Option<String> {
     }
 }
 
+/// What a listing says where `narrowing` kept no session: that none was
+/// recorded only where nothing narrowed them, since sessions kept out by
+/// `--last` or `--since` were recorded all the same.
+pub(crate) fn none_kept(narrowing: Narrowing) -> String {
+    match kept(narrowing) {
+        None => "No sessions recorded in this repository.".to_owned(),
+        Some(kept) => format!("No session recorded in this repository is among {kept}."),
+    }
+}
+
 /// The page for the sessions of the repository `name`, oldest first, which
 /// `narrowing` kept of those recorded.
 ///
@@ -366,10 +376,7 @@ pub fn markdown(
     let mut lines = vec![format!("# What has been built in {}", inline(name))];
     let (Some(first), Some(last)) = (sessions.first(), sessions.last()) else {
         lines.push(String::new());
-        lines.push(match kept(narrowing) {
-            None => "No sessions recorded in this repository.".to_owned(),
-            Some(kept) => format!("No session recorded in this repository is among {kept}."),
-        });
+        lines.push(none_kept(narrowing));
         return lines;
     };
     lines.push(String::new());

@@ -1382,7 +1382,7 @@ fn print_overview(narrowing: args::Narrowing) -> Result<(), String> {
 fn print_cost(narrowing: args::Narrowing, format: cost::Format) -> Result<(), String> {
     let root = repo::root(&cwd()?);
     let folded = overview::narrowed(overview::read(&root)?, narrowing);
-    for line in cost::lines(&repo::describe(&root).name, &folded, format) {
+    for line in cost::lines(&repo::describe(&root).name, &folded, narrowing, format) {
         say!("{line}");
     }
     Ok(())
