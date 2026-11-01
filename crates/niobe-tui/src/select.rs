@@ -251,7 +251,7 @@ pub(crate) fn link_at(
 
     let mut at = row;
     let mut from = start;
-    while from == indent(lines.get(at)?) && at > 0 {
+    while from == lead(lines.get(at)?) && at > 0 {
         let above = lines.get(at - 1)?;
         let this = lines.get(at)?;
         if !cut_between(above, this, width) {
@@ -279,7 +279,7 @@ pub(crate) fn link_at(
         if !cut_between(this, below, width) {
             break;
         }
-        let first = indent(below);
+        let first = lead(below);
         let Some(next) = word_at(below, text::width(below.get(..first)?)) else {
             break;
         };
@@ -367,9 +367,33 @@ fn last_word(drawn: &str) -> Option<(usize, usize)> {
     word_at(drawn, text::width(trimmed).checked_sub(1)?)
 }
 
-/// The bytes of blank `drawn` starts with.
-fn indent(drawn: &str) -> usize {
-    drawn.len() - drawn.trim_start().len()
+/// The bytes before the first link character of `drawn`: its blank, and
+/// the marks a block draws before its text — a bullet, a quote's bar, a code
+/// block's gutter, a table's columns to the left.
+fn lead(drawn: &str) -> usize {
+    drawn.find(in_link).unwrap_or(drawn.len())
+}
+
+/// Whether `below`, the lead of a line, is what a line carrying on the text
+/// of the one whose lead is `above` would start with: in each cell, a blank
+/// or what `above` has in that cell. A quote's bar, a code block's gutter and
+/// a table's column rules are drawn on every line of the block, and a
+/// bullet's or a number's line goes on under spaces; anything else there is
+/// a word of the line's own, which a cut word is not carried on behind.
+fn carries_on(above: &str, below: &str) -> bool {
+    let above: Vec<(usize, &str)> = placed(above).collect();
+    placed(below)
+        .all(|(at, grapheme)| grapheme.trim().is_empty() || above.contains(&(at, grapheme)))
+}
+
+/// Each grapheme of `drawn` beside the column it is drawn from.
+fn placed(drawn: &str) -> impl Iterator<Item = (usize, &str)> {
+    let mut column = 0;
+    text::graphemes(drawn).map(move |(grapheme, width)| {
+        let at = column;
+        column += width;
+        (at, grapheme)
+    })
 }
 
 /// Whether `above` and `below` are one word the line's width cut in two.
@@ -377,19 +401,25 @@ fn indent(drawn: &str) -> usize {
 /// The wrappers break a line inside a word only where the word is wider than
 /// the line, and then start it on a line of its own and fill each line with
 /// it. So `above` must end in a link character with no break before it since
-/// where its text starts — the column `below`'s text starts at, past a bullet
-/// as well as an indent — and must be filled to the width, or to one cell
-/// short of it where a two-cell character did not fit in the last. A word that
-/// merely did not fit after the others is an ordinary wrap, not a cut.
+/// where its text starts — the column `below`'s text starts at, past a bullet,
+/// a quote's bar, a code block's gutter or a table's columns as well as an
+/// indent, which `below` carries on behind ([`carries_on`]) — and must be
+/// filled to the width, or to one cell short of it where a two-cell character
+/// did not fit in the last. A word that merely did not fit after the others
+/// is an ordinary wrap, not a cut.
 fn cut_between(above: &str, below: &str, width: usize) -> bool {
     let ends = above.trim_end();
-    let starts = below.trim_start();
     let Some((word, _)) = last_word(above) else {
         return false;
     };
+    let starts = lead(below);
     let text_column = |line: &str, byte: usize| line.get(..byte).map(text::width);
-    starts.starts_with(in_link)
-        && text_column(above, word) == text_column(below, indent(below))
+    starts < below.len()
+        && text_column(above, word) == text_column(below, starts)
+        && above
+            .get(..word)
+            .zip(below.get(..starts))
+            .is_some_and(|(above, below)| carries_on(above, below))
         && text::width(ends) + 2 > width
 }
 
@@ -576,6 +606,49 @@ mod tests {
         let whole = Some("https://example.com/a/very/long/path".to_owned());
         assert_eq!(link(&lines, 32, 0, 5), whole);
         assert_eq!(link(&lines, 32, 1, 3), whole);
+    }
+
+    /// Every cell of every line of `source` drawn as the transcript draws a
+    /// reply, `width` cells wide behind its two-cell gutter, and the link a
+    /// click there opens, where it opens one.
+    fn links_clicked(source: &str, width: usize) -> Vec<String> {
+        let lines: Vec<String> = crate::markdown::render(source, width - 2, &crate::theme::CLASSIC)
+            .iter()
+            .map(|line| format!("  {}", shown(line)))
+            .collect();
+        let mut opened = Vec::new();
+        for (row, line) in lines.iter().enumerate() {
+            for column in 0..text::width(line) {
+                opened.extend(link_at(&lines, width, row, column, &[source]));
+            }
+        }
+        opened.dedup();
+        opened
+    }
+
+    #[test]
+    fn a_link_cut_in_a_quote_a_code_block_or_a_table_opens_whole_from_every_part() {
+        let whole = "https://example.com/a/very/long/path/that/wraps/here";
+        for source in [
+            format!("> see {whole} end"),
+            format!("> - see {whole} end"),
+            format!("```\n{whole}\n```"),
+            format!("| a | b |\n|---|---|\n| x | {whole} |"),
+        ] {
+            assert_eq!(links_clicked(&source, 26), [whole], "{source}");
+        }
+    }
+
+    #[test]
+    fn a_word_after_a_quote_bar_is_not_joined_to_a_link_that_filled_the_line_above() {
+        let lines = ["  ▎ https://example.com/aaaa", "  ▎ nextword here"];
+        let said = ["> https://example.com/aaaa nextword here"];
+        let lines: Vec<String> = lines.iter().map(|line| (*line).to_owned()).collect();
+        assert_eq!(
+            link_at(&lines, 28, 0, 6, &said).as_deref(),
+            Some("https://example.com/aaaa")
+        );
+        assert_eq!(link_at(&lines, 28, 1, 6, &said), None);
     }
 
     #[test]
