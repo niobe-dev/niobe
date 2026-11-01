@@ -228,6 +228,22 @@ fn product_tree_args() -> Vec<&'static str> {
     args
 }
 
+/// The arguments of the `cargo tree` that lists every feature switched on in
+/// the crates the product can be built from.
+fn feature_tree_args() -> Vec<&'static str> {
+    let mut args = vec!["tree", "--workspace"];
+    args.extend(WHOLE_TREE);
+    args.extend([
+        "--edges",
+        "normal,build,features",
+        "--prefix",
+        "none",
+        "--format",
+        "{p}",
+    ]);
+    args
+}
+
 /// Checks that nothing in the workspace can talk over the network or reach
 /// for a CLI's credentials: see [`network`]. `members` are the directories of
 /// the workspace's own crates.
@@ -239,6 +255,15 @@ fn off_the_network(members: &[&str]) -> Result<(), String> {
             "network crates in the dependency tree: {}\nniobe makes no network calls of its \
              own; the official CLIs are what talk to the providers (AGENTS.md §2)",
             crates.join(", ")
+        ));
+    }
+
+    let features = network::network_features_in(&cargo_output(&feature_tree_args())?);
+    if !features.is_empty() {
+        return Err(format!(
+            "network features switched on in the dependency tree: {}\nniobe makes no network \
+             calls of its own; the official CLIs are what talk to the providers (AGENTS.md §2)",
+            features.join(", ")
         ));
     }
 
@@ -615,6 +640,16 @@ mod tests {
     #[test]
     fn a_dependency_behind_a_feature_or_another_target_is_in_the_network_tree() {
         assert!(reads_the_whole_tree(&product_tree_args()));
+    }
+
+    #[test]
+    fn a_feature_behind_a_feature_or_another_target_is_in_the_feature_tree() {
+        let args = feature_tree_args();
+        assert!(reads_the_whole_tree(&args));
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--edges", "normal,build,features"])
+        );
     }
 
     #[test]

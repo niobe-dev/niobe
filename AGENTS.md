@@ -490,7 +490,8 @@ These hold for every change. Breaking one is a bug even when the feature ships g
    layering` checks names and text, not behaviour. It reads the tree of crates the product is
    built from — every workspace member's normal and build dependencies, with every feature on
    and on every target; dev-dependencies are not in it — and fails on a crate that exists to
-   talk over the network (`NETWORK_CRATES` in `xtask/src/network.rs`), on any crate that is
+   talk over the network (`NETWORK_CRATES` in `xtask/src/network.rs`), on a feature that gives an
+   allowed crate a network module of safe functions (`NETWORK_FEATURES`: rustix's `net`), on any crate that is
    not a workspace member and not on `ALLOWED_CRATES` — a crate vendored beside the workspace
    and depended on by path included — and on a path crate outside the repository. It reads
    every Rust file git lists, tracked or untracked and not ignored, but `xtask`'s, and fails on

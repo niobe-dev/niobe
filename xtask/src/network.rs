@@ -383,6 +383,41 @@ pub(crate) const CREDENTIAL_MARKS: &[&str] = &[
     "user_agent",
 ];
 
+/// Features that give a crate on [`ALLOWED_CRATES`], let in for something
+/// else, a module that opens connections through safe functions none of the
+/// [`NETWORK_MARKS`] names: `rustix::net::connect` sends over TCP with no
+/// `std::net` written anywhere, and rustix is a direct dependency of most of
+/// the workspace, so the feature is one word in a member's manifest away.
+/// As `(crate, feature)`.
+///
+/// Two network features are on in the tree and are not here: mio's `net`,
+/// which signal-hook-mio switches on for a Unix socket and whose TCP and UDP
+/// types carry the names the marks read, and windows-sys's
+/// `Win32_Networking_WinSock`, which mio switches on for Windows and whose
+/// functions are all `unsafe`, which the workspace denies.
+pub(crate) const NETWORK_FEATURES: &[(&str, &str)] = &[("rustix", "net")];
+
+/// The [`NETWORK_FEATURES`] switched on in `tree`, the output of `cargo tree
+/// --edges features --prefix none --format {p}`, as `crate/feature`: a
+/// feature is a line `name feature "feature"`, with ` (*)` after it where it
+/// was printed before. Sorted, once each.
+pub(crate) fn network_features_in(tree: &str) -> Vec<String> {
+    let mut found: Vec<String> = tree
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim_end().trim_end_matches(" (*)");
+            let (name, feature) = line.split_once(" feature \"")?;
+            let feature = feature.strip_suffix('"')?;
+            NETWORK_FEATURES
+                .contains(&(name, feature))
+                .then(|| format!("{name}/{feature}"))
+        })
+        .collect();
+    found.sort_unstable();
+    found.dedup();
+    found
+}
+
 /// The network crates in `tree`, the output of `cargo tree --prefix none
 /// --format {p}`: one package per line, its name first.
 pub(crate) fn network_crates_in(tree: &str) -> Vec<String> {
@@ -578,6 +613,30 @@ agent.user_agent(\"x\");
             ["crates/x/src/lib.rs:1: use std::net::TcpStream;"]
         );
         assert!(network_marks_in("crates/x/tests/pty.rs", source).is_empty());
+    }
+
+    #[test]
+    fn a_network_feature_switched_on_in_an_allowed_crate_is_named_once() {
+        let tree = "\
+niobe-cli v0.16.0 (/repo/crates/niobe-cli)
+rustix feature \"process\"
+rustix v1.1.4
+rustix feature \"net\"
+rustix feature \"net\" (*)
+mio feature \"net\"
+";
+        assert_eq!(network_features_in(tree), ["rustix/net"]);
+        assert!(network_features_in("rustix feature \"fs\"\nrustix feature \"std\"\n").is_empty());
+    }
+
+    #[test]
+    fn a_connection_through_rustix_is_not_a_line_the_marks_name() {
+        // Why the feature is refused in the tree: the source of a socket
+        // opened through rustix holds nothing the marks read.
+        let source = "let fd = rustix::net::socket(AddressFamily::INET, SocketType::STREAM, None)?;
+rustix::net::connect(&fd, &SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 1), 443))?;
+";
+        assert!(network_marks_in("crates/x/src/lib.rs", source).is_empty());
     }
 
     #[test]
