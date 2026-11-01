@@ -120,17 +120,12 @@ const LINE_LIMIT: u64 = 64 * 1024 * 1024;
 /// as well as the rest would.
 const TITLE_DESCRIPTION: usize = 1024;
 
-/// What the CLI is told when the operator refuses a call.
+/// What the CLI is told when a call is refused with no words of its own.
 ///
 /// The CLI hands it to the model as the refused call's result, where it is
 /// otherwise indistinguishable from a tool that broke, so it names who
 /// refused.
 const REFUSED: &str = "The operator denied this call in Niobe.";
-
-/// What goes in front of the operator's own words when they answered a prompt
-/// by writing rather than choosing. The words follow whole, so the model reads
-/// what was written and who wrote it, and nothing Niobe made up between them.
-const REFUSED_SAYING: &str = "The operator denied this call in Niobe and answered instead: ";
 
 /// What the CLI is waiting on an answer to: the tool call it asked about, and
 /// the id the answer is addressed to, with the arguments to approve.
@@ -1037,10 +1032,11 @@ impl Session {
     /// and Niobe approves a call without ever rewriting one, so what goes back
     /// is what was shown.
     ///
-    /// `message` is what the operator wrote instead of choosing an answer. It
-    /// goes out with a refusal, which is the one place the protocol carries
-    /// words back to the model about a call it asked to make; an approval has
-    /// nowhere to put it.
+    /// `message` is what the refusal tells the model, sent whole: whoever
+    /// refused wrote it, and says in it who they are, so nothing is put in
+    /// front of it here. It goes out with a refusal, which is the one place
+    /// the protocol carries words back to the model about a call it asked to
+    /// make; an approval has nowhere to put it.
     pub fn answer(
         &mut self,
         id: &ToolCallId,
@@ -1948,10 +1944,7 @@ fn control_response(
     decision: PermissionDecision,
     message: Option<&str>,
 ) -> serde_json::Value {
-    let refused = match message {
-        Some(said) => format!("{REFUSED_SAYING}{said}"),
-        None => REFUSED.to_owned(),
-    };
+    let refused = message.unwrap_or(REFUSED);
     let response = match decision.allowed() {
         true => serde_json::json!({ "behavior": "allow", "updatedInput": input }),
         false => serde_json::json!({ "behavior": "deny", "message": refused }),
@@ -2483,22 +2476,17 @@ mod tests {
     }
 
     #[test]
-    fn a_refusal_in_the_operators_own_words_hands_the_agent_those_words() {
+    fn a_refusal_with_words_of_its_own_hands_the_agent_those_words_and_nothing_else() {
         let refused = control_response(
             "c3",
             &serde_json::json!({ "command": "git push" }),
             PermissionDecision::Deny,
-            Some("open a PR instead"),
+            Some("Refused: no one is at the terminal."),
         );
 
         let response = &refused["response"]["response"];
         assert_eq!(response["behavior"], "deny");
-        let said = response["message"].as_str().expect("the message is text");
-        assert!(
-            said.starts_with("The operator denied this call in Niobe"),
-            "{said}"
-        );
-        assert!(said.ends_with("open a PR instead"), "{said}");
+        assert_eq!(response["message"], "Refused: no one is at the terminal.");
     }
 
     #[test]

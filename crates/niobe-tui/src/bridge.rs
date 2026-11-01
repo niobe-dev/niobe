@@ -19,6 +19,18 @@ use niobe_core::image::Image;
 /// Why a turn could not be sent. Shown to the operator as it reads.
 pub type BridgeError = Box<dyn std::error::Error + Send + Sync>;
 
+/// What goes in front of the words the operator wrote at a question instead
+/// of choosing an answer, as a backend hands the refusal to the agent: the
+/// words follow whole, so the model reads what was written and who wrote it,
+/// and nothing Niobe made up between them.
+const OPERATOR_REFUSED: &str = "The operator denied this call in Niobe and answered instead: ";
+
+/// The refusal the agent is handed for a call the operator refused by
+/// writing `said` at its question rather than choosing an answer.
+pub fn operator_refused(said: &str) -> String {
+    format!("{OPERATOR_REFUSED}{said}")
+}
+
 /// A backend a session is attached to.
 ///
 /// `Debug` is required so that whatever holds one can derive it: the workspace
@@ -33,9 +45,12 @@ pub trait Bridge: std::fmt::Debug {
     /// Answers a permission prompt the backend raised, by the id of the call
     /// it gated. Returns once the backend has the answer.
     ///
-    /// `message` is what the operator wrote instead of choosing one of the
-    /// answers on offer; a backend hands it to the agent with the refusal it
-    /// comes with.
+    /// `message` is the words a refusal reaches the agent in, whole: a
+    /// backend hands them over as they are and puts nothing in front of
+    /// them, so whoever refused says in them who did — the shell for words
+    /// the operator wrote at the question ([`operator_refused`]), `niobe -p`
+    /// for a call nobody at a terminal could be asked about. `None` leaves
+    /// the backend's own words for a refusal.
     ///
     /// A backend that gates nothing is never asked, so the default refuses:
     /// an answer that went nowhere must be reported rather than dropped, or a

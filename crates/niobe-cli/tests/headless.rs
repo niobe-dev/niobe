@@ -234,6 +234,24 @@ fn a_prompt_no_rule_allows_is_refused_and_the_agent_is_told_why() {
 }
 
 #[test]
+fn a_prompt_no_rule_allows_reaches_the_agent_in_the_words_the_run_refused_it_with() {
+    let setup = Setup::new(ASKS_CLAUDE, METERED);
+    let output = setup.run(&["-p", "run the tests"]);
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+
+    let answer = std::fs::read_to_string(setup.repo().join("answer.json"))
+        .expect("the stand-in was answered");
+    let answer: Value = serde_json::from_str(&answer).expect("the answer is one JSON line");
+    let said = answer["response"]["response"]["message"]
+        .as_str()
+        .expect("a refusal carries its words");
+    assert!(
+        said.starts_with("Refused: niobe -p runs with no one at the terminal"),
+        "nobody answered at a terminal, so nothing may tell the agent an operator did: {said}"
+    );
+}
+
+#[test]
 fn a_prompt_a_standing_rule_allows_is_allowed() {
     let config = format!("{METERED}\n[permissions]\nallow = [\"Bash(cargo test)\"]\n");
     let setup = Setup::new(ASKS_CLAUDE, &config);

@@ -671,7 +671,10 @@ fn send_produced(
                 decision,
                 message,
             } => {
-                if let Err(error) = backend.answer(id, *decision, message.as_deref()) {
+                // The record keeps the words as the operator wrote them; the
+                // agent is told, with them, that the operator wrote them.
+                let refused = message.as_deref().map(crate::bridge::operator_refused);
+                if let Err(error) = backend.answer(id, *decision, refused.as_deref()) {
                     app.not_answered(&error.to_string());
                 }
             }
@@ -1967,6 +1970,33 @@ mod tests {
             "a resumed session would not know the call was allowed"
         );
         assert!(app.asking().is_none(), "the prompt stayed on screen");
+    }
+
+    #[test]
+    fn words_written_at_a_question_reach_the_agent_as_the_operators_and_are_kept_as_written() {
+        let mut app = app_with_a_prompt(Some("cargo test"));
+        let mut journal = Kept::default();
+        let mut backend = Attached::default();
+
+        app.answer_saying("open a PR instead");
+        send_produced(&mut app, &mut journal, &mut backend, &mut Forgotten);
+
+        assert_eq!(
+            backend.said,
+            [Some(
+                "The operator denied this call in Niobe and answered instead: open a PR instead"
+                    .to_owned()
+            )]
+        );
+        assert_eq!(
+            journal.events,
+            [SessionEvent::PermissionResponse {
+                id: "t1".into(),
+                decision: PermissionDecision::Deny,
+                message: Some("open a PR instead".to_owned()),
+            }],
+            "the record holds what the operator wrote, and nothing put in front of it"
+        );
     }
 
     #[test]
