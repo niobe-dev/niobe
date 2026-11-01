@@ -1525,6 +1525,15 @@ impl SessionState {
         self.turn_running
     }
 
+    /// Whether the turn that typed a clear may still be running: from the
+    /// clear until that turn's end. Live the fold saw that turn running; read
+    /// back from the clear a conversation opens on it did not, and
+    /// [`Self::turn_running`] says so, but a prompt sent in either is one
+    /// that waits behind it and joins it.
+    pub fn clearing(&self) -> bool {
+        self.clear_open
+    }
+
     /// Whether the backend is compacting the conversation: between its word
     /// that it began and its word that it stopped, or the end of the turn it
     /// was compacting in.

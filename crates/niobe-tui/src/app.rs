@@ -2189,9 +2189,18 @@ impl App {
         self.before_prompt = None;
         let turns = self.session.turns().len();
         if matches!(event, Event::UserMessage { .. }) {
-            match self.session.turn_running() {
-                true => self.prompt_queued = true,
-                false => {
+            match (self.session.clearing(), self.session.turn_running()) {
+                // The prompt waits behind the turn that typed a clear, which
+                // live was running and read back from the clear was not seen
+                // to: either way it opens the new conversation, which is timed
+                // from here, and the turn it then runs is timed from that
+                // turn's end, as a prompt sent mid-turn is.
+                (true, _) => {
+                    self.turn_began_at = self.turn_began_at.or(self.at);
+                    self.prompt_queued = true;
+                }
+                (false, true) => self.prompt_queued = true,
+                (false, false) => {
                     self.turn_began_at = self.at;
                     self.turn_began_with = (self.agents.len(), self.entries.len());
                 }
@@ -16766,6 +16775,46 @@ mod tests {
             .map(|(_, rule)| (rule.calls, rule.took))
             .collect();
         assert_eq!(counted, [(3, Some(Duration::from_secs(30))), (1, None)]);
+    }
+
+    /// A prompt sent before the turn that typed a clear has ended joins that
+    /// turn, live and read back from the clear the new conversation opens on,
+    /// where the fold has seen no turn running: the rules under the turns it
+    /// ends in are timed the same either way.
+    #[test]
+    fn a_prompt_sent_while_a_clear_runs_is_ruled_the_same_live_and_read_back() {
+        let after_the_clear = [
+            (Event::Cleared, at(101, 14, 0)),
+            (said("hello"), at(102, 14, 0)),
+            (Event::TurnEnded, at(103, 14, 0)),
+            (start("t1", "Read", "{}", None), at(110, 14, 0)),
+            (Event::TurnEnded, at(133, 14, 0)),
+        ];
+        let rules_of = |app: &App| -> Vec<(u64, Option<Duration>)> {
+            rules(app)
+                .into_iter()
+                .map(|(_, rule)| (rule.number, rule.took))
+                .collect()
+        };
+
+        let mut live = app();
+        live.apply_at(&said("/clear"), at(100, 14, 0));
+        for (event, stamp) in &after_the_clear {
+            live.apply_at(event, *stamp);
+        }
+        let mut read_back = app();
+        for (event, stamp) in &after_the_clear {
+            read_back.apply_at(event, *stamp);
+        }
+
+        let timed = [
+            (1, Some(Duration::from_secs(1))),
+            (2, Some(Duration::from_secs(30))),
+        ];
+        assert_eq!(rules_of(&live), timed, "live");
+        assert_eq!(rules_of(&read_back), timed, "read back");
+        assert_eq!(live.worked(), Some(Duration::from_secs(31)));
+        assert_eq!(read_back.worked(), live.worked());
     }
 
     #[test]
