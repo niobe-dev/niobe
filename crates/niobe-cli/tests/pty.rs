@@ -2816,6 +2816,63 @@ fn an_interrupt_typed_while_an_editor_has_the_terminal_does_not_end_the_session(
     assert!(status.success(), "the shell ended with {status}: {drawn}");
 }
 
+/// An editor that dies with the terminal in its own modes — killed, or
+/// crashed before it could put them back — leaves the terminal raw and
+/// silent. The shell lent it the terminal as it found it at the start, and
+/// the terminal it hands back at the quit is that one, not the dead
+/// editor's: otherwise the operator's own shell gets a terminal that echoes
+/// nothing they type.
+#[test]
+fn an_editor_that_dies_in_raw_mode_does_not_leave_the_terminal_raw_after_the_quit() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo = repo();
+    let home = stand_in(repo.path(), WRITES_DOWN_TURNS_CLAUDE);
+    let elsewhere = tempfile::tempdir().expect("a temporary directory can be created");
+    std::fs::write(repo.path().join("CLAUDE.md"), "@tools/notes.md\n")
+        .expect("the memory file is written");
+    std::fs::create_dir(repo.path().join("tools")).expect("a directory for the notes");
+    std::fs::write(repo.path().join("tools").join("notes.md"), "notes\n")
+        .expect("the imported file is written");
+    let editor = elsewhere.path().join("editor");
+    std::fs::write(&editor, "#!/bin/sh\nstty raw -echo -isig\nkill -KILL $$\n")
+        .expect("the stand-in editor is written");
+    std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o755))
+        .expect("the stand-in editor is made executable");
+
+    let (terminal, slave) = Terminal::open();
+    let mut shell = shell_driving_the_stand_in(&slave, repo.path(), home.path())
+        .env("HOME", elsewhere.path())
+        .env("CLAUDE_CONFIG_DIR", elsewhere.path().join("claude"))
+        .env_remove("VISUAL")
+        .env("EDITOR", &editor)
+        .spawn()
+        .expect("the niobe binary runs");
+    terminal.shows(OPENING_FRAME);
+
+    terminal.typed(b"\x1b[19~");
+    terminal.shows("notes.md");
+    terminal.typed(b"\x1b[F");
+    let editing = terminal.mark();
+    terminal.typed(b"e");
+    terminal.shows_since(editing, "is not edited");
+    let closing = terminal.mark();
+    terminal.typed(b"\x1b");
+    terminal.drew_since(closing);
+    terminal.typed(CTRL_Q);
+
+    let (_, status) = ended(&mut shell);
+    let (drawn, cooked) = released(terminal, slave);
+    assert!(status.success(), "the shell ended with {status}: {drawn}");
+    assert_handed_back_times(
+        &drawn,
+        cooked,
+        "a quit after an editor that died in raw mode",
+        Keys::Reported,
+        2,
+    );
+}
+
 /// An image file dropped on the terminal — which types its path as a paste —
 /// is attached rather than typed, and goes to the CLI as an image block after
 /// the prompt's text, which keeps the placeholder standing where it went.

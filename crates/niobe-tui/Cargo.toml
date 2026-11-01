@@ -26,11 +26,11 @@ serde_json.workspace = true
 [target.'cfg(unix)'.dependencies]
 signal-hook.workspace = true
 # `poll(2)`, for the wait that notices a terminal that has gone away.
-rustix = { workspace = true, features = ["event"] }
+rustix = { workspace = true, features = ["event", "termios"] }
 
 [target.'cfg(unix)'.dev-dependencies]
 # A pty to wait on, so that a hangup is tested against a real terminal.
-rustix = { workspace = true, features = ["event", "pty"] }
+rustix = { workspace = true, features = ["event", "pty", "termios"] }
 
 [lints]
 workspace = true

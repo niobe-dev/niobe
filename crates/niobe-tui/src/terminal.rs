@@ -350,9 +350,61 @@ pub struct TerminalGuard<W: Write> {
     /// taken again rather than handed back a second time.
     suspended: bool,
     restored: bool,
+    /// The terminal's modes as they were handed back for a stop or a lend,
+    /// which [`Self::resume`] puts back before it asks for raw mode again.
+    handed: Handed,
     /// What the operator typed while the shell waited for the terminal's
     /// answer about its keyboard, not yet read as keys.
     typed: Vec<u8>,
+}
+
+/// The modes of the terminal raw mode is asked of — standard input, where it
+/// is one, as for crossterm — as the shell handed it over.
+///
+/// Raw mode is asked for again by reading the terminal's modes as they are
+/// and keeping them to hand back at the quit. After a lend they are whatever
+/// the editor left: one killed, or crashed, before it put its own modes back
+/// leaves the terminal raw and silent, and the quit would hand the operator's
+/// shell that terminal. A job-control shell puts back the modes a job found
+/// for the same reason.
+#[derive(Debug, Default)]
+struct Handed(#[cfg(unix)] Option<rustix::termios::Termios>);
+
+impl Handed {
+    /// The terminal's modes now, where standard input is a terminal.
+    #[cfg(unix)]
+    fn now() -> Self {
+        let stdin = io::stdin();
+        Self(
+            rustix::termios::isatty(&stdin)
+                .then(|| rustix::termios::tcgetattr(&stdin).ok())
+                .flatten(),
+        )
+    }
+
+    #[cfg(not(unix))]
+    fn now() -> Self {
+        Self()
+    }
+
+    /// Puts the modes read back on the terminal, if any were.
+    #[cfg(unix)]
+    fn put_back(&self) -> io::Result<()> {
+        match &self.0 {
+            Some(modes) => rustix::termios::tcsetattr(
+                io::stdin(),
+                rustix::termios::OptionalActions::Now,
+                modes,
+            )
+            .map_err(io::Error::from),
+            None => Ok(()),
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn put_back(&self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 impl<W: Write> TerminalGuard<W> {
@@ -373,6 +425,7 @@ impl<W: Write> TerminalGuard<W> {
             keyboard: Asked::Nothing,
             suspended: false,
             restored: false,
+            handed: Handed::default(),
             typed: Vec::new(),
         };
         // Set before the screen is entered, not after: it is what
@@ -443,6 +496,7 @@ impl<W: Write> TerminalGuard<W> {
             keyboard: Asked::Nothing,
             suspended: false,
             restored: false,
+            handed: Handed::default(),
             typed: Vec::new(),
         })
     }
@@ -469,7 +523,13 @@ impl<W: Write> TerminalGuard<W> {
             return Ok(());
         }
         self.suspended = true;
-        self.hand_back()
+        let handed = self.hand_back();
+        // Read once raw mode is let go of, so that what is kept is the
+        // terminal as the operator's shell had it.
+        if self.raw_mode {
+            self.handed = Handed::now();
+        }
+        handed
     }
 
     /// Takes the terminal again after [`Self::suspend`]: raw mode, the
@@ -478,6 +538,10 @@ impl<W: Write> TerminalGuard<W> {
     /// report — it is the same terminal, and waiting on the answer would hold
     /// the frame up.
     ///
+    /// Raw mode is asked for over the modes the terminal was handed back
+    /// with, put back first, rather than over whatever a program it was lent
+    /// to left it in, since those are the modes the quit hands back.
+    ///
     /// What the last frame drew is not assumed to be on the screen any more,
     /// so the caller owes a whole frame rather than what changed since it.
     pub fn resume(&mut self) -> io::Result<()> {
@@ -485,6 +549,7 @@ impl<W: Write> TerminalGuard<W> {
             return Ok(());
         }
         if self.raw_mode {
+            std::mem::take(&mut self.handed).put_back()?;
             enable_raw_mode()?;
             TERMINAL_ENTERED.store(true, Ordering::SeqCst);
         }
