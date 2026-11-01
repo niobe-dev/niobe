@@ -1720,10 +1720,16 @@ pub struct App {
     /// Whether the operator asked the running turn to stop since the loop
     /// last asked.
     interrupt: bool,
-    /// The turn a stop was asked for, counted as the turns that had ended
-    /// before it, so a second Ctrl+C in the same turn leads to a quit and one
-    /// in the next turn stops that turn.
-    stop_asked_in: Option<usize>,
+    /// Whether a stop was asked of the turn running, so that a second Ctrl+C
+    /// in the same turn leads to a quit and one in the next turn stops that
+    /// turn. Taken down as the turn ends rather than told from the count of
+    /// turns ended: the turn that typed a clear ends recording none, and a
+    /// stop asked of it would otherwise be read as asked of the new
+    /// conversation's first turn, whose own stop would then never be sent.
+    stop_asked: bool,
+    /// Whether the turn that ended last was one a stop was asked of: it
+    /// ended because the operator, who was there to ask, stopped it.
+    ended_stopped: bool,
     /// The Ctrl+C that asked for a second one to quit, while the key after it
     /// has not been pressed and its window has not run out.
     quit_asked: Option<QuitAsked>,
@@ -2158,7 +2164,8 @@ impl App {
             should_quit: false,
             suspend: false,
             interrupt: false,
-            stop_asked_in: None,
+            stop_asked: false,
+            ended_stopped: false,
             quit_asked: None,
         }
     }
@@ -2201,7 +2208,11 @@ impl App {
         {
             watch.operator_ran = true;
         }
+        let was_running = self.session.turn_running();
         self.session.apply(event);
+        if was_running && !self.session.turn_running() {
+            self.ended_stopped = std::mem::take(&mut self.stop_asked);
+        }
         // The fold carries no times, so when each decision was stated is kept
         // here: the ones the event added get this moment, and a clear that
         // started them over drops theirs.
@@ -2460,7 +2471,6 @@ impl App {
         self.turn_began_with = (self.agents.len(), 0);
         self.turns_took = Some(Duration::ZERO);
         self.last_folded_at = None;
-        self.stop_asked_in = None;
         // The entry a refusal was counted on is gone, and an index into the
         // entries that replace it would rewrite whichever one is there.
         self.unsaved = None;
@@ -6164,11 +6174,9 @@ impl App {
         self.called.asks = self.asks.iter().map(|ask| ask.id.clone()).collect();
         let working = self.working();
         let ended = std::mem::replace(&mut self.called.working, working) && !working;
-        // The turn that ended is the last one counted, and a stop asked of it
-        // means the operator was here to ask.
-        let stopped = self.stop_asked_in.is_some()
-            && self.stop_asked_in == self.session.turns().len().checked_sub(1);
-        match (new_ask, ended && !stopped) {
+        // A stop asked of the turn that ended means the operator was here to
+        // ask.
+        match (new_ask, ended && !self.ended_stopped) {
             (true, _) => Some(Alert::NeedsYou),
             (false, true) => Some(Alert::TurnEnded),
             (false, false) => None,
@@ -7576,9 +7584,8 @@ impl App {
 
     /// Asks the running turn to stop, once per turn.
     fn stop_turn(&mut self) {
-        let turn = self.session.turns().len();
-        if self.stop_asked_in != Some(turn) {
-            self.stop_asked_in = Some(turn);
+        if !self.stop_asked {
+            self.stop_asked = true;
             self.interrupt = true;
         }
         self.hint = Some(STOPPING_HINT.to_owned());
@@ -7594,14 +7601,14 @@ impl App {
 
     /// Whether a stop has been asked for the turn that is running.
     fn stopping(&self) -> bool {
-        self.working() && self.stop_asked_in == Some(self.session.turns().len())
+        self.working() && self.stop_asked
     }
 
     /// Says in the transcript that the backend did not take a stop, so the
     /// turn runs on. The turn counts as not asked again, so the next Esc or
     /// Ctrl+C asks for the stop once more instead of leading to a quit.
     pub fn not_stopped(&mut self, error: &str) {
-        self.stop_asked_in = None;
+        self.stop_asked = false;
         self.forget_stopping_hint();
         self.push(Entry {
             attention: Attention::NeedsYou,
@@ -12561,7 +12568,6 @@ mod tests {
             message: None,
         });
         app.follow = false;
-        app.stop_asked_in = Some(3);
         app.turn_began_with = (4, 5);
         app.turns_took = Some(Duration::from_secs(9));
         assert!(!app.tool_entries.is_empty());
@@ -12580,7 +12586,6 @@ mod tests {
         );
         assert!(app.answered.is_empty(), "the answers given");
         assert!(app.follow, "the view follows the new conversation");
-        assert_eq!(app.stop_asked_in, None, "a stop asked of a turn gone");
         assert_eq!(
             app.turn_began_with,
             (1, 0),
@@ -13804,6 +13809,59 @@ mod tests {
             app.take_alert(),
             Some(Alert::TurnEnded),
             "the stop of the turn before kept this one quiet"
+        );
+    }
+
+    /// The turn that typed a clear ends recording no turn, so the count of
+    /// turns ended does not move for it: a stop asked of it is no stop of
+    /// the new conversation's first turn.
+    #[test]
+    fn a_stop_asked_of_the_turn_that_typed_a_clear_does_not_hold_back_the_next_turns_stop() {
+        use ratatui::crossterm::event::KeyCode;
+        let mut app = sent(app().attached(), "go");
+        app.said();
+        assert_eq!(app.take_alert(), None);
+        app.apply(&Event::Cleared);
+        app.on_key(key(KeyCode::Esc));
+        assert!(app.take_interrupt(), "Esc did not stop the clear's turn");
+        app.apply(&Event::TurnEnded);
+        assert_eq!(app.take_alert(), None, "the operator stopped it");
+        assert!(app.session().turns().is_empty(), "the clear's turn is none");
+
+        let mut app = sent(app, "and now");
+        app.said();
+        assert_eq!(app.take_alert(), None);
+        assert!(
+            app.activity().is_some_and(|a| a.doing != "stopping"),
+            "the new turn reads as working"
+        );
+        app.on_key(key(KeyCode::Esc));
+        assert!(
+            app.take_interrupt(),
+            "Esc did not stop the new conversation's first turn"
+        );
+    }
+
+    #[test]
+    fn the_new_conversations_first_turn_ending_unstopped_calls_the_operator_back() {
+        use ratatui::crossterm::event::KeyCode;
+        let mut app = sent(app().attached(), "go");
+        app.said();
+        assert_eq!(app.take_alert(), None);
+        app.apply(&Event::Cleared);
+        app.on_key(key(KeyCode::Esc));
+        assert!(app.take_interrupt());
+        app.apply(&Event::TurnEnded);
+        assert_eq!(app.take_alert(), None);
+
+        let mut app = sent(app, "and now");
+        app.said();
+        assert_eq!(app.take_alert(), None);
+        app.apply(&Event::TurnEnded);
+        assert_eq!(
+            app.take_alert(),
+            Some(Alert::TurnEnded),
+            "the stop of the clear's turn kept this one quiet"
         );
     }
 
