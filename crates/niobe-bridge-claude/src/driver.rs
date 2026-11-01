@@ -45,7 +45,7 @@ use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -596,6 +596,15 @@ pub struct Session {
     /// a prompt is queued behind it, before that end goes out: see
     /// [`Session::turn_open`].
     turn_follows: Arc<AtomicBool>,
+    /// How many turn ends the thread reading the CLI has read, counted
+    /// before the line holding each goes out: see [`Session::turn_open`].
+    ends_read: Arc<AtomicU64>,
+    /// How many turn ends the drain has handed on.
+    ends_heard: u64,
+    /// How many turn ends the thread reading the CLI had read when the last
+    /// turn was sent. A turn sent after the reader read an end cannot be
+    /// part of the turn that end closed, nor counted in its queue.
+    sent_after_ends: u64,
     /// Whether [`Options::ask_title`] was on when the session started, which
     /// is what a clear puts back.
     titles_wanted: bool,
@@ -645,7 +654,10 @@ pub struct Session {
     model_answers: ModelAnswers,
     /// Whether a turn was sent that the CLI has not ended, or one the CLI
     /// started from a prompt queued behind the last end. A CLI stopped then
-    /// took the turn with it, and the session is not carried on.
+    /// took the turn with it, and the session is not carried on. An end
+    /// handed on after a turn was sent leaves it open where the reader had
+    /// already read that end when the turn went out: see
+    /// [`Session::sent_after_ends`].
     turn_open: bool,
     /// Whether the CLI was stopped by a signal between turns, with
     /// [`Options::carry_on`]: the session goes on, in a CLI started again.
@@ -755,6 +767,8 @@ impl Session {
         let was_cleared = Arc::clone(&cleared);
         let turn_follows = Arc::new(AtomicBool::new(false));
         let queued_behind = Arc::clone(&turn_follows);
+        let ends_read = Arc::new(AtomicU64::new(0));
+        let ended_turns = Arc::clone(&ends_read);
         let out_tap = tap.clone();
         let reader = std::thread::spawn(move || {
             let mut stdout = BufReader::new(stdout);
@@ -849,6 +863,16 @@ impl Session {
                 if let Some(follows) = translator.take_turn_follows() {
                     queued_behind.store(follows, Ordering::Release);
                 }
+                let ends = events
+                    .iter()
+                    .filter(|event| matches!(event, Event::TurnEnded))
+                    .count();
+                if ends > 0 {
+                    let ends = u64::try_from(ends).unwrap_or(u64::MAX);
+                    let _ = ended_turns.fetch_update(Ordering::AcqRel, Ordering::Acquire, |read| {
+                        Some(read.saturating_add(ends))
+                    });
+                }
                 // A line's events go out together, so that no drain takes
                 // the first of them without the rest: a call the CLI refused
                 // by itself is a prompt and its refusal, and a drain that
@@ -895,6 +919,9 @@ impl Session {
             mcp_status_wanted,
             cleared,
             turn_follows,
+            ends_read,
+            ends_heard: 0,
+            sent_after_ends: 0,
             titles_wanted: options.ask_title,
             stderr: kept,
             threads: vec![reader, errors, writer],
@@ -951,6 +978,7 @@ impl Session {
             label: label_of(prompt),
         });
         self.turn_open = true;
+        self.sent_after_ends = self.ends_read.load(Ordering::Acquire);
         // The turn went in. A title that could not follow it is no reason to
         // say it did not, and a closed input is reported by the next drain.
         let _ = self.ask_for_title(prompt);
@@ -1308,8 +1336,12 @@ impl Session {
         // A prompt sent while the turn ran and still queued is the CLI's next
         // turn, started as soon as it wrote this end: a CLI stopped now took
         // that turn with it, and nothing will end it.
+        // A turn sent once the reader had read this end is not one it
+        // closed either: the CLI wrote the end before that prompt reached it.
         if matches!(event, Event::TurnEnded) {
-            self.turn_open = self.turn_follows.load(Ordering::Acquire);
+            self.ends_heard = self.ends_heard.saturating_add(1);
+            self.turn_open = self.turn_follows.load(Ordering::Acquire)
+                || self.sent_after_ends >= self.ends_heard;
         }
         if let Event::AgentSpawn { id, .. } = event {
             self.running_agents.insert(id.clone());
@@ -4162,6 +4194,46 @@ read -r rest
             1,
             "{events:#?}"
         );
+        assert!(
+            matches!(events.last(), Some(Event::Error { fatal: true, message })
+                if message == "the `claude` session was stopped by SIGTERM (exit status 143) and said nothing."),
+            "{events:#?}"
+        );
+        assert!(session.next().is_none());
+    }
+
+    /// A prompt sent after the reader read the last turn's end, but before
+    /// the drain handed that end on, starts a turn of its own: the CLI wrote
+    /// the end before the prompt could reach it, so the end neither closed
+    /// it nor counted it as queued. Stopped under that turn, the CLI took it
+    /// with it, and the session ends under it rather than carrying on as
+    /// though nothing were running.
+    #[cfg(unix)]
+    #[test]
+    fn a_prompt_sent_after_the_last_end_was_read_and_before_it_was_drained_runs_a_turn() {
+        let first_ended = r#"printf '%s\n' '{"type":"system","subtype":"init","session_id":"s-9","model":"claude-sonnet-5","permissionMode":"default"}' '{"type":"result","subtype":"success","is_error":false,"session_id":"s-9","queued_turn_count":0}'"#;
+        let second_starts = r#"printf '%s\n' '{"type":"system","subtype":"init","session_id":"s-9","model":"claude-sonnet-5","permissionMode":"default"}'"#;
+        let (mut session, _dir) = started_with(
+            &format!(
+                "read -r initialize\nread -r first\n{first_ended}\nread -r second\n{second_starts}\nexit 143\n"
+            ),
+            |options| options.carry_on = true,
+        );
+        session
+            .send("list the files", &[])
+            .expect("the turn is queued");
+        // No drain until the reader has read the first turn's end, so the
+        // second prompt goes out between the two, every time.
+        let started = Instant::now();
+        while session.ends_read.load(Ordering::Acquire) == 0 {
+            assert!(started.elapsed() < PATIENCE, "the first turn never ended");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        session
+            .send("and count them", &[])
+            .expect("the second turn is queued");
+        let events = drained_to_the_end(&mut session);
+
         assert!(
             matches!(events.last(), Some(Event::Error { fatal: true, message })
                 if message == "the `claude` session was stopped by SIGTERM (exit status 143) and said nothing."),
