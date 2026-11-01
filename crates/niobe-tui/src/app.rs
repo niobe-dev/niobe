@@ -5878,6 +5878,12 @@ impl App {
     /// A session no backend has reported a mode for cycles from `ask`, which is
     /// what the bridge spawns the CLI in: one keypress then lands where it
     /// would have from a mode that had been reported.
+    ///
+    /// On a model the backend said cannot run `auto`, the cycle passes over
+    /// it to the mode after, as the CLI's own cycle skips a mode that is not
+    /// available. Stopping there instead would leave the session where it
+    /// was, and since `auto` is the only mode after `ask`, `plan` could never
+    /// be reached.
     fn cycle_mode(&mut self) {
         // A record read back with nothing driving it has no mode to move: the
         // change would be recorded and nothing would take it.
@@ -5890,18 +5896,16 @@ impl App {
             return;
         }
         let before = self.session.mode();
-        let mode = before.unwrap_or(Mode::Ask).next();
+        let mut mode = before.unwrap_or(Mode::Ask).next();
         if mode == Mode::Auto && self.model_cannot_run_auto() {
+            mode = mode.next();
             self.hint = Some(format!(
-                "Shift+Tab — this model cannot run auto mode; pick another with {} or stay \
-                 in this mode",
+                "Shift+Tab — this model cannot run auto mode, so it was passed over for \
+                 {mode}; pick another with {} to run auto",
                 self.key_for(niobe_core::Bindable::Model)
             ));
-            return;
         }
-        if self.attached {
-            self.modes_before.push_back(before);
-        }
+        self.modes_before.push_back(before);
         self.produce(Event::ModeSelected { mode });
     }
 
@@ -13852,7 +13856,7 @@ mod tests {
     }
 
     #[test]
-    fn shift_tab_refuses_auto_on_a_model_that_cannot_run_it_and_changes_nothing() {
+    fn shift_tab_passes_over_auto_to_plan_on_a_model_that_cannot_run_it() {
         let mut app = app().attached();
         app.apply(&without_auto("opus"));
         app.apply(&Event::ModelSelected {
@@ -13862,14 +13866,42 @@ mod tests {
 
         app.on_key(back_tab());
 
-        assert_eq!(app.session().mode(), Some(Mode::Ask));
-        assert_eq!(app.said(), []);
+        assert_eq!(app.session().mode(), Some(Mode::Plan));
+        assert_eq!(app.said(), [Event::ModeSelected { mode: Mode::Plan }]);
         assert!(
-            app.hint()
-                .is_some_and(|hint| hint.contains("cannot run auto mode")),
+            app.hint().is_some_and(
+                |hint| hint.contains("cannot run auto mode") && hint.contains("passed over")
+            ),
             "{:?}",
             app.hint()
         );
+
+        app.on_key(back_tab());
+        assert_eq!(app.session().mode(), Some(Mode::Ask));
+        assert!(
+            app.said()
+                .iter()
+                .all(|said| *said != Event::ModeSelected { mode: Mode::Auto }),
+            "auto was sent to a model that cannot run it: {:?}",
+            app.said()
+        );
+    }
+
+    /// A mode the backend reported that niobe does not model counts from
+    /// `ask`, and on a model that cannot run `auto` must still move.
+    #[test]
+    fn next_mode_moves_a_session_in_an_unmodelled_mode_on_a_model_that_cannot_run_auto() {
+        let mut app = app().attached();
+        app.apply(&without_auto("opus"));
+        app.apply(&Event::ModelSelected {
+            model: "opus".to_owned(),
+        });
+        app.apply(&Event::ModeUnknown);
+
+        app.perform(crate::menu::Action::CycleMode);
+
+        assert_eq!(app.session().mode(), Some(Mode::Plan));
+        assert_eq!(app.said(), [Event::ModeSelected { mode: Mode::Plan }]);
     }
 
     #[test]
