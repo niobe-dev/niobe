@@ -1026,11 +1026,26 @@ impl Translator {
         out
     }
 
-    /// The notices and warnings held for a reply whose text was still
-    /// streaming when the CLI's output ended, which nothing after it will
-    /// let out.
-    pub(crate) fn take_aside(&mut self) -> Vec<Event> {
+    /// The notices and warnings held while the session's reply streamed its
+    /// text, let out now that something has ended that text.
+    fn take_aside(&mut self) -> Vec<Event> {
         self.aside.take().unwrap_or_default()
+    }
+
+    /// What is left to say once the CLI's output has ended for good: the
+    /// notices held for a reply still streaming, then each message still in
+    /// flight, cut off.
+    ///
+    /// A message in flight was a request the account was billed for, and
+    /// with the output ended no `message_delta` or `result` will count it, so
+    /// it is counted here from the snapshot its last `assistant` line
+    /// carried, as one cut off mid-turn is.
+    pub(crate) fn finish(&mut self) -> Vec<Event> {
+        let mut out = self.take_aside();
+        for (stream, message) in std::mem::take(&mut self.in_flight) {
+            self.cut_off(&stream, message, CarriedOn::No, &mut out);
+        }
+        out
     }
 
     /// The events of one line, where `mend` says a line that does not parse

@@ -858,10 +858,10 @@ impl Session {
                     return;
                 }
             }
-            let aside = translator.take_aside();
-            if !aside.is_empty() {
+            let left = translator.finish();
+            if !left.is_empty() {
                 // The receiver gone is the session dropped, as above.
-                let _ = sender.send(aside);
+                let _ = sender.send(left);
             }
         });
 
@@ -2965,6 +2965,44 @@ mod tests {
             .position(|event| matches!(event, Event::Error { fatal: true, .. }));
         assert!(notice.is_some(), "the notice was lost: {events:#?}");
         assert!(notice < end, "{events:#?}");
+    }
+
+    /// A reply the CLI was writing when it died was a request the account
+    /// was billed for: its tokens are counted from the snapshot its last
+    /// `assistant` line carried, as a reply cut off by a stream that ended
+    /// before its `message_delta` is, and the operator is told it was cut.
+    #[cfg(unix)]
+    #[test]
+    fn a_reply_the_cli_dies_writing_is_counted_from_what_it_recorded_of_it() {
+        let init = r#"{"type":"system","subtype":"init","session_id":"s-9","model":"claude-opus-5-5","permissionMode":"default"}"#;
+        let start = r#"{"type":"stream_event","event":{"type":"message_start","message":{"model":"claude-opus-5-5","id":"msg_1","usage":{"input_tokens":2,"cache_creation_input_tokens":4576,"cache_read_input_tokens":113494,"output_tokens":1}}}}"#;
+        let written = r#"{"type":"assistant","message":{"id":"msg_1","model":"claude-opus-5-5","content":[{"type":"thinking","thinking":"Reading the files."}],"usage":{"input_tokens":2,"cache_creation_input_tokens":4576,"cache_read_input_tokens":113494,"output_tokens":40}},"parent_tool_use_id":null}"#;
+        let (_, events) = stand_in(&format!(
+            "read -r first\nread -r turn\nprintf '%s\\n' '{init}' '{start}' '{written}'\nkill -KILL $$\n"
+        ));
+
+        let counted: Vec<(u64, u64, u64, u64)> = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Usage(usage) => Some((
+                    usage.input,
+                    usage.output,
+                    usage.cache_read,
+                    usage.cache_write,
+                )),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(counted, [(2, 40, 113_494, 4576)], "{events:#?}");
+        let cut = events.iter().position(|event| {
+            matches!(event, Event::Notice { message }
+                if message.starts_with("The reply above was cut off before the CLI said it was finished. Its tokens are counted"))
+        });
+        let end = events
+            .iter()
+            .position(|event| matches!(event, Event::Error { fatal: true, .. }));
+        assert!(cut.is_some(), "{events:#?}");
+        assert!(cut < end, "{events:#?}");
     }
 
     #[cfg(unix)]
