@@ -116,6 +116,11 @@ const CLI_WROTE_IT: [&str; 2] = ["<command-name>", "<local-command-stdout>"];
 /// passed over.
 const TASK_NOTIFICATION: &str = "task-notification";
 
+/// The tag each notification of background work stopping opens with, in the
+/// turn or the attachment that carries it. Read off the same transcripts, 1
+/// November 2026: each of the 3,505 that named a call named it inside one.
+const NOTIFICATION: &str = "<task-notification>";
+
 /// What the CLI puts where a message's model would be when it wrote the
 /// message itself rather than asking a model for it — the line it shows when a
 /// request failed, and the like. Read off the transcripts above, where it
@@ -1333,6 +1338,20 @@ impl Fold {
         if let Some(call) = agent {
             record.drop_result_of(call);
         }
+        // Background work stopping is written as a user turn too, and it is
+        // the CLI speaking. What it says is how a sub-agent launched in the
+        // background ended, which the call's own result never does, and how
+        // a command put in the background did. Read before the CLI's other
+        // notes are passed over, because in a sub-agent's own file the CLI
+        // marks this turn as one of them, which the session's file never
+        // does: see
+        // `a_sub_agents_background_commands_end_where_its_own_file_says_they_stopped`.
+        if record.notifies() {
+            if let Some(text) = record.message.content.as_ref().and_then(said) {
+                self.notified(&text);
+            }
+            return;
+        }
         // The CLI writes notes of its own into the transcript as user turns —
         // the caveat that precedes a local command's output, and the like —
         // and marks them. They are not what the operator said.
@@ -1354,15 +1373,6 @@ impl Fold {
             return;
         }
         if record.transcript_only {
-            return;
-        }
-        // Background work stopping is written as a user turn too, and it is
-        // the CLI speaking. What it says is how a sub-agent launched in the
-        // background ended, which the call's own result never does.
-        if record.notifies() {
-            if let Some(text) = record.message.content.as_ref().and_then(said) {
-                self.notified(&text);
-            }
             return;
         }
         // What an agent is told is the session speaking to it, and the
@@ -1427,12 +1437,20 @@ impl Fold {
     /// it says about a sub-agent is how it ended; its `<summary>` is the
     /// CLI's wording and not the agent's, and is read only for the status a
     /// background command exited with.
+    ///
+    /// One turn can hold several notifications, each its own element, and
+    /// each is read on its own: a tag read off the whole text would be the
+    /// first notification's, and the others' work would never end.
     fn notified(&mut self, text: &str) {
-        if let Some(id) = tag(text, "tool-use-id") {
-            let mut ended =
-                self.translator
-                    .task_stopped(id, tag(text, "status"), tag(text, "summary"));
-            self.out.append(&mut ended);
+        for notification in text.split(NOTIFICATION).skip(1) {
+            if let Some(id) = tag(notification, "tool-use-id") {
+                let mut ended = self.translator.task_stopped(
+                    id,
+                    tag(notification, "status"),
+                    tag(notification, "summary"),
+                );
+                self.out.append(&mut ended);
+            }
         }
     }
 
@@ -3437,6 +3455,96 @@ mod tests {
         )
         .expect("the temporary directory is writable");
         events(&path, "max", Path::new("/repo")).expect("the transcript reads")
+    }
+
+    /// A shell command a sub-agent put in the background, as its own file
+    /// holds the call and the CLI's word that the command was moved there.
+    fn agent_backgrounds(call: &str, task: &str) -> [String; 2] {
+        [
+            format!(
+                r#"{{"type":"assistant","message":{{"id":"msg_{call}","model":"claude-haiku-4-5-20251001","content":[{{"type":"tool_use","id":"{call}","name":"Bash","input":{{"command":"cargo build","run_in_background":true}}}}]}}}}"#
+            ),
+            format!(
+                r#"{{"type":"user","message":{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"{call}","content":"Command running in background with ID: {task}.","is_error":false}}]}},"toolUseResult":{{"stdout":"","stderr":"","interrupted":false,"backgroundTaskId":"{task}"}}}}"#
+            ),
+        ]
+    }
+
+    /// One `<task-notification>` as the CLI writes it into a turn.
+    fn stopped(call: &str, task: &str, status: &str, summary: &str) -> String {
+        format!(
+            r"<task-notification>\n<task-id>{task}</task-id>\n<tool-use-id>{call}</tool-use-id>\n<output-file>/tmp/{task}.output</output-file>\n<status>{status}</status>\n<summary>{summary}</summary>\n</task-notification>"
+        )
+    }
+
+    fn background_ends(events: &[Event]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                Event::BackgroundCommandEnded { id } => Some(id.to_string()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// In a sub-agent's own file the CLI marks the turn that says its
+    /// background work stopped as one of its own notes (`isMeta`), which the
+    /// session's file never does. Measured on the machine this was written
+    /// on, 1 November 2026: all 146 such turns in agents' files were marked,
+    /// none of the 1,282 in sessions' files, and five of the agents' named
+    /// two commands in one turn. Passed over as a note, the command read
+    /// back as running for ever, and how it ended was never said.
+    #[test]
+    fn a_sub_agents_background_commands_end_where_its_own_file_says_they_stopped() {
+        let [called_1, moved_1] = agent_backgrounds("toolu_bg1", "b1");
+        let [called_2, moved_2] = agent_backgrounds("toolu_bg2", "b2");
+        let both = format!(
+            r#"{{"type":"user","isMeta":true,"message":{{"role":"user","content":"{}\n{}"}},"origin":{{"kind":"task-notification"}}}}"#,
+            stopped(
+                "toolu_bg1",
+                "b1",
+                "failed",
+                r#"Background command \"cargo build\" failed with exit code 101"#
+            ),
+            stopped(
+                "toolu_bg2",
+                "b2",
+                "completed",
+                r#"Background command \"cargo build\" completed (exit code 0)"#
+            ),
+        );
+        let events = with_agent(
+            &[
+                r#"{"type":"assistant","message":{"id":"msg_s","model":"claude-opus-5","content":[{"type":"tool_use","id":"toolu_a","name":"Agent","input":{"subagent_type":"general-purpose","description":"Build it","prompt":"Build."}}]}}"#,
+            ],
+            &[&called_1, &moved_1, &called_2, &moved_2, &both],
+        );
+
+        assert_eq!(
+            background_ends(&events),
+            ["toolu_bg1", "toolu_bg2"],
+            "{events:?}"
+        );
+        let notices: Vec<&str> = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Notice { message } => Some(message.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            notices,
+            [
+                "the background command `cargo build` failed with exit code 101",
+                "the background command `cargo build` finished with exit code 0",
+            ]
+        );
+        assert!(
+            events
+                .iter()
+                .all(|event| !matches!(event, Event::UserMessage { .. })),
+            "the CLI's note is nobody speaking: {events:?}"
+        );
     }
 
     fn output_counts(events: &[Event]) -> Vec<(String, u64)> {
