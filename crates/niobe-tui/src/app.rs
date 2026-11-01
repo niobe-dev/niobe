@@ -2413,6 +2413,16 @@ impl App {
         self.recorded.clear();
         self.call_at.clear();
         self.detail_call = None;
+        // The list of calls chooses by place in `recorded`, which the next
+        // conversation's calls fill again from the first: left open, it would
+        // read one of those under the name of a call that is gone.
+        if self
+            .picking
+            .as_ref()
+            .is_some_and(|picker| picker.purpose == Purpose::Call)
+        {
+            self.picking = None;
+        }
         self.only_agent = None;
         self.agent_entries.clear();
         let running = self.session.running_agents();
@@ -18564,6 +18574,33 @@ mod tests {
             "{\"file_path\":\"b.rs\"}fn b() {}\n\tfn c() {}\n"
         );
         assert_eq!(app.overlay(), Some(Overlay::Detail));
+    }
+
+    /// The list names the calls of the conversation it was opened on; once
+    /// that conversation is cleared, Enter on one of them must not read
+    /// whichever call of the new one came to stand at the same place.
+    #[test]
+    fn the_list_of_calls_open_across_a_clear_never_reads_a_call_it_did_not_name() {
+        let mut app = app();
+        read_call(&mut app, "t1", "a.rs", "fn a() {}");
+        read_call(&mut app, "t2", "b.rs", "fn b() {}");
+        app.perform(crate::menu::Action::Calls);
+        assert_eq!(
+            app.picking().map(|picker| picker.at),
+            Some(1),
+            "the list opens on b.rs"
+        );
+
+        app.apply(&Event::Cleared);
+        read_call(&mut app, "t3", "c.rs", "fn c() {}");
+        read_call(&mut app, "t4", "d.rs", "fn d() {}");
+        app.on_key(key(KeyCode::Enter));
+
+        let read = app.detail().map(|detail| detail.text().to_owned());
+        assert!(
+            read.as_deref().is_none_or(|text| text.contains("b.rs")),
+            "the list said b.rs and read {read:?}"
+        );
     }
 
     #[test]
