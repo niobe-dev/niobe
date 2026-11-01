@@ -81,7 +81,7 @@ tasks:
     version   report what a release would be; --check that the manifest agrees with itself;
               <patch|minor|major|X.Y.Z> to move the workspace to that version
     formula   print the Homebrew formula for <version> from the .sha256 files of a release in
-              <directory>
+              <directory>, or the tap's current [<formula>] where it names a later release
     size      build --release and check the `niobe` binary against the 20 MB budget"
             );
             return ExitCode::FAILURE;

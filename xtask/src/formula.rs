@@ -9,10 +9,13 @@
 //! that sits beside each archive in the release, so the formula and the
 //! archives are the same release by construction, and a target whose checksum
 //! is not there fails the task rather than leaving a formula that installs
-//! nothing on that machine.
+//! nothing on that machine. Given the formula the tap holds, it keeps that
+//! one where it names a later release than the one being published.
 
 use std::collections::BTreeMap;
 use std::path::Path;
+
+use crate::version::Version;
 
 /// Where the archives are published.
 const RELEASES: &str = "https://github.com/niobe-dev/niobe/releases/download";
@@ -26,11 +29,30 @@ const TARGETS: [(&str, &str, &str); 4] = [
     ("x86_64-unknown-linux-musl", "on_linux", "on_intel"),
 ];
 
-/// `niobe formula <version> <directory>`: prints the formula for `version`,
-/// from the `niobe-<target>.tar.gz.sha256` files in `directory`.
+/// `niobe formula <version> <directory> [<formula>]`: prints the formula for
+/// `version`, from the `niobe-<target>.tar.gz.sha256` files in `directory`;
+/// or, where `formula` is the one the tap holds now and it names a later
+/// release, that formula unchanged.
 pub fn run(args: &[String]) -> Result<(), String> {
-    let [version, directory] = args else {
-        return Err("usage: cargo xtask formula <version> <directory of .sha256 files>".to_owned());
+    let (version, directory, current) = match args {
+        [version, directory] => (version, directory, None),
+        [version, directory, current] => (version, directory, Some(current)),
+        _ => {
+            return Err(
+                "usage: cargo xtask formula <version> <directory of .sha256 files> \
+                 [<the formula the tap holds now>]"
+                    .to_owned(),
+            );
+        }
+    };
+    let current = match current {
+        Some(path) => match std::fs::read_to_string(path) {
+            Ok(text) => Some(text),
+            // A tap with no formula yet has nothing to keep.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(format!("cannot read {path}: {error}")),
+        },
+        None => None,
     };
     let mut sums = BTreeMap::new();
     for (target, _, _) in TARGETS {
@@ -41,8 +63,36 @@ pub fn run(args: &[String]) -> Result<(), String> {
             checksum(&text).ok_or_else(|| format!("{} does not hold a SHA-256", file.display()))?;
         sums.insert(target, sum);
     }
-    print!("{}", render(version, &sums)?);
+    print!("{}", over(current.as_deref(), version, &sums)?);
     Ok(())
+}
+
+/// The formula the tap should hold once `version` is released, where it holds
+/// `current` now: `current` itself where that names a later release, since a
+/// fix released on an older line, or an older release's tap job run again,
+/// would otherwise move every new Homebrew install back to it.
+fn over(
+    current: Option<&str>,
+    version: &str,
+    sums: &BTreeMap<&str, String>,
+) -> Result<String, String> {
+    let releasing = Version::parse(version.strip_prefix('v').unwrap_or(version));
+    if let (Some(current), Ok(releasing)) = (current, releasing)
+        && let Some(held) = version_of(current)
+        && held > releasing
+    {
+        eprintln!("xtask: the tap holds {held}, after {releasing}; its formula is left as it is");
+        return Ok(current.to_owned());
+    }
+    render(version, sums)
+}
+
+/// The version a formula says it installs, where it says one.
+fn version_of(formula: &str) -> Option<Version> {
+    formula.lines().find_map(|line| {
+        let quoted = line.trim().strip_prefix("version \"")?.strip_suffix('"')?;
+        Version::parse(quoted).ok()
+    })
 }
 
 /// The digest `shasum -a 256` wrote: sixty-four hex digits, then the name.
@@ -156,6 +206,29 @@ mod tests {
         for version in ["", "latest", "0.17.0\"; system \"rm"] {
             assert!(render(version, &sums()).is_err(), "{version}");
         }
+    }
+
+    #[test]
+    fn a_release_older_than_the_taps_formula_leaves_the_formula_as_it_is() {
+        let newer = render("0.16.0", &sums()).expect("every target has a digest");
+
+        let kept = over(Some(&newer), "v0.15.1", &sums()).expect("an older release is no error");
+
+        assert_eq!(kept, newer, "a patch to an older line moved the tap back");
+    }
+
+    #[test]
+    fn a_release_at_or_after_the_taps_formula_replaces_it() {
+        let older = render("0.15.1", &sums()).expect("every target has a digest");
+        let same = render("0.16.0", &sums()).expect("every target has a digest");
+
+        for current in [None, Some(older.as_str()), Some(same.as_str())] {
+            let formula = over(current, "v0.16.0", &sums()).expect("a newer release");
+            assert!(formula.contains("version \"0.16.0\""), "{formula}");
+        }
+        let hand_written = "class Niobe < Formula\nend\n";
+        let formula = over(Some(hand_written), "0.16.0", &sums()).expect("no version to keep");
+        assert!(formula.contains("version \"0.16.0\""), "{formula}");
     }
 
     #[test]

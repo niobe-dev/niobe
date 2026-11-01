@@ -207,8 +207,11 @@ jobs:
         env:
           TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
-          cargo xtask formula "${GITHUB_REF_NAME}" dist > niobe.rb
           git clone --depth 1 "https://x-access-token:${TAP_TOKEN}@github.com/niobe-dev/homebrew-tap.git" tap
+          # Given the tap's formula, a release older than the one it names
+          # (a fix on an earlier line, or this job run again after a later
+          # release) leaves it as it is rather than moving installs back.
+          cargo xtask formula "${GITHUB_REF_NAME}" dist tap/Formula/niobe.rb > niobe.rb
           mkdir -p tap/Formula
           cp niobe.rb tap/Formula/niobe.rb
           cd tap
