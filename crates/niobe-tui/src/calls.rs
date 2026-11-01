@@ -1160,7 +1160,7 @@ fn summed(sides: impl Iterator<Item = Option<u64>>) -> (u64, bool) {
 
 /// How long a run of calls ran: the time the clock had at least one of them
 /// running, `≥` where it missed an end of one of them, and `None` where it
-/// missed every one.
+/// missed every one. A refused call never ran, so it has no time to miss.
 ///
 /// A backend runs some calls side by side — sub-agents, reads — and their
 /// times overlap, so the run took the span they covered rather than the sum
@@ -1168,7 +1168,11 @@ fn summed(sides: impl Iterator<Item = Option<u64>>) -> (u64, bool) {
 /// that ran one after another cover their own times and no gap between them,
 /// which is their sum. A run never reads longer than the turn it is part of.
 fn spanned_time(calls: &[Call]) -> Option<String> {
-    let mut spans: Vec<(SystemTime, SystemTime)> = calls
+    let ran: Vec<&Call> = calls
+        .iter()
+        .filter(|call| call.outcome != Some(ToolOutcome::Denied))
+        .collect();
+    let mut spans: Vec<(SystemTime, SystemTime)> = ran
         .iter()
         .filter_map(|call| {
             let began = call.began()?.at();
@@ -1195,7 +1199,7 @@ fn spanned_time(calls: &[Call]) -> Option<String> {
     if let Some((from, to)) = open {
         total = total.saturating_add(to.duration_since(from).unwrap_or_default());
     }
-    Some(match timed == calls.len() {
+    Some(match timed == ran.len() {
         true => clock::took(total),
         false => format!("≥{}", clock::took(total)),
     })
@@ -2020,6 +2024,30 @@ mod tests {
         let rows = drawn(&app, true);
         assert!(rows[0].ends_with("2.0 kB · 1 denied"), "{rows:?}");
         assert!(!rows[0].contains("failed"), "{rows:?}");
+    }
+
+    /// A call refused at its question never ran: the minute the operator
+    /// took to refuse it is not time the run spent, and the run's time is
+    /// the one call that did run, stated whole rather than as a floor.
+    #[test]
+    fn a_run_does_not_count_the_wait_on_a_refused_question_as_time_it_ran() {
+        let mut app = app();
+        app.apply_at(&start("t1", "Bash"), at(0));
+        app.apply_at(&end("t1", "Bash", ToolOutcome::Ok, None), at(1_500));
+        app.apply_at(&start("t2", "Bash"), at(1_500));
+        app.apply_at(
+            &Event::PermissionResponse {
+                id: "t2".into(),
+                decision: niobe_core::event::PermissionDecision::Deny,
+                message: None,
+            },
+            at(61_500),
+        );
+        app.apply_at(&end("t2", "Bash", ToolOutcome::Denied, None), at(61_700));
+
+        assert_eq!(app.entries()[0].calls[1].took, None);
+        let rows = drawn(&app, true);
+        assert!(rows[0].ends_with(" · 1 denied · 1.5s"), "{rows:?}");
     }
 
     #[test]

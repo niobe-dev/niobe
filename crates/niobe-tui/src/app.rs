@@ -807,7 +807,9 @@ pub struct Call {
     /// How long it ran by this shell's clock, or by the clock the store
     /// recorded it with. `None` while it runs, wherever either end came with
     /// no time — a log that kept none — and where the two ends are closer
-    /// than the clock can tell apart ([`TIMED`]).
+    /// than the clock can tell apart ([`TIMED`]). `None` for a call that was
+    /// refused, which never ran: the time between its start and its refusal
+    /// is the operator's, or the backend's, deciding.
     pub took: Option<Duration>,
     /// What it did to a file, where the backend reported the lines it
     /// changed. Drawn under the call as a diff; `None` for a call that is not
@@ -901,9 +903,14 @@ impl Call {
         self.bytes = Some(ending.bytes);
         self.exit_code = ending.exit_code;
         self.error = ending.error;
-        self.took = match (self.started, at) {
-            (Some(started), Some(at)) => at.since(started).filter(|took| *took >= TIMED),
-            _ => None,
+        self.took = match (ending.outcome, self.started, at) {
+            (ToolOutcome::Denied, _, _) => None,
+            (
+                ToolOutcome::Ok | ToolOutcome::Failed | ToolOutcome::Interrupted,
+                Some(started),
+                Some(at),
+            ) => at.since(started).filter(|took| *took >= TIMED),
+            (ToolOutcome::Ok | ToolOutcome::Failed | ToolOutcome::Interrupted, _, _) => None,
         };
     }
 
