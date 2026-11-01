@@ -379,7 +379,7 @@ fn no_content_puts_a_control_or_a_direction_mark_on_the_terminal() {
         with(vec![Event::SessionMeta(niobe_core::event::SessionMeta {
             backend: niobe_core::event::Backend::Claude,
             profile: format!("prof{p}"),
-            model: format!("model{p}"),
+            model: Some(format!("model{p}")),
             backend_session: None,
         })])
     }));

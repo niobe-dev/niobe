@@ -818,7 +818,7 @@ fn meta(backend_session: &str) -> Event {
     Event::SessionMeta(niobe_core::event::SessionMeta {
         backend: niobe_core::event::Backend::Claude,
         profile: "max".to_owned(),
-        model: "opus-5".to_owned(),
+        model: Some("opus-5".to_owned()),
         backend_session: Some(backend_session.to_owned()),
     })
 }
@@ -894,7 +894,7 @@ fn under(profile: &str) -> Event {
     Event::SessionMeta(niobe_core::event::SessionMeta {
         backend: niobe_core::event::Backend::Claude,
         profile: profile.to_owned(),
-        model: "opus-5".to_owned(),
+        model: Some("opus-5".to_owned()),
         backend_session: None,
     })
 }

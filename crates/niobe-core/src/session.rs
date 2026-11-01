@@ -748,9 +748,18 @@ impl SessionState {
 
     fn fold(&mut self, event: &Event) {
         match event {
+            // A meta that names the conversation and not the model says
+            // nothing about the model: the one known stays, on the meta too,
+            // which is what a refused change falls back to.
             Event::SessionMeta(meta) => {
-                self.model = Some(meta.model.clone());
-                self.meta = Some(meta.clone());
+                let mut meta = meta.clone();
+                if meta.model.is_none() {
+                    meta.model = self.meta.as_ref().and_then(|known| known.model.clone());
+                }
+                if let Some(model) = &meta.model {
+                    self.model = Some(model.clone());
+                }
+                self.meta = Some(meta);
             }
 
             Event::ModeSelected { mode } => self.mode = Some(*mode),
@@ -769,7 +778,7 @@ impl SessionState {
             Event::ModelRefused { back_to } => {
                 self.model = back_to
                     .clone()
-                    .or_else(|| self.meta.as_ref().map(|meta| meta.model.clone()));
+                    .or_else(|| self.meta.as_ref().and_then(|meta| meta.model.clone()));
             }
 
             Event::Titled { title } => self.title = Some(title.clone()),
@@ -3202,19 +3211,58 @@ mod tests {
         state.apply(&Event::SessionMeta(SessionMeta {
             backend: Backend::Claude,
             profile: "default".to_owned(),
-            model: "opus-5".to_owned(),
+            model: Some("opus-5".to_owned()),
             backend_session: None,
         }));
         state.apply(&Event::SessionMeta(SessionMeta {
             backend: Backend::Claude,
             profile: "default".to_owned(),
-            model: "sonnet-5".to_owned(),
+            model: Some("sonnet-5".to_owned()),
             backend_session: None,
         }));
 
         let meta = state.meta().expect("the stream carried session meta");
         assert_eq!(meta.backend, Backend::Claude);
-        assert_eq!(meta.model, "sonnet-5");
+        assert_eq!(meta.model.as_deref(), Some("sonnet-5"));
+    }
+
+    /// A meta that names the conversation before any model, as one read in
+    /// from a transcript no reply named a model in does, says nothing of the
+    /// model: what was known stays known, and what never was stays unknown.
+    #[test]
+    fn a_meta_naming_no_model_leaves_the_model_as_it_was() {
+        let meta = |model: Option<&str>| {
+            Event::SessionMeta(SessionMeta {
+                backend: Backend::Claude,
+                profile: "max".to_owned(),
+                model: model.map(str::to_owned),
+                backend_session: Some("conv-1".to_owned()),
+            })
+        };
+        let mut state = SessionState::new();
+        state.apply(&meta(None));
+        assert_eq!(state.model(), None);
+        assert_eq!(
+            state
+                .meta()
+                .and_then(|meta| meta.backend_session.as_deref()),
+            Some("conv-1")
+        );
+
+        state.apply(&meta(Some("claude-opus-5")));
+        state.apply(&meta(None));
+        assert_eq!(state.model(), Some("claude-opus-5"));
+        assert_eq!(
+            state.meta().and_then(|meta| meta.model.as_deref()),
+            Some("claude-opus-5")
+        );
+
+        // A refused change goes back to the model the meta held.
+        state.apply(&Event::ModelSelected {
+            model: "haiku".to_owned(),
+        });
+        state.apply(&Event::ModelRefused { back_to: None });
+        assert_eq!(state.model(), Some("claude-opus-5"));
     }
 
     #[test]
@@ -3261,7 +3309,7 @@ mod tests {
         state.apply(&Event::SessionMeta(SessionMeta {
             backend: Backend::Claude,
             profile: "max".to_owned(),
-            model: "claude-opus-5".to_owned(),
+            model: Some("claude-opus-5".to_owned()),
             backend_session: None,
         }));
         assert_eq!(state.model(), Some("claude-opus-5"));
@@ -3276,7 +3324,7 @@ mod tests {
         state.apply(&Event::SessionMeta(SessionMeta {
             backend: Backend::Claude,
             profile: "max".to_owned(),
-            model: "claude-haiku-4-5-20251001".to_owned(),
+            model: Some("claude-haiku-4-5-20251001".to_owned()),
             backend_session: None,
         }));
         assert_eq!(state.model(), Some("claude-haiku-4-5-20251001"));
@@ -3288,7 +3336,7 @@ mod tests {
         state.apply(&Event::SessionMeta(SessionMeta {
             backend: Backend::Claude,
             profile: "max".to_owned(),
-            model: "claude-opus-5".to_owned(),
+            model: Some("claude-opus-5".to_owned()),
             backend_session: None,
         }));
         state.apply(&Event::ModelSelected {
@@ -3307,7 +3355,7 @@ mod tests {
         state.apply(&Event::SessionMeta(SessionMeta {
             backend: Backend::Claude,
             profile: "max".to_owned(),
-            model: "claude-haiku-4-5-20251001".to_owned(),
+            model: Some("claude-haiku-4-5-20251001".to_owned()),
             backend_session: None,
         }));
         state.apply(&Event::ModelSelected {

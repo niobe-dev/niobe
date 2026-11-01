@@ -6104,7 +6104,7 @@ fn identity(
         // turn, and naming the one it is moving off would read as a switch
         // that did not land.
         (Some(meta), _) => (
-            Some(session.model().unwrap_or(&meta.model).to_owned()),
+            session.model().or(meta.model.as_deref()).map(str::to_owned),
             Some(match meta.profile.is_empty() {
                 true => meta.backend.to_string(),
                 false => format!("{} · {}", meta.backend, meta.profile),
@@ -6733,7 +6733,7 @@ mod tests {
         let running = SessionState::replay(&[niobe_core::event::Event::SessionMeta(SessionMeta {
             backend: Backend::Codex,
             profile: "default".to_owned(),
-            model: "gpt-5-codex".to_owned(),
+            model: Some("gpt-5-codex".to_owned()),
             backend_session: None,
         })]);
         assert_eq!(
@@ -6742,6 +6742,23 @@ mod tests {
                 Some("gpt-5-codex".to_owned()),
                 Some("codex · default".to_owned())
             )
+        );
+    }
+
+    /// A session read in from a conversation no reply named a model in knows
+    /// the conversation and not the model: the row names no model rather than
+    /// an empty one.
+    #[test]
+    fn a_meta_that_names_no_model_names_none_in_the_row() {
+        let unnamed = SessionState::replay(&[niobe_core::event::Event::SessionMeta(SessionMeta {
+            backend: Backend::Claude,
+            profile: "max".to_owned(),
+            model: None,
+            backend_session: Some("conv-1".to_owned()),
+        })]);
+        assert_eq!(
+            identity(&unnamed, None),
+            (None, Some("claude · max".to_owned()))
         );
     }
 
@@ -6761,7 +6778,7 @@ mod tests {
         let running = SessionState::replay(&[niobe_core::event::Event::SessionMeta(SessionMeta {
             backend: Backend::Claude,
             profile: "work".to_owned(),
-            model: "opus-5".to_owned(),
+            model: Some("opus-5".to_owned()),
             backend_session: None,
         })]);
         assert_eq!(
@@ -6888,7 +6905,7 @@ mod tests {
         app.apply(&niobe_core::event::Event::SessionMeta(SessionMeta {
             backend: Backend::Claude,
             profile: "max".to_owned(),
-            model: "claude-opus-5".to_owned(),
+            model: Some("claude-opus-5".to_owned()),
             backend_session: None,
         }));
         assert_eq!(row_of(&app).last(), Some(&"● working 30s".to_owned()));
@@ -6912,7 +6929,7 @@ mod tests {
         app.apply(&niobe_core::event::Event::SessionMeta(SessionMeta {
             backend: Backend::Claude,
             profile: "max".to_owned(),
-            model: "claude-opus-5".to_owned(),
+            model: Some("claude-opus-5".to_owned()),
             backend_session: None,
         }));
         app
@@ -8137,7 +8154,7 @@ mod tests {
             let meta = niobe_core::event::Event::SessionMeta(SessionMeta {
                 backend: Backend::Claude,
                 profile: "max".to_owned(),
-                model: "claude-opus-5".to_owned(),
+                model: Some("claude-opus-5".to_owned()),
                 backend_session: None,
             });
             let windows = niobe_core::event::Event::UsageWindows(UsageWindows {

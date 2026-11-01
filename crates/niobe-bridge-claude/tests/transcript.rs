@@ -289,7 +289,7 @@ fn a_transcript_says_what_it_ran_as_and_what_it_ran_on() {
         Some(&SessionMeta {
             backend: Backend::Claude,
             profile: "max".to_owned(),
-            model: "claude-sonnet-5".to_owned(),
+            model: Some("claude-sonnet-5".to_owned()),
             // The id the file is named by, which is the only thing that can
             // hand the conversation back to the CLI.
             backend_session: Some(SESSION.to_owned()),

@@ -2315,7 +2315,7 @@ mod tests {
         app.apply(&SessionEvent::SessionMeta(niobe_core::event::SessionMeta {
             backend: niobe_core::event::Backend::Claude,
             profile: "max".to_owned(),
-            model: "claude-opus-5".to_owned(),
+            model: Some("claude-opus-5".to_owned()),
             backend_session: None,
         }));
 

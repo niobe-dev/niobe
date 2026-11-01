@@ -1933,7 +1933,7 @@ impl Translator {
         out.push(Event::SessionMeta(SessionMeta {
             backend: Backend::Claude,
             profile: self.profile.clone(),
-            model,
+            model: Some(model),
             backend_session: self.backend_session.clone(),
         }));
     }
@@ -5419,7 +5419,7 @@ mod tests {
 
         assert!(matches!(
             moved.as_slice(),
-            [Event::SessionMeta(meta)] if meta.model == "sonnet-5"
+            [Event::SessionMeta(meta)] if meta.model.as_deref() == Some("sonnet-5")
         ));
         assert!(
             again.is_empty(),

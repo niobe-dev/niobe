@@ -121,7 +121,13 @@ pub struct SessionMeta {
     pub profile: String,
     /// The model the session starts on. A routing decision may move it, in
     /// which case the backend produces a fresh `SessionMeta`.
-    pub model: String,
+    ///
+    /// `None` where the backend has named its conversation and not yet the
+    /// model: a transcript read in before any reply named one says which
+    /// conversation it is, and nothing about the model. A meta recorded
+    /// before this could be absent holds a string, and reads as `Some`.
+    #[serde(default)]
+    pub model: Option<String>,
     /// The id the backend calls this session by, where it has one of its own.
     /// A bridge drives a CLI that keeps its own transcript under its own id,
     /// and only that id can hand the transcript back; Niobe's session id names
@@ -1384,6 +1390,31 @@ mod tests {
     }
     use super::*;
 
+    /// A meta stored before its model could be absent holds the model as a
+    /// string, and still reads as that model; one stored with none reads
+    /// back with none.
+    #[test]
+    fn a_stored_meta_reads_back_with_its_model_or_with_none() {
+        let old: Event = serde_json::from_str(
+            r#"{"type":"session_meta","backend":"claude","profile":"max","model":"claude-opus-5","backend_session":"conv-1"}"#,
+        )
+        .expect("a meta stored with a model reads");
+        let Event::SessionMeta(old) = old else {
+            panic!("read as another event: {old:?}");
+        };
+        assert_eq!(old.model.as_deref(), Some("claude-opus-5"));
+
+        let unnamed = Event::SessionMeta(SessionMeta {
+            backend: Backend::Claude,
+            profile: "max".to_owned(),
+            model: None,
+            backend_session: Some("conv-1".to_owned()),
+        });
+        let stored = serde_json::to_string(&unnamed).expect("a meta serializes");
+        let read: Event = serde_json::from_str(&stored).expect("a meta it wrote reads");
+        assert_eq!(read, unnamed);
+    }
+
     #[test]
     fn usage_tokens_counts_cache_traffic() {
         let usage = Usage {
@@ -1618,7 +1649,7 @@ mod tests {
             Event::SessionMeta(SessionMeta {
                 backend: Backend::Claude,
                 profile: "default".to_owned(),
-                model: "opus-5".to_owned(),
+                model: Some("opus-5".to_owned()),
                 backend_session: None,
             })
         );

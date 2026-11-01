@@ -465,7 +465,7 @@ fn what_the_session_ran_comes_from_the_cli_not_from_the_profile() {
 
     assert_eq!(meta.backend, Backend::Claude);
     assert_eq!(meta.profile, "max");
-    assert_eq!(meta.model, "claude-sonnet-5");
+    assert_eq!(meta.model.as_deref(), Some("claude-sonnet-5"));
     assert_eq!(meta.backend_session.as_deref(), Some("s-1"));
 }
 
@@ -1003,7 +1003,7 @@ mod long_context {
         let models: Vec<&str> = events
             .iter()
             .filter_map(|event| match event {
-                Event::SessionMeta(meta) => Some(meta.model.as_str()),
+                Event::SessionMeta(meta) => meta.model.as_deref(),
                 _ => None,
             })
             .collect();
@@ -1650,7 +1650,7 @@ fn a_cleared_conversation_is_the_one_a_resume_carries_on() {
         "the id the CLI's `init` gave after the clear"
     );
     assert_eq!(
-        state.meta().map(|meta| meta.model.as_str()),
+        state.meta().and_then(|meta| meta.model.as_deref()),
         Some("claude-sonnet-5")
     );
     assert_eq!(

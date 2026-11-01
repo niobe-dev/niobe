@@ -381,7 +381,7 @@ mod tests {
         on_max.state.apply(&Event::SessionMeta(SessionMeta {
             backend: Backend::Claude,
             profile: "max".to_owned(),
-            model: "opus-5".to_owned(),
+            model: Some("opus-5".to_owned()),
             backend_session: None,
         }));
         let sessions = [

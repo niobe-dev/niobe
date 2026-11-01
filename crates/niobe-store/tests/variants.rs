@@ -50,7 +50,7 @@ fn one_of_each() -> Vec<Event> {
         Event::SessionMeta(SessionMeta {
             backend: Backend::Claude,
             profile: text("max"),
-            model: text("claude-opus-4-8[1m]"),
+            model: Some(text("claude-opus-4-8[1m]")),
             backend_session: Some(text("b6c1")),
         }),
         Event::UserMessage { text: text("hi") },

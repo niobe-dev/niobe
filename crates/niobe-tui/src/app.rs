@@ -5479,7 +5479,7 @@ impl App {
         let model = self
             .session
             .model()
-            .or_else(|| self.session.meta().map(|meta| meta.model.as_str()))
+            .or_else(|| self.session.meta().and_then(|meta| meta.model.as_deref()))
             .unwrap_or("—")
             .to_owned();
         (backend, model)
@@ -11274,7 +11274,7 @@ mod tests {
         app.apply(&Event::SessionMeta(SessionMeta {
             backend: Backend::Claude,
             profile: "default".to_owned(),
-            model: "opus-5".to_owned(),
+            model: Some("opus-5".to_owned()),
             backend_session: None,
         }));
         app.apply(&Event::AssistantDelta {
@@ -11307,7 +11307,7 @@ mod tests {
         app.apply(&Event::SessionMeta(SessionMeta {
             backend: Backend::Claude,
             profile: "default".to_owned(),
-            model: "opus-5".to_owned(),
+            model: Some("opus-5".to_owned()),
             backend_session: None,
         }));
         app.apply(&Event::AgentSpawn {
@@ -11372,7 +11372,7 @@ mod tests {
         app.apply(&Event::SessionMeta(SessionMeta {
             backend: Backend::Claude,
             profile: "default".to_owned(),
-            model: "opus-5".to_owned(),
+            model: Some("opus-5".to_owned()),
             backend_session: None,
         }));
         app.apply(&Event::UserMessage {
@@ -11430,7 +11430,7 @@ mod tests {
         app.apply(&Event::SessionMeta(SessionMeta {
             backend: Backend::Claude,
             profile: "default".to_owned(),
-            model: "opus-5".to_owned(),
+            model: Some("opus-5".to_owned()),
             backend_session: None,
         }));
         app.apply(&Event::UserMessage {
@@ -11472,7 +11472,7 @@ mod tests {
         app.apply(&Event::SessionMeta(SessionMeta {
             backend: Backend::Claude,
             profile: "default".to_owned(),
-            model: "opus-5".to_owned(),
+            model: Some("opus-5".to_owned()),
             backend_session: None,
         }));
         app.apply(&Event::UserMessage {
@@ -12018,7 +12018,7 @@ mod tests {
         app.apply(&Event::SessionMeta(niobe_core::event::SessionMeta {
             backend: niobe_core::event::Backend::Claude,
             profile: "max".to_owned(),
-            model: "claude-opus-5".to_owned(),
+            model: Some("claude-opus-5".to_owned()),
             backend_session: None,
         }));
 
@@ -14530,7 +14530,7 @@ mod tests {
         app.apply(&Event::SessionMeta(SessionMeta {
             backend: Backend::Claude,
             profile: "max".to_owned(),
-            model: "claude-opus-5-5".to_owned(),
+            model: Some("claude-opus-5-5".to_owned()),
             backend_session: None,
         }));
 
@@ -15411,7 +15411,7 @@ mod tests {
             app.apply(&Event::SessionMeta(SessionMeta {
                 backend: Backend::Claude,
                 profile: "max".to_owned(),
-                model: "claude-opus-5".to_owned(),
+                model: Some("claude-opus-5".to_owned()),
                 backend_session: None,
             }));
             app.apply(&Event::UsageWindows(windows(NOW)));
@@ -20577,6 +20577,21 @@ mod tests {
             unread: None,
         });
         app
+    }
+
+    #[test]
+    fn a_session_whose_meta_names_no_model_shows_an_em_dash_for_it() {
+        let mut app = app();
+        app.apply(&Event::SessionMeta(SessionMeta {
+            backend: niobe_core::event::Backend::Claude,
+            profile: "max".to_owned(),
+            model: None,
+            backend_session: Some("conv-1".to_owned()),
+        }));
+        assert_eq!(
+            app.running_under(),
+            ("claude · max".to_owned(), "—".to_owned())
+        );
     }
 
     #[test]

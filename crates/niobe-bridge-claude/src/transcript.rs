@@ -73,7 +73,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
 
-use niobe_core::event::{CompactTrigger, Event};
+use niobe_core::event::{Backend, CompactTrigger, Event, SessionMeta};
 
 use crate::conformance;
 use crate::spilled;
@@ -503,7 +503,7 @@ pub fn timed(path: &Path, profile: &str, cwd: &Path) -> Result<Vec<Timed>, Trans
         .map(|side| (side.call.clone(), recorded_agent(&side.text)))
         .collect();
 
-    let mut fold = Fold::new(profile, cwd, id, accountings, agents).counting(last_usage);
+    let mut fold = Fold::new(profile, cwd, id.clone(), accountings, agents).counting(last_usage);
     for (call, file) in passed_over {
         fold.out.push(translate::warn(format!(
             "two files of sub-agent records name the call `{call}`: `{file}` is not read, and \
@@ -553,7 +553,36 @@ pub fn timed(path: &Path, profile: &str, cwd: &Path) -> Result<Vec<Timed>, Trans
         fold.record(record, None);
     }
     threads.fold_before(None, &mut fold);
-    Ok(fold.timed())
+    let mut timed = fold.timed();
+    name_the_conversation(&mut timed, profile, id);
+    Ok(timed)
+}
+
+/// Opens `timed` with what conversation it is, where no reply in it named a
+/// model: the CLI says which conversation it is only with the model a reply
+/// ran on, and a transcript with none — commands run, a prompt left before
+/// any answer — would otherwise be read in as a session carrying no
+/// conversation on, which is listed beside the conversation it was read from
+/// and opened as a new one.
+fn name_the_conversation(timed: &mut Vec<Timed>, profile: &str, id: String) {
+    let named = timed
+        .iter()
+        .any(|timed| matches!(timed.event, Event::SessionMeta(_)));
+    if named || id.is_empty() {
+        return;
+    }
+    timed.insert(
+        0,
+        Timed {
+            event: Event::SessionMeta(SessionMeta {
+                backend: Backend::Claude,
+                profile: profile.to_owned(),
+                model: None,
+                backend_session: Some(id),
+            }),
+            at: None,
+        },
+    );
 }
 
 /// For each of `records`, the stamp of the first record after it that has
@@ -2124,6 +2153,58 @@ mod tests {
         "\n",
     );
 
+    /// A conversation no reply named a model in still says which conversation
+    /// it is, first, so the session that reads it in carries it on; and one a
+    /// reply named a model in says so once, with the model.
+    #[test]
+    fn a_transcript_no_reply_named_a_model_in_still_names_its_conversation_first() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        transcript(
+            dir.path(),
+            "unanswered",
+            Duration::from_secs(60),
+            r#"{"type":"user","message":{"role":"user","content":"rename the crate"},"cwd":"/repo"}"#,
+        );
+
+        let unanswered = events(
+            &dir.path().join("unanswered.jsonl"),
+            "max",
+            Path::new("/repo"),
+        )
+        .expect("the transcript folds");
+        assert_eq!(
+            unanswered.first(),
+            Some(&Event::SessionMeta(niobe_core::event::SessionMeta {
+                backend: niobe_core::event::Backend::Claude,
+                profile: "max".to_owned(),
+                model: None,
+                backend_session: Some("unanswered".to_owned()),
+            })),
+            "{unanswered:?}"
+        );
+
+        transcript(
+            dir.path(),
+            "answered",
+            Duration::from_secs(60),
+            &response("msg_1", "claude-opus-5", 3, 40),
+        );
+        let answered = events(
+            &dir.path().join("answered.jsonl"),
+            "max",
+            Path::new("/repo"),
+        )
+        .expect("the transcript folds");
+        let metas: Vec<Option<&str>> = answered
+            .iter()
+            .filter_map(|event| match event {
+                Event::SessionMeta(meta) => Some(meta.model.as_deref()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(metas, [Some("claude-opus-5")]);
+    }
+
     #[test]
     fn what_the_cli_wrote_is_neither_the_operators_words_nor_the_title_and_turns_end_at_prompts() {
         let dir = tempfile::tempdir().expect("a temporary directory can be created");
@@ -2974,8 +3055,11 @@ mod tests {
             r#"{"type":"user","message":{"role":"user","content":"Add etag support to the fetcher"}}"#,
         ]);
 
+        // After the conversation is named, which no reply here did.
         assert_eq!(
-            events.first(),
+            events
+                .iter()
+                .find(|event| !matches!(event, Event::SessionMeta(_))),
             Some(&Event::Titled {
                 title: "Add etag support to the fetcher".to_owned()
             })
@@ -3273,7 +3357,7 @@ mod tests {
         let models: Vec<&str> = events
             .iter()
             .filter_map(|event| match event {
-                Event::SessionMeta(meta) => Some(meta.model.as_str()),
+                Event::SessionMeta(meta) => meta.model.as_deref(),
                 _ => None,
             })
             .collect();

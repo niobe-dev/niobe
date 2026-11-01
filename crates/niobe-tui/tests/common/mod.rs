@@ -86,7 +86,7 @@ fn session_events() -> Vec<Event> {
         Event::SessionMeta(SessionMeta {
             backend: Backend::Claude,
             profile: "default".to_owned(),
-            model: "opus-5".to_owned(),
+            model: Some("opus-5".to_owned()),
             backend_session: None,
         }),
         // A plan, as the Claude bridge reports a claude.ai login once a turn
@@ -837,7 +837,7 @@ pub fn session_with_finished_turns() -> App {
             Event::SessionMeta(SessionMeta {
                 backend: Backend::Claude,
                 profile: "default".to_owned(),
-                model: "opus-5".to_owned(),
+                model: Some("opus-5".to_owned()),
                 backend_session: None,
             }),
         ),
@@ -909,7 +909,7 @@ pub fn session_whose_turn_total_differs() -> App {
             Event::SessionMeta(SessionMeta {
                 backend: Backend::Claude,
                 profile: "default".to_owned(),
-                model: "opus-5".to_owned(),
+                model: Some("opus-5".to_owned()),
                 backend_session: Some("506fa4fd-8719-4564-8c62-5c6ae4b1a471".to_owned()),
             }),
         ),

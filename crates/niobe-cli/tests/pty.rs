@@ -937,6 +937,63 @@ fn a_claude_session_read_in_twice_opens_the_niobe_session_the_first_made() {
     );
 }
 
+/// A conversation the agent never answered — commands run and a prompt
+/// left before any reply — names no model, which is what a live session
+/// first says its conversation in. Read in and left, it is still the one
+/// Niobe session that carries that conversation on, so a second read opens
+/// that session rather than recording the history again.
+#[test]
+fn a_claude_session_the_agent_never_answered_read_in_twice_opens_one_niobe_session() {
+    let repo = repo();
+    let claude = claude_config_with_the_transcript(repo.path());
+    let here = std::fs::canonicalize(repo.path()).expect("the repository resolves");
+    let flattened: String = here
+        .to_string_lossy()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let transcript = claude
+        .path()
+        .join("projects")
+        .join(flattened)
+        .join(format!("{TRANSCRIPT_SESSION}.jsonl"));
+    let text = std::fs::read_to_string(&transcript).expect("the transcript is read");
+    let unanswered: String = text
+        .lines()
+        .take_while(|line| !line.contains(r#""type":"assistant""#))
+        .map(|line| format!("{line}\n"))
+        .collect();
+    std::fs::write(&transcript, unanswered).expect("the transcript is written");
+
+    for _ in 0..2 {
+        let (terminal, slave) = Terminal::open();
+        let mut shell = shell_command(&slave, repo.path())
+            .env("CLAUDE_CONFIG_DIR", claude.path())
+            .args(["--resume", TRANSCRIPT_SESSION])
+            .spawn()
+            .expect("the niobe binary runs");
+        terminal.shows("add an etag to the catalog response");
+        prompt_recorded(repo.path(), "add an etag to the catalog response");
+        terminal.typed(CTRL_Q);
+        let (_, status) = ended(&mut shell);
+        drop(slave);
+        assert!(status.success(), "ended with {status}");
+    }
+
+    let listed = niobe(repo.path(), &["sessions"]);
+    let out = String::from_utf8(listed.stdout).expect("stdout is UTF-8");
+    let niobe_sessions: Vec<&str> = out
+        .lines()
+        .skip(1)
+        .take_while(|line| !line.trim().is_empty() && !line.contains("claude sessions"))
+        .collect();
+    assert_eq!(
+        niobe_sessions.len(),
+        1,
+        "the same conversation was recorded twice:\n{out}"
+    );
+}
+
 /// A session read in from the CLI's transcript is stored at the times the
 /// CLI recorded, so that resuming it shows when it happened rather than when
 /// it was read in.
