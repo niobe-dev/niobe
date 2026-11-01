@@ -563,6 +563,15 @@ fn commands_for(root: &Path, backend: &mut backend::Attachment) -> commands::Com
     }
 }
 
+/// How `--resume` has the session's store: only to read it, where it prints
+/// the session, or holding the session, to carry it on.
+enum Taken {
+    /// Read, and nothing held.
+    Read(niobe_store::Store),
+    /// Held by this recorder, which the shell goes on recording through.
+    Held(Recorder),
+}
+
 /// Opens the shell on a recorded session and keeps recording into it. Without
 /// a terminal, prints what the session folds to.
 fn resume(
@@ -596,7 +605,19 @@ fn resume(
     if !store.has_session(session).map_err(|e| e.to_string())? {
         return Err(niobe_store::StoreError::NoSuchSession(session).to_string());
     }
-    let stored = store.events(session).map_err(|e| e.to_string())?;
+    // A shell takes the session's hold before reading it, so that what it
+    // folds is all the session holds — a niobe quitting it at this moment
+    // writes its last events before it lets go — and what it appends follows
+    // what it showed. A piped run only reads, and holds nothing.
+    let taken = match piped {
+        true => Taken::Read(store),
+        false => Taken::Held(Recorder::resume(store, session).map_err(|e| e.to_string())?),
+    };
+    let stored = match &taken {
+        Taken::Read(store) => store.events(session),
+        Taken::Held(recorder) => recorder.events(),
+    }
+    .map_err(|e| e.to_string())?;
     let spent = Spent::of(
         usage_times(stored.iter().map(|s| (&s.event, Some(s.at)))),
         (!piped).then(today),
@@ -633,20 +654,22 @@ fn resume(
     app.resumed();
     let elapsed = started.elapsed();
 
-    if piped {
-        print_summary(
-            &format!(
-                "session {session} · {} events · loaded and folded in {}",
-                stored.len(),
-                millis(elapsed)
-            ),
-            &app,
-        );
-        return Ok(None);
-    }
+    let recorder = match taken {
+        Taken::Read(_) => {
+            print_summary(
+                &format!(
+                    "session {session} · {} events · loaded and folded in {}",
+                    stored.len(),
+                    millis(elapsed)
+                ),
+                &app,
+            );
+            return Ok(None);
+        }
+        Taken::Held(recorder) => recorder,
+    };
     keys_can_be_read()?;
-    app = carry_windows(app, Some(&store), selected.as_ref());
-    let recorder = Recorder::resume(store, session).map_err(|e| e.to_string())?;
+    app = carry_windows(app, Some(recorder.store()), selected.as_ref());
     let recorded = app.session().meta().map(|meta| meta.profile.clone());
     let selected_name = selected.as_ref().map(|selected| selected.name);
     if let Some(said) = profile_changed(recorded.as_deref(), selected_name) {

@@ -7,7 +7,7 @@ use std::time::SystemTime;
 
 use niobe_core::event::Event;
 
-use crate::store::{SessionId, Store, StoreError};
+use crate::store::{SessionId, Store, StoreError, StoredEvent};
 
 /// Records one session's events into a [`Store`].
 ///
@@ -71,6 +71,23 @@ impl Recorder {
     /// The store underneath, for reading.
     pub fn store(&self) -> &Store {
         &self.store
+    }
+
+    /// Every event of the session being recorded, in order; none before
+    /// there is a session.
+    ///
+    /// What a resumed session is folded from before it goes on. Read after
+    /// [`resume`](Self::resume) has taken the hold, it is everything the
+    /// session holds: a recorder lets go only once it has written its last,
+    /// and none can add to it while this one holds it. Read from the store
+    /// before the hold, it could be short of the last events of a niobe
+    /// quitting that session at that moment, which this one would then
+    /// append after without having shown them.
+    pub fn events(&self) -> Result<Vec<StoredEvent>, StoreError> {
+        match self.session {
+            Some(session) => self.store.events(session),
+            None => Ok(Vec::new()),
+        }
     }
 
     /// Appends one event, dated now, opening the session first if this is its

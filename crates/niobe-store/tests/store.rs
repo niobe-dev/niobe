@@ -588,6 +588,39 @@ fn a_session_one_recorder_holds_cannot_be_taken_up_by_another_until_it_lets_go()
     .expect("a session nobody holds is taken up");
 }
 
+/// What a resume folds is read through the hold it takes, so it is everything
+/// the session holds: read before the hold, it could miss the last events of
+/// a niobe quitting that session at that moment, and the resumed shell would
+/// show less than its record and append after events it never folded.
+#[cfg(unix)]
+#[test]
+fn a_resumed_recorder_reads_every_event_the_one_before_it_wrote() {
+    let (_dir, path) = scratch();
+    let mut first = Recorder::new(Store::open(&path).expect("a store opens"));
+    first
+        .record(&user("one"))
+        .expect("a session in a temporary store takes an event");
+    let session = first.session().expect("a session was opened");
+    first
+        .record(&Event::SessionLeft)
+        .expect("a session in a temporary store takes an event");
+    drop(first);
+
+    let resumed = Recorder::resume(
+        Store::open(&path).expect("the store file is in a temporary directory"),
+        session,
+    )
+    .expect("a session nobody holds is taken up");
+    let read: Vec<Event> = resumed
+        .events()
+        .expect("the held session reads")
+        .into_iter()
+        .map(|stored| stored.event)
+        .collect();
+
+    assert_eq!(read, [user("one"), Event::SessionLeft]);
+}
+
 #[cfg(unix)]
 #[test]
 fn a_session_whose_hold_cannot_be_taken_is_opened_once_and_taken_up_when_it_can_be() {
