@@ -1122,6 +1122,18 @@ mod tests {
     }
 
     #[test]
+    fn output_saved_by_a_redirection_against_the_word_before_it_is_still_saved() {
+        assert_eq!(
+            read("echo \"x\">notes.md"),
+            (Work::Editing, named(&["echo"]))
+        );
+        assert_eq!(
+            read("cargo test>log.txt"),
+            (Work::Building, named(&["cargo test"]))
+        );
+    }
+
+    #[test]
     fn git_show_only_reads() {
         assert_eq!(
             read("git show HEAD~1"),

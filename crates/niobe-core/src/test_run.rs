@@ -146,8 +146,10 @@ pub fn is_test_run(command: &str) -> bool {
 ///
 /// A word is read with its quoting taken off — `RUSTFLAGS="-D warnings"` is
 /// one word, and `cargo 'test'` names `test` — and a line ended with `\` goes
-/// on to the next. A separator inside quotes, a `$(…)` or backticks, or
-/// escaped with `\`, is part of a word: `git commit -m "fix; cargo test
+/// on to the next. An unquoted `>` or `<` ends the word before it, as a
+/// shell's does: `cargo test>log` is `cargo`, `test` and `>log`. A separator
+/// inside quotes, a `$(…)` or backticks, or escaped with `\`, is part of a
+/// word: `git commit -m "fix; cargo test
 /// passes"` is one command, `git`'s. What a command substitution runs is not
 /// split out either, since what it prints is captured and its status is not
 /// the command's; its text is kept in the word as it was written, quotes and
@@ -280,6 +282,14 @@ pub(crate) fn simple_commands_marked(command: &str) -> Vec<Vec<Word>> {
             }
             (None, _) if separates(&chars, at) => split.end_command(),
             (None, ' ' | '\t') => split.end_word(),
+            (None, '<' | '>') => {
+                split.redirection_starts();
+                split.push(c);
+            }
+            (None, '&') if next == Some('>') => {
+                split.redirection_starts();
+                split.push(c);
+            }
             (None, _) => split.push(c),
         }
         at += 1;
@@ -325,6 +335,24 @@ impl Split {
     fn end_command(&mut self) {
         self.end_word();
         self.commands.push(std::mem::take(&mut self.words));
+    }
+
+    /// Ends the word being read where a redirection starts against it, as a
+    /// shell does: `cargo test>log` is `cargo`, `test` and `>log`. Not where
+    /// what has been read is the redirection's own start — the number of the
+    /// descriptor it sends, as in `2>`, or an operator still being written,
+    /// as in `>>`, `&>` or `<<<`.
+    fn redirection_starts(&mut self) {
+        let operator = !self.quoted
+            && (self.word.chars().all(|c| c.is_ascii_digit())
+                || self.word.ends_with(['<', '>', '&'])
+                    && self
+                        .word
+                        .chars()
+                        .all(|c| c.is_ascii_digit() || matches!(c, '<' | '>' | '&')));
+        if !operator {
+            self.end_word();
+        }
     }
 
     /// Whether nothing of a word has been read yet, where a `#` starts a
@@ -2195,6 +2223,28 @@ error: doctest failed, to rerun pass `--doc`
         let written = "x=$(cat <<-EOF\n\tit's `cargo test; done\n\tEOF\n)";
         assert!(!is_test_run(written), "{written:?} runs no tests");
         assert_eq!(simple_commands(written).len(), 1, "{written:?}");
+    }
+
+    #[test]
+    fn a_redirection_written_against_the_word_before_it_is_a_word_of_its_own() {
+        // A shell ends a word at an unquoted `>` or `<`: `cargo test>log`
+        // runs `cargo test` with its output sent to `log`.
+        let words = |command: &str| simple_commands(command).concat();
+        assert_eq!(words("cargo test>log.txt"), ["cargo", "test", ">log.txt"]);
+        assert!(is_test_run("cargo test>log.txt"));
+        assert_eq!(words("echo \"x\">>notes.md"), ["echo", "x", ">>notes.md"]);
+        assert_eq!(words("sort<in.txt"), ["sort", "<in.txt"]);
+        assert_eq!(
+            words("cargo test 2>&1>log"),
+            ["cargo", "test", "2>&1", ">log"]
+        );
+        assert_eq!(words("cargo test&>log"), ["cargo", "test", "&>log"]);
+        assert_eq!(words("cat<<<word"), ["cat", "<<<word"]);
+        // A descriptor's number is the redirection's own, and a quoted `>`
+        // is text.
+        assert_eq!(words("ls 2>err.txt"), ["ls", "2>err.txt"]);
+        assert_eq!(words("echo '>'x"), ["echo", ">x"]);
+        assert_eq!(words("echo a\\>b"), ["echo", "a>b"]);
     }
 
     #[test]
