@@ -5935,9 +5935,10 @@ impl App {
         // A sub-agent's rows land while the session is still writing, and do
         // not end its reply: the reply keeps its place above them rather than
         // being started again below. Nor does a prompt sent while it streams,
-        // which the CLI reads once the reply is done. Nor does the store
-        // refusing the reply's first fragment, or every fragment after it
-        // would start a reply of its own under the failure.
+        // which the CLI reads once the reply is done. Nor does a `!` command
+        // the operator runs meanwhile, which the backend never sees. Nor does
+        // the store refusing the reply's first fragment, or every fragment
+        // after it would start a reply of its own under the failure.
         let unsaved = self.unsaved.as_ref().map(|unsaved| unsaved.entry);
         let ended = self
             .entries
@@ -5945,7 +5946,10 @@ impl App {
             .enumerate()
             .skip(at.saturating_add(1))
             .any(|(later, entry)| {
-                entry.agent.is_none() && entry.kind != EntryKind::User && Some(later) != unsaved
+                entry.agent.is_none()
+                    && entry.kind != EntryKind::User
+                    && !is_operators_command(entry)
+                    && Some(later) != unsaved
             });
         if ended {
             return None;
@@ -10366,6 +10370,12 @@ fn count(things: usize) -> u64 {
     u64::try_from(things).unwrap_or(u64::MAX)
 }
 
+/// Whether `entry` is a `!` command the operator ran: its row is headed by
+/// the tool name such a command is recorded under, which no backend uses.
+fn is_operators_command(entry: &Entry) -> bool {
+    entry.head == crate::shell::OPERATOR_SHELL && !entry.calls.is_empty()
+}
+
 /// A tool's name as a person reads it.
 ///
 /// An MCP tool arrives as `mcp__<server>__<tool>`, and the server as the
@@ -11228,6 +11238,50 @@ mod tests {
                 (EntryKind::User, "slow", false),
                 (EntryKind::Agent, "word0 word1 word2", false),
                 (EntryKind::User, "hello during", false),
+            ]
+        );
+    }
+
+    /// A `!` command the operator runs while the reply streams is theirs, not
+    /// the agent's, and the backend never sees it: the reply keeps its place
+    /// above the command's row, and its words finish that one entry rather
+    /// than leave half of it streaming and draw the whole again below.
+    #[test]
+    fn a_bang_command_run_while_the_reply_streams_leaves_one_reply_above_it() {
+        let mut app = app();
+        app.apply(&Event::SessionMeta(SessionMeta {
+            backend: Backend::Claude,
+            profile: "default".to_owned(),
+            model: "opus-5".to_owned(),
+            backend_session: None,
+        }));
+        app.apply(&Event::UserMessage {
+            text: "slow".to_owned(),
+        });
+        app.apply(&Event::AssistantDelta {
+            text: "word0 ".to_owned(),
+        });
+        app.apply(&start("op1", crate::shell::OPERATOR_SHELL, "git log", None));
+        app.apply(&Event::AssistantDelta {
+            text: "word1".to_owned(),
+        });
+        app.apply(&end("op1", crate::shell::OPERATOR_SHELL));
+        app.apply(&Event::AssistantMessage {
+            text: "word0 word1 word2".to_owned(),
+            agent: None,
+        });
+
+        let finished: Vec<(EntryKind, &str, bool)> = app
+            .entries()
+            .iter()
+            .map(|entry| (entry.kind, entry.body.as_str(), entry.streaming))
+            .collect();
+        assert_eq!(
+            finished,
+            [
+                (EntryKind::User, "slow", false),
+                (EntryKind::Agent, "word0 word1 word2", false),
+                (EntryKind::Tool, "", false),
             ]
         );
     }
