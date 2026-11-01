@@ -250,6 +250,29 @@ struct Model {
     /// Whether the turn that typed the last clear may still be running: no
     /// end of any kind has come since the clear. A prompt sent then joins it.
     clear_open: bool,
+    /// Tokens per model since the last clear, as the records named it.
+    by_model: std::collections::BTreeMap<String, u64>,
+    /// How the session was last said to be billed, which a clear keeps.
+    billing: Option<Billing>,
+    /// Tokens folded while the session was last said to be billed by use.
+    metered: u64,
+    /// The last request's prompt and model, or a compaction's floor.
+    context: Option<(u64, String)>,
+    /// The five-hour window as last reported, which a clear keeps.
+    five_hour: Option<UsageWindow>,
+    /// The window where the running turn began, where a prompt opened it.
+    began_at: Option<Option<UsageWindow>>,
+    /// The window where the last turn ended.
+    ended_at: Option<UsageWindow>,
+    /// Whether any window was reported since the running turn began or the
+    /// last one ended.
+    window_said: bool,
+    /// Lines added and removed and changes made, per project file.
+    lines: std::collections::BTreeMap<String, (u64, u64, u64)>,
+    /// The calls running, each with its tool and the agent that made it.
+    running_calls: std::collections::BTreeMap<ToolCallId, (String, Option<AgentId>)>,
+    /// The sub-agents running.
+    running_agents: std::collections::BTreeSet<AgentId>,
 }
 
 fn tokens(usage: &Usage) -> u64 {
@@ -261,32 +284,77 @@ impl Model {
     fn before(&mut self, before: &SessionState, event: &Event) {
         match event {
             Event::Cleared => {
-                *self = Model::default();
+                let agents = std::mem::take(&mut self.running_agents);
+                let mut calls = std::mem::take(&mut self.running_calls);
+                calls.retain(|_, (name, agent)| {
+                    name == OPERATOR_SHELL || agent.as_ref().is_some_and(|a| agents.contains(a))
+                });
+                *self = Model {
+                    billing: self.billing,
+                    five_hour: self.five_hour,
+                    running_calls: calls,
+                    running_agents: agents,
+                    ..Model::default()
+                };
                 self.clear_open = true;
             }
-            Event::AgentExit { id, .. }
-                if !before.running_agents().contains(id) && !self.ended.contains(id) =>
-            {
-                self.orphan_exits += 1;
-                self.ended.insert(id.clone());
+            Event::Billing { billing } => self.billing = Some(*billing),
+            Event::Context(context) => {
+                self.context = Some((context.tokens, context.model.clone()));
             }
+            Event::Compacted { after, .. } => {
+                let last = self.context.take();
+                self.context = last.zip(*after).map(|((_, model), after)| (after, model));
+            }
+            Event::UsageWindows(windows) if !windows.is_empty() => {
+                self.five_hour = windows.five_hour;
+                self.window_said = true;
+            }
+            Event::AgentExit { id, .. } if self.ended.contains(id) => {}
             Event::AgentExit { id, .. } => {
+                if !before.running_agents().contains(id) {
+                    self.orphan_exits += 1;
+                }
                 self.ended.insert(id.clone());
+                self.running_agents.remove(id);
+                self.running_calls
+                    .retain(|_, (_, agent)| agent.as_ref() != Some(id));
             }
             Event::AgentSpawn { id, .. } => {
                 self.ended.remove(id);
+                self.running_agents.insert(id.clone());
+            }
+            Event::ToolCallStart {
+                id, name, agent, ..
+            } => {
+                let agent = agent
+                    .clone()
+                    .or_else(|| self.running_calls.get(id).and_then(|(_, a)| a.clone()));
+                self.running_calls.insert(id.clone(), (name.clone(), agent));
+            }
+            Event::ToolCallEnd { id, .. } => {
+                self.running_calls.remove(id);
             }
             Event::SessionLeft | Event::Error { fatal: true, .. } => {
+                self.running_calls
+                    .retain(|_, (name, _)| name == OPERATOR_SHELL);
+                self.running_agents.clear();
                 self.ended.extend(before.running_agents().iter().cloned());
                 self.clear_open = false;
             }
             Event::TurnEnded => self.clear_open = false,
             Event::UserMessage { .. } if !before.turn_running() && !self.clear_open => {
+                self.began_at = Some(self.five_hour);
+                self.window_said = false;
                 self.no_turn += self.between;
                 self.between = 0;
                 self.in_turn = 0;
             }
             Event::Usage(usage) => {
+                *self.by_model.entry(usage.model.clone()).or_default() += tokens(usage);
+                if self.billing == Some(Billing::Metered) {
+                    self.metered += tokens(usage);
+                }
                 self.usage_records += 1;
                 match before.turn_running() {
                     true => self.in_turn += tokens(usage),
@@ -294,19 +362,53 @@ impl Model {
                 }
             }
             Event::FileChange {
+                path,
+                added,
+                removed,
                 scope: ChangeScope::Project,
                 ..
-            } => self.project_changes += 1,
+            } => {
+                self.project_changes += 1;
+                let file = self.lines.entry(path.clone()).or_default();
+                file.0 += added.unwrap_or(0);
+                file.1 += removed.unwrap_or(0);
+                file.2 += 1;
+            }
             _ => {}
         }
     }
 
     /// Takes in a turn the fold has just recorded, and says what it spent.
     fn turn_recorded(&mut self) -> u64 {
+        let agents = &self.running_agents;
+        self.running_calls.retain(|_, (name, agent)| {
+            name == OPERATOR_SHELL || agent.as_ref().is_some_and(|a| agents.contains(a))
+        });
         let spent = self.between + self.in_turn;
         self.between = 0;
         self.in_turn = 0;
         spent
+    }
+
+    /// Takes in the window share of a turn the fold has just recorded, and
+    /// says what it should be: the level at its end less the level where it
+    /// began, of one window, where one was reported in between.
+    fn share_recorded(&mut self) -> Option<f64> {
+        let began = self.began_at.take().unwrap_or(self.ended_at);
+        let ended = self.five_hour;
+        let share = match (self.window_said, began, ended) {
+            (true, Some(before), Some(after))
+                if before.resets_at.is_some()
+                    && before.resets_at == after.resets_at
+                    && after.utilization >= before.utilization =>
+            {
+                Some(after.utilization - before.utilization)
+            }
+            _ => None,
+        };
+        self.ended_at = ended;
+        self.window_said = false;
+        share
     }
 }
 
@@ -416,6 +518,46 @@ fn check(seed: u64, at: usize, event: &Event, state: &SessionState, model: &Mode
 
     let changes: u64 = state.files().iter().map(|f| f.changes).sum();
     assert_eq!(changes, model.project_changes, "file changes, {}", why());
+    for file in state.files() {
+        assert_eq!(
+            Some(&(file.added, file.removed, file.changes)),
+            model.lines.get(&file.path),
+            "lines of {}, {}",
+            file.path,
+            why()
+        );
+    }
+    assert_eq!(state.files().len(), model.lines.len(), "files, {}", why());
+    assert_eq!(
+        state.running_agents(),
+        &model.running_agents,
+        "running agents, {}",
+        why()
+    );
+    assert_eq!(
+        state.in_flight_tools().keys().collect::<Vec<_>>(),
+        model.running_calls.keys().collect::<Vec<_>>(),
+        "running calls, {}",
+        why()
+    );
+    assert_eq!(
+        totals.tokens_by_model,
+        model.by_model,
+        "tokens per model, {}",
+        why()
+    );
+    assert_eq!(
+        state.metered_totals().tokens(),
+        model.metered,
+        "metered tokens, {}",
+        why()
+    );
+    assert_eq!(
+        state.context().map(|c| (c.tokens, c.model.clone())),
+        model.context,
+        "context, {}",
+        why()
+    );
     assert!(
         state.pending_permissions().len() as u64 <= state.permission_requests(),
         "{}",
@@ -438,6 +580,12 @@ fn fold_checked(seed: u64, events: &[Event]) -> SessionState {
             assert_eq!(
                 recorded, spent,
                 "the turn recorded at event {at} of seed {seed} ({event:?})"
+            );
+            let share = model.share_recorded();
+            assert_eq!(
+                state.turns()[turns].five_hour_share,
+                share,
+                "the window share of the turn recorded at event {at} of seed {seed} ({event:?})"
             );
         }
         check(seed, at, event, &state, &model);
