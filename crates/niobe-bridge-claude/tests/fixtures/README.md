@@ -1329,6 +1329,16 @@ counts such messages from their own usage; the unit test
 `what_a_process_that_left_no_accounting_spent_is_counted_from_its_messages` in
 `src/transcript.rs` holds the case.
 
+A process that carries the totals over carries the `startTime` they count from
+with them: both records above name 1791023440453. Of the 178 `cost-state`
+records on the machine this was written on, 1 November 2026, that followed
+another in the same file, the 177 that named the same `startTime` each held at
+least the totals before them, and the one that named a start of its own held
+its own process's spend alone — 59,335 Opus output tokens after 381,652. The
+reader measures such a record from nothing; the unit test
+`an_accounting_that_did_not_carry_the_one_before_is_counted_from_nothing`
+holds the case.
+
 ## `models-listed.jsonl`
 
 One turn on a Max login, recorded from Claude Code 2.1.288 on 4 October 2026

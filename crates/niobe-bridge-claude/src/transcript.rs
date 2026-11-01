@@ -963,6 +963,9 @@ struct Fold {
     /// The running totals the last accounting folded recorded, which a
     /// process that resumes the session restores; nothing before the first.
     restored: Spent,
+    /// When the count the last accounting folded began, where it said: a
+    /// process that restored those totals restored this with them.
+    restored_start: Option<SystemTime>,
     /// Whether a message since the last accounting was counted from its own
     /// usage although another accounting is still ahead, because its process
     /// ended without writing one.
@@ -1020,6 +1023,7 @@ impl Fold {
             accountings,
             at: None,
             restored: Spent::default(),
+            restored_start: None,
             outside_accounting: false,
             awaited: false,
             awaited_before: false,
@@ -1448,7 +1452,19 @@ impl Fold {
         if std::mem::take(&mut self.outside_accounting) {
             self.translator.restarted_from(&self.restored);
         }
+        // A process that restored the last accounting's running totals
+        // restored the start they count from with them; one that names a
+        // start of its own restored nothing, and its totals are its own spend
+        // whole. See
+        // `an_accounting_that_did_not_carry_the_one_before_is_counted_from_nothing`.
+        let started = record.started();
+        if let (Some(before), Some(now)) = (self.restored_start, started)
+            && before != now
+        {
+            self.translator.counted_afresh();
+        }
         self.restored = Spent::from_model_usage(&record.model_usage);
+        self.restored_start = started;
         // The CLI says when it could not price something it ran, and a total
         // that is missing a model is a floor rather than the bill. Said
         // plainly, because nothing else in the record marks which model it was.
@@ -3492,8 +3508,9 @@ mod tests {
     }
 
     /// A process that ended without an accounting between two that wrote
-    /// one: the last restored the first's running totals, not the lost
-    /// process's, so its accounting less the first is its own spend.
+    /// one: the last restored neither the first's running totals nor the
+    /// lost process's, and counted from the start it records, so its
+    /// accounting is its own spend.
     #[test]
     fn a_process_lost_between_two_accountings_is_counted_once_and_neither_accounting_twice() {
         let at = |stamp: &str, record: String| {
@@ -3516,7 +3533,7 @@ mod tests {
                 "2026-09-30T09:00:31.000Z",
                 response("msg_3", "claude-opus-5", 5, 7),
             ),
-            r#"{"type":"cost-state","startTime":1790758820000,"totalCostUSD":0.03,"modelUsage":{"claude-opus-5":{"inputTokens":7,"outputTokens":17,"costUSD":0.03}}}"#,
+            r#"{"type":"cost-state","startTime":1790758820000,"totalCostUSD":0.02,"modelUsage":{"claude-opus-5":{"inputTokens":5,"outputTokens":7,"costUSD":0.02}}}"#,
         ]);
 
         let counted = events
@@ -3555,7 +3572,7 @@ mod tests {
                 "2026-09-30T09:00:31.000Z",
                 response("msg_3", "claude-opus-5", 5, 7),
             ),
-            r#"{"type":"cost-state","startTime":1790758820000,"totalCostUSD":0.03,"modelUsage":{"claude-opus-5":{"inputTokens":7,"outputTokens":17,"costUSD":0.03}}}"#,
+            r#"{"type":"cost-state","startTime":1790758820000,"totalCostUSD":0.02,"modelUsage":{"claude-opus-5":{"inputTokens":5,"outputTokens":7,"costUSD":0.02}}}"#,
         ]);
 
         let state = niobe_core::SessionState::replay(&events);
@@ -3569,6 +3586,67 @@ mod tests {
             !totals.cost_fully_reported(),
             "the lost process's 43 tokens are in no cost, yet the session reads as whole: {events:#?}"
         );
+    }
+
+    /// A process that resumed the session without carrying the last
+    /// accounting over counts on from its own start, which its accounting
+    /// records in place of the earlier one's. Measured on the machine this
+    /// was written on, 1 November 2026: of the 178 accountings that followed
+    /// another in the same file, the 177 that carried its `startTime` each
+    /// held at least its totals, and the one that named a start of its own
+    /// held its process's spend alone — 59,335 output tokens of Opus, where
+    /// the accounting before it had recorded 381,652. Measured from the
+    /// earlier totals, that process's spend is lost, and so is as much of the
+    /// next one's as the earlier process spent.
+    #[test]
+    fn an_accounting_that_did_not_carry_the_one_before_is_counted_from_nothing() {
+        let at = |stamp: &str, record: String| {
+            record.replacen('{', &format!(r#"{{"timestamp":"{stamp}","#), 1)
+        };
+        let accounting = |start: u64, input: u64, output: u64, usd: f64| {
+            format!(
+                r#"{{"type":"cost-state","startTime":{start},"totalCostUSD":{usd},"modelUsage":{{"claude-opus-5":{{"inputTokens":{input},"outputTokens":{output},"costUSD":{usd}}}}}}}"#
+            )
+        };
+        // The second process's own spend, below the first's and above it.
+        for (input, output, usd) in [(3, 4, 0.004), (30, 40, 0.03)] {
+            let events = imported(&[
+                &at("2026-09-30T05:00:00.000Z", prompt("first")),
+                &at(
+                    "2026-09-30T05:00:01.000Z",
+                    response("msg_1", "claude-opus-5", 2, 10),
+                ),
+                &accounting(1_790_744_390_000, 2, 10, 0.01),
+                &at("2026-09-30T09:00:30.000Z", prompt("second")),
+                &at(
+                    "2026-09-30T09:00:31.000Z",
+                    response("msg_2", "claude-opus-5", input, output),
+                ),
+                &accounting(1_790_758_820_000, input, output, usd),
+                &at("2026-09-30T10:00:00.000Z", prompt("third")),
+                &at(
+                    "2026-09-30T10:00:01.000Z",
+                    response("msg_3", "claude-opus-5", 5, 7),
+                ),
+                &accounting(1_790_758_820_000, input + 5, output + 7, usd + 0.002),
+            ]);
+
+            let counted = events
+                .iter()
+                .filter_map(|event| match event {
+                    Event::Usage(usage) => Some((usage.input, usage.output)),
+                    _ => None,
+                })
+                .fold((0, 0), |(i, o), (input, output)| (i + input, o + output));
+            assert_eq!(counted, (2 + input + 5, 10 + output + 7), "{events:#?}");
+            let totals = niobe_core::SessionState::replay(&events).totals().clone();
+            assert!(
+                (totals.reported_cost_usd - (0.01 + usd + 0.002)).abs() < 1e-9,
+                "{}",
+                totals.reported_cost_usd
+            );
+            assert!(totals.cost_fully_reported(), "{events:#?}");
+        }
     }
 
     #[test]

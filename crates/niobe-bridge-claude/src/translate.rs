@@ -760,6 +760,15 @@ impl Translator {
         self.restored_unknown = spent.unknown.is_some();
     }
 
+    /// Measures the next bill from nothing: the running totals of a process
+    /// that resumed the session without restoring the last bill's, and so
+    /// counted its own spend from its own start. What was reported before
+    /// stays reported; the next bill holds none of it.
+    pub(crate) fn counted_afresh(&mut self) {
+        self.reported.clear();
+        self.restored_unknown = false;
+    }
+
     /// The same translator, told how the session is billed by the profile it
     /// runs under.
     ///
