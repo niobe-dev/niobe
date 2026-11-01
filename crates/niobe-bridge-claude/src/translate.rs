@@ -2488,7 +2488,9 @@ impl Translator {
     }
 
     /// Counts one message's `usage` on `stream`, filed under the model its
-    /// `message_start` named.
+    /// `message_start` named: a record for each API request the message
+    /// took, where its usage lists them, since what a request costs can turn
+    /// on that request's own prompt.
     fn count_message(
         &mut self,
         stream: &Option<String>,
@@ -2506,27 +2508,31 @@ impl Translator {
             .turn_1h
             .zip(usage.cache_write_1h())
             .map(|(sum, hour)| sum.saturating_add(hour));
-        let record = Usage {
-            input: counts.input,
-            output: counts.output,
-            cache_read: counts.cache_read,
-            cache_write: counts.cache_write,
-            cache_write_1h: usage.cache_write_1h(),
-            // `output_tokens_details.thinking_tokens` is a share of
-            // `output_tokens`, not a count beside it. Reporting it as
-            // reasoning tokens would count those tokens twice, in the
-            // total and again in the bill.
-            reasoning: 0,
-            model: model.clone().unwrap_or_default(),
-            // The CLI reports no money per message; the turn's `result` does,
-            // for the session so far, and settles this record along with it.
-            cost_usd: None,
-            settles_model: Some(false),
-            fast,
-        };
-        match model {
-            Some(model) => self.file(model, record, out),
-            None => self.unattributed.push(record),
+        for request in usage.requests() {
+            let counts = Counts::from(&request);
+            let record = Usage {
+                input: counts.input,
+                output: counts.output,
+                cache_read: counts.cache_read,
+                cache_write: counts.cache_write,
+                cache_write_1h: request.cache_write_1h(),
+                // `output_tokens_details.thinking_tokens` is a share of
+                // `output_tokens`, not a count beside it. Reporting it as
+                // reasoning tokens would count those tokens twice, in the
+                // total and again in the bill.
+                reasoning: 0,
+                model: model.clone().unwrap_or_default(),
+                // The CLI reports no money per message; the turn's `result`
+                // does, for the session so far, and settles this record
+                // along with it.
+                cost_usd: None,
+                settles_model: Some(false),
+                fast,
+            };
+            match model.clone() {
+                Some(model) => self.file(model, record, out),
+                None => self.unattributed.push(record),
+            }
         }
         if stream.is_none() {
             self.report_context(usage.last_prompt(), out);

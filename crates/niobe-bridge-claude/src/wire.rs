@@ -745,6 +745,59 @@ impl Usage {
         input.saturating_add(read).saturating_add(write)
     }
 
+    /// The API requests the message took, each with its own counts, where
+    /// its iterations account for every token of its totals; the message
+    /// whole, as one request, where they do not.
+    ///
+    /// A provider bills a long-context rate on one request's own prompt, so
+    /// a message of two 150K requests priced as its 300K sum would be priced
+    /// past a 200K threshold that neither request crossed. Iterations that
+    /// do not add up to the totals, or whose lifetimes do not add up to the
+    /// split the totals give, say something else than this reading of them,
+    /// and the message is left as the CLI summed it.
+    pub(crate) fn requests(&self) -> Vec<Usage> {
+        if self.iterations.len() < 2 {
+            return vec![self.clone()];
+        }
+        let split = self.cache_write_1h();
+        let requests: Vec<Usage> = self
+            .iterations
+            .iter()
+            .map(|iteration| Usage {
+                input_tokens: iteration.input_tokens,
+                output_tokens: iteration.output_tokens,
+                cache_read_input_tokens: iteration.cache_read_input_tokens,
+                cache_creation_input_tokens: iteration.cache_creation_input_tokens,
+                // A request that wrote nothing bought nothing for any
+                // lifetime, which is a split of its writes where the message
+                // has one.
+                cache_creation: iteration.cache_creation.clone().or_else(|| {
+                    (split.is_some() && iteration.cache_creation_input_tokens == 0)
+                        .then(CacheCreation::default)
+                }),
+                iterations: Vec::new(),
+                speed: self.speed.clone(),
+            })
+            .collect();
+        let sum =
+            |count: fn(&Usage) -> u64| requests.iter().map(count).fold(0u64, u64::saturating_add);
+        let adds_up = sum(|r| r.input_tokens) == self.input_tokens
+            && sum(|r| r.output_tokens) == self.output_tokens
+            && sum(|r| r.cache_read_input_tokens) == self.cache_read_input_tokens
+            && sum(|r| r.cache_creation_input_tokens) == self.cache_creation_input_tokens;
+        let split_adds_up = match split {
+            None => true,
+            Some(hour) => {
+                requests.iter().all(|r| r.cache_creation.is_some())
+                    && sum(|r| r.cache_write_1h().unwrap_or_default()) == hour
+            }
+        };
+        match adds_up && split_adds_up {
+            true => requests,
+            false => vec![self.clone()],
+        }
+    }
+
     /// Whether any request the message took says how its writes split by
     /// lifetime.
     fn splits_requests(&self) -> bool {
@@ -783,6 +836,8 @@ impl Usage {
 pub(crate) struct Iteration {
     #[serde(default, deserialize_with = "count")]
     pub(crate) input_tokens: u64,
+    #[serde(default, deserialize_with = "count")]
+    pub(crate) output_tokens: u64,
     #[serde(default, deserialize_with = "count")]
     pub(crate) cache_read_input_tokens: u64,
     #[serde(default, deserialize_with = "count")]
@@ -1407,6 +1462,60 @@ mod tests {
         let whole = start.completed_by(&usage(r#"{"output_tokens":5}"#));
 
         assert_eq!(whole.cache_write_1h(), Some(40));
+    }
+
+    /// Each request of a message is its own, with the lifetime it bought
+    /// its writes for; a request that wrote nothing split nothing.
+    #[test]
+    fn a_message_whose_requests_add_up_to_its_totals_is_read_as_those_requests() {
+        let whole = usage(
+            r#"{"input_tokens":10,"cache_creation_input_tokens":300,"cache_read_input_tokens":3000,"output_tokens":90,"iterations":[{"input_tokens":4,"output_tokens":40,"cache_read_input_tokens":1000,"cache_creation_input_tokens":0,"type":"message"},{"input_tokens":6,"output_tokens":50,"cache_read_input_tokens":2000,"cache_creation_input_tokens":300,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":300},"type":"message"}]}"#,
+        );
+
+        let read: Vec<_> = whole
+            .requests()
+            .iter()
+            .map(|r| {
+                (
+                    r.input_tokens,
+                    r.output_tokens,
+                    r.cache_read_input_tokens,
+                    r.cache_creation_input_tokens,
+                    r.cache_write_1h(),
+                    r.last_prompt(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            read,
+            [
+                (4, 40, 1000, 0, Some(0), 1004),
+                (6, 50, 2000, 300, Some(300), 2306)
+            ]
+        );
+    }
+
+    /// Requests that do not account for the totals, or for the split of
+    /// their writes, are not read as the message's: it stays the one record
+    /// the CLI summed.
+    #[test]
+    fn a_message_whose_requests_do_not_add_up_is_read_whole() {
+        let short = usage(
+            r#"{"input_tokens":10,"output_tokens":90,"iterations":[{"input_tokens":4,"output_tokens":40,"type":"message"},{"input_tokens":5,"output_tokens":50,"type":"compaction"}]}"#,
+        );
+        let unsplit = usage(
+            r#"{"input_tokens":10,"cache_creation_input_tokens":500,"output_tokens":90,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":500},"iterations":[{"input_tokens":4,"output_tokens":40,"cache_creation_input_tokens":200,"type":"message"},{"input_tokens":6,"output_tokens":50,"cache_creation_input_tokens":300,"type":"message"}]}"#,
+        );
+        let one = usage(
+            r#"{"input_tokens":4,"output_tokens":40,"iterations":[{"input_tokens":4,"output_tokens":40,"type":"message"}]}"#,
+        );
+
+        for whole in [short, unsplit, one] {
+            let requests = whole.requests();
+            assert_eq!(requests.len(), 1);
+            assert_eq!(requests[0].input_tokens, whole.input_tokens);
+            assert_eq!(requests[0].cache_write_1h(), whole.cache_write_1h());
+        }
     }
 
     #[test]

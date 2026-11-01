@@ -172,3 +172,47 @@ fn a_resumed_session_whose_earlier_spend_is_unknown_stays_a_floor_when_priced() 
     assert_eq!(niobe_tui::session_cost(&state, None), "≥$0.05");
     assert_eq!(niobe_tui::session_cost(&state, Some(&bundled())), "≥$0.05");
 }
+
+/// One message that took two API requests, as Claude Code 2.1.278 streams
+/// one: its `message_delta` sums both requests and lists each in its
+/// `iterations`. A provider bills the long-context rate on a request's own
+/// prompt, so two 150K prompts are two requests under Sonnet 4.5's 200K
+/// threshold, not one 300K prompt over it.
+#[test]
+fn a_message_of_two_requests_under_the_threshold_is_priced_at_standard_rates() {
+    // Claude Sonnet 4.5: input $3, output $15, cache read $0.30. Each
+    // request's prompt is 2,000 input and 148,000 cache reads, 150K:
+    //     2,000 input × 3        =  6,000
+    //   148,000 cache read × 0.3 = 44,400
+    //     1,000 output × 15      = 15,000
+    //                              65,400 each, × 2 = 130,800 / 1e6 = $0.1308
+    // The sum read as one 300K request would be billed at $6, $0.60 and
+    // $22.50: 24,000 + 177,600 + 45,000 = $0.2466.
+    let mut translator = niobe_bridge_claude::Translator::new("work");
+    let request = r#"{"input_tokens":2000,"cache_read_input_tokens":148000,"cache_creation_input_tokens":0,"output_tokens":1000,"type":"message"}"#;
+    let delta = format!(
+        r#"{{"type":"stream_event","event":{{"type":"message_delta","usage":{{"input_tokens":4000,"cache_read_input_tokens":296000,"cache_creation_input_tokens":0,"output_tokens":2000,"iterations":[{request},{request}]}}}}}}"#
+    );
+    let events: Vec<Event> = [
+        r#"{"type":"system","subtype":"init","session_id":"s-1","model":"claude-sonnet-4-5"}"#,
+        r#"{"type":"stream_event","event":{"type":"message_start","message":{"model":"claude-sonnet-4-5","usage":{"input_tokens":2000,"cache_read_input_tokens":148000,"cache_creation_input_tokens":0,"output_tokens":1}}}}"#,
+        &delta,
+    ]
+    .iter()
+    .flat_map(|line| translator.line(line))
+    .collect();
+    let state = SessionState::replay(&events);
+    let prices = bundled();
+
+    let totals = state.totals();
+    assert_eq!(
+        (totals.input, totals.cache_read, totals.output),
+        (4_000, 296_000, 2_000),
+        "every token of the message is counted once"
+    );
+    let owed = &totals.unsettled["claude-sonnet-4-5"];
+    let estimate = niobe_tui::Prices::estimate_owed(&prices, owed)
+        .expect("the bundled table prices claude-sonnet-4-5");
+    assert_usd(estimate, 0.1308);
+    assert_eq!(niobe_tui::session_cost(&state, Some(&prices)), "~$0.13");
+}

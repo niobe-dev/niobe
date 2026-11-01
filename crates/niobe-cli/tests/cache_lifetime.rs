@@ -149,7 +149,8 @@ fn dropping_the_lifetime_prices_every_write_at_the_five_minute_rate() {
 /// total, and the `message_delta` sums both requests and splits them only
 /// per request. The first request bought its 200 writes for five minutes and
 /// the second its 300 for an hour, so the message's writes are priced at
-/// both rates, not at the first request's alone.
+/// both rates, not at the first request's alone. Each request is a record of
+/// its own, as the provider bills it.
 #[test]
 fn a_message_of_two_requests_prices_each_requests_writes_at_its_own_lifetime() {
     let table = PriceTable::bundled().expect("the bundled price table parses");
@@ -167,16 +168,22 @@ fn a_message_of_two_requests_prices_each_requests_writes_at_its_own_lifetime() {
             _ => None,
         })
         .collect();
-    let [message] = records.as_slice() else {
-        panic!("one message, one record: {records:?}");
+    let [first, second] = records.as_slice() else {
+        panic!("one message of two requests, a record each: {records:?}");
     };
     assert_eq!(
-        (message.cache_write, message.cache_write_1h),
-        (500, Some(300))
+        [
+            (first.cache_write, first.cache_write_1h),
+            (second.cache_write, second.cache_write_1h)
+        ],
+        [(200, Some(0)), (300, Some(300))]
     );
 
-    // Claude Sonnet 5: 10×2.00 + 90×10.00 + 3000×0.20 + 200×2.50 + 300×4.00
-    //   = 20 + 900 + 600 + 500 + 1200 = 3220 millionths of a dollar. Every
-    //   write at the first request's five minutes would be 2770.
-    assert_usd(usd(&table, message), 0.003_220);
+    // Claude Sonnet 5, the first request: 4×2.00 + 40×10.00 + 1000×0.20 +
+    //   200×2.50 = 8 + 400 + 200 + 500 = 1108 millionths of a dollar; the
+    //   second: 6×2.00 + 50×10.00 + 2000×0.20 + 300×4.00 = 12 + 500 + 400 +
+    //   1200 = 2112. 3220 between them. Every write at the first request's
+    //   five minutes would be 2770.
+    assert_usd(usd(&table, first), 0.001_108);
+    assert_usd(usd(&table, second), 0.002_112);
 }
