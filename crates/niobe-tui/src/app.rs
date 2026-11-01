@@ -8225,6 +8225,7 @@ impl App {
         let escaped = self.escaped;
         let key = self.as_function_key(key);
         let key = self.rebound(key);
+        let key = as_backspace(key);
         // A terminal that did not say it could send Shift+Enter has now sent
         // one — tmux asked for modifyOtherKeys, under a terminal that reports
         // it — so it is the key the bar can name.
@@ -9734,9 +9735,9 @@ enum BrowserRow {
 /// own handling is already that: a selection, a line break, a character
 /// that is one code point, or any other key.
 ///
-/// The editor's other names for three of them are the same keys: Ctrl+H,
-/// which a terminal set to send `^H` for Backspace sends, Ctrl+D and Ctrl+B.
-/// Ctrl+F, the fourth, searches the transcript before it reaches here.
+/// The editor's other names for two of them are the same keys: Ctrl+D and
+/// Ctrl+B. Ctrl+F, the third, searches the transcript before it reaches
+/// here, and Ctrl+H is Backspace by then (see [`as_backspace`]).
 ///
 /// `Some` says whether the text changed, as the editor's own input does.
 fn whole_character(
@@ -9751,7 +9752,6 @@ fn whole_character(
             code @ (KeyCode::Backspace | KeyCode::Delete | KeyCode::Left | KeyCode::Right),
             KeyModifiers::NONE,
         ) => code,
-        (KeyCode::Char('h'), KeyModifiers::CONTROL) => KeyCode::Backspace,
         (KeyCode::Char('d'), KeyModifiers::CONTROL) => KeyCode::Delete,
         (KeyCode::Char('b'), KeyModifiers::CONTROL) => KeyCode::Left,
         _ => return None,
@@ -10123,6 +10123,28 @@ fn is_plain_enter(key: ratatui::crossterm::event::KeyEvent) -> bool {
     use ratatui::crossterm::event::{KeyCode, KeyModifiers};
 
     key.code == KeyCode::Enter && key.modifiers == KeyModifiers::NONE
+}
+
+/// `key`, with Ctrl+H read as the Backspace it is.
+///
+/// A terminal set to send `^H` for Backspace — an option in Terminal.app and
+/// in PuTTY — sends the byte Ctrl+H does, and the two cannot be told apart.
+/// Nothing in the shell answers to Ctrl+H otherwise, and the composer's
+/// editor already erases with it, so it is read as Backspace once, here, for
+/// every place the operator writes: a refusal the model reads word for word,
+/// the history filter, the search and the `!` line. Read only in the
+/// composer, a typo anywhere else could not be erased on such a terminal.
+fn as_backspace(key: ratatui::crossterm::event::KeyEvent) -> ratatui::crossterm::event::KeyEvent {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    match (key.code, key.modifiers) {
+        (KeyCode::Char('h'), KeyModifiers::CONTROL) => KeyEvent {
+            code: KeyCode::Backspace,
+            modifiers: KeyModifiers::NONE,
+            ..key
+        },
+        _ => key,
+    }
 }
 
 /// Whether `key` opens a line in the composer rather than sending it.
@@ -20625,6 +20647,51 @@ mod tests {
             2,
             "a cleared filter keeps every prompt"
         );
+    }
+
+    /// A terminal set to send `^H` for Backspace sends it everywhere the
+    /// operator writes, not only in the composer: a refusal the model reads
+    /// word for word, the history filter, an empty `!` line and an empty
+    /// search are each erased, or left, by it as by Backspace.
+    #[test]
+    fn a_backspace_sent_as_ctrl_h_erases_wherever_the_operator_writes() {
+        use ratatui::crossterm::event::KeyCode;
+
+        let mut refusing = app();
+        refusing.apply(&prompt(Some("rm -rf build")));
+        refusing.on_key(key(KeyCode::Tab));
+        typed(&mut refusing, "keep buildx");
+        refusing.on_key(ctrl('h'));
+        assert_eq!(
+            refusing.ask_draft(),
+            "keep build",
+            "the refusal kept its typo"
+        );
+
+        let mut filtering = remembering(
+            &[("Add ETag support", "3"), ("fix the resume race", "4")],
+            &["3", "4"],
+        );
+        filtering.on_key(ctrl('r'));
+        typed(&mut filtering, "etagx");
+        filtering.on_key(ctrl('h'));
+        assert_eq!(
+            listed_prompts(&filtering),
+            ["Add ETag support"],
+            "the filter kept its typo"
+        );
+
+        let mut commanding = app().runs_commands();
+        commanding.on_key(key(KeyCode::Char('!')));
+        assert!(commanding.shell_mode());
+        commanding.on_key(ctrl('h'));
+        assert!(!commanding.shell_mode(), "an empty `!` line was not left");
+
+        let mut searching = app();
+        searching.on_key(ctrl('f'));
+        assert!(searching.finding().is_some());
+        searching.on_key(ctrl('h'));
+        assert!(searching.finding().is_none(), "an empty search stayed open");
     }
 
     #[test]
