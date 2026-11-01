@@ -647,8 +647,9 @@ pub struct Session {
     /// the first then leaves the second standing.
     model_changes: Vec<ModelChange>,
     model_answers: ModelAnswers,
-    /// Whether a turn was sent that the CLI has not ended, or one the CLI
-    /// started from a prompt queued behind the last end. A CLI stopped then
+    /// Whether a turn was sent that the CLI has not ended, one the CLI
+    /// started from a prompt queued behind the last end, or one it started
+    /// of itself, which its agent at work says. A CLI stopped then
     /// took the turn with it, and the session is not carried on. An end
     /// handed on after a turn was sent leaves it open where the reader had
     /// already read that end when the turn went out: see
@@ -1339,6 +1340,13 @@ impl Session {
             self.turn_open = self.turn_follows.load(Ordering::Acquire)
                 || self.sent_after_ends >= self.ends_heard;
         }
+        // The CLI starts a turn of its own, with no prompt, once a sub-agent
+        // or a command it left in the background ends: the session's own
+        // agent answering or calling a tool is the first word of it, and its
+        // `result` the last. A CLI stopped in between took that turn with it.
+        if is_main_agent_at_work(event) {
+            self.turn_open = true;
+        }
         if let Event::AgentSpawn { id, .. } = event {
             self.running_agents.insert(id.clone());
         }
@@ -1796,6 +1804,18 @@ fn pass_over_line(reader: &mut impl BufRead) {
             return;
         }
     }
+}
+
+/// Whether `event` is the session's own agent answering or calling a tool,
+/// which it does only inside a turn. A sub-agent is not: one launched in the
+/// background works on after the turn that launched it has ended.
+fn is_main_agent_at_work(event: &Event) -> bool {
+    matches!(
+        event,
+        Event::AssistantDelta { .. }
+            | Event::AssistantMessage { agent: None, .. }
+            | Event::ToolCallStart { agent: None, .. }
+    )
 }
 
 /// The warning for a line of the CLI's output too long to read.
@@ -4068,6 +4088,42 @@ read -r rest
         let state = niobe_core::session::SessionState::replay(&events);
         assert!(state.running_agents().is_empty(), "{events:#?}");
         assert!(session.next().is_some());
+    }
+
+    /// The CLI starting a turn of its own once the background agent of the
+    /// turn before has ended, as Claude Code 2.1.309 was recorded doing in
+    /// `tests/fixtures/background-commands.jsonl`: the end, then an `init`
+    /// and the main agent answering it, with no prompt sent.
+    #[cfg(unix)]
+    const TURN_OF_ITS_OWN: &str = r#"printf '%s\n' '{"type":"system","subtype":"task_notification","tool_use_id":"toolu_bg","status":"completed","summary":"fetch.py retries forever on a 404."}' '{"type":"system","subtype":"init","session_id":"s-9","model":"claude-sonnet-5","permissionMode":"default"}' '{"type":"assistant","message":{"model":"claude-sonnet-5","content":[{"type":"text","text":"The review found that fetch.py retries forever on a 404."}]}}'"#;
+
+    /// A turn the CLI started of itself is a turn running like any other:
+    /// stopped under it, the CLI took it with it, so the session ends under
+    /// that turn rather than carrying on as though nothing were running —
+    /// which would leave the turn open on screen with nothing to end it.
+    #[cfg(unix)]
+    #[test]
+    fn a_cli_stopped_while_a_turn_it_started_itself_runs_ends_the_session_under_it() {
+        let (mut session, mut events, _dir) = carried_on(
+            &format!(
+                "read -r initialize\nread -r turn\n{BACKGROUND_AGENT}\n{TURN_OF_ITS_OWN}\nkill -TERM $$\n"
+            ),
+            true,
+        );
+        events.extend(drained_to_the_end(&mut session));
+
+        assert!(
+            matches!(events.last(), Some(Event::Error { fatal: true, message })
+                if message == "the `claude` session was stopped by SIGTERM and said nothing."),
+            "{events:#?}"
+        );
+        let mut all = vec![Event::UserMessage {
+            text: "list the files".to_owned(),
+        }];
+        all.extend(events);
+        let state = niobe_core::session::SessionState::replay(&all);
+        assert!(!state.turn_running(), "{all:#?}");
+        assert!(session.next().is_none());
     }
 
     /// A turn that launches two sub-agents in the background, the second of
