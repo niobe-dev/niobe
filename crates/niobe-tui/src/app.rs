@@ -8415,10 +8415,9 @@ impl App {
             // Up on the composer's first row and Down on its last are where
             // the cursor has nowhere to go, and where a shell walks its
             // history; anywhere else they move the cursor as they always have.
-            (KeyCode::Up | KeyCode::Down, KeyModifiers::NONE)
-                if !self.shell_mode && self.recall_key(key.code == KeyCode::Up) =>
-            {
+            (KeyCode::Up | KeyCode::Down, KeyModifiers::NONE) if !self.shell_mode => {
                 self.focus = Focus::Session;
+                self.recall_key(key.code == KeyCode::Up);
             }
             // Shift+Enter, Ctrl+J or Alt+Enter opens a line; Enter sends. The
             // other way round would make the common action the awkward one.
@@ -9607,9 +9606,11 @@ impl App {
         }
     }
 
-    /// Up or Down where the composer's cursor cannot move that way: the
-    /// prompt before or after the one shown. Returns whether it was that.
-    fn recall_key(&mut self, older: bool) -> bool {
+    /// Up or Down in the composer: the cursor a row that way where it can
+    /// go, and otherwise the prompt before or after the one shown. The key is
+    /// spent here either way: handed on to the editor after the cursor had
+    /// moved, it would move it a second row.
+    fn recall_key(&mut self, older: bool) {
         use ratatui_textarea::CursorMove;
 
         self.end_walk_if_edited();
@@ -9620,13 +9621,12 @@ impl App {
         });
         if self.composer.cursor() != before {
             keep_off_a_glyph(&mut self.composer, before);
-            return false;
+            return;
         }
         match older {
             true => self.recall_older(),
             false => self.recall_newer(),
         }
-        true
     }
 
     /// The prompt before the one shown, starting a walk on the newest with
@@ -20195,6 +20195,24 @@ mod tests {
         assert_eq!(app.composed(), "earlier", "the first row's Up recalls");
         app.on_key(key(KeyCode::Down));
         assert_eq!(app.composed(), "one\ntwo");
+    }
+
+    #[test]
+    fn up_and_down_inside_the_composer_move_the_cursor_one_row() {
+        let mut app = remembering(&[("earlier", "3")], &["3"]);
+        typed(&mut app, "one");
+        app.on_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL));
+        typed(&mut app, "two");
+        app.on_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL));
+        typed(&mut app, "three");
+
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(app.composer().cursor().0, 1, "Up from the last row");
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(app.composer().cursor().0, 0);
+        app.on_key(key(KeyCode::Down));
+        assert_eq!(app.composer().cursor().0, 1, "Down from the first row");
+        assert_eq!(app.composed(), "one\ntwo\nthree");
     }
 
     #[test]
