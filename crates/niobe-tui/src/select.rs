@@ -328,35 +328,38 @@ fn link_in(word: &str) -> Option<String> {
 }
 
 /// The run of link characters at cell `column` of `drawn`, as byte offsets.
+///
+/// Read by graphemes, as the terminal draws them: an accent drawn over a
+/// letter, and a character that draws in no cell at all — a zero-width space,
+/// a direction mark — sit between two letters the operator sees as one word,
+/// so the run goes on through them rather than end at one and open part of
+/// what was drawn. They stay in what is found, which the opener refuses as
+/// holding what a link is not drawn with; only those before the run's first
+/// letter and after its last are left out, since nothing is drawn there.
 fn word_at(drawn: &str, column: usize) -> Option<(usize, usize)> {
-    let mut at = 0;
-    let mut byte = 0;
-    let mut hit = None;
+    let mut placed = Vec::new();
+    let (mut at, mut byte) = (0, 0);
     for (grapheme, width) in text::graphemes(drawn) {
-        if column >= at && column < at + width.max(1) {
-            hit = Some(byte);
-            break;
-        }
+        placed.push((byte, grapheme, width, at));
         at += width;
         byte += grapheme.len();
     }
-    let hit = hit?;
-    if !drawn.get(hit..)?.starts_with(in_link) {
+    let hit = placed
+        .iter()
+        .position(|&(_, _, width, at)| width > 0 && column >= at && column < at + width)?;
+    let joins = |&(_, grapheme, width, _): &(usize, &str, usize, usize)| {
+        width == 0 || grapheme.starts_with(in_link)
+    };
+    let shown = |&(_, _, width, _): &(usize, &str, usize, usize)| width > 0;
+    if !placed.get(hit)?.1.starts_with(in_link) {
         return None;
     }
-    let start = drawn
-        .get(..hit)?
-        .char_indices()
-        .rev()
-        .take_while(|(_, c)| in_link(*c))
-        .last()
-        .map_or(hit, |(at, _)| at);
-    let end = drawn
-        .get(hit..)?
-        .char_indices()
-        .find(|(_, c)| !in_link(*c))
-        .map_or(drawn.len(), |(at, _)| hit + at);
-    Some((start, end))
+    let first = placed.get(..hit)?.iter().rposition(|place| !joins(place));
+    let last = placed.get(hit..)?.iter().position(|place| !joins(place));
+    let run = placed.get(first.map_or(0, |at| at + 1)..last.map_or(placed.len(), |at| hit + at))?;
+    let from = run.iter().find(|place| shown(place))?;
+    let to = run.iter().rfind(|place| shown(place))?;
+    Some((from.0, to.0 + to.1.len()))
 }
 
 /// The last run of link characters on `drawn`, where the line ends with one.
@@ -649,6 +652,43 @@ mod tests {
             Some("https://example.com/aaaa")
         );
         assert_eq!(link_at(&lines, 28, 1, 6, &said), None);
+    }
+
+    #[test]
+    fn a_click_never_opens_part_of_a_link_a_character_that_draws_as_nothing_splits() {
+        // Each draws in no cell, so the terminal shows `https://github.com/x`
+        // and `https://example.com/y` with nothing between their letters.
+        for hidden in ['\u{200b}', '\u{200e}', '\u{2060}', '\u{feff}'] {
+            let line = format!("  see https://github.co{hidden}m/x now");
+            for column in 6..26 {
+                let opened = link(&[line.as_str()], 80, 0, column);
+                assert!(
+                    opened.as_ref().is_none_or(|link| link.contains(hidden)),
+                    "{hidden:?} at {column} opened {opened:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_click_never_opens_part_of_a_link_an_accent_is_drawn_over() {
+        let line = "  see https://exam\u{301}ple.com/y now";
+        for column in 6..27 {
+            let opened = link(&[line], 80, 0, column);
+            assert!(
+                opened.as_ref().is_none_or(|link| link.contains('\u{301}')),
+                "at {column} opened {opened:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_character_that_draws_as_nothing_after_a_link_is_left_out_of_it() {
+        let line = "  see https://example.com/x\u{200b} now";
+        assert_eq!(
+            link(&[line], 80, 0, 10).as_deref(),
+            Some("https://example.com/x")
+        );
     }
 
     #[test]
