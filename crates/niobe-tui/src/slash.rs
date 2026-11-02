@@ -175,23 +175,25 @@ pub(crate) fn model_named(prompt: &str, commands: &[SlashCommand]) -> Option<Str
 /// Up to `limit` of the `commands` the `/` word `slash` could name.
 ///
 /// A command matches when its name holds what was typed, ignoring case. One
-/// whose name is what was typed comes first, so that Enter on a name typed in
-/// full never takes a longer one it starts; then one whose name starts with
-/// it; within each, the backend's own order, which is the order it lists them
-/// in everywhere else.
+/// whose name is the whole word comes first — what was typed and the rest of
+/// it after the cursor — so that Enter on a name typed in full never takes a
+/// longer one it starts, wherever in it the cursor was left; then one whose
+/// name starts with what was typed; within each, the backend's own order,
+/// which is the order it lists them in everywhere else.
 pub(crate) fn candidates<'a>(
     commands: &'a [SlashCommand],
     slash: &Slash,
     limit: usize,
 ) -> Vec<&'a SlashCommand> {
     let typed = slash.typed.to_lowercase();
+    let word = slash.word().to_lowercase();
     let mut ranked: Vec<(u8, usize, &SlashCommand)> = commands
         .iter()
         .enumerate()
         .filter(|(_, command)| slash.can_name(command))
         .filter_map(|(at, command)| {
             let name = command.name.to_lowercase();
-            let rank = if name == typed {
+            let rank = if name == word {
                 0
             } else if name.starts_with(&typed) {
                 1
@@ -345,6 +347,22 @@ mod tests {
             .collect();
 
         assert_eq!(names, ["Review", "review-pr", "pre-review"]);
+    }
+
+    #[test]
+    fn a_command_named_in_full_comes_first_wherever_the_cursor_is_in_it() {
+        let commands = [command("review-pr"), command("review")];
+        for (typed, after) in [("revi", "ew"), ("", "review"), ("review", "")] {
+            let slash = Slash {
+                after: after.to_owned(),
+                ..opening(typed)
+            };
+            let names: Vec<&str> = candidates(&commands, &slash, 10)
+                .into_iter()
+                .map(|command| command.name.as_str())
+                .collect();
+            assert_eq!(names, ["review", "review-pr"], "{typed}|{after}");
+        }
     }
 
     #[test]

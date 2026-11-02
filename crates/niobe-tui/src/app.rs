@@ -20050,6 +20050,31 @@ mod tests {
         }
     }
 
+    /// A command typed in full and then gone back into — to mend a typo, or
+    /// just with the cursor left there — is still the command typed in full:
+    /// Enter sends it, wherever in the word the cursor stands. The list was
+    /// ranked by the letters before the cursor alone, so a longer name the
+    /// backend listed first came out on top and Enter swapped it in.
+    #[test]
+    fn enter_with_the_cursor_inside_a_command_typed_in_full_sends_that_command() {
+        for back in [0, 2, 6] {
+            let mut app = offering(&["review-all", "review"]);
+            typed(&mut app, "/review");
+            for _ in 0..back {
+                app.on_key(key(KeyCode::Left));
+            }
+            app.on_key(key(KeyCode::Enter));
+            assert_eq!(
+                app.said(),
+                [Event::UserMessage {
+                    text: "/review".to_owned()
+                }],
+                "{back} back: the composer holds {:?}",
+                app.composed()
+            );
+        }
+    }
+
     #[test]
     fn enter_in_the_mcp_view_shows_why_the_server_under_the_cursor_failed() {
         let mut app = with_mcp_servers();
