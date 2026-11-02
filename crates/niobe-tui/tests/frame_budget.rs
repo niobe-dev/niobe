@@ -146,6 +146,44 @@ fn a_paragraph_of_thousands_of_links_redraws_inside_a_frame_budget() {
     );
 }
 
+/// How deep the linked images of
+/// [`a_reply_of_images_nested_thousands_deep_redraws_inside_a_frame_budget`]
+/// go: a reply of 44 KB.
+const IMAGE_DEPTH: usize = 4000;
+
+/// A resize of a reply whose one paragraph is a linked image inside a linked
+/// image, thousands deep. Each link and image is drawn with where it leads
+/// unless its own words, past the marks of the images it opens with, already
+/// say so, which is worked out as it closes; a cost there that grows with the
+/// words inside it makes the reply cost the square of its depth, on every
+/// delta while it streams.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "a frame is timed in an optimised build")]
+fn a_reply_of_images_nested_thousands_deep_redraws_inside_a_frame_budget() {
+    let _alone = ALONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut app = running_session();
+    app.apply(&Event::AssistantMessage {
+        text: format!(
+            "{}badge{} last",
+            "[![".repeat(IMAGE_DEPTH),
+            "](b.svg)](u)".repeat(IMAGE_DEPTH)
+        ),
+        agent: None,
+    });
+    let frame = screen(&mut app, 200, 60);
+    assert!(frame.contains("(u) last"), "the reply is drawn: {frame}");
+
+    let median = median_frame(&mut app, &[(200, 60), (180, 60)]);
+
+    assert!(
+        median <= FRAME_BUDGET,
+        "the median resized frame of images nested {IMAGE_DEPTH} deep took {median:?}, over \
+         the {FRAME_BUDGET:?} budget"
+    );
+}
+
 /// The redraw every tick makes, ten a second, in a long session of replies in
 /// markdown. Each reply is parsed and wrapped once and drawn from what that
 /// made after, so a transcript that only grows costs a frame what its visible

@@ -51,15 +51,22 @@ enum Spacing {
 /// What a table cell holds: its runs.
 type Cell = Vec<Run>;
 
-/// The runs of the block being drawn, and how many bytes of text they hold.
+/// The runs of the block being drawn, how many bytes of text they hold, and
+/// where among those bytes the image marks lie.
 ///
 /// The length is kept as runs are added rather than summed when asked: it
 /// is asked as every link and image opens, and a paragraph of thousands of
-/// links would sum every run before each one.
+/// links would sum every run before each one. The marks are kept as they are
+/// added for the same reason: a link's own words start past the marks of the
+/// images it opens with, and images nested thousands deep would read back
+/// through every mark before each one closed.
 #[derive(Debug, Default)]
 struct Gathered {
     runs: Vec<Run>,
     len: usize,
+    /// Each stretch of image marks added one straight after another, as the
+    /// byte range it takes, in the order they were added.
+    marks: Vec<(usize, usize)>,
 }
 
 impl Gathered {
@@ -79,7 +86,31 @@ impl Gathered {
     /// The runs gathered, leaving none.
     fn take(&mut self) -> Vec<Run> {
         self.len = 0;
+        self.marks.clear();
         std::mem::take(&mut self.runs)
+    }
+
+    /// Adds an image's mark in `style`.
+    fn push_mark(&mut self, style: Style) {
+        let start = self.len;
+        self.push(IMAGE_MARK, style, Spacing::Collapsed);
+        match self.marks.last_mut() {
+            Some((_, end)) if *end == start => *end = self.len,
+            _ => self.marks.push((start, self.len)),
+        }
+    }
+
+    /// Whether the text gathered after the first `at` bytes, past the image
+    /// marks it opens with, is `text`. Costs what `text` is, however much was
+    /// gathered after `at`.
+    fn says_past_marks(&self, at: usize, text: &str) -> bool {
+        let stretch = self.marks.partition_point(|(_, end)| *end <= at);
+        let words = match self.marks.get(stretch) {
+            Some((start, end)) if *start <= at => *end,
+            _ => at,
+        };
+        self.len.checked_sub(words) == Some(text.len())
+            && self.since(words).as_deref() == Some(text)
     }
 
     /// The text gathered after the first `at` bytes, read from the last run
@@ -351,7 +382,7 @@ impl<'t> Renderer<'t> {
             // An image cannot be drawn; its alt text, which arrives as text
             // inside it, is what stands in for it.
             Tag::Image { dest_url, .. } => {
-                self.text(IMAGE_MARK, self.style());
+                self.runs.push_mark(self.style());
                 self.open_destination(&dest_url);
             }
             // Drawn where it is written, which is the end of a reply as a
@@ -534,9 +565,7 @@ impl<'t> Renderer<'t> {
         let Some((destination, at)) = self.destinations.pop() else {
             return;
         };
-        let said = self.runs.since(at).unwrap_or_default();
-        let own = said.trim_start_matches(IMAGE_MARK);
-        if destination.is_empty() || own == drawable(&destination) {
+        if destination.is_empty() || self.runs.says_past_marks(at, &drawable(&destination)) {
             return;
         }
         let dim = self.theme.dim;
@@ -1495,6 +1524,31 @@ mod tests {
         assert_eq!(gathered.since(5), None, "inside a character");
         assert_eq!(gathered.since(14), None, "past the text");
         assert!(gathered.take().len() == 3 && gathered.since(0).as_deref() == Some(""));
+    }
+
+    #[test]
+    fn a_link_around_images_reads_its_own_words_past_the_marks_they_open_with() {
+        assert_eq!(drawn("[![![x](x)](x)](x)", 40), ["\u{29c9} \u{29c9} x"]);
+        assert_eq!(
+            drawn("[![x](x) more](x)", 40),
+            ["\u{29c9} x more (x)"],
+            "words past the image are the link's own"
+        );
+        assert_eq!(
+            drawn("[a ![x](x)](x)", 40),
+            ["a \u{29c9} x (x)"],
+            "a mark after the link's first word is one of its words"
+        );
+        assert_eq!(
+            drawn("[![](y) ![](z) x](x)", 40),
+            ["\u{29c9} (y) \u{29c9} (z) x (x)"],
+            "an image that says where it leads ends the marks"
+        );
+        assert_eq!(
+            drawn("[![](<>)![](<>)x](x)", 40),
+            ["\u{29c9} \u{29c9} x"],
+            "images that lead nowhere say nothing between their marks"
+        );
     }
 
     #[test]
