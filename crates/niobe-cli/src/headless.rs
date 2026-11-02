@@ -22,10 +22,14 @@
 //! A turn that finished with a sub-agent or a shell command still working in
 //! the background is waited past: the end of each starts a turn of the
 //! backend's own, and the run ends with the first turn that finishes with
-//! nothing left running in the background, its reply the reply. A backend
-//! that leaves while the run waits takes that work with it, and the run
-//! fails on its end: the binary attaches it as a session of one turn, which
-//! no later prompt starts again.
+//! nothing left running in the background, its reply the reply. Work that
+//! ends while one of those turns is under way, and that the turn does not
+//! take in, is answered by a turn of the backend's own after it, which the
+//! backend says is coming ([`Event::TurnFollows`]) and the run waits for too
+//! — for [`OWED_TURN_GRACE`] at most before the agent is heard from again. A
+//! backend that leaves while the run waits takes that work with it, and the
+//! run fails on its end: the binary attaches it as a session of one turn,
+//! which no later prompt starts again.
 //!
 //! A run asked to stop while the turn is under way — a CI job's timeout, or
 //! Ctrl+C — asks the backend to stop the turn and gives it [`STOP_GRACE`] to
@@ -51,6 +55,16 @@ pub const BUDGET_STOPPED: u8 = 3;
 /// GitHub Actions, ten under `docker stop` — and long past the moment the CLI
 /// was recorded taking to close a turn it was asked to stop.
 pub const STOP_GRACE: Duration = Duration::from_secs(3);
+
+/// How long a run waits for the agent to be heard from in a turn the
+/// backend said follows the one that ended, with nothing left running in the
+/// background, before it ends with the reply it has. The backend starts that
+/// turn as soon as it has ended the one before, so this is never waited out
+/// where the turn comes; it bounds the wait where the backend took the news
+/// in after all — work that ended in the moment between a call's result
+/// going out and the backend asking the model again — and nothing follows.
+/// Long past the start of a reply, which is what clears it.
+pub const OWED_TURN_GRACE: Duration = Duration::from_secs(120);
 
 /// What a prompt no rule allows is refused with. The backend hands it to the
 /// agent, which can then say what it could not do rather than retry it.
@@ -122,6 +136,37 @@ pub fn run(
     pause: &mut dyn FnMut(),
     stopping: &mut dyn FnMut() -> Option<String>,
 ) -> Turn {
+    let waits = Waits {
+        pause,
+        stopping,
+        owed_turn: OWED_TURN_GRACE,
+    };
+    run_waiting(bridge, journal, allowed, prompt, budget, waits)
+}
+
+/// How a run waits: what it does while the backend has nothing new, what
+/// says it has been asked to stop, and how long it waits for a turn the
+/// backend said follows.
+struct Waits<'a> {
+    pause: &'a mut dyn FnMut(),
+    stopping: &'a mut dyn FnMut() -> Option<String>,
+    owed_turn: Duration,
+}
+
+/// [`run`], waiting as `waits` says.
+fn run_waiting(
+    bridge: &mut dyn Bridge,
+    journal: &mut dyn Journal,
+    allowed: &Allowlist,
+    prompt: &str,
+    budget: Option<f64>,
+    waits: Waits<'_>,
+) -> Turn {
+    let Waits {
+        pause,
+        stopping,
+        owed_turn,
+    } = waits;
     let started_at = SystemTime::now();
     let mut state = SessionState::new();
     let mut reply = String::new();
@@ -146,6 +191,10 @@ pub fn run(
     // ending is the outcome.
     let mut outcome: Option<Outcome> = None;
     let mut stopped: Option<(String, Instant)> = None;
+    // Whether the backend said a turn of its own follows the one ending, and
+    // until when the run waits to hear from the agent in it.
+    let mut follows = false;
+    let mut owed_until: Option<Instant> = None;
     while outcome.is_none() {
         if stopped.is_none()
             && let Some(why) = stopping()
@@ -158,6 +207,10 @@ pub fn run(
             outcome = Some(Outcome::Stopped(why.clone()));
             break;
         }
+        if owed_until.is_some_and(|by| Instant::now() >= by) {
+            outcome = Some(Outcome::Finished);
+            break;
+        }
         let events = bridge.drain();
         if events.is_empty() {
             pause();
@@ -165,6 +218,9 @@ pub fn run(
         }
         for (at, event) in events.iter().enumerate() {
             keep(journal, &mut state, event);
+            if is_main_agent_at_work(event) {
+                owed_until = None;
+            }
             let ending = match event {
                 // What the backend says after the run's end is recorded, and
                 // is not the reply the run printed.
@@ -203,6 +259,10 @@ pub fn run(
                 Event::SessionLeft => Some(Outcome::Failed(
                     "the backend left before the turn ended".to_owned(),
                 )),
+                Event::TurnFollows => {
+                    follows = true;
+                    None
+                }
                 // A turn that finished with a sub-agent or a shell command
                 // still working is not the end of the run: the CLI runs
                 // sub-agents in the background by default, the model can put
@@ -210,11 +270,17 @@ pub fn run(
                 // CLI's own that answers with what it came to. Ended here,
                 // the run would print "it is running" as its reply and stop
                 // the work with the backend. One that failed ends the run as
-                // it stands, since nothing says another turn follows.
-                Event::TurnEnded => match limited.take() {
-                    Some(why) => Some(Outcome::Failed(why)),
-                    None => match ended(failure.take(), &state, budget) {
+                // it stands, since nothing says another turn follows. Nor is
+                // one the backend said a turn follows: work ended under it
+                // that it did not take in.
+                Event::TurnEnded => match (limited.take(), std::mem::take(&mut follows)) {
+                    (Some(why), _) => Some(Outcome::Failed(why)),
+                    (None, follows) => match ended(failure.take(), &state, budget) {
                         Outcome::Finished if still_working(&state) => None,
+                        Outcome::Finished if follows => {
+                            owed_until = Some(Instant::now() + owed_turn);
+                            None
+                        }
                         ended => Some(ended),
                     },
                 },
@@ -251,6 +317,18 @@ pub fn run(
 /// its own.
 fn still_working(state: &SessionState) -> bool {
     !state.running_agents().is_empty() || !state.background_commands().is_empty()
+}
+
+/// Whether `event` is the session's own agent answering or calling a tool,
+/// which it does only inside a turn: the first word of a turn the backend
+/// said follows. A sub-agent working on in the background is not.
+fn is_main_agent_at_work(event: &Event) -> bool {
+    matches!(
+        event,
+        Event::AssistantDelta { .. }
+            | Event::AssistantMessage { agent: None, .. }
+            | Event::ToolCallStart { agent: None, .. }
+    )
 }
 
 /// Records why the run is stopping and asks the backend to stop the turn,
@@ -601,6 +679,66 @@ mod tests {
         );
         assert_eq!(turn.outcome, Outcome::Finished);
         assert_eq!(turn.reply, "two tests failed");
+    }
+
+    /// The backend's own turn for a command that ended while the turn before
+    /// it ran, as `background-commands.jsonl` recorded: the command has
+    /// ended, so nothing running says another turn is coming.
+    fn a_command_ended_under_the_turn() -> Vec<Vec<Event>> {
+        let id = ToolCallId::new("toolu_bash");
+        vec![
+            vec![
+                Event::BackgroundCommandStarted { id: id.clone() },
+                said("the command is running"),
+                Event::TurnEnded,
+            ],
+            vec![
+                said("the first command finished"),
+                Event::BackgroundCommandEnded { id },
+                Event::TurnFollows,
+                Event::TurnEnded,
+            ],
+        ]
+    }
+
+    #[test]
+    fn a_turn_the_backend_says_follows_is_waited_for_and_its_reply_is_the_reply() {
+        let mut batches = a_command_ended_under_the_turn();
+        batches.push(vec![]);
+        batches.push(vec![said("the second command failed"), Event::TurnEnded]);
+        let (turn, ..) = ran(batches, &Allowlist::new(), None);
+
+        assert_eq!(turn.outcome, Outcome::Finished);
+        assert_eq!(turn.reply, "the second command failed");
+    }
+
+    /// Where the backend took the news in after all, nothing follows: the run
+    /// waits as long as `waits` says for the agent to be heard from, and no
+    /// longer.
+    #[test]
+    fn a_turn_said_to_follow_that_never_comes_ends_the_run_with_the_reply_it_has() {
+        let mut bridge = Scripted {
+            batches: a_command_ended_under_the_turn().into(),
+            ..Scripted::default()
+        };
+        let mut journal = Kept::default();
+        let waited = Instant::now();
+        let turn = run_waiting(
+            &mut bridge,
+            &mut journal,
+            &Allowlist::new(),
+            "fix the test",
+            None,
+            Waits {
+                pause: &mut || std::thread::sleep(Duration::from_millis(1)),
+                stopping: &mut || None,
+                owed_turn: Duration::from_millis(50),
+            },
+        );
+
+        assert_eq!(turn.outcome, Outcome::Finished);
+        assert_eq!(turn.reply, "the first command finished");
+        assert!(waited.elapsed() >= Duration::from_millis(50));
     }
 
     #[test]

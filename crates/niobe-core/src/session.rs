@@ -781,10 +781,11 @@ impl SessionState {
     /// the end it repeats, and a call's end or an agent's exit once that
     /// call or agent has ended.
     pub fn apply(&mut self, event: &Event) {
-        // A prompt that reached no backend, and the operator looking, are not
-        // things that happened in the session's conversation, so an end said
-        // again after either is still said again.
-        if let Event::PromptNotSent { .. } | Event::Looked = event {
+        // A prompt that reached no backend, the operator looking and the
+        // backend saying another turn follows are not things that happened
+        // in the session's conversation, so an end said again after any of
+        // them is still said again.
+        if let Event::PromptNotSent { .. } | Event::Looked | Event::TurnFollows = event {
             return;
         }
         if self.opens_a_turn(event) {
@@ -1156,8 +1157,9 @@ impl SessionState {
             // A notice changes nothing that is counted: it explains the
             // numbers around it, and the transcript is where it is read.
             Event::Notice { .. } | Event::LimitReached { .. } => {}
-            // Passed over in `apply`, before the fold.
-            Event::Looked => {}
+            // Passed over in `apply`, before the fold: the turn it forecasts
+            // is counted when it comes, from what it does.
+            Event::Looked | Event::TurnFollows => {}
             // Kept apart rather than added to the totals: where the backend
             // bills what its messages did not report, the turn's bill already
             // carries it, and adding it here would count it twice.

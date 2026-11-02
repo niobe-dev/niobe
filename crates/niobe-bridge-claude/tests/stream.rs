@@ -1265,6 +1265,23 @@ fn a_recorded_sub_agents_permission_prompts_name_the_agent_that_asked() {
     );
 }
 
+/// The first agent ends while the second prompt's turn waits on its first
+/// request (lines 76–86); that request's answer calls tools, and the request
+/// after their results (line 154) takes the end in, so no turn follows for
+/// it. The other two end between turns (265, 428), each starting the turn
+/// after it.
+#[test]
+fn a_recorded_end_the_next_request_takes_in_says_no_other_turn_follows() {
+    let events = translated_sub_agents();
+
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::TurnFollows)),
+        "{events:#?}"
+    );
+}
+
 #[test]
 fn recorded_background_sub_agents_end_when_the_cli_says_they_stopped() {
     let events = translated_sub_agents();
@@ -2621,6 +2638,33 @@ mod background {
         assert_eq!(began, 3, "the turns seen running");
         assert_eq!(state.turns().len(), 3);
         assert!(!state.turn_running(), "the last result ended its turn");
+    }
+
+    /// The second command ends while the turn the first one's end started is
+    /// waiting on its only request (lines 16–18), and that turn answers
+    /// about the first alone (20–21): the CLI owes the second a turn of its
+    /// own (22–24), which is said just before the turn that did not take it
+    /// in ends. The first ended between turns (line 14), where the turn it
+    /// starts takes it in, and the operator's turn ended with both running.
+    #[test]
+    fn a_turn_that_did_not_take_in_a_command_that_ended_under_it_says_another_follows() {
+        let events = events();
+        let ends: Vec<bool> = events
+            .iter()
+            .enumerate()
+            .filter(|(_, event)| matches!(event, Event::TurnEnded))
+            .map(|(at, _)| at > 0 && events[at - 1] == Event::TurnFollows)
+            .collect();
+
+        assert_eq!(ends, [false, true, false], "{events:#?}");
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, Event::TurnFollows))
+                .count(),
+            1,
+            "{events:#?}"
+        );
     }
 
     #[test]

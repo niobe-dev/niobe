@@ -83,6 +83,7 @@ impl Attention {
             | Event::Models { .. }
             | Event::Notice { .. }
             | Event::LimitReached { .. }
+            | Event::TurnFollows
             | Event::Looked => Self::Routine,
         }
     }

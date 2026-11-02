@@ -593,6 +593,22 @@ pub struct Translator {
     /// the CLI starts as a turn straight after; `None` until a turn's end is
     /// read, and again once taken.
     turn_follows: Option<bool>,
+    /// Whether a turn of the session's own agent is under way: from the
+    /// `init` the CLI starts each turn with, or the agent's first message
+    /// where no `init` came, to the turn's `result`.
+    turn_under_way: bool,
+    /// The calls of the session's own agent that put a sub-agent or a shell
+    /// command in the background, until the CLI says it ended. The CLI tells
+    /// the agent of their ends; a sub-agent's own background work it tells
+    /// that sub-agent of.
+    main_background: BTreeSet<String>,
+    /// Whether background work of the session's own agent ended while its
+    /// turn was under way, after the turn last took such news in. The CLI
+    /// takes in what ended at a turn's start and whenever the agent's calls
+    /// return, before it asks the model again; work that ended after the
+    /// last of those is news no request of the turn carried, and the CLI
+    /// starts a turn of its own to tell the agent once the turn ends.
+    untaken_end: bool,
     /// Messages whose usage arrived before anything named their model — a
     /// `message_delta` with no `message_start` ahead of it, before `init` —
     /// held until the turn's `result` says which id billed them. Filed under
@@ -708,6 +724,9 @@ impl Translator {
             short: BTreeSet::new(),
             open_requests: BTreeMap::new(),
             turn_follows: None,
+            turn_under_way: false,
+            main_background: BTreeSet::new(),
+            untaken_end: false,
             unattributed: Vec::new(),
             windows: BTreeMap::new(),
             context: None,
@@ -1505,6 +1524,9 @@ impl Translator {
     fn system(&mut self, system: wire::System, out: &mut Vec<Event>) {
         match system.subtype.as_deref() {
             Some("init") => {
+                // What ended before the turn started is what it starts on.
+                self.turn_under_way = true;
+                self.untaken_end = false;
                 self.check_release(system.claude_code_version.as_deref(), out);
                 if let Some(id) = system.session_id {
                     self.backend_session = Some(id);
@@ -1683,11 +1705,18 @@ impl Translator {
         let Some(id) = system.tool_use_id else { return };
         let answer = system.summary.as_deref().and_then(opening_line);
         self.agent_progress(&id, None, total_tokens(system.usage.as_ref()), answer, out);
-        out.append(&mut self.task_stopped(
-            &id,
-            system.status.as_deref(),
-            system.summary.as_deref(),
-        ));
+        let mut stopped =
+            self.task_stopped(&id, system.status.as_deref(), system.summary.as_deref());
+        let ended = stopped.iter().any(|event| {
+            matches!(
+                event,
+                Event::AgentExit { .. } | Event::BackgroundCommandEnded { .. }
+            )
+        });
+        if ended && self.main_background.remove(&id) && self.turn_under_way {
+            self.untaken_end = true;
+        }
+        out.append(&mut stopped);
     }
 
     /// The CLI's word on a sub-agent it is running: the step it is on and how
@@ -1981,6 +2010,9 @@ impl Translator {
         // A message that names the sub-agent call it belongs to is that
         // agent's: its words and its calls are the agent's, not the session's.
         let agent = envelope.parent_tool_use_id.map(AgentId::new);
+        if agent.is_none() {
+            self.turn_under_way = true;
+        }
         let written_by_cli = envelope.message.model.as_deref() == Some(CLI_WRITTEN);
         let blocks = match envelope.message.content {
             Some(wire::Content::Blocks(blocks)) => blocks,
@@ -2065,6 +2097,7 @@ impl Translator {
         if envelope.says_interrupted() {
             self.stopped(&envelope.parent_tool_use_id);
         }
+        let main = envelope.parent_tool_use_id.is_none();
         let background = envelope.launched_in_background();
         let interrupted: Vec<String> = envelope
             .tool_result_meta
@@ -2096,6 +2129,11 @@ impl Translator {
                 continue;
             };
 
+            // The request the agent makes with this result carries what had
+            // ended by then.
+            if main {
+                self.untaken_end = false;
+            }
             let output = content.map(render_content).unwrap_or_default();
             let bytes = output.len() as u64;
             let (name, input, summary, arguments) = match self.tool_calls.remove(&tool_use_id) {
@@ -2143,6 +2181,9 @@ impl Translator {
             // sub-agent's own results carry none, so for an agent one of them
             // launched it is the sentence the CLI answers the call with.
             let background = outcome == ToolOutcome::Ok && (background || says_launched(&output));
+            if background && main && self.is_running(&tool_use_id) {
+                self.main_background.insert(tool_use_id.clone());
+            }
             if !background {
                 let stopped_by_limit = self.limited_agents.remove(&tool_use_id).is_some();
                 self.agent_ended(
@@ -2211,6 +2252,9 @@ impl Translator {
                     .background
                     .insert(tool_use_id.clone(), command.clone())
                     .is_none();
+                if main {
+                    self.main_background.insert(tool_use_id.clone());
+                }
             }
             let id = ToolCallId::new(tool_use_id);
             let backgrounded =
@@ -2773,6 +2817,8 @@ impl Translator {
 
     fn result(&mut self, outcome: wire::Outcome, out: &mut Vec<Event>) {
         self.turn_follows = Some(outcome.queued_turn_count.unwrap_or(0) > 0);
+        self.turn_under_way = false;
+        let owes_a_turn = std::mem::take(&mut self.untaken_end);
         let interrupted = outcome.interrupted();
         let shown_limit = self.usage_limit.take();
         let limit_words = limit_in(&outcome, shown_limit.as_deref());
@@ -2863,6 +2909,9 @@ impl Translator {
             });
         }
 
+        if owes_a_turn {
+            out.push(Event::TurnFollows);
+        }
         // Last, after everything the line reports: the shell stops showing
         // the session as working when it reads this, and a figure that came
         // after it would land in a turn the operator saw end.

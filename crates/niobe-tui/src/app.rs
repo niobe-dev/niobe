@@ -2450,6 +2450,7 @@ impl App {
             | Event::ToolCallStart { .. }
             | Event::ToolCallEnd { .. }
             | Event::TurnEnded
+            | Event::TurnFollows
             | Event::Usage(_)
             | Event::UsageWindows(_)
             | Event::Billing { .. }
@@ -3096,6 +3097,9 @@ impl App {
 
             // The working line reads the phase off the fold.
             Event::CompactionStarted | Event::CompactionEnded => {}
+
+            // The turn it forecasts is drawn from what that turn does.
+            Event::TurnFollows => {}
 
             // What the next catch-up is counted from, read back from a record
             // as it was taken live.

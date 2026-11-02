@@ -318,7 +318,10 @@ reviewers that encode both, for an agent working in this tree.
   keeps for that agent beside the session's and folded in where the CLI's timestamps put them,
   and its answer from the same file; a shell command the CLI ran in the
   background is running from its call's end, and ends, where the CLI says it did, as a notice
-  naming the command, how it ended and the exit code the CLI's summary names; `conformance.rs`
+  naming the command, how it ended and the exit code the CLI's summary names, and where the
+  session's own background work ends while a turn is under way, after the turn's `init` or its
+  agent's last call result and before its `result`, that turn's end says another follows, since
+  no request of it took the news in and the CLI answers it in a turn of its own; `conformance.rs`
   names the CLI releases every shape in the crate was recorded from, which is what a session says
   once when it is driving a release nobody recorded. `tests/stream.rs` and `tests/transcript.rs`
   fold the recordings in `tests/fixtures/`, whose README carries the arithmetic the tests assert —
@@ -383,7 +386,9 @@ reviewers that encode both, for an agent working in this tree.
   nothing said how a session was billed and no figure priced by the table; `headless.rs` is
   `niobe -p`: one turn sent through the same `Bridge` and recorded through the same `Journal` as
   the shell's — waited past where it finished with a sub-agent or a shell command still running
-  in the background, to the end of the turn the CLI starts on its own once that work ends, whose
+  in the background, to the end of the turn the CLI starts on its own once that work ends — or
+  where the bridge says the CLI owes a turn for work that ended under one that did not take it in,
+  to that turn, for two minutes at most before the agent is heard from in it — whose
   reply is the one printed — each permission prompt answered by the standing rules — the config's, and those
   `--allow` gave for that run alone, which nothing writes down — and every other refused with
   words that tell the agent no one is there, and an outcome — finished, failed, or stopped on the

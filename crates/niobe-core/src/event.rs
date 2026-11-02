@@ -858,6 +858,17 @@ pub enum Event {
     /// operator look the same between one tool call and the next.
     TurnEnded,
 
+    /// The backend starts a turn of its own as soon as the turn ending now
+    /// has ended: work it ran in the background — a sub-agent, a shell
+    /// command — ended while that turn was under way, after the turn last
+    /// took such news in, and the backend answers it in a turn rather than in
+    /// the one ending. Arrives just before that turn's [`Event::TurnEnded`].
+    ///
+    /// The background work has ended, so nothing still running says another
+    /// turn is coming; this does. It says nothing of how the session stands,
+    /// which the turn that follows shows.
+    TurnFollows,
+
     /// Tokens and, when reported, money.
     Usage(Usage),
 

@@ -728,6 +728,7 @@ fn send_produced(
             | SessionEvent::ToolCallStart { .. }
             | SessionEvent::ToolCallEnd { .. }
             | SessionEvent::TurnEnded
+            | SessionEvent::TurnFollows
             | SessionEvent::Usage(_)
             | SessionEvent::UsageWindows(_)
             | SessionEvent::Billing { .. }

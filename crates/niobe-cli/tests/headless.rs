@@ -221,6 +221,45 @@ fn a_command_running_in_the_background_is_waited_for_and_the_turn_its_end_starts
     assert_eq!(printed["cost"]["reported_usd"], 0.3);
 }
 
+/// A `claude` that plays `background-commands.jsonl`, recorded from 2.1.309,
+/// with a pause between its turns: the operator's turn ends with two commands
+/// in the background (lines 1–12), the first one's end starts a turn of the
+/// CLI's own (13–16), the second ends while that turn's request is out
+/// (17–19), that turn answers about the first alone and ends (20–21), and
+/// the CLI starts another of its own that says how the second went (22–24).
+fn plays_background_commands_claude() -> String {
+    let recording = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../niobe-bridge-claude/tests/fixtures/background-commands.jsonl");
+    let recording = recording.display();
+    format!(
+        "#!/bin/sh\n\
+         read -r first\n\
+         read -r turn\n\
+         sed -n '1,12p' '{recording}'\n\
+         sleep 0.5\n\
+         sed -n '13,21p' '{recording}'\n\
+         sleep 0.5\n\
+         sed -n '22,24p' '{recording}'\n\
+         while read -r line; do :; done\n"
+    )
+}
+
+#[test]
+fn a_command_that_ends_while_the_cli_answers_another_is_waited_for_and_its_turn_is_the_reply() {
+    let setup = Setup::new(&plays_background_commands_claude(), METERED);
+    let output = setup.run(&["-p", "run two commands in the background", "--json"]);
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+
+    let printed = json(&output);
+    assert_eq!(printed["outcome"], "finished", "{printed:#}");
+    assert_eq!(
+        printed["reply"],
+        "The second command (`sleep 3; echo about-to-fail; exit 3`) failed with exit code 3, \
+         as it was set up to.",
+        "the turn that answers the second command's end is the run's last: {printed:#}"
+    );
+}
+
 /// A `claude` whose turn leaves a sub-agent working in the background, as
 /// [`SPAWNS_IN_THE_BACKGROUND_CLAUDE`] does, and which is then killed — the
 /// out-of-memory killer, a crash — before the agent's end starts the turn it
