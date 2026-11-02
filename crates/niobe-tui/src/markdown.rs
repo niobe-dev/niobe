@@ -112,6 +112,16 @@ const LABEL_UNDER: &str = "  ";
 /// What a block quote's lines sit behind.
 const QUOTE_BAR: &str = "▎ ";
 
+/// Whether `c` is a mark a block draws in front of every one of its lines —
+/// a quote's bar, a code block's gutter — rather than only its first, as a
+/// bullet is: a line that has one where the line above has it goes on with
+/// the block's text, however the pane wrapped it.
+pub(crate) fn is_carried_mark(c: char) -> bool {
+    [QUOTE_BAR, CODE_GUTTER]
+        .iter()
+        .any(|mark| mark.starts_with(c))
+}
+
 /// Between two table columns.
 const COLUMN_GAP: &str = " │ ";
 

@@ -5048,6 +5048,41 @@ fn folding_the_calls_above_the_current_match_keeps_the_same_match_current() {
     assert_ne!(current(&mut app, "fetch.ts second"), chip, "{folded}");
 }
 
+/// A phrase the pane wrapped inside a quoted reply is found where it was
+/// cut, the quote's bar on the line it goes on to being no part of it.
+#[test]
+fn a_phrase_wrapped_inside_a_quote_is_found_and_marked_behind_the_bar() {
+    let mut app = empty_session();
+    app.apply(&Event::UserMessage {
+        text: "go".to_owned(),
+    });
+    app.apply(&Event::AssistantMessage {
+        text: "> a quoted line that goes on and on so that the phrase has to wrap zebra \
+               quokka somewhere inside the quote"
+            .to_owned(),
+        agent: None,
+    });
+    app.apply(&Event::TurnEnded);
+    let frame = screen(&mut app, 80, 24);
+    assert!(
+        frame.contains("wrap zebra") && frame.contains("▎ quokka somewhere"),
+        "the test needs the phrase cut behind the bar:\n{frame}"
+    );
+
+    ctrl_f(&mut app);
+    type_keys(&mut app, "zebra quokka");
+    let frame = screen(&mut app, 80, 24);
+
+    assert!(find_row(&frame).contains("1 of 1"), "{frame}");
+    let theme = app.theme().to_owned();
+    let chip = Some((Some(theme.pane_bg), Some(theme.hot)));
+    let style =
+        |app: &mut App, text: &str| style_at(app, 80, 24, text).map(|style| (style.fg, style.bg));
+    assert_eq!(style(&mut app, "zebra"), chip, "{frame}");
+    assert_eq!(style(&mut app, "quokka"), chip, "{frame}");
+    assert_ne!(style(&mut app, "▎ quokka"), chip, "the bar was marked");
+}
+
 /// A reply that arrives while the search is open is searched too, and the
 /// match stepped to stays where it was.
 #[test]

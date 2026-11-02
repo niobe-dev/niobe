@@ -87,8 +87,9 @@ impl Found {
 ///
 /// A run of whitespace in it is one space, and matches any run of whitespace
 /// in the transcript — including the break where the pane wrapped a line and
-/// the indent the next one starts with, so a phrase is found wherever it was
-/// cut.
+/// the indent the next one starts with, and the quote's bar or code block's
+/// gutter that line is drawn behind again, so a phrase is found wherever it
+/// was cut.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Query {
     chars: Vec<char>,
@@ -193,7 +194,8 @@ impl Query {
 }
 
 /// One entry's lines read as one text, as a comparison sees them, with a
-/// space between each line and the next.
+/// space between each line and the next, and the marks a line carries on a
+/// block behind read as the blanks they stand in front of.
 ///
 /// Kept as one string and the byte each line starts at, rather than as each
 /// character beside its place, and kept with the lines it was read from
@@ -224,8 +226,23 @@ impl Text {
                 text.push(' ');
             }
             starts.push(text.len());
+            let mut carried = row
+                .checked_sub(1)
+                .and_then(|above| lines.get(above))
+                .map_or(0, |above| carried_lead(above, line));
             for span in &line.spans {
-                push_folded(&mut text, &span.content, exact);
+                let content: &str = &span.content;
+                let split = content
+                    .char_indices()
+                    .nth(carried)
+                    .map_or(content.len(), |(at, _)| at);
+                let (lead, rest) = content.split_at(split);
+                carried = carried.saturating_sub(lead.chars().count());
+                text.extend(
+                    lead.chars()
+                        .map(|c| if c.is_whitespace() { c } else { ' ' }),
+                );
+                push_folded(&mut text, rest, exact);
             }
         }
         Self {
@@ -295,6 +312,29 @@ impl Text {
             Some((first.saturating_add(row), column - 1, c.is_whitespace()))
         })
     }
+}
+
+/// How many characters `line` starts with that are blank or the marks of a
+/// block it carries on from `above` — a quote's bar or a code block's gutter
+/// drawn in the same column of both — up to the last such mark: what a
+/// comparison reads as the space between the words either side of the
+/// break, as it reads an indent.
+fn carried_lead(above: &Line<'_>, line: &Line<'_>) -> usize {
+    let mut over = above.spans.iter().flat_map(|span| span.content.chars());
+    let mut lead = 0;
+    let mut carried = 0;
+    for c in line.spans.iter().flat_map(|span| span.content.chars()) {
+        let above = over.next();
+        if c.is_whitespace() {
+            lead += 1;
+        } else if above == Some(c) && crate::markdown::is_carried_mark(c) {
+            lead += 1;
+            carried = lead;
+        } else {
+            break;
+        }
+    }
+    carried
 }
 
 /// A byte of a [`Text`] with the line it is on and its character of that
@@ -502,6 +542,30 @@ mod tests {
             vec![vec![(10, 4, 12)]]
         );
         assert!(found_in("zebra quokka", &["a zebra", "• quokka"]).is_empty());
+    }
+
+    /// A quote's bar and a code block's gutter are drawn again on every line
+    /// the pane wrapped the block to: behind them the text carries on, so a
+    /// phrase cut there is found as one, and the marks are not part of it.
+    /// A mark the line above has nowhere in that column, and a bullet, which
+    /// opens an item of its own, are not carried on.
+    #[test]
+    fn a_phrase_wrapped_inside_a_quote_is_found_behind_the_bar_carried_on() {
+        assert_eq!(
+            found_in("zebra quokka", &["  ▎ wrap zebra", "  ▎ quokka b"]),
+            vec![vec![(10, 9, 5), (11, 4, 6)]]
+        );
+        assert_eq!(
+            found_in("zebra quokka", &["▎ ▎ │ a zebra", "▎ ▎ │ quokka"]),
+            vec![vec![(10, 8, 5), (11, 6, 6)]]
+        );
+        assert!(found_in("zebra quokka", &["a zebra", "▎ quokka"]).is_empty());
+        assert!(found_in("zebra quokka", &["• a zebra", "• quokka"]).is_empty());
+        assert_eq!(
+            found_in("▎ zebra", &["  ▎ zebra", "  ▎ quokka"]),
+            vec![vec![(10, 2, 7)]],
+            "a bar no line above carries on to is the line's own text"
+        );
     }
 
     /// Places are counted in characters of the line, whatever the bytes
