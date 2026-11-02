@@ -1609,16 +1609,22 @@ impl Fold {
         if self.mode.as_deref() == Some(spelt.as_str()) {
             return;
         }
-        self.out.push(match translate::read_mode(&spelt) {
-            Some(mode) => Event::ModeSelected { mode },
+        match translate::read_mode(&spelt) {
+            Some(mode) => self.out.push(Event::ModeSelected { mode }),
             // The CLI gates calls in ways Niobe has no word for. Naming the
-            // one this session ran under beats showing a mode it was not in.
-            None => translate::warn(format!(
-                "the session was gating tool calls as `{spelt}`, which this version of Niobe \
-                 does not model. No mode is reported until the session is moved to one it \
-                 does."
-            )),
-        });
+            // one this session ran under beats showing a mode it was not in,
+            // and so does putting down the one it was in before: a session
+            // read back is started again in the mode its fold ends on, and
+            // one that left plan would otherwise be put back in it.
+            None => {
+                self.out.push(translate::warn(format!(
+                    "the session was gating tool calls as `{spelt}`, which this version of \
+                     Niobe does not model. No mode is reported until the session is moved to \
+                     one it does."
+                )));
+                self.out.push(Event::ModeUnknown);
+            }
+        }
         self.mode = Some(spelt);
     }
 
@@ -3012,11 +3018,27 @@ mod tests {
         let events =
             folded(&[r#"{"type":"permission-mode","permissionMode":"bypassPermissions"}"#]);
 
-        let [Event::Error { message, fatal }] = events.as_slice() else {
-            panic!("one warning: {events:?}");
+        let [Event::Error { message, fatal }, Event::ModeUnknown] = events.as_slice() else {
+            panic!("one warning, and no mode: {events:?}");
         };
         assert!(!fatal);
         assert!(message.contains("bypassPermissions"), "{message}");
+    }
+
+    #[test]
+    fn a_session_moved_from_plan_to_a_mode_niobe_does_not_model_no_longer_reads_as_plan() {
+        let events = folded(&[
+            r#"{"type":"permission-mode","permissionMode":"plan"}"#,
+            r#"{"type":"permission-mode","permissionMode":"acceptEdits"}"#,
+        ]);
+
+        let state = niobe_core::session::SessionState::replay(&events);
+        assert_eq!(
+            state.mode(),
+            None,
+            "a session read back in plan is started again in plan, which the operator left: \
+             {events:?}"
+        );
     }
 
     #[test]
