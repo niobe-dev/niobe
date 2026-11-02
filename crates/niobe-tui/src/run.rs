@@ -28,7 +28,9 @@ use crate::memory::{Memory, NoMemory};
 use crate::overview::{NoOverview, Overview};
 use crate::rules::{Forgotten, Reach, Rules};
 use crate::shell::{NoShell, Shell};
-use crate::terminal::{Shutdown, Stop, TerminalGuard, install_panic_hook, stop_until_continued};
+use crate::terminal::{
+    Shutdown, Stop, TerminalGuard, install_panic_hook, stop_until_continued, stops_can_be_continued,
+};
 use crate::trust;
 use crate::ui;
 use crate::watch::{Unwatched, Watch};
@@ -65,6 +67,10 @@ struct Machine<'a> {
     /// stopped ends the session; or, for a stop the process could
     /// not catch, takes the terminal again as it finds it.
     suspend: &'a mut dyn FnMut(Hold) -> io::Result<()>,
+    /// Whether anything could continue the process once it is stopped: see
+    /// [`stops_can_be_continued`]. Where nothing could, a stop asked for is
+    /// not made, as the kernel would not make a terminal's.
+    stops: bool,
     /// Writes the bytes that call the operator back — a bell, a desktop
     /// notification — to the terminal the shell draws on.
     ring: &'a mut dyn FnMut(&str) -> io::Result<()>,
@@ -291,6 +297,7 @@ fn open(app: App, around: Around<'_>) -> io::Result<(Ended, App)> {
             wait: &mut wait,
             clock: &clock,
             suspend: &mut suspend,
+            stops: stops_can_be_continued(),
             ring: &mut ring,
         },
     );
@@ -460,7 +467,11 @@ fn event_loop<B: Backend<Error = io::Error>>(
             // Both are read, so that a Ctrl+Z and a SIGTSTP arriving in one tick
             // are one stop rather than a second waiting for the continue.
             let suspend = app.take_suspend() | machine.shutdown.take_suspend();
-            let suspended = suspend && !app.should_quit();
+            let suspend = suspend && !app.should_quit();
+            let suspended = suspend && machine.stops;
+            if suspend && !machine.stops {
+                app.not_suspended();
+            }
             if suspended {
                 (machine.suspend)(Hold::Suspend)?;
                 // A signal sent while the shell was stopped is the session's

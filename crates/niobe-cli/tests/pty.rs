@@ -521,6 +521,17 @@ fn shell_on(slave: &File, cwd: &Path) -> Reaped {
     )
 }
 
+/// Opens the shell on `slave` in a process group of its own, the way a
+/// job-control shell starts a job: one whose stop the shell that started it
+/// is there to continue. [`shell_on`] leaves it in the test runner's group,
+/// which, under a runner started with no job control, is its session's own
+/// group, where nothing could continue a stop and the shell makes none.
+fn shell_in_a_job(slave: &File, cwd: &Path) -> Reaped {
+    let mut command = shell_command(slave, cwd);
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
+    Reaped(command.spawn().expect("the niobe binary runs"))
+}
+
 /// Opens the shell on `slave` as its controlling terminal, the way a login
 /// gives an operator's shell one: in a session of its own, where `/dev/tty`
 /// names `slave`. [`shell_on`] leaves the shell whatever controlling terminal
@@ -4069,7 +4080,7 @@ fn a_stop_hands_the_terminal_back_and_a_continue_takes_it_again(
 ) {
     let repo = repo();
     let (terminal, slave) = Terminal::open();
-    let mut shell = shell_on(&slave, repo.path());
+    let mut shell = shell_in_a_job(&slave, repo.path());
     terminal.shows(OPENING_FRAME);
     assert!(
         !cooked(&slave),
@@ -4206,7 +4217,7 @@ fn ctrl_z_suspends_the_shell_as_a_sigtstp_would() {
 fn a_signal_sent_while_stopped_ends_the_shell_where_it_stands(path: &str, ending: Signal) {
     let repo = repo();
     let (terminal, slave) = Terminal::open();
-    let mut shell = shell_on(&slave, repo.path());
+    let mut shell = shell_in_a_job(&slave, repo.path());
     terminal.shows(OPENING_FRAME);
 
     signal(&shell, Signal::TSTP);
@@ -4246,5 +4257,73 @@ fn a_hangup_while_stopped_ends_the_shell_without_taking_the_terminal_again() {
     a_signal_sent_while_stopped_ends_the_shell_where_it_stands(
         "a hangup while stopped",
         Signal::HUP,
+    );
+}
+
+/// Whether `shell` stops within `within`.
+fn stops_within(shell: &Child, within: Duration) -> bool {
+    let raw = i32::try_from(shell.id()).expect("a pid fits in an i32");
+    let pid = Pid::from_raw(raw).expect("the shell has a pid");
+    let deadline = Instant::now() + within;
+    while Instant::now() < deadline {
+        let waited = rustix::process::waitpid(
+            Some(pid),
+            rustix::process::WaitOptions::UNTRACED | rustix::process::WaitOptions::NOHANG,
+        )
+        .expect("the shell can be waited on");
+        match waited {
+            Some((_, status)) if status.stopped() => return true,
+            Some((_, status)) => panic!("the shell ended instead of going on: {status:?}"),
+            None => std::thread::sleep(Duration::from_millis(5)),
+        }
+    }
+    false
+}
+
+/// A shell that leads its own session — the command a tmux window or a
+/// terminal's profile runs, or `ssh -t host niobe` — has no job-control shell
+/// above it, so nothing would ever continue it once stopped: the kernel
+/// discards a terminal's stop for such a process group for that reason. A
+/// Ctrl+Z there keeps the shell running and on screen, and says why.
+#[test]
+fn ctrl_z_with_no_job_control_shell_to_continue_it_keeps_the_shell_running() {
+    let repo = repo();
+    let (terminal, slave) = Terminal::open();
+    let mut shell = shell_owning(&slave, repo.path());
+    terminal.shows(OPENING_FRAME);
+
+    let pressed = terminal.mark();
+    terminal.typed(CTRL_Z);
+    let stopped = stops_within(&shell, Duration::from_secs(2));
+    if stopped {
+        // Continued so that the test fails rather than hangs on the quit.
+        signal(&shell, Signal::CONT);
+    }
+    assert!(
+        !stopped,
+        "Ctrl+Z stopped a shell that nothing could continue"
+    );
+    terminal.shows_since(pressed, "Not suspended");
+    let after = terminal.caught_up()[pressed..].to_owned();
+    assert!(
+        !after.contains(LEAVE_ALTERNATE_SCREEN),
+        "the terminal was handed back for a stop that never came: {after:?}"
+    );
+
+    terminal.typed(CTRL_Q);
+    let (_, status) = ended(&mut shell);
+    // The shell led the session, so its end hung the terminal up: the modes
+    // can no longer be read, and what was written is the record.
+    drop(slave);
+    let drawn = terminal.drained();
+    assert!(
+        status.success(),
+        "the quit after Ctrl+Z ended with {status}"
+    );
+    assert_eq!(
+        drawn[pressed..].matches(RESTORED).count(),
+        1,
+        "the quit after Ctrl+Z did not hand the terminal back once: {:?}",
+        &drawn[pressed..]
     );
 }

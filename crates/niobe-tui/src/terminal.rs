@@ -655,6 +655,39 @@ pub fn stop_until_continued() -> io::Result<()> {
     Ok(())
 }
 
+/// Whether a job-control shell may be there to continue the process once
+/// [`stop_until_continued`] has stopped it.
+///
+/// Not where the process's group is its session's own: the command a tmux
+/// window or a terminal profile runs, `ssh -t host niobe`, and anything a
+/// shell without job control started under one of them. The process that
+/// made the session is the one that would continue a stop, and it is outside
+/// the session. That group is orphaned, which is why the kernel discards a
+/// terminal's stop for it; [`stop_until_continued`] stops with SIGSTOP,
+/// which nothing discards, so it is not called there at all — on macOS such a
+/// process stays stopped even after its terminal closes, and keeps the CLI it
+/// started running with it.
+///
+/// Another group whose every member's parent is outside the session is
+/// orphaned too, but which processes those are is not something a process can
+/// ask about itself; such a group is rare, and a stop there is what the
+/// operator asked for.
+#[cfg(unix)]
+pub fn stops_can_be_continued() -> bool {
+    match rustix::process::getsid(None) {
+        Ok(session) => session != rustix::process::getpgrp(),
+        // Nothing known against it: the stop the operator asked for.
+        Err(_) => true,
+    }
+}
+
+/// Whether a stop could be continued. There is no job control off the POSIX
+/// side, and [`stop_until_continued`] stops nothing there.
+#[cfg(not(unix))]
+pub fn stops_can_be_continued() -> bool {
+    true
+}
+
 /// Why a signal is ending the session.
 ///
 /// The two are not the same ending. A process asked to stop ran on a terminal

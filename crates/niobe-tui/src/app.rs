@@ -1938,6 +1938,11 @@ const TOP_OFF_SCREEN_HINT: &str =
 /// to draw.
 const TOO_SMALL_HINT: &str = "Not taken as an answer: the window is too small to show the question";
 
+/// What the bar says when a stop was asked for where nothing could continue
+/// the shell once it had stopped.
+const NOT_SUSPENDED_HINT: &str =
+    "Not suspended: no job control shell here could continue niobe. Ctrl+Q quits";
+
 /// What the bar says when the question that had the keyboard was taken away
 /// rather than answered.
 const QUESTION_WITHDRAWN_HINT: &str = "The question was withdrawn before it was answered";
@@ -7634,6 +7639,12 @@ impl App {
     /// turn it into SIGTSTP, so the loop is what stops the process for it.
     pub fn take_suspend(&mut self) -> bool {
         std::mem::take(&mut self.suspend)
+    }
+
+    /// Says on the bar that the stop asked for was not made, because nothing
+    /// would continue the shell once it had stopped.
+    pub fn not_suspended(&mut self) {
+        self.hint = Some(NOT_SUSPENDED_HINT.to_owned());
     }
 
     /// Whether the operator asked the running turn to stop since this was
@@ -13611,6 +13622,20 @@ mod tests {
         assert!(!app.should_quit());
         assert!(app.asking().is_some(), "the question is still waiting");
         assert_eq!(app.composed(), "");
+    }
+
+    #[test]
+    fn a_stop_nothing_could_continue_says_so_on_the_bar() {
+        let mut app = app();
+
+        app.not_suspended();
+
+        assert!(
+            app.hint()
+                .is_some_and(|hint| hint.starts_with("Not suspended")),
+            "{:?}",
+            app.hint()
+        );
     }
 
     #[test]
