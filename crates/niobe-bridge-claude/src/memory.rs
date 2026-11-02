@@ -24,7 +24,7 @@
 //!   once the agent reads one of them. The CLI takes a directory's rules in
 //!   the order the filesystem lists them; they are listed here by name;
 //! * under each of those, the files it imports with `@path`, relative to the
-//!   importing file, from `~` or absolute, at most [`IMPORT_DEPTH`] deep, and
+//!   importing file, from `~` or absolute, less than [`IMPORT_DEPTH`] deep, and
 //!   not inside a code span or a fenced block;
 //! * the CLI's auto-memory index, `MEMORY.md` in the project's directory under
 //!   the configuration directory — the main checkout's, for a session in a
@@ -126,7 +126,10 @@ pub struct Lookup<'a> {
     pub home: Option<&'a Path>,
 }
 
-/// How many imports deep the CLI follows, as its documentation gives it.
+/// How many imports deep a file is when the CLI no longer reads it: the file
+/// the CLI loads itself is none deep, and it reads what that imports to four
+/// deep. Its documentation says five hops; Claude Code 2.1.312 and 2.1.316
+/// both pass over a file at this depth without reading it.
 pub const IMPORT_DEPTH: usize = 5;
 
 /// The largest memory file read, in bytes. A file the agent is given whole on
@@ -335,7 +338,9 @@ impl Found {
         if !wanted(&text) {
             return;
         }
-        let imports = match depth < IMPORT_DEPTH {
+        // What this file imports is read only where it is not as deep as
+        // the CLI stops at.
+        let imports = match depth.saturating_add(1) < IMPORT_DEPTH {
             true => imports(&text),
             false => Vec::new(),
         };
@@ -1466,10 +1471,11 @@ mod tests {
         assert_eq!(imports("x ```` @f.md ```` @g.md"), ["g.md"]);
     }
 
-    /// The CLI follows imports [`IMPORT_DEPTH`] deep and no further: a chain
-    /// of six lists the first five and not the sixth.
+    /// The CLI reads no file [`IMPORT_DEPTH`] imports deep: a chain of six
+    /// lists the file it loads and the four it imports before that, and not
+    /// the fifth, which Claude Code 2.1.312 and 2.1.316 pass over.
     #[test]
-    fn imports_are_followed_five_deep_and_no_further() {
+    fn imports_are_followed_four_deep_and_no_further() {
         let dir = tempfile::tempdir().expect("a temporary directory can be made");
         let repo = dir.path().join("repo");
         write(
@@ -1511,7 +1517,6 @@ mod tests {
                 ("2.md".to_owned(), 2),
                 ("3.md".to_owned(), 3),
                 ("4.md".to_owned(), 4),
-                ("5.md".to_owned(), 5),
             ]
         );
     }
