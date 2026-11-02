@@ -4605,10 +4605,25 @@ fn without_odd_port(host: &str) -> &str {
 }
 
 /// The tools of `server`'s among the session's: those named
-/// `mcp__<server>__<tool>`, where the server's name has every character but
-/// an ASCII letter, a digit, `_` and `-` written as `_`, as the CLI names
-/// them — `claude.ai Notion` gives `mcp__claude_ai_Notion__…`.
+/// `mcp__<server>__<tool>`, under the server's name as the CLI writes it
+/// there (see [`tool_prefix_name`]).
 fn server_tools(server: &str, tools: &[String]) -> Vec<String> {
+    let prefix = format!("mcp__{}__", tool_prefix_name(server));
+    tools
+        .iter()
+        .filter_map(|tool| tool.strip_prefix(&prefix))
+        .filter(|tool| !tool.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// `server` as the CLI writes it in its tools' names: every character but an
+/// ASCII letter, a digit, `_` and `-` written as `_` — `claude.ai Notion`
+/// gives `claude_ai_Notion`. A claude.ai connector's name then has each run
+/// of `_` written once and none at either end, as the CLI does for those
+/// alone: `claude.ai Linear (Beta)` gives `claude_ai_Linear_Beta`, where any
+/// other server's `my (server)` gives `my__server_`.
+fn tool_prefix_name(server: &str) -> String {
     let named: String = server
         .chars()
         .map(
@@ -4618,13 +4633,16 @@ fn server_tools(server: &str, tools: &[String]) -> Vec<String> {
             },
         )
         .collect();
-    let prefix = format!("mcp__{named}__");
-    tools
-        .iter()
-        .filter_map(|tool| tool.strip_prefix(&prefix))
-        .filter(|tool| !tool.is_empty())
-        .map(str::to_owned)
-        .collect()
+    if !server.starts_with("claude.ai ") {
+        return named;
+    }
+    let mut collapsed = String::with_capacity(named.len());
+    for c in named.chars() {
+        if !(c == '_' && collapsed.ends_with('_')) {
+            collapsed.push(c);
+        }
+    }
+    collapsed.trim_matches('_').to_owned()
 }
 
 /// A server's status, in the CLI's spelling.
@@ -10109,6 +10127,43 @@ error: could not compile `demo` (lib test) due to 1 previous error";
         assert_eq!(server_tools("claude.ai Notion", &tools), ["notion-search"]);
         assert_eq!(server_tools("code-review-graph", &tools), ["query_graph"]);
         assert!(server_tools("Read", &tools).is_empty());
+    }
+
+    /// The CLI writes a claude.ai connector's name with each run of `_` its
+    /// spaces and punctuation became written once, and none at either end,
+    /// which no other server's name is: `claude.ai Linear (Beta)` gives
+    /// `mcp__claude_ai_Linear_Beta__…`, and `my (server)` keeps all three.
+    #[test]
+    fn a_claude_ai_connectors_tools_are_found_under_the_name_with_its_underscores_run_together() {
+        let tools: Vec<String> = [
+            "mcp__claude_ai_Linear_Beta__list_issues",
+            "mcp__claude_ai_Linear_Beta__get_issue",
+            "mcp__claude_ai_Jira_Confluence__search",
+            "mcp__my__server___run",
+        ]
+        .map(str::to_owned)
+        .to_vec();
+
+        assert_eq!(
+            server_tools("claude.ai Linear (Beta)", &tools),
+            ["list_issues", "get_issue"]
+        );
+        assert_eq!(
+            server_tools("claude.ai Jira & Confluence.", &tools),
+            ["search"]
+        );
+        assert_eq!(server_tools("my (server)", &tools), ["run"]);
+
+        let events = Translator::new("max").line(
+            r#"{"type":"system","subtype":"init","session_id":"s","tools":["Read","mcp__claude_ai_Linear_Beta__list_issues","mcp__claude_ai_Linear_Beta__get_issue"],"mcp_servers":[{"name":"claude.ai Linear (Beta)","status":"connected","source":"claudeai"}]}"#,
+        );
+        let Some(Event::McpServers { servers }) = events
+            .iter()
+            .find(|event| matches!(event, Event::McpServers { .. }))
+        else {
+            panic!("no server list: {events:?}");
+        };
+        assert_eq!(servers[0].tools, ["list_issues", "get_issue"]);
     }
 
     #[test]
