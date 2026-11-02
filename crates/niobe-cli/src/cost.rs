@@ -184,18 +184,22 @@ fn csv_row(folded: &Folded) -> String {
     let session = &folded.state;
     let t = session.totals();
     let m = money(session);
+    // A session no usage record reached measured nothing, so its token
+    // fields are empty as its row in the table is a dash, not a row of zeros.
+    let measured = (t.records > 0).then_some(t);
+    let count = |kind: fn(&Totals) -> u64| field(measured.map(kind));
     [
         folded.id.get().to_string(),
         rfc3339(folded.started_at),
         billing(Billed::of(session)).to_owned(),
-        t.input.to_string(),
-        t.output.to_string(),
-        t.cache_read.to_string(),
-        t.cache_write.to_string(),
-        t.cache_write_1h.to_string(),
-        t.cache_write_unsplit.to_string(),
-        t.reasoning.to_string(),
-        t.tokens().to_string(),
+        count(|t| t.input),
+        count(|t| t.output),
+        count(|t| t.cache_read),
+        count(|t| t.cache_write),
+        count(|t| t.cache_write_1h),
+        count(|t| t.cache_write_unsplit),
+        count(|t| t.reasoning),
+        count(Totals::tokens),
         field(m.and_then(reported)),
         field(m.map(Totals::cost_fully_reported)),
         field(m.map(|m| m.records)),
@@ -537,6 +541,19 @@ mod tests {
         assert_eq!(
             table[2],
             " 2  2026-09-18T12:01:40Z  unknown             0  —"
+        );
+    }
+
+    #[test]
+    fn a_csv_row_of_a_session_that_reported_no_usage_leaves_its_tokens_empty_not_zero() {
+        let sessions = [unreported(1, 1_789_732_800), session(2, 1_789_732_900, 0)];
+        let csv = lines("repo", &sessions, Narrowing::default(), Format::Csv);
+        // The first measured nothing, so it has no figure to give; the second
+        // reported a record of no tokens, which is a measured zero.
+        assert_eq!(csv[1], "1,2026-09-18T12:00:00Z,unknown,,,,,,,,,,,,,");
+        assert_eq!(
+            csv[2],
+            "2,2026-09-18T12:01:40Z,unknown,0,0,0,0,0,0,0,0,,,,,"
         );
     }
 
