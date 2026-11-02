@@ -270,6 +270,9 @@ struct Model {
     /// Whether any window was reported since the running turn began or the
     /// last one ended.
     window_said: bool,
+    /// Whether the session was left since the five-hour window was last
+    /// reported, which a clear keeps: no turn is measured from that level.
+    left: bool,
     /// Lines added and removed and changes made, per project file.
     lines: std::collections::BTreeMap<String, (u64, u64, u64)>,
     /// The calls running, each with its tool and the agent that made it.
@@ -297,6 +300,7 @@ impl Model {
                 *self = Model {
                     billing: self.billing,
                     five_hour: self.five_hour,
+                    left: self.left,
                     running_calls: calls,
                     running_agents: agents,
                     ..Model::default()
@@ -315,6 +319,7 @@ impl Model {
             Event::UsageWindows(windows) if !windows.is_empty() => {
                 self.five_hour = windows.five_hour;
                 self.window_said = true;
+                self.left &= windows.five_hour.is_none();
             }
             Event::AgentExit { id, .. } if self.ended.contains(id) => {}
             Event::AgentExit { id, .. } => {
@@ -349,10 +354,11 @@ impl Model {
                 self.running_agents.clear();
                 self.ended.extend(before.running_agents().iter().cloned());
                 self.clear_open = false;
+                self.left |= matches!(event, Event::SessionLeft);
             }
             Event::TurnEnded => self.clear_open = false,
             Event::UserMessage { .. } if !before.turn_running() && !self.clear_open => {
-                self.began_at = Some(self.five_hour);
+                self.began_at = Some(self.five_hour.filter(|_| !self.left));
                 self.window_said = false;
                 self.no_turn += self.between;
                 self.between = 0;
@@ -420,7 +426,7 @@ impl Model {
             }
             _ => None,
         };
-        self.ended_at = ended;
+        self.ended_at = ended.filter(|_| !self.left);
         self.window_said = false;
         share
     }
@@ -618,6 +624,11 @@ fn fold_checked(seed: u64, events: &[Event]) -> SessionState {
                 share,
                 "the window share of the turn recorded at event {at} of seed {seed} ({event:?})"
             );
+        }
+        // Whatever turn the leave cut was measured to the level before it;
+        // a turn after it, prompted or not, is measured from nothing.
+        if matches!(event, Event::SessionLeft) {
+            model.ended_at = None;
         }
         check(seed, at, event, &state, &model);
     }

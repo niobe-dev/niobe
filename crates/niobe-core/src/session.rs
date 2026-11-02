@@ -540,7 +540,10 @@ pub struct TurnRecord {
     /// a point may have spent less than a point that crossed one.
     ///
     /// The window is the account's, not the session's: anything else the
-    /// account ran during the turn moved it too.
+    /// account ran during the turn moved it too. A level reported before the
+    /// session was left is not measured from, so the first turn after it is
+    /// taken up again has no share: the account's other sessions may have
+    /// moved the window any distance in between, which that turn did not.
     pub five_hour_share: Option<f64>,
     /// Whether the turn was cut off rather than ended by the backend: the
     /// session failed under it, or the process running it stopped.
@@ -615,6 +618,12 @@ pub struct SessionState {
     /// How many reports have given the five-hour window's level, so that a
     /// level read at one moment can be told from the same level read again.
     five_hour_reports: u64,
+    /// Whether the five-hour level the fold holds was reported before the
+    /// session was last left: a reading from a process that has stopped,
+    /// which the account's other sessions may have moved any distance since.
+    /// The level is still what the fold shows, but no turn is measured from
+    /// it, until the window is reported again.
+    five_hour_left: bool,
     /// Whether the last event folded ended a turn — its end, or a fatal
     /// error — which an end straight after it repeats rather than closes a
     /// turn of its own.
@@ -937,6 +946,7 @@ impl SessionState {
                 let measured = !windows.is_empty();
                 if windows.five_hour.is_some() {
                     bump(&mut self.five_hour_reports);
+                    self.five_hour_left = false;
                 }
                 let said = match (windows.overage, self.usage_windows) {
                     (crate::event::Overage::Unreported, Some(before)) => before.overage,
@@ -984,6 +994,8 @@ impl SessionState {
                 self.pending_assistant.clear();
                 self.interrupt_backend_work();
                 self.cut_short();
+                self.five_hour_left = true;
+                self.turn_last_ended.five_hour = None;
             }
 
             Event::PermissionRequest { id, .. } => {
@@ -1205,7 +1217,10 @@ impl SessionState {
     fn mark(&self) -> TurnMark {
         TurnMark {
             tokens: self.totals.tokens(),
-            five_hour: self.usage_windows.and_then(|windows| windows.five_hour),
+            five_hour: self
+                .usage_windows
+                .and_then(|windows| windows.five_hour)
+                .filter(|_| !self.five_hour_left),
         }
     }
 
@@ -1272,6 +1287,7 @@ impl SessionState {
             mode: self.mode,
             model: self.model.take(),
             usage_windows: self.usage_windows.take(),
+            five_hour_left: self.five_hour_left,
             billing: self.billing.take(),
             commands: std::mem::take(&mut self.commands),
             models: std::mem::take(&mut self.models),
@@ -4782,6 +4798,71 @@ mod tests {
             .map(|turn| turn.five_hour_share.map(|s| (s * 100.0).round() as u64))
             .collect();
         assert_eq!(shares, [None, Some(2), Some(1), None, Some(1)]);
+    }
+
+    /// A session left at 14 % and taken up again while the account's other
+    /// sessions took the window to 60 %: the first turn after it is not what
+    /// moved the window those 46 points, and the level before it is a reading
+    /// from a process that has stopped. Turns after a report of the new
+    /// process's are measured again.
+    #[test]
+    fn the_first_turn_after_the_session_was_left_is_not_measured_from_before_it() {
+        let state = SessionState::replay(&[
+            prompt(),
+            five_hour(0.14, RESET),
+            Event::TurnEnded,
+            Event::SessionLeft,
+            prompt(),
+            five_hour(0.60, RESET),
+            Event::TurnEnded,
+            prompt(),
+            five_hour(0.61, RESET),
+            Event::TurnEnded,
+        ]);
+        let shares: Vec<Option<u64>> = state
+            .turns()
+            .iter()
+            .map(|turn| turn.five_hour_share.map(|s| (s * 100.0).round() as u64))
+            .collect();
+        assert_eq!(shares, [None, None, Some(1)]);
+    }
+
+    /// The same for a turn the backend opened of itself after the session was
+    /// taken up again, which is counted from where the last one ended, and
+    /// across a clear typed before anything reported the window again.
+    #[test]
+    fn no_turn_after_the_session_was_left_is_measured_from_before_it() {
+        let unprompted = SessionState::replay(&[
+            prompt(),
+            five_hour(0.14, RESET),
+            Event::TurnEnded,
+            Event::SessionLeft,
+            Event::AssistantMessage {
+                text: "done".to_owned(),
+                agent: None,
+            },
+            five_hour(0.60, RESET),
+            Event::TurnEnded,
+        ]);
+        assert_eq!(unprompted.turns()[1].five_hour_share, None);
+
+        let cleared = SessionState::replay(&[
+            prompt(),
+            five_hour(0.14, RESET),
+            Event::TurnEnded,
+            Event::SessionLeft,
+            Event::Cleared,
+            Event::TurnEnded,
+            prompt(),
+            five_hour(0.60, RESET),
+            Event::TurnEnded,
+        ]);
+        assert_eq!(
+            cleared.turns().last().map(|turn| turn.five_hour_share),
+            Some(None),
+            "{:?}",
+            cleared.turns()
+        );
     }
 
     #[test]
