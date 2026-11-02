@@ -188,7 +188,7 @@ fn single(
     };
     let mut lines = vec![row(
         (glyph, glyph_colour),
-        entry.head.clone(),
+        (&entry.head, 1),
         Doing {
             agent: entry.agent.as_deref().filter(|_| !detail.grouped),
             what: &doing(call, detail),
@@ -241,7 +241,7 @@ fn remembered(
     };
     vec![row(
         ("◆", colour),
-        head(entry),
+        (&entry.head, calls.len()),
         Doing {
             agent: entry.agent.as_deref().filter(|_| !detail.grouped),
             what: &what,
@@ -298,7 +298,7 @@ fn group(
         .join(", ");
     let mut lines = vec![row(
         (glyph, colour),
-        head(entry),
+        (&entry.head, calls.len()),
         Doing {
             agent: entry.agent.as_deref().filter(|_| !detail.grouped),
             what: &what,
@@ -845,11 +845,13 @@ fn first_line(text: &str) -> Option<&str> {
 /// What the call does gives way first. On a pane too narrow for the columns
 /// and the cost together the agent column goes, then the name gives way, and
 /// the cost never does. A row the session's own agent made leaves the agent
-/// column blank, so what every call does still starts in one column.
+/// column blank, so what every call does still starts in one column. `name`
+/// is the tool's, and how many calls the row stands for, which
+/// [`fitted_name`] keeps whole where the name gives way.
 #[allow(clippy::too_many_arguments)] // Each is one column of the row; a struct would only name them again.
 fn row(
     (glyph, glyph_colour): (&str, Color),
-    name: String,
+    name: (&str, usize),
     doing: Doing<'_>,
     result: Vec<Span<'static>>,
     width: usize,
@@ -860,7 +862,7 @@ fn row(
     let cost = spans_width(&result);
     let room = width.saturating_sub(GUTTER + cost + GAP);
     let name_column = columns.name.max(NAME_LEAST).min(room);
-    let name = text::truncate(&name, name_column);
+    let name = fitted_name(name, name_column);
     let left = room.saturating_sub(name_column + 1);
     let agent_column = match columns.agent > 0 && left >= columns.agent + 1 + WHAT_LEAST {
         true => columns.agent,
@@ -916,9 +918,30 @@ const RUNNING: &str = "⠋";
 /// What a tool-call entry is called in the name column: the tool, and how
 /// many calls a run of them holds.
 fn head(entry: &Entry) -> String {
-    match entry.calls.len() {
-        0 | 1 => entry.head.clone(),
-        calls => format!("{} ×{calls}", entry.head),
+    format!("{}{}", entry.head, run_count(entry.calls.len()))
+}
+
+/// ` ×3` after the name of a run of three calls; nothing after a call on
+/// its own.
+fn run_count(calls: usize) -> String {
+    match calls {
+        0 | 1 => String::new(),
+        calls => format!(" ×{calls}"),
+    }
+}
+
+/// A tool's name and the count of a run of `calls` to it, fitted to a
+/// column `columns` cells wide.
+///
+/// The name gives way and the count does not: a run whose count was cut
+/// with a long name — an MCP tool's — would read as one call, with the
+/// figures of the whole run beside it. Only a column with no cell left for
+/// the name beside the count cuts the two as one.
+fn fitted_name((name, calls): (&str, usize), columns: usize) -> String {
+    let count = run_count(calls);
+    match columns.checked_sub(text::width(&count)) {
+        Some(room) if room > 0 => format!("{}{count}", text::truncate(name, room)),
+        _ => text::truncate(&format!("{name}{count}"), columns),
     }
 }
 
@@ -1751,6 +1774,29 @@ mod tests {
                 agent: text::width("quick")
             }
         );
+    }
+
+    /// A name too long for its column gives way, and the count of a run's
+    /// calls after it does not: cut with the name, a run of three calls
+    /// would read as one call whose figures are the three's sum.
+    #[test]
+    fn a_run_of_calls_to_a_long_named_tool_keeps_its_count_when_the_name_is_cut() {
+        for name in ["mcp__github__search_issues", "NotebookEdit"] {
+            for folded in [false, true] {
+                let mut app = app();
+                for id in ["t1", "t2", "t3"] {
+                    app.apply(&start(id, name));
+                    app.apply(&end(id, name, ToolOutcome::Ok, None));
+                }
+                let rows = drawn(&app, folded);
+                let column: String = rows[0].chars().skip(2).take(NAME_MOST).collect();
+                assert!(column.ends_with(" ×3"), "{name}: {rows:?}");
+                assert!(
+                    text::width(&column) <= NAME_MOST && column.contains('…'),
+                    "{name}: the name gave way: {rows:?}"
+                );
+            }
+        }
     }
 
     #[test]
