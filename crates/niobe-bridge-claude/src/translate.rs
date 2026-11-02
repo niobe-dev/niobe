@@ -1290,9 +1290,19 @@ impl Translator {
     /// is what a later refusal goes back to; one it refused puts the session
     /// back in the mode the CLI is still in — unless a later change is still
     /// unanswered, which is then what the session shows until its own answer.
+    ///
+    /// One it took is said too, where no later change is waiting: the shell
+    /// showed it when it was asked for, but what reached the shell between
+    /// the request and this answer — the `init` of a turn the CLI started
+    /// before reading the request, or the refusal of an earlier change read
+    /// before the operator moved on — names the mode the CLI was in then,
+    /// and would otherwise stand over the one it is in now.
     fn answered_mode(&mut self, mode: Mode, outcome: &wire::ControlOutcome, out: &mut Vec<Event>) {
         if outcome.subtype.as_deref() == Some("success") {
             self.taken_mode = Some(mode);
+            if self.mode_requests.is_empty() {
+                out.push(Event::ModeSelected { mode });
+            }
             return;
         }
         out.push(refused_change(outcome));
@@ -7846,6 +7856,58 @@ mod tests {
 
         assert!(taken.is_empty(), "{taken:?}");
         assert_eq!(refused[1], Event::ModeSelected { mode: Mode::Plan });
+    }
+
+    #[test]
+    fn a_mode_change_taken_after_an_init_that_named_the_mode_before_it_is_what_the_session_shows() {
+        let mut translator = Translator::new("max");
+        let mut events = translator.line(
+            r#"{"type":"system","subtype":"init","session_id":"s","permissionMode":"default"}"#,
+        );
+        // Shift+Tab, just after a prompt went: the shell shows auto at once,
+        // and the CLI starts the prompt's turn — whose `init` names the mode
+        // it is in before it reads the request — and only then takes it.
+        translator.asked_for_mode("niobe-1", Mode::Auto);
+        events.push(Event::ModeSelected { mode: Mode::Auto });
+        events.extend(translator.line(
+            r#"{"type":"system","subtype":"init","session_id":"s","permissionMode":"default"}"#,
+        ));
+        events.extend(translator.line(
+            r#"{"type":"control_response","response":{"subtype":"success","request_id":"niobe-1","response":{"mode":"auto"}}}"#,
+        ));
+
+        let state = niobe_core::session::SessionState::replay(&events);
+        assert_eq!(
+            state.mode(),
+            Some(Mode::Auto),
+            "the shell shows ask while the CLI runs calls unasked: {events:?}"
+        );
+    }
+
+    #[test]
+    fn a_mode_change_taken_after_the_refusal_of_one_before_it_was_read_is_what_the_session_shows() {
+        let mut translator = Translator::new("max").started_in(Mode::Ask);
+        translator.line(
+            r#"{"type":"system","subtype":"init","session_id":"s","permissionMode":"default"}"#,
+        );
+        translator.asked_for_mode("niobe-2", Mode::Auto);
+        let mut events = vec![Event::ModeSelected { mode: Mode::Auto }];
+        // The refusal is read before the operator presses Shift+Tab again,
+        // and reaches the shell after that press has moved it on to plan.
+        let refused = translator.line(REFUSED_AUTO);
+        events.push(Event::ModeSelected { mode: Mode::Plan });
+        events.extend(refused);
+        translator.asked_for_mode("niobe-3", Mode::Plan);
+        events.extend(translator.line(
+            r#"{"type":"control_response","response":{"subtype":"success","request_id":"niobe-3","response":{"mode":"plan"}}}"#,
+        ));
+
+        let state = niobe_core::session::SessionState::replay(&events);
+        assert_eq!(
+            state.mode(),
+            Some(Mode::Plan),
+            "the shell shows ask while the CLI plans: {events:?}"
+        );
     }
 
     #[test]
