@@ -345,8 +345,11 @@ impl<'t> Renderer<'t> {
                 self.open_destination(&dest_url);
             }
             // Drawn where it is written, which is the end of a reply as a
-            // rule, marked with the name its reference in the text has.
+            // rule, marked with the name its reference in the text has. It
+            // can open inside a tight list item too, so it ends the item's
+            // text first, as the blocks below do.
             Tag::FootnoteDefinition(name) => {
+                self.flush();
                 self.gap();
                 let dim = self.theme.dim;
                 self.text(&format!("[^{name}] "), Style::new().fg(dim));
@@ -1425,6 +1428,17 @@ mod tests {
         assert_eq!(
             drawn("- text\n  <div>\n  html\n  </div>", 40),
             ["• text", "  <div> html </div>"]
+        );
+    }
+
+    /// A footnote's note written inside a tight item is a block of its own:
+    /// run into the item's text, `a` and `[^1] the note` read as one
+    /// sentence with a reference in it, and the note is lost as a note.
+    #[test]
+    fn a_list_item_keeps_its_own_text_above_a_footnote_note_inside_it() {
+        assert_eq!(
+            drawn("- text\n  [^1]: the note\n- next\n\nSee[^1].", 40),
+            ["• text", "  [^1] the note", "• next", "", "See[^1]."]
         );
     }
 
