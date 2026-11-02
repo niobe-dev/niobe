@@ -4382,10 +4382,24 @@ fn background_ended(command: &str, status: Option<&str>, summary: Option<&str>) 
     }
 }
 
+/// How the CLI opens its summary of a background command that ended of
+/// itself, up to the quote that opens the command's description.
+const BACKGROUND_SUMMARY: &str = "Background command \"";
+
 /// The status the CLI's summary of a background command names, after its
 /// `exit code`.
+///
+/// The CLI writes `Background command "<description>" <how it ended>`, and
+/// the description is the model's own words, or the command where it gave
+/// none: a code either names is not the one the command exited with. So the
+/// code is read only from the words after the description's closing quote,
+/// which are the CLI's and hold no quote of their own. A command the CLI
+/// stopped is summed up by its bare description, which names no code of
+/// the CLI's at all.
 fn exit_code_in(summary: &str) -> Option<i32> {
-    let (_, after) = summary.rsplit_once("exit code ")?;
+    let quoted = summary.strip_prefix(BACKGROUND_SUMMARY)?;
+    let (_, clis) = quoted.rsplit_once('"')?;
+    let (_, after) = clis.split_once("exit code ")?;
     let digits: String = after
         .chars()
         .take_while(|c| c.is_ascii_digit() || *c == '-')
@@ -9286,6 +9300,49 @@ mod tests {
                     id: ToolCallId::new("toolu_bash")
                 }
             ]
+        );
+    }
+
+    /// The CLI's summary of a stopped command is the call's description and
+    /// nothing else, and the model wrote that: a code it names is not one
+    /// the command exited with.
+    #[test]
+    fn a_stopped_commands_description_that_names_an_exit_code_gives_it_none() {
+        let mut translator = translator();
+        backgrounded(&mut translator, "./serve.sh");
+
+        let events = translator.line(&command_notified(
+            "stopped",
+            "Start the server, failing with exit code 2 on a port clash",
+        ));
+
+        assert_eq!(
+            events.first(),
+            Some(&Event::Notice {
+                message: "the background command `./serve.sh` was stopped".to_owned()
+            }),
+            "{events:?}"
+        );
+    }
+
+    /// An exit code is read from the CLI's words after the description it
+    /// quotes, not from the description.
+    #[test]
+    fn a_background_commands_exit_code_is_the_clis_and_not_its_descriptions() {
+        let mut translator = translator();
+        backgrounded(&mut translator, "./check.sh");
+
+        let events = translator.line(&command_notified(
+            "completed",
+            r#"Background command \"Check that \\\"exit code 7\\\" is reported\" completed"#,
+        ));
+
+        assert_eq!(
+            events.first(),
+            Some(&Event::Notice {
+                message: "the background command `./check.sh` finished".to_owned()
+            }),
+            "{events:?}"
         );
     }
 
