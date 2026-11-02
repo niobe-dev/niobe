@@ -2287,10 +2287,11 @@ impl Translator {
                 let counts = match (hunks.is_empty(), replace_all) {
                     (false, _) => diff::hunks_changed(&hunks),
                     (true, true) => None,
-                    (true, false) => diff::replacement_changed(
-                        string_at(arguments, "old_string").unwrap_or_default(),
-                        string_at(arguments, "new_string").unwrap_or_default(),
-                    ),
+                    (true, false) => {
+                        let new = string_at(arguments, "new_string").unwrap_or_default();
+                        let old = string_at(arguments, "old_string").unwrap_or_default();
+                        diff::replacement_changed(&replaced_text(old, new), new)
+                    }
                 };
                 match counts {
                     Some((added, removed)) => (path, Some(added), Some(removed), hunks),
@@ -2698,10 +2699,11 @@ impl Translator {
                     None => false,
                     Some(every) => every.as_bool()?,
                 };
+                let new = text("new_string")?;
                 let action = Action::Replace {
                     path: text("file_path")?,
-                    old: text("old_string")?,
-                    new: text("new_string")?,
+                    old: replaced_text(&text("old_string")?, &new).into_owned(),
+                    new,
                     every,
                 };
                 Some(Proposal::new(
@@ -3818,6 +3820,22 @@ pub(crate) fn kind_of(line: &str) -> String {
         .ok()
         .and_then(|tag| tag.kind)
         .unwrap_or_else(|| "(untyped)".to_owned())
+}
+
+/// The text the CLI's `Edit` takes out of the file for `old_string` `old`
+/// replaced with `new_string` `new`.
+///
+/// Replaced with nothing, text that does not end a line takes the line end
+/// after it as well, where the file has one there — read out of 2.1.316's
+/// bundle, `!old.endsWith("\n") && file.includes(old + "\n")` — so that
+/// deleting a line leaves no blank line behind. The file is not read here:
+/// the text is taken to stop where a line does, which is what an edit of
+/// whole lines does and what [`diff::replacement_changed`] assumes already.
+fn replaced_text<'a>(old: &'a str, new: &str) -> std::borrow::Cow<'a, str> {
+    match new.is_empty() && !old.is_empty() && !old.ends_with('\n') {
+        true => std::borrow::Cow::Owned(format!("{old}\n")),
+        false => std::borrow::Cow::Borrowed(old),
+    }
 }
 
 /// A tool call's arguments, on one line, as they are shown and attributed.
@@ -6954,6 +6972,28 @@ mod tests {
         }
     }
 
+    /// The CLI's `Edit` that replaces text with nothing takes the line end
+    /// after the text too, where the file has one there: deleting the line
+    /// `use gone;` leaves no blank line in its place. Read 2.1.316's
+    /// `applyEdit` out of its bundle: `!old.endsWith("\n") &&
+    /// file.includes(old + "\n")` replaces `old + "\n"` instead.
+    #[test]
+    fn an_edit_deleting_text_proposes_taking_the_line_end_after_it() {
+        let proposal = proposal_asked(
+            r#"{"type":"control_request","request_id":"c1","request":{"subtype":"can_use_tool","tool_name":"Edit","input":{"file_path":"/f","old_string":"use gone;","new_string":""},"tool_use_id":"toolu_1"}}"#,
+            &mut translator(),
+        );
+        assert_eq!(
+            proposal.as_ref().map(Proposal::action),
+            Some(&Action::Replace {
+                path: "/f".to_owned(),
+                old: "use gone;\n".to_owned(),
+                new: String::new(),
+                every: false,
+            })
+        );
+    }
+
     #[test]
     fn an_edit_without_replace_all_replaces_one_occurrence() {
         let proposal = proposal_asked(
@@ -8777,6 +8817,27 @@ mod tests {
         assert_eq!(
             changes(&events),
             vec![("notes.txt".to_owned(), Some(2), Some(1))],
+            "{events:?}"
+        );
+    }
+
+    /// A sub-agent's edit carries no patch, so it is counted from its
+    /// arguments, as the CLI applies them: text replaced with nothing takes
+    /// its line end with it, which `git diff --numstat` counts as `0 2`.
+    #[test]
+    fn an_edit_deleting_lines_is_counted_as_lines_removed_and_none_added() {
+        let mut translator = translator().in_dir("/repo");
+        translator.line(&call(
+            "t1",
+            "Edit",
+            r#"{"file_path":"/repo/notes.txt","old_string":"one\ntwo","new_string":"","replace_all":false}"#,
+        ));
+
+        let events = translator.line(&result("t1", UPDATED, false));
+
+        assert_eq!(
+            changes(&events),
+            vec![("notes.txt".to_owned(), Some(0), Some(2))],
             "{events:?}"
         );
     }
