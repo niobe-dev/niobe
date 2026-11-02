@@ -14,11 +14,11 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use niobe_core::event::Event;
 use niobe_core::session::{DecisionRecord, SessionState};
-use niobe_store::{SessionId, Store, StoredEvent};
+use niobe_store::{SessionId, SessionSpan, Store, StoredEvent};
 
 use crate::args::Narrowing;
 use crate::repo;
@@ -143,6 +143,20 @@ fn records(store: &Store) -> Result<Vec<Record>, String> {
     Ok(records)
 }
 
+/// The records `spans` names, which the store lists oldest first, with their
+/// events.
+fn records_of<'a>(
+    store: &Store,
+    spans: impl Iterator<Item = &'a SessionSpan>,
+) -> Result<Vec<Record>, String> {
+    spans
+        .map(|span| {
+            let stored = store.events(span.id).map_err(|e| e.to_string())?;
+            Ok((span.id, span.started_at, stored))
+        })
+        .collect()
+}
+
 /// Each record's conversations folded on their own, with their bounds.
 fn fold_each(records: &[Record]) -> (Vec<Folded>, Vec<Bounds>) {
     records
@@ -156,25 +170,95 @@ fn fold_each(records: &[Record]) -> (Vec<Folded>, Vec<Bounds>) {
 /// it what the shell had when the clear opened it: a sub-agent still
 /// running, its call, a question waiting, the operator's command. None where
 /// `session` does not open on a clear, or no record's running turn is the
-/// one its clear went on with.
+/// one its clear went on with. `cleared_at` is when its first event, the
+/// clear, happened.
 ///
 /// Matched as [`read`] matches them, so `--resume` and `niobe cost` agree on
 /// which conversation a clear went on from; and only from a record whose last
 /// conversation it is, since a record that holds a clear of its own after it
 /// did not end where the clear began.
-pub fn carried_into(store: &Store, session: SessionId) -> Result<Vec<StoredEvent>, String> {
-    let records = records(store)?;
+///
+/// Read first from the records with an event within [`CLEAR_LOOKBACK`] of
+/// the clear rather than from every record the store holds, which a resume
+/// would wait on for as long as the repository has history: the conversation
+/// a clear went on from is the one that ended last before it, which is
+/// moments before. What those records hold settles the chain where each
+/// clear in it, and the conversation each went on from, is inside the
+/// window, because no record outside it ends there; anything else is read
+/// again from every record dated at or before the clear.
+pub fn carried_into(
+    store: &Store,
+    session: SessionId,
+    cleared_at: SystemTime,
+) -> Result<Vec<StoredEvent>, String> {
+    let spans = store.spans().map_err(|e| e.to_string())?;
+    let since = cleared_at.checked_sub(CLEAR_LOOKBACK);
+    if since.is_some()
+        && let Some(carried) = chain(store, &spans, session, cleared_at, since)?
+    {
+        return Ok(carried);
+    }
+    Ok(chain(store, &spans, session, cleared_at, None)?.unwrap_or_default())
+}
+
+/// How far before a clear [`carried_into`] first looks for the conversation
+/// the clear went on from.
+const CLEAR_LOOKBACK: Duration = Duration::from_secs(60 * 60);
+
+/// The events of the chain of records the conversation `session` opens on
+/// went on from, folded from the records with an event at or before
+/// `cleared_at` and, where `since` is given, one at or after it; `None`
+/// where those records cannot settle the chain without the ones before
+/// `since`.
+///
+/// Each clear takes the running conversation that ended last before it, of
+/// those no earlier clear took, so a clear and a conversation both at or
+/// after `since` are matched here as they are among every record: only a
+/// clear before `since` takes a conversation that ended before it. A clear
+/// dated before `since`, or one matched to a conversation that ended before
+/// it, or to none, is left to every record.
+fn chain(
+    store: &Store,
+    spans: &[SessionSpan],
+    session: SessionId,
+    cleared_at: SystemTime,
+    since: Option<SystemTime>,
+) -> Result<Option<Vec<StoredEvent>>, String> {
+    let records = records_of(
+        store,
+        spans.iter().filter(|span| {
+            span.first_at <= cleared_at && since.is_none_or(|since| span.last_at >= since)
+        }),
+    )?;
     let (folded, bounds) = fold_each(&records);
     let matched = matched_clears(&folded, &bounds);
+    let inside =
+        |at: Option<SystemTime>| since.is_none_or(|since| at.is_some_and(|at| at >= since));
     let mut chain = Vec::new();
     let mut opening = bounds.iter().position(|b| b.key == (session, 0));
     while let Some(clearing) = opening {
+        let Some(&Bounds {
+            first: Some((at, true)),
+            ..
+        }) = bounds.get(clearing)
+        else {
+            break;
+        };
         let Some(&(before, _)) = matched.iter().find(|(_, opened)| *opened == clearing) else {
+            match since {
+                Some(_) => return Ok(None),
+                None => break,
+            }
+        };
+        let Some(&Bounds {
+            key: (id, _), last, ..
+        }) = bounds.get(before)
+        else {
             break;
         };
-        let Some(&Bounds { key: (id, _), .. }) = bounds.get(before) else {
-            break;
-        };
+        if !inside(Some(at)) || !inside(last) {
+            return Ok(None);
+        }
         let last_of_its_record = bounds.get(before + 1).is_none_or(|next| next.key.0 != id);
         if !last_of_its_record {
             break;
@@ -183,12 +267,14 @@ pub fn carried_into(store: &Store, session: SessionId) -> Result<Vec<StoredEvent
         // Earlier ids only, so the walk ends.
         opening = bounds.iter().position(|b| b.key == (id, 0));
     }
-    Ok(chain
-        .iter()
-        .rev()
-        .filter_map(|id| records.iter().find(|(record, _, _)| record == id))
-        .flat_map(|(_, _, stored)| stored.iter().cloned())
-        .collect())
+    Ok(Some(
+        chain
+            .iter()
+            .rev()
+            .filter_map(|id| records.iter().find(|(record, _, _)| record == id))
+            .flat_map(|(_, _, stored)| stored.iter().cloned())
+            .collect(),
+    ))
 }
 
 /// A record as the store holds it: its id, when it was created and its events.
@@ -1421,5 +1507,104 @@ mod tests {
             left_open(&[folded(5, &[])], Some(&[])),
             ["Nothing: every session ended between turns, and what they changed is committed."]
         );
+    }
+
+    /// A store at `root`, with a recorder that starts a record of its own
+    /// for each list of `records`, every event dated as it says; and the
+    /// records' ids, in order.
+    fn recorded(
+        root: &Path,
+        records: &[&[(Event, SystemTime)]],
+    ) -> (niobe_store::Recorder, Vec<SessionId>) {
+        std::fs::create_dir_all(root.join(".git")).expect("a .git directory");
+        let store = repo::open_or_create_store(root).expect("the store opens");
+        let mut recorder = niobe_store::Recorder::new(store);
+        let mut ids = Vec::new();
+        for events in records {
+            recorder.start_over();
+            for (event, at) in *events {
+                recorder
+                    .record_at(event, *at)
+                    .expect("the event is recorded");
+            }
+            ids.push(recorder.session().expect("the record was opened"));
+        }
+        (recorder, ids)
+    }
+
+    fn dated(carried: &[StoredEvent]) -> Vec<(Event, SystemTime)> {
+        carried
+            .iter()
+            .map(|stored| (stored.event.clone(), stored.at))
+            .collect()
+    }
+
+    /// One moment, and that many minutes before it.
+    fn minutes_before(minutes: u64) -> SystemTime {
+        UNIX_EPOCH + Duration::from_secs(1_789_732_800 - minutes * 60)
+    }
+
+    fn clear() -> Event {
+        Event::UserMessage {
+            text: "/clear".to_owned(),
+        }
+    }
+
+    /// A clear goes on from the conversation that ended last before it
+    /// however long before that was: one opened by a clear two hours
+    /// before, from a conversation that had waited an hour on its own clear,
+    /// is carried whole, as every record read would carry it.
+    #[test]
+    fn a_clear_is_carried_from_conversations_that_ended_hours_before_it() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let first: &[(Event, SystemTime)] = &[
+            (prompt(), minutes_before(180)),
+            (question("q"), minutes_before(180)),
+            (clear(), minutes_before(180)),
+        ];
+        let second: &[(Event, SystemTime)] = &[
+            (Event::Cleared, minutes_before(120)),
+            (clear(), minutes_before(10)),
+        ];
+        let third: &[(Event, SystemTime)] = &[(Event::Cleared, minutes_before(0))];
+        let (recorder, ids) = recorded(dir.path(), &[first, second, third]);
+
+        let carried =
+            carried_into(recorder.store(), ids[2], minutes_before(0)).expect("the store reads");
+
+        assert_eq!(dated(&carried), [first, second].concat());
+    }
+
+    /// A record near a clear can hold an older conversation that a clear
+    /// recorded far from it took: a store written before the store split
+    /// sessions at a clear keeps the conversation a clear inside it opened
+    /// in the record the clear was typed in. The clear before that is not
+    /// matched to the older conversation for want of the record that took
+    /// it, but as every record read matches it.
+    #[test]
+    fn a_clear_is_not_matched_to_a_conversation_a_clear_outside_the_records_read_took() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let first: &[(Event, SystemTime)] = &[(clear(), minutes_before(180))];
+        let split_inside: &[(Event, SystemTime)] = &[
+            (clear(), minutes_before(162)),
+            (Event::Cleared, minutes_before(90)),
+            (clear(), minutes_before(5)),
+        ];
+        let taking_it: &[(Event, SystemTime)] = &[
+            (Event::Cleared, minutes_before(156)),
+            (Event::TurnEnded, minutes_before(153)),
+        ];
+        let second: &[(Event, SystemTime)] = &[
+            (Event::Cleared, minutes_before(120)),
+            (clear(), minutes_before(1)),
+        ];
+        let third: &[(Event, SystemTime)] = &[(Event::Cleared, minutes_before(0))];
+        let (recorder, ids) =
+            recorded(dir.path(), &[first, split_inside, taking_it, second, third]);
+
+        let carried =
+            carried_into(recorder.store(), ids[4], minutes_before(0)).expect("the store reads");
+
+        assert_eq!(dated(&carried), [first, second].concat());
     }
 }

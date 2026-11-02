@@ -364,6 +364,70 @@ fn print(dir: &Path, args: &[&str]) -> String {
 /// and not an end with no start or an agent completed that never spawned.
 #[test]
 fn a_call_running_across_a_clear_reads_back_as_the_shell_counted_it() {
+    let dir = repository();
+    let cleared = record_a_call_across_a_clear(dir.path());
+
+    let resumed = print(dir.path(), &["--resume", &cleared.get().to_string()]);
+    let replayed = print(dir.path(), &["replay", "log.jsonl"]);
+    assert!(
+        resumed.contains("tool calls  1 finished · 0 failed · 0 denied\n"),
+        "{resumed}"
+    );
+    assert_eq!(resumed, replayed);
+}
+
+/// A conversation a clear opened is resumed from the records its clear went
+/// on from, not from every record the store holds: those are read only where
+/// the records around the clear cannot say which one it was. A store that
+/// holds a session from the day before, with a row whose time no longer
+/// reads, is resumed as one that does not hold it — read whole, that row
+/// failed the resume, and every other record the store held made it slower.
+#[test]
+fn a_conversation_a_clear_opened_is_resumed_without_reading_older_sessions() {
+    let dir = repository();
+    let path = dir.path().join(".niobe").join("sessions.db");
+    let a_day_before = |n: u64| arrived(0) - Duration::from_secs(86_400) + Duration::from_secs(n);
+    let older = {
+        let mut recorder = Recorder::new(Store::open(&path).expect("the store opens"));
+        let asked = Event::UserMessage {
+            text: "something else".to_owned(),
+        };
+        for n in 0..3 {
+            recorder
+                .record_at(&asked, a_day_before(n))
+                .expect("the store keeps the event");
+        }
+        recorder
+            .session()
+            .expect("the first event opened a session")
+    };
+    rusqlite::Connection::open(&path)
+        .expect("a second connection to the store opens")
+        .execute(
+            "INSERT INTO events (session_id, seq, at, event) VALUES (?1, 4, 'yesterday', '{}')",
+            [older.get()],
+        )
+        .expect("a damaged row is planted");
+    let cleared = record_a_call_across_a_clear(dir.path());
+
+    let resumed = print(dir.path(), &["--resume", &cleared.get().to_string()]);
+    let replayed = print(dir.path(), &["replay", "log.jsonl"]);
+    assert_eq!(resumed, replayed);
+}
+
+/// A scratch repository with a `.niobe` directory and nothing recorded.
+fn repository() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("a scratch directory");
+    std::fs::create_dir(dir.path().join(".git")).expect("a .git directory is made");
+    std::fs::create_dir(dir.path().join(".niobe")).expect("a .niobe directory is made");
+    dir
+}
+
+/// Records, into the store of the repository at `dir`, a sub-agent's call
+/// that starts before a clear and ends after it, as the binary's journal
+/// does, and writes the same events to `log.jsonl` beside it; returns the
+/// session the clear opened.
+fn record_a_call_across_a_clear(dir: &Path) -> SessionId {
     use niobe_core::event::{AgentOutcome, ToolOutcome};
     let read = |id: &str| Event::ToolCallStart {
         id: id.into(),
@@ -408,10 +472,7 @@ fn a_call_running_across_a_clear_reads_back_as_the_shell_counted_it() {
         Event::TurnEnded,
     ];
 
-    let dir = tempfile::tempdir().expect("a scratch directory");
-    std::fs::create_dir(dir.path().join(".git")).expect("a .git directory is made");
-    std::fs::create_dir(dir.path().join(".niobe")).expect("a .niobe directory is made");
-    let path = dir.path().join(".niobe").join("sessions.db");
+    let path = dir.join(".niobe").join("sessions.db");
     let mut recorder = Recorder::new(Store::open(&path).expect("the store opens"));
     let mut log = String::new();
     for (n, event) in events.iter().enumerate() {
@@ -429,13 +490,6 @@ fn a_call_running_across_a_clear_reads_back_as_the_shell_counted_it() {
     }
     let cleared = recorder.session().expect("the clear opened a session");
     assert!(cleared.get() > 1, "the clear started a session of its own");
-    std::fs::write(dir.path().join("log.jsonl"), log).expect("the log is written");
-
-    let resumed = print(dir.path(), &["--resume", &cleared.get().to_string()]);
-    let replayed = print(dir.path(), &["replay", "log.jsonl"]);
-    assert!(
-        resumed.contains("tool calls  1 finished · 0 failed · 0 denied\n"),
-        "{resumed}"
-    );
-    assert_eq!(resumed, replayed);
+    std::fs::write(dir.join("log.jsonl"), log).expect("the log is written");
+    cleared
 }

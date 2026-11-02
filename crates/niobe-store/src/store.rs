@@ -180,6 +180,21 @@ pub struct SessionSummary {
     pub title: Option<String>,
 }
 
+/// When a session was created and the earliest and latest times its events
+/// are dated by: what says which sessions could have been running at a
+/// moment without reading their events.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionSpan {
+    /// The session.
+    pub id: SessionId,
+    /// When the session was created.
+    pub started_at: SystemTime,
+    /// The earliest time one of its events is dated by.
+    pub first_at: SystemTime,
+    /// The latest time one of its events is dated by.
+    pub last_at: SystemTime,
+}
+
 /// A prompt as it was stored.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredPrompt {
@@ -618,6 +633,35 @@ impl Store {
             })
         })?;
 
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Every session that holds an event, oldest first, with the earliest and
+    /// latest times its events are dated by.
+    ///
+    /// Dated by every event, not by the first and the last appended: an
+    /// event is dated by when it happened, which need not follow the order
+    /// it was stored in. A row whose time is not a number is passed over, as
+    /// [`Store::sessions`] passes over a row that is not JSON, rather than
+    /// failing every session's span; reading that session's events still
+    /// reports it.
+    pub fn spans(&self) -> Result<Vec<SessionSpan>, StoreError> {
+        let mut statement = self.conn.prepare(
+            "SELECT s.id, s.started_at, MIN(e.at), MAX(e.at)
+               FROM sessions s
+               JOIN events e ON e.session_id = s.id
+              WHERE typeof(e.at) = 'integer'
+              GROUP BY s.id
+              ORDER BY s.id",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(SessionSpan {
+                id: SessionId(row.get(0)?),
+                started_at: from_unix_millis(row.get(1)?),
+                first_at: from_unix_millis(row.get(2)?),
+                last_at: from_unix_millis(row.get(3)?),
+            })
+        })?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
 

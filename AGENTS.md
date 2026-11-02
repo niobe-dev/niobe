@@ -132,7 +132,9 @@ reviewers that encode both, for an agent working in this tree.
   SQLite (`store.rs`; the triggers in its schema refuse an update or a delete), which also reads
   every prompt of every session in one statement, and the backend conversations each carried
   on, for the shell's history, and the newest plan usage windows a profile's sessions recorded,
-  which a new session shows, dated, until its own backend reports. `recorder.rs` is
+  which a new session shows, dated, until its own backend reports, and the span of times each
+  session's events are dated by, so the binary finds the conversation a clear went on from by
+  reading only the sessions near it. `recorder.rs` is
   the write side a running session holds, and says whether another holds a session without
   taking it; `jsonl.rs` reads a JSON Lines event log, each line dated where it carries an
   `at` in the milliseconds the store dates an event by.

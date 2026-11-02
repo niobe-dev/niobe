@@ -628,7 +628,7 @@ fn resume(
                 Taken::Read(store) => store,
                 Taken::Held(recorder) => recorder.store(),
             };
-            overview::carried_into(store, session)?
+            overview::carried_into(store, session, first.at)?
         }
         Some(_) | None => Vec::new(),
     };

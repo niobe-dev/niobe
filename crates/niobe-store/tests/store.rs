@@ -521,6 +521,44 @@ fn an_event_recorded_late_is_dated_when_it_happened() {
     assert_eq!(stored[0].at, happened);
 }
 
+/// A session's span runs from its earliest event to its latest by the times
+/// they are dated, whatever order they were stored in; a session with no
+/// events has none, and a row whose time is not a number widens no span.
+#[test]
+fn each_session_spans_the_earliest_and_latest_times_its_events_are_dated_by() {
+    let (_dir, path) = scratch();
+    let at = |millis: u64| SystemTime::UNIX_EPOCH + Duration::from_millis(millis);
+    let (empty, dated) = {
+        let store = Store::open(&path).expect("a store opens");
+        let empty = store.create_session().expect("a session is created");
+        let dated = store.create_session().expect("a session is created");
+        for millis in [2_000, 1_000, 3_000, 2_500] {
+            store
+                .append_at(dated, &user("hi"), at(millis))
+                .expect("a session in a temporary store takes an event");
+        }
+        (empty, dated)
+    };
+    raw(&path)
+        .execute(
+            "INSERT INTO events (session_id, seq, at, event) VALUES (?1, 5, 'later', '{}')",
+            [dated.get()],
+        )
+        .expect("a row can be appended directly");
+    let store = Store::open(&path).expect("the store opens");
+
+    let spans = store.spans().expect("the spans read");
+
+    assert_eq!(
+        spans
+            .iter()
+            .map(|span| (span.id, span.first_at, span.last_at))
+            .collect::<Vec<_>>(),
+        [(dated, at(1_000), at(3_000))]
+    );
+    assert!(spans.iter().all(|span| span.id != empty));
+}
+
 #[test]
 fn a_resumed_recorder_appends_to_the_session_it_resumed() {
     let (_dir, path) = scratch();
