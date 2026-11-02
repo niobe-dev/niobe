@@ -164,6 +164,33 @@ impl View {
         }
     }
 
+    /// What a read found, in place of what the last one did. The cursor
+    /// stays on the file it was on, and a file being read is shown again as
+    /// it is now, both found by the path a change names it by, since a file
+    /// the operator edited can import more or fewer files than it did and
+    /// move every row below it. A file no longer listed puts the cursor on
+    /// the first row and closes its page.
+    pub(crate) fn reread(&mut self, files: Vec<MemoryFile>) {
+        let named = |at: usize| {
+            self.files
+                .as_ref()
+                .and_then(|files| files.get(at))
+                .map(|file| file.named.clone())
+        };
+        let cursor = named(self.at);
+        let read = self.reading().and_then(named);
+        let place = |named: Option<String>| {
+            named.and_then(|named| files.iter().position(|file| file.named == named))
+        };
+        self.at = place(cursor).unwrap_or(0);
+        self.reading = place(read).and_then(|at| {
+            let file = files.get(at)?;
+            let text = file.text.as_deref()?;
+            Some((at, Detail::verbatim(&file.path, &as_read(text), EMPTY)))
+        });
+        self.files = Some(files);
+    }
+
     /// Which file is being read, where Enter opened one.
     pub fn reading(&self) -> Option<usize> {
         self.reading.as_ref().map(|(at, _)| *at)
@@ -469,6 +496,36 @@ mod tests {
         assert_eq!(view.on_key(key(KeyCode::Esc)), Outcome::Stay);
         assert_eq!(view.reading(), None);
         assert_eq!(view.on_key(key(KeyCode::Esc)), Outcome::Close);
+    }
+
+    #[test]
+    fn a_read_again_keeps_the_file_being_read_where_an_import_moved_its_row() {
+        let mut view = View {
+            files: Some(vec![
+                file("CLAUDE.md", Some("before\n"), true),
+                file("AGENTS.md", Some("# Agents\n"), true),
+            ]),
+            ..View::default()
+        };
+        view.on_key(key(KeyCode::Down));
+        view.on_key(key(KeyCode::Enter));
+
+        view.reread(vec![
+            file("CLAUDE.md", Some("@STYLE.md\n"), true),
+            file("STYLE.md", Some("# Style\n"), true),
+            file("AGENTS.md", Some("# Agents, edited\n"), true),
+        ]);
+        assert_eq!(view.at, 2);
+        assert_eq!(view.reading(), Some(2));
+        let (_, page) = view.reading.as_ref().expect("the page stays open");
+        assert_eq!(page.text(), "# Agents, edited");
+
+        view.reread(vec![file("CLAUDE.md", Some(""), true)]);
+        assert_eq!(
+            (view.at, view.reading()),
+            (0, None),
+            "a file gone is not read"
+        );
     }
 
     #[test]

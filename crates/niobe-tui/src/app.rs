@@ -8039,9 +8039,16 @@ impl App {
     }
 
     /// Says how handing `handoff` to the desktop went.
+    ///
+    /// A file the Memory view handed to the text editor is read again once
+    /// the editor is done with it, so the view shows what the file holds now
+    /// rather than what it held before the operator changed it.
     pub fn handed_off(&mut self, handoff: &crate::desktop::Handoff, outcome: Result<(), String>) {
         use crate::desktop::Handoff;
 
+        if matches!(handoff, Handoff::Edit(_)) && self.memory.is_some() {
+            self.memory_wanted = true;
+        }
         self.hint = Some(match (handoff, outcome) {
             (Handoff::Copy(copied), Ok(())) => {
                 let lines = copied.lines().count().max(1);
@@ -9308,12 +9315,12 @@ impl App {
     }
 
     /// What the agent is given, as it was read for the open Memory view. A
-    /// read that lands after the view was closed is dropped.
+    /// read that lands after the view was closed is dropped. One that lands
+    /// on a list already read is a read again, after the operator edited a
+    /// file: see [`crate::memory::View::reread`].
     pub fn set_memory(&mut self, files: Vec<crate::memory::MemoryFile>) {
         if let Some(view) = self.memory.as_mut() {
-            view.files = Some(files);
-            view.at = 0;
-            view.reading = None;
+            view.reread(files);
         }
     }
 
@@ -20293,6 +20300,42 @@ mod tests {
         app.on_key(key(KeyCode::Esc));
         assert_eq!(app.memory(), None);
         assert_eq!(app.composer().lines(), [""], "a key reached the composer");
+    }
+
+    #[test]
+    fn a_memory_file_edited_from_the_view_is_read_again_and_shown_as_it_now_is() {
+        use crate::memory::Scope;
+        let mut app = app();
+        app.on_key(key(KeyCode::F(8)));
+        assert!(app.take_memory_request());
+        app.set_memory(vec![
+            remembered("CLAUDE.md", Scope::Project, 0),
+            remembered("AGENTS.md", Scope::Imported, 1),
+        ]);
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Enter));
+        app.on_key(key(KeyCode::Char('e')));
+        let handed = app.take_handoffs();
+        let [edit] = handed.as_slice() else {
+            panic!("e handed over {handed:?}");
+        };
+        app.handed_off(edit, Ok(()));
+
+        assert!(
+            app.take_memory_request(),
+            "the file the editor changed is not read again"
+        );
+        let mut edited = remembered("AGENTS.md", Scope::Imported, 1);
+        edited.text = Some("written in the editor\n".to_owned());
+        app.set_memory(vec![remembered("CLAUDE.md", Scope::Project, 0), edited]);
+        let view = app.memory().expect("the view stays open");
+        assert_eq!(
+            view.reading(),
+            Some(1),
+            "the edited file is still the one read"
+        );
+        let (_, page) = view.reading.as_ref().expect("a page is open");
+        assert_eq!(page.text(), "written in the editor");
     }
 
     fn mcp_server(
