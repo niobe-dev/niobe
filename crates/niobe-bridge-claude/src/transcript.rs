@@ -259,12 +259,28 @@ fn recorded_cwd(path: &Path) -> Option<PathBuf> {
     struct Placed {
         cwd: Option<PathBuf>,
     }
-    BufReader::new(open(path).ok()?)
-        .lines()
-        .map_while(Result::ok)
+    lines(open(path).ok()?)
         .filter_map(|line| wire::from_line::<Placed>(&line).ok())
         .map(|(placed, _)| placed)
         .find_map(|placed| placed.cwd)
+}
+
+/// The lines of `file`, with anything in them that is not UTF-8 read as
+/// U+FFFD, as [`read`] reads a whole transcript, until the file ends or
+/// cannot be read further.
+///
+/// A record the CLI was cut off writing inside a character is a line that
+/// does not parse, and is passed over like any other: a reader that stopped
+/// at it would leave every record after it unread — among them the one that
+/// says where the session ran.
+fn lines(file: std::io::Take<File>) -> impl Iterator<Item = String> {
+    BufReader::new(file)
+        .split(b'\n')
+        .map_while(Result::ok)
+        .map(|line| {
+            let line = line.strip_suffix(b"\r").unwrap_or(&line);
+            String::from_utf8_lossy(line).into_owned()
+        })
 }
 
 /// One session the CLI has recorded for a working directory.
@@ -934,10 +950,7 @@ fn opening(path: &Path) -> Opening {
     let Ok(file) = open(path) else {
         return opening;
     };
-    for line in BufReader::new(file).lines() {
-        let Ok(line) = line else {
-            break;
-        };
+    for line in lines(file) {
         if opening.entrypoint.is_none() || opening.cwd.is_none() {
             let entered = wire::from_line::<Entered>(&line).ok();
             if let Some((entered, _)) = entered {
@@ -2411,6 +2424,37 @@ mod tests {
         );
         assert_eq!(ran_elsewhere(&dir.join("ours.jsonl"), here), None);
         assert_eq!(ran_elsewhere(&dir.join("unplaced.jsonl"), here), None);
+    }
+
+    /// A record cut inside a character, ahead of the one that says where the
+    /// session ran, is still passed over to that one: a file the reader
+    /// stopped at for the cut would say no directory, and be listed and
+    /// opened in any repository whose name flattens into its directory's.
+    #[test]
+    fn a_record_cut_inside_a_character_does_not_hide_where_the_session_ran() {
+        let config = tempfile::tempdir().expect("a temporary directory can be created");
+        let here = Path::new("/w/b-c");
+        let dir = directory(config.path(), here);
+        std::fs::create_dir_all(&dir).expect("the directory is created");
+        let path = dir.join("theirs.jsonl");
+        let mut bytes = b"{\"type\":\"queue-operation\",\"content\":\"\xe2\x82".to_vec();
+        bytes.extend_from_slice(b"\n");
+        bytes.extend_from_slice(ran_in("/w/b/c", "delete the old releases").as_bytes());
+        std::fs::write(&path, bytes).expect("the transcript is written");
+
+        assert_eq!(ran_elsewhere(&path, here), Some(PathBuf::from("/w/b/c")));
+        assert!(
+            list(&dir, here).expect("the directory lists").is_empty(),
+            "a session recorded as run in another directory is that directory's"
+        );
+        let listed = list(&dir, Path::new("/w/b/c")).expect("the directory lists");
+        assert_eq!(
+            listed
+                .iter()
+                .map(|t| t.first_prompt.as_deref())
+                .collect::<Vec<_>>(),
+            [Some("delete the old releases")]
+        );
     }
 
     #[test]
