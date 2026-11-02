@@ -2653,6 +2653,9 @@ fn a_bracketed_paste_of_three_lines_is_sent_as_one_turn() {
     terminal.shows(OPENING_FRAME);
 
     terminal.typed(b"\x1b[200~here is the log:\rerror: boom\rat foo.rs:3\x1b[201~");
+    // A key read with a paste came in the paste's burst and is pasted
+    // too, so the Enter that sends it is pressed apart, as a person does.
+    std::thread::sleep(KEY_GAP);
     terminal.typed(b"\r");
     terminal.shows("answered-the-turn");
     terminal.typed(CTRL_Q);

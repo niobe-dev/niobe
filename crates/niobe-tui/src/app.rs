@@ -2009,7 +2009,7 @@ const QUESTION_FIRST_HINT: &str =
 pub struct Arrival {
     /// When the read that held it came back.
     pub at: Instant,
-    /// Whether it was the only key in that read.
+    /// Whether it was the only key in that read, and the read held no paste.
     pub alone: bool,
 }
 

@@ -624,10 +624,18 @@ fn hand_over(app: &mut App, events: Vec<Event>) {
 /// A read that held several keys is a paste, or keys typed faster than a
 /// person types, and a prompt must not take either as an answer. A mouse
 /// event beside a key leaves the key alone: it is not something typed.
+///
+/// A paste beside a key does not. A terminal that leaves the closing marker
+/// in the text it pastes sends a copied `ESC [201~ CR ESC [200~` on inside a
+/// paste of its own, which reads as two pastes with an Enter between; the
+/// Enter came in the paste's burst, and taken as pressed it would send the
+/// prompt the paste had just typed.
 fn arrival(events: &[Event], at: std::time::Instant) -> Arrival {
+    let presses = events.iter().filter(|event| is_press(event)).count();
+    let pasted = events.iter().any(|event| matches!(event, Event::Paste(_)));
     Arrival {
         at,
-        alone: events.iter().filter(|event| is_press(event)).count() <= 1,
+        alone: presses <= 1 && !pasted,
     }
 }
 
@@ -2455,5 +2463,52 @@ mod tests {
         assert!(arrival(&[press('2')], at).alone);
         assert!(arrival(&[press('2'), wheel], at).alone);
         assert!(arrival(&[press('2'), Event::Key(released)], at).alone);
+        assert!(!arrival(&[Event::Paste("a".to_owned()), press('2')], at).alone);
+    }
+
+    /// What the loop hands the app of one read of `bytes`.
+    #[cfg(unix)]
+    fn decoded(bytes: &[u8]) -> Vec<Event> {
+        let mut events = Vec::new();
+        crate::keys::Decoder::default().feed(bytes, false, &mut events);
+        events
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_enter_read_alone_answers_a_question() {
+        let mut app = app_with_a_prompt(Some("cargo test"));
+        let mut backend = Attached::default();
+
+        hand_over(&mut app, decoded(b"\r"));
+        send_produced(&mut app, &mut Kept::default(), &mut backend, &mut Forgotten);
+
+        assert_eq!(
+            backend.answered,
+            [(ToolCallId::new("t1"), PermissionDecision::Allow)]
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_enter_between_two_pastes_in_one_read_sends_nothing() {
+        // A terminal that leaves the closing marker in what it pastes sends a
+        // copied `ESC [201~ CR ESC [200~` on as it is, inside a paste of its
+        // own: two pastes with one key between, as far as the bytes go. The
+        // key came in the paste's burst, so nobody pressed it.
+        let mut app = App::new(Repo::default()).attached();
+        let mut backend = Attached::default();
+
+        hand_over(
+            &mut app,
+            decoded(b"\x1b[200~! touch pwned\x1b[201~\r\x1b[200~ more\x1b[201~"),
+        );
+        send_produced(&mut app, &mut Kept::default(), &mut backend, &mut Forgotten);
+
+        assert!(
+            app.take_commands().is_empty(),
+            "a pasted Enter ran a command"
+        );
+        assert!(backend.sent.is_empty(), "a pasted Enter sent a prompt");
     }
 }
