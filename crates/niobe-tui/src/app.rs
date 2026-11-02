@@ -2194,8 +2194,14 @@ impl App {
         self.heard
     }
 
-    /// Folds one event in, from wherever it came.
+    /// Folds one event in, from wherever it came, keeping the open history
+    /// dialog's cursor on the row it was on.
     fn fold_event(&mut self, event: &Event) {
+        self.keeping_browser_row(|app| app.fold_one(event));
+    }
+
+    /// Folds one event in: see [`App::fold_event`].
+    fn fold_one(&mut self, event: &Event) {
         self.looked_stale = true;
         self.before_prompt = None;
         let turns = self.session.turns().len();
@@ -9343,12 +9349,12 @@ impl App {
     /// operator moves through what the last one listed, and a session started
     /// since, listed above theirs, would otherwise have Enter open another.
     pub fn set_past(&mut self, past: crate::history::Past) {
-        let on = self.browser_row();
-        self.past = Some(past);
-        // Wrapping, not saturating: the count is told apart, never read as
-        // a size, and one that stopped would stop telling loads apart.
-        self.past_loads = self.past_loads.wrapping_add(1);
-        self.find_browser_row(on);
+        self.keeping_browser_row(|app| {
+            app.past = Some(past);
+            // Wrapping, not saturating: the count is told apart, never read
+            // as a size, and one that stopped would stop telling loads apart.
+            app.past_loads = app.past_loads.wrapping_add(1);
+        });
     }
 
     /// Whether a load has landed, so that an empty list is one that is empty
@@ -9366,7 +9372,7 @@ impl App {
     /// this session, which the dialog lists as itself rather than as another.
     pub fn set_recorded_as(&mut self, recorded: Option<String>) {
         if self.recorded_as != recorded {
-            self.recorded_as = recorded;
+            self.keeping_browser_row(|app| app.recorded_as = recorded);
         }
     }
 
@@ -9558,6 +9564,25 @@ impl App {
                 .get(browser.at)
                 .map(|row| BrowserRow::Session(row.target.clone())),
         }
+    }
+
+    /// Does `change` with the open history dialog's cursor kept on the row
+    /// it was on, wherever the rows it lists after it put that row.
+    ///
+    /// The cursor is a place in the list, and the list is made from more
+    /// than the loads of the earlier sessions: this session's title, its
+    /// prompts, the record it is kept under and the conversation it carries
+    /// on each decide whether a row is listed. Any of them can change while
+    /// the dialog is open, and a row listed or dropped above the cursor
+    /// would otherwise have Enter open a session the operator did not choose.
+    fn keeping_browser_row(&mut self, change: impl FnOnce(&mut Self)) {
+        if self.browser.is_none() {
+            change(self);
+            return;
+        }
+        let on = self.browser_row();
+        change(self);
+        self.find_browser_row(on);
     }
 
     /// Puts the dialog's cursor back on `on`, after what it lists changed
@@ -21782,6 +21807,49 @@ mod tests {
         app.on_key(key(KeyCode::Enter));
 
         assert_eq!(app.composed(), "oldest");
+    }
+
+    /// The title the backend gives this session arrives after its first
+    /// prompt, while the operator may be filtering the sessions: where it
+    /// matches the filter, this session is listed above the one they are on,
+    /// and Enter has to open the one they chose, not the one that moved
+    /// under them.
+    #[test]
+    fn a_title_arriving_under_the_cursor_keeps_it_on_the_session_chosen() {
+        let mut app = remembering(&[("etag work", "3"), ("etag tests", "2")], &["3", "2"]);
+        app.perform(crate::menu::Action::Resume);
+        for c in "etag".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        app.on_key(key(KeyCode::Down));
+        let chosen = app
+            .session_rows()
+            .get(app.browser().map_or(0, |b| b.at))
+            .and_then(|row| row.target.clone());
+        assert_eq!(chosen, Some(Target::Recorded("2".to_owned())));
+
+        app.apply(&Event::Titled {
+            title: "Etag cache".to_owned(),
+        });
+        app.on_key(key(KeyCode::Enter));
+
+        assert_eq!(app.take_opening(), Some(Target::Recorded("2".to_owned())));
+    }
+
+    /// The number this session is recorded under arrives from the journal's
+    /// thread, and its record leaves the list of other sessions: the cursor
+    /// stays on the session the operator is on.
+    #[test]
+    fn this_sessions_record_number_arriving_keeps_the_cursor_on_the_session_chosen() {
+        let mut app = remembering(&[], &["4", "3", "2"]);
+        app.perform(crate::menu::Action::Resume);
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Down));
+
+        app.set_recorded_as(Some("4".to_owned()));
+        app.on_key(key(KeyCode::Enter));
+
+        assert_eq!(app.take_opening(), Some(Target::Recorded("3".to_owned())));
     }
 
     /// The row the cursor was on is gone from what the load found: the
