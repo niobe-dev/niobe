@@ -221,6 +221,65 @@ fn a_command_running_in_the_background_is_waited_for_and_the_turn_its_end_starts
     assert_eq!(printed["cost"]["reported_usd"], 0.3);
 }
 
+/// A `claude` whose turn leaves a sub-agent working in the background, as
+/// [`SPAWNS_IN_THE_BACKGROUND_CLAUDE`] does, and which is then killed — the
+/// out-of-memory killer, a crash — before the agent's end starts the turn it
+/// owes.
+const KILLED_WHILE_AN_AGENT_WORKS_CLAUDE: &str = "#!/bin/sh\n\
+    read -r first\n\
+    read -r turn\n\
+    printf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"model\":\"claude-sonnet-5\",\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_a\",\"name\":\"Agent\",\"input\":{\"subagent_type\":\"reviewer\",\"description\":\"Review fetch.py\",\"prompt\":\"review fetch.py\"}}]},\"parent_tool_use_id\":null}'\n\
+    printf '%s\\n' '{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"tool_use_id\":\"toolu_a\",\"type\":\"tool_result\",\"content\":\"Async agent launched successfully.\"}]},\"parent_tool_use_id\":null,\"tool_use_result\":{\"status\":\"async_launched\"}}'\n\
+    printf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"model\":\"claude-sonnet-5\",\"id\":\"msg_2\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"A reviewer is running in the background.\"}]},\"parent_tool_use_id\":null}'\n\
+    printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"A reviewer is running in the background.\",\"total_cost_usd\":0.1,\"usage\":{\"input_tokens\":10,\"output_tokens\":5,\"cache_read_input_tokens\":0,\"cache_creation_input_tokens\":0}}'\n\
+    sleep 1\n\
+    kill -KILL $$\n";
+
+#[test]
+fn a_cli_killed_while_a_sub_agent_works_in_the_background_fails_the_run_rather_than_hang_it() {
+    let setup = Setup::new(KILLED_WHILE_AN_AGENT_WORKS_CLAUDE, METERED);
+    let mut niobe = Command::new(env!("CARGO_BIN_EXE_niobe"))
+        .args(["-p", "review fetch.py", "--json"])
+        .current_dir(setup.repo())
+        .env("XDG_CONFIG_HOME", setup.dir.path().join("config"))
+        .env("CLAUDE_CONFIG_DIR", setup.dir.path().join("no-claude-here"))
+        .env_remove("HOME")
+        .env(
+            "PATH",
+            format!("{}:/bin:/usr/bin", setup.dir.path().join("bin").display()),
+        )
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the niobe binary runs");
+
+    // Far past the second the stand-in waits before it is killed: a run still
+    // going then is waiting on a turn no process is left to start.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while niobe.try_wait().expect("niobe can be waited on").is_none() {
+        if std::time::Instant::now() >= deadline {
+            let _ = niobe.kill();
+            let _ = niobe.wait();
+            panic!("niobe -p waited on a sub-agent of a CLI that was gone");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let output = niobe
+        .wait_with_output()
+        .expect("niobe's output can be read");
+
+    assert_eq!(output.status.code(), Some(1), "{}", text(&output.stderr));
+    let printed = json(&output);
+    assert_eq!(printed["outcome"], "failed", "{printed:#}");
+    assert!(
+        printed["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("SIGKILL")),
+        "the reason says what ended the CLI: {printed:#}"
+    );
+    assert_eq!(printed["cost"]["reported_usd"], 0.1);
+}
+
 #[test]
 fn a_prompt_no_rule_allows_is_refused_and_the_agent_is_told_why() {
     let setup = Setup::new(ASKS_CLAUDE, METERED);

@@ -724,6 +724,7 @@ fn resume(
             decisions: false,
             tap: tap.clone(),
             trim: trim_for(&root, loaded.config.trim())?,
+            one_turn: false,
         },
         std::env::var_os(niobe_bridge_claude::transcript::CONFIG_DIR_VAR),
         std::env::var_os("HOME"),
@@ -950,6 +951,7 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<Option<
             decisions: false,
             tap: tap.clone(),
             trim: trim_for(&root, loaded.config.trim())?,
+            one_turn: false,
         },
         std::env::var_os(niobe_bridge_claude::transcript::CONFIG_DIR_VAR),
         std::env::var_os("HOME"),
@@ -1080,6 +1082,10 @@ fn print_turn(
             decisions: false,
             tap,
             trim: trim_for(&root, loaded.config.trim())?,
+            // A CLI stopped while the run waits on work it left in the
+            // background takes that work with it, and no prompt follows to
+            // start it again: its end is the run's.
+            one_turn: true,
             ..backend::Attach::default()
         },
         std::env::var_os(niobe_bridge_claude::transcript::CONFIG_DIR_VAR),

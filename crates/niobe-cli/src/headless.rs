@@ -22,7 +22,10 @@
 //! A turn that finished with a sub-agent or a shell command still working in
 //! the background is waited past: the end of each starts a turn of the
 //! backend's own, and the run ends with the first turn that finishes with
-//! nothing left running in the background, its reply the reply.
+//! nothing left running in the background, its reply the reply. A backend
+//! that leaves while the run waits takes that work with it, and the run
+//! fails on its end: the binary attaches it as a session of one turn, which
+//! no later prompt starts again.
 //!
 //! A run asked to stop while the turn is under way — a CI job's timeout, or
 //! Ctrl+C — asks the backend to stop the turn and gives it [`STOP_GRACE`] to

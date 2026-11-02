@@ -52,6 +52,11 @@ pub struct Attach {
     /// config says `trim = true`. Unlike [`Attach::terse`] it holds for a
     /// conversation carried on too: the CLI reads its hooks at every start.
     pub trim: Option<crate::trim::Trim>,
+    /// Whether the session is one turn that nothing sends another prompt
+    /// after, as `niobe -p`'s is. A CLI stopped between turns is then not
+    /// left to be started again by a next prompt that never comes: its end
+    /// is the session's, which a run waiting on its background work ends on.
+    pub one_turn: bool,
 }
 
 /// What a terse conversation appends to the backend's system prompt.
@@ -607,7 +612,7 @@ fn claude_options(
     options.ask_over_stdio = true;
     // The shell's bridge starts the CLI again on its conversation when
     // something stops it between turns: see `Claude::carry_on`.
-    options.carry_on = true;
+    options.carry_on = !with.one_turn;
     options.ask_title = with.title && with.resume.is_none();
     Ok(options)
 }
@@ -928,6 +933,7 @@ mod tests {
                 decisions: false,
                 tap: None,
                 trim: None,
+                one_turn: false,
             },
             Some(claude.path().as_os_str().to_owned()),
             NO_HOME,
@@ -1581,6 +1587,7 @@ mod tests {
                 decisions: false,
                 tap: None,
                 trim: None,
+                one_turn: false,
             },
             NO_HOME,
         )
@@ -1588,6 +1595,29 @@ mod tests {
 
         assert_eq!(options.mode, Mode::Plan);
         assert_eq!(options.budget_usd, Some(0.5));
+    }
+
+    #[test]
+    fn a_cli_stopped_between_turns_is_started_again_only_where_another_prompt_can_follow() {
+        let config = config("[profiles.max]\nbackend = \"claude\"\n");
+        let selected = config
+            .select(Some("max"))
+            .expect("the profile is defined")
+            .expect("a profile was selected");
+        let started = |with: &Attach| {
+            claude_options(Path::new("/repo"), &selected, with, NO_HOME)
+                .expect("the profile names no settings file to be missing")
+        };
+
+        assert!(started(&Attach::default()).carry_on, "the shell's session");
+        assert!(
+            !started(&Attach {
+                one_turn: true,
+                ..Attach::default()
+            })
+            .carry_on,
+            "a run of one turn, which no prompt follows"
+        );
     }
 
     #[test]
