@@ -52,6 +52,11 @@ pub struct Folded {
     /// lets go of its questions and its sub-agents, so the state alone no
     /// longer says that they were open.
     pub left: Option<Open>,
+    /// Whether a niobe holds it now — the shell the overview is opened in,
+    /// or another — so that what it has open is still going rather than
+    /// left: its turn runs, its question waits on the operator at that
+    /// shell, and `niobe --resume` is refused until it is let go of.
+    pub running: bool,
 }
 
 /// What a session had not finished.
@@ -107,7 +112,21 @@ pub fn read(root: &Path) -> Result<Vec<Folded>, String> {
             session.cleared = true;
         }
     }
+    mark_running(&store, &mut folded, &bounds);
     Ok(folded)
+}
+
+/// Marks the sessions a niobe holds now as running: the last conversation
+/// of each held record, since a record split at its clears goes on only in
+/// its last. A hold that cannot be looked at is taken for none, as the
+/// history dialog takes it, so the page says what the record shows.
+fn mark_running(store: &Store, folded: &mut [Folded], bounds: &[Bounds]) {
+    for (index, session) in folded.iter_mut().enumerate() {
+        let last_of_its_record = bounds
+            .get(index + 1)
+            .is_none_or(|next| next.key.0 != session.id);
+        session.running = last_of_its_record && store.is_held(session.id).unwrap_or(false);
+    }
 }
 
 /// Every record the store holds, with when it was created and its events,
@@ -302,6 +321,7 @@ fn conversation(
         decided_at,
         cleared: false,
         left,
+        running: false,
     };
     (folded, bounds)
 }
@@ -639,20 +659,25 @@ fn lowlights(sessions: &[Folded]) -> Vec<String> {
 
 /// What the record shows was not finished: a session that stopped in the
 /// middle of a turn, on a question nobody answered, on a failing test run, or
-/// with sub-agents still running — and the files the sessions changed that
-/// are among `uncommitted`, the working tree's changes as git lists them
+/// with sub-agents still running, or that a niobe has open with any of those
+/// still going — and the files the sessions changed that are among
+/// `uncommitted`, the working tree's changes as git lists them
 /// now, `None` where git could not be read.
 fn left_open(sessions: &[Folded], uncommitted: Option<&[String]>) -> Vec<String> {
     let mut lines: Vec<String> = sessions
         .iter()
         .filter_map(|session| {
             let s = &session.state;
-            // What a clear went on with is the next conversation's to end.
-            let open = match session.cleared {
+            // What a clear went on with is the next conversation's to end,
+            // and what a session a niobe holds has open is still going.
+            let open = match session.cleared || session.running {
                 true => Open::default(),
                 false => session.left.unwrap_or_else(|| Open::of(s)),
             };
             let mut what = Vec::new();
+            if session.running && Open::of(s) != Open::default() {
+                what.push("still running in a niobe that has it open".to_owned());
+            }
             if open.questions > 0 {
                 what.push(format!(
                     "stopped waiting on {}",
@@ -670,14 +695,13 @@ fn left_open(sessions: &[Folded], uncommitted: Option<&[String]>) -> Vec<String>
                     counted(open.agents as u64, "sub-agent", "sub-agents")
                 ));
             }
-            (!what.is_empty()).then(|| {
-                format!(
-                    "- Session {}: {} — `niobe --resume {}`",
-                    session.id,
-                    what.join(", "),
-                    session.id
-                )
-            })
+            // A held session cannot be resumed until it is let go of.
+            let resume = match session.running {
+                true => String::new(),
+                false => format!(" — `niobe --resume {}`", session.id),
+            };
+            (!what.is_empty())
+                .then(|| format!("- Session {}: {}{resume}", session.id, what.join(", ")))
         })
         .collect();
     lines.extend(not_committed(sessions, uncommitted));
@@ -950,6 +974,7 @@ mod tests {
             state,
             cleared: false,
             left: None,
+            running: false,
         }
     }
 
@@ -1345,6 +1370,37 @@ mod tests {
                 "- Session 2: stopped waiting on 1 question — `niobe --resume 2`",
                 "- Session 3: 1 sub-agent never reported an end — `niobe --resume 3`",
             ]
+        );
+    }
+
+    /// A session a niobe has open now — the shell the overview is opened in,
+    /// in the middle of its turn — has stopped nothing: its turn is still
+    /// running, and `--resume` would be refused while it is held. Once it is
+    /// let go of in the middle of a turn, with no `SessionLeft` recorded, as
+    /// a niobe killed outright leaves it, it is left open.
+    #[test]
+    fn a_session_a_niobe_has_open_now_is_running_rather_than_left_open() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let root = dir.path().join("catalog");
+        std::fs::create_dir_all(root.join(".git")).expect("a .git directory");
+        let store = repo::open_or_create_store(&root).expect("the store opens");
+        let mut recorder = niobe_store::Recorder::new(store);
+        recorder.record(&prompt()).expect("the prompt is recorded");
+        recorder
+            .record(&question("q"))
+            .expect("the question is recorded");
+
+        let running = read(&root).expect("the store reads");
+        assert_eq!(
+            left_open(&running, Some(&[])),
+            ["- Session 1: still running in a niobe that has it open"]
+        );
+
+        drop(recorder);
+        let let_go = read(&root).expect("the store reads");
+        assert_eq!(
+            left_open(&let_go, Some(&[])),
+            ["- Session 1: stopped waiting on 1 question — `niobe --resume 1`"]
         );
     }
 

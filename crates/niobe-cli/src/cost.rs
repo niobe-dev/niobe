@@ -371,6 +371,7 @@ mod tests {
             decided_at: Vec::new(),
             cleared: false,
             left: None,
+            running: false,
         }
     }
 
@@ -519,6 +520,7 @@ mod tests {
             decided_at: Vec::new(),
             cleared: false,
             left: None,
+            running: false,
         }
     }
 
