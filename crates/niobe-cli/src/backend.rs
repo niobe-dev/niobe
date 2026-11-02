@@ -202,7 +202,7 @@ pub fn attach(
 
     match selected.profile.backend() {
         Backend::Claude => {
-            let transcripts = transcripts(Some(selected), root, config_dir.clone(), home.clone());
+            let cli_config = cli_config(Some(selected), config_dir.clone(), home.clone());
             let options = resumed_options(root, selected, with, config_dir, home)?;
             let session = Session::spawn(&options).map_err(describe)?;
             let (groups, process_groups) = channel();
@@ -211,7 +211,8 @@ pub fn attach(
             Ok(Attachment {
                 bridge: Box::new(Claude {
                     session,
-                    transcripts,
+                    cli_config,
+                    root: root.to_path_buf(),
                     groups,
                 }),
                 attached: true,
@@ -407,12 +408,23 @@ pub fn transcripts(
     config_dir: Option<OsString>,
     home: Option<OsString>,
 ) -> Option<PathBuf> {
+    let config = cli_config(profile, config_dir, home)?;
+    Some(transcript::directory(&config, cwd))
+}
+
+/// The `claude` CLI's own configuration directory under `profile`, from the
+/// values of `CLAUDE_CONFIG_DIR` and `HOME`, read as [`transcripts`] reads
+/// them; `None` where nothing says which directory that is.
+fn cli_config(
+    profile: Option<&Selected<'_>>,
+    config_dir: Option<OsString>,
+    home: Option<OsString>,
+) -> Option<PathBuf> {
     let configured = profile
         .and_then(|selected| selected.profile.env().get(transcript::CONFIG_DIR_VAR))
         .map(OsString::from)
         .or(config_dir);
-    let config = transcript::config_dir(configured.as_deref(), home.as_deref())?;
-    Some(transcript::directory(&config, cwd))
+    transcript::config_dir(configured.as_deref(), home.as_deref())
 }
 
 /// The sessions the `claude` CLI has recorded for `cwd`, newest first.
@@ -659,9 +671,17 @@ pub const CANNOT_START: &str = "cannot start this profile's backend: ";
 #[derive(Debug)]
 struct Claude {
     session: Session,
-    /// Where the CLI keeps its transcripts, which is where what a CLI started
-    /// again will restore as spent is read from.
-    transcripts: Option<PathBuf>,
+    /// The CLI's own configuration directory, under which its transcripts of
+    /// `root` are where what a CLI started again will restore as spent is
+    /// read from.
+    ///
+    /// The transcripts' directory itself is found only when a CLI is started
+    /// again: where the CLI names it with a hash, it is told apart by the
+    /// transcripts in it, and in the first session a repository has there
+    /// are none until the CLI has written them.
+    cli_config: Option<PathBuf>,
+    /// Where the session runs.
+    root: PathBuf,
     /// Told the process group of each CLI started again.
     groups: Sender<u32>,
 }
@@ -679,7 +699,11 @@ impl Claude {
         let Some(next) = self.session.next() else {
             return Ok(());
         };
-        let next = carried_on(next, self.transcripts.as_deref());
+        let transcripts = self
+            .cli_config
+            .as_deref()
+            .map(|config| transcript::directory(config, &self.root));
+        let next = carried_on(next, transcripts.as_deref());
         let session = Session::spawn(&next).map_err(|error| {
             BridgeError::from(format!(
                 "the `claude` CLI could not be started again: {error}"
@@ -1830,6 +1854,110 @@ mod tests {
         let argv = std::fs::read_to_string(seen.join("1")).expect("the second start recorded");
         assert!(argv.contains("--resume s-9"), "{argv}");
         assert!(argv.contains("--permission-mode plan"), "{argv}");
+    }
+
+    /// The bill a stand-in CLI reports: `usd` spent on `claude-sonnet-5` so
+    /// far, over `input` and `output` tokens, as a `modelUsage` block.
+    fn model_usage(input: u64, output: u64, usd: f64) -> String {
+        format!(
+            r#""modelUsage":{{"claude-sonnet-5":{{"inputTokens":{input},"outputTokens":{output},"costUSD":{usd}}}}}"#
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_cli_started_again_in_a_long_path_bills_only_its_own_turn_from_the_first_session_there() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        // A working directory whose flattened name is past the 200
+        // characters the CLI keeps, so it writes the transcripts under a
+        // name with a hash appended — and, this being the first session
+        // there, writes that directory only once it has run.
+        let root = dir.path().join("r".repeat(120)).join("s".repeat(120));
+        std::fs::create_dir_all(&root).expect("the repository is made");
+        let cli = dir.path().join("cli");
+        let flattened: String = root
+            .to_string_lossy()
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect();
+        let written = cli
+            .join("projects")
+            .join(format!("{}-1a2b", &flattened[..200]));
+        let bin = dir.path().join("bin");
+        std::fs::create_dir(&bin).expect("the stand-in's directory is made");
+        let seen = dir.path().join("seen");
+        std::fs::create_dir(&seen).expect("the record's directory is made");
+        // Started once, it bills a turn of $0.50, records that as the
+        // session's spend the way the CLI does as it leaves, and leaves.
+        // Started again, it restores that spend and bills its own turn of
+        // $0.25 on top, as the CLI's running totals do.
+        let first = model_usage(10, 20, 0.5);
+        let second = model_usage(15, 30, 0.75);
+        let script = bin.join("claude");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\n\
+                 n=$(ls {seen} | wc -l | tr -d ' ')\n\
+                 touch {seen}/$n\n\
+                 read -r initialize\n\
+                 read -r turn\n\
+                 printf '%s\\n' '{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s-9\",\"model\":\"claude-sonnet-5\"}}'\n\
+                 if [ \"$n\" = 0 ]; then\n\
+                 printf '%s\\n' '{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"session_id\":\"s-9\",\"total_cost_usd\":0.5,{first}}}'\n\
+                 mkdir -p '{written}'\n\
+                 printf '%s\\n' '{{\"type\":\"user\",\"cwd\":\"{root}\",\"message\":{{\"role\":\"user\",\"content\":\"one\"}}}}' '{{\"type\":\"cost-state\",\"totalCostUSD\":0.5,{first}}}' > '{written}/s-9.jsonl'\n\
+                 exit 143\n\
+                 fi\n\
+                 printf '%s\\n' '{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"session_id\":\"s-9\",\"total_cost_usd\":0.75,{second}}}'\n\
+                 exec sleep 30\n",
+                seen = seen.display(),
+                written = written.display(),
+                root = root.display(),
+            ),
+        )
+        .expect("the stand-in is written");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+            .expect("the stand-in is made executable");
+        let config = config(&format!(
+            "[profiles.max]\nbackend = \"claude\"\nenv = {{ PATH = \"{}:/usr/bin:/bin\" }}\n",
+            bin.display()
+        ));
+        let selected = config
+            .select(Some("max"))
+            .expect("the profile is defined")
+            .expect("a profile was selected");
+
+        let mut attachment = attach(
+            &root,
+            Some(&selected),
+            &Attach::default(),
+            Some(cli.into_os_string()),
+            NO_HOME,
+        )
+        .expect("the stand-in starts");
+        let bridge = attachment.bridge();
+        bridge.send("one", &[]).expect("the turn is sent");
+        drained_until(bridge, |event| matches!(event, Event::Notice { .. }));
+        bridge
+            .send("two", &[])
+            .expect("the CLI is started again and sent the turn");
+        let events = drained_until(bridge, |event| matches!(event, Event::TurnEnded));
+
+        let billed: f64 = events
+            .iter()
+            .filter_map(|event| {
+                let Event::Usage(usage) = event else {
+                    return None;
+                };
+                usage.cost_usd
+            })
+            .sum();
+        assert!(
+            (billed - 0.25).abs() < 1e-9,
+            "the second turn was billed ${billed}: {events:#?}"
+        );
     }
 
     #[test]
