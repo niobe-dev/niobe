@@ -26,7 +26,9 @@
 //! A file to edit is the exception to all of that. It goes to `$VISUAL` or
 //! `$EDITOR` — split on whitespace and run with no shell, the path its last
 //! argument — on the terminal the shell lends it, in the session's own
-//! process group so that it may read the terminal, and is waited on. Where
+//! process group so that it may read the terminal, and is waited on — this
+//! process stopping whenever the editor stops, so that the operator's
+//! job-control shell sees the job stop and can continue it. Where
 //! neither is set it goes to `open -t` on macOS, which opens a file in the
 //! text editor whatever kind it is, and to `vi` elsewhere. It never goes to
 //! the opener: `open` and `xdg-open` dispatch on the file's kind, and run a
@@ -71,14 +73,63 @@ impl Program {
     /// The program run on the terminal as it is, with `path` as its last
     /// argument, waited on until it ends.
     fn run_on_the_terminal(&self, path: &str) -> Result<(), String> {
-        let status = Command::new(&self.name)
+        let child = Command::new(&self.name)
             .args(&self.args)
             .arg(path)
-            .status()
+            .spawn()
             .map_err(|error| format!("{} did not start: {error}", self.name))?;
+        let status = ended_stopping_with(&child)
+            .map_err(|error| format!("{} could not be waited on: {error}", self.name))?;
         match status.success() {
             true => Ok(()),
             false => Err(format!("{} ended with {status}", self.name)),
+        }
+    }
+}
+
+/// Waits for `child`, run on the terminal the shell lent it, to end, and
+/// stops this process whenever it stops.
+///
+/// An editor stopped by Ctrl+Z — vim signals its whole process group, which
+/// this process is in, and stops — holds a terminal it will read nothing
+/// from until it is continued. The shell catches that signal, so without
+/// this nothing the operator's job-control shell waits on would stop: it
+/// waits on `niobe` alone, never takes the terminal back, and the session
+/// hangs with every key going to an editor that cannot read it. Stopped
+/// with the editor, `niobe` is the job the operator's shell sees stop, and
+/// the `fg` that continues the job's group continues both. The editor is
+/// continued as well once this process is, for a SIGCONT sent to `niobe`
+/// alone.
+///
+/// With SIGSTOP rather than SIGTSTP for the reason the shell's own stop
+/// gives in `niobe_tui::terminal::stop_until_continued`: the kernel throws
+/// away a SIGTSTP that would stop a process in an orphaned group.
+fn ended_stopping_with(child: &Child) -> std::io::Result<std::process::ExitStatus> {
+    use std::os::unix::process::ExitStatusExt;
+
+    let pid = rustix::process::Pid::from_child(child);
+    loop {
+        match rustix::process::waitpid(Some(pid), rustix::process::WaitOptions::UNTRACED) {
+            Ok(Some((_, status))) if status.stopped() => {
+                // Neither can fail on a process that is this one or its own
+                // unreaped child, and were one to, waiting on is still the
+                // only way to the editor's end: returning would leave it
+                // stopped and unreaped.
+                let _ = rustix::process::kill_process(
+                    rustix::process::getpid(),
+                    rustix::process::Signal::STOP,
+                );
+                // Continued: so is the editor, whoever was sent the SIGCONT.
+                let _ = rustix::process::kill_process(pid, rustix::process::Signal::CONT);
+            }
+            Ok(Some((_, status))) => {
+                return Ok(std::process::ExitStatus::from_raw(status.as_raw()));
+            }
+            // Asked without NOHANG, so only a child already reaped says
+            // nothing, which cannot be: it is this function's to reap.
+            Ok(None) => return Err(std::io::Error::from(std::io::ErrorKind::NotFound)),
+            Err(rustix::io::Errno::INTR) => {}
+            Err(error) => return Err(error.into()),
         }
     }
 }

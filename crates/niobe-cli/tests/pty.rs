@@ -2792,6 +2792,74 @@ fn an_editor_that_suspends_itself_does_not_stop_the_shell_after_it_ends() {
     );
 }
 
+/// An editor that does stop on Ctrl+Z, as vim does under a job-control
+/// shell: it signals its whole process group and stops, and the shell, which
+/// catches that signal, does not. The operator's shell waits on the shell
+/// alone, sees nothing stop and never takes the terminal back, while the
+/// terminal belongs to an editor that will read nothing until someone
+/// continues it — and nobody but the shell knows it is there. So the shell
+/// stops with the editor, which is what the operator's shell can see, and
+/// the `fg` that continues the job continues both.
+///
+/// The test's pty is an orphaned group, where the kernel throws a SIGTSTP
+/// away rather than stop a process with it, so the stand-in stops itself
+/// with SIGSTOP after the SIGTSTP the shell catches, and the test continues
+/// the group as `fg` would.
+#[test]
+fn an_editor_that_stops_on_ctrl_z_stops_the_shell_with_it_until_the_job_is_continued() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo = repo();
+    let home = stand_in(repo.path(), WRITES_DOWN_TURNS_CLAUDE);
+    let elsewhere = tempfile::tempdir().expect("a temporary directory can be created");
+    std::fs::write(repo.path().join("CLAUDE.md"), "@tools/notes.md\n")
+        .expect("the memory file is written");
+    std::fs::create_dir(repo.path().join("tools")).expect("a directory for the notes");
+    std::fs::write(repo.path().join("tools").join("notes.md"), "notes\n")
+        .expect("the imported file is written");
+    let editor = elsewhere.path().join("editor");
+    std::fs::write(&editor, "#!/bin/sh\nkill -TSTP 0\nkill -STOP $$\nexit 0\n")
+        .expect("the stand-in editor is written");
+    std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o755))
+        .expect("the stand-in editor is made executable");
+
+    let (terminal, slave) = Terminal::open();
+    let mut command = shell_driving_the_stand_in(&slave, repo.path(), home.path());
+    command
+        .env("HOME", elsewhere.path())
+        .env("CLAUDE_CONFIG_DIR", elsewhere.path().join("claude"))
+        .env_remove("VISUAL")
+        .env("EDITOR", &editor);
+    in_a_session_of_its_own(&mut command);
+    let mut shell = Reaped(command.spawn().expect("the niobe binary runs"));
+    terminal.shows(OPENING_FRAME);
+
+    terminal.typed(b"\x1b[19~");
+    terminal.shows("notes.md");
+    terminal.typed(b"\x1b[F");
+    let editing = terminal.mark();
+    terminal.typed(b"e");
+    stopped(&shell);
+
+    let raw = i32::try_from(shell.id()).expect("a pid fits in an i32");
+    let group = Pid::from_raw(raw).expect("the shell leads its own group");
+    rustix::process::kill_process_group(group, Signal::CONT).expect("the job can be continued");
+    terminal.shows_since(editing, "Edited");
+    let closing = terminal.mark();
+    terminal.typed(b"\x1b");
+    terminal.drew_since(closing);
+    terminal.typed(CTRL_Q);
+
+    let (_, status) = ended(&mut shell);
+    // Not read through `released`: the terminal of a session whose leader
+    // has ended is no terminal to ask for its modes.
+    drop(slave);
+    let drawn = terminal.drained();
+    assert!(status.success(), "the shell ended with {status}: {drawn}");
+    // Once for the editor, once for the quit.
+    assert_eq!(drawn.matches(RESTORED).count(), 2, "{drawn:?}");
+}
+
 /// An editor the operator interrupts, as Ctrl+C on the terminal lent to a
 /// `code --wait` does: the terminal is cooked while it is lent, so the
 /// interrupt goes to the whole foreground process group, which the shell is

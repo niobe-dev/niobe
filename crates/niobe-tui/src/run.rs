@@ -252,9 +252,11 @@ fn open(app: App, around: Around<'_>) -> io::Result<(Ended, App)> {
             Hold::Lend => guard.suspend(),
             // A stop an editor asked of its whole process group, which the shell
             // is in, reached the shell while the terminal was lent. The editor
-            // was stopped and continued by whoever runs the operator's jobs and
-            // has ended; stopping the shell now would leave nothing to continue
-            // it, and under a wrapper that waits on it the session hangs. So
+            // was stopped and continued — the desktop stops this process with
+            // it, so that the operator's job-control shell sees the job stop
+            // and its `fg` continues both — and has ended; stopping the shell
+            // now would leave nothing to continue it, and under a wrapper that
+            // waits on it the session hangs. So
             // did the Ctrl+C or Ctrl+\ typed at the cooked terminal to give up
             // on the editor: it was the editor's interrupt, and quitting on it
             // would end a session the operator only meant to leave unedited.
