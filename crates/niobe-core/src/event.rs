@@ -952,7 +952,10 @@ pub enum Event {
     /// The process the session ran in stopped while a turn, or a sub-agent
     /// working in the background after its turn, was running — the operator
     /// quit, or it was killed and this is recorded when the session is taken
-    /// up again.
+    /// up again. A session taken up again after its process stopped between
+    /// turns records it then too, with nothing running: what that process
+    /// last reported of the plan's windows is no reading a turn of the next
+    /// one is measured from.
     ///
     /// The turn ends here, cut: the next prompt opens a turn of its own rather
     /// than joining one a process that is gone was running, and nothing the

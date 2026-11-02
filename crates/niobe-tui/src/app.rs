@@ -1512,6 +1512,9 @@ pub struct App {
     /// one back from away however soon it comes.
     looked_recorded: bool,
     returned: bool,
+    /// Whether the session was just read back to be taken up again, until
+    /// [`App::leave`] records that the process before this one left it.
+    taken_up: bool,
     /// When the operator last pressed a key, or the shell first ticked, by
     /// the monotonic clock and by the wall clock. The monotonic clock stands
     /// still while the machine sleeps, which is how a machine left alone
@@ -2122,6 +2125,7 @@ impl App {
             looked_stale: false,
             looked_recorded: false,
             returned: false,
+            taken_up: false,
             last_key: None,
             last_key_at: None,
             away_after: AWAY_AFTER,
@@ -2579,11 +2583,19 @@ impl App {
     /// report its end: left running, it would read as working for the rest
     /// of the session.
     ///
+    /// Taken up again, the process before this one left whatever it was
+    /// doing, and the record says so even where it stopped between turns
+    /// with nothing running, unless it already does: the plan window's level
+    /// that process last reported is no reading a turn of this one may be
+    /// measured from, since the account's other sessions may have moved the
+    /// window any distance in between.
+    ///
     /// Taken up again from a record that marks no look, the cut is part of
     /// reading that record back, as what it holds is: the turn stopped
     /// before the session was opened, and is no news on the first key.
     pub fn leave(&mut self) {
-        if self.session.turn_running() || !self.session.running_agents().is_empty() {
+        let taken_up = std::mem::take(&mut self.taken_up) && self.heard && !self.session.left();
+        if taken_up || self.session.turn_running() || !self.session.running_agents().is_empty() {
             self.produce(Event::SessionLeft);
             if self.returned && !self.looked_recorded {
                 self.mark_read_back();
@@ -2635,6 +2647,7 @@ impl App {
         }
         self.looked_stale = true;
         self.returned = true;
+        self.taken_up = true;
     }
 
     /// Draws the rule under the turn the fold has just ended, below whatever
@@ -18121,6 +18134,55 @@ mod tests {
         app.leave();
         assert_eq!(app.said(), [Event::SessionLeft]);
         assert!(!app.session().turn_running());
+    }
+
+    /// A session quit between turns at 14 % of the five-hour window and taken
+    /// up again once the account's other sessions had taken it to 60 %, in the
+    /// same window: the first turn after it moved the window one point, not
+    /// the 47 the gap and that turn did together. The level the record holds
+    /// came from a process that has stopped, as it does for a session left
+    /// mid-turn, and the rule says the same of it read back again.
+    #[test]
+    fn a_session_quit_between_turns_and_taken_up_again_credits_its_next_turn_with_no_gap() {
+        let five_hour = |utilization: f64| {
+            Event::UsageWindows(UsageWindows {
+                five_hour: Some(niobe_core::event::UsageWindow {
+                    utilization,
+                    resets_at: Some(1_789_005_400),
+                }),
+                seven_day: None,
+                using_overage: false,
+                overage: niobe_core::event::Overage::Unreported,
+            })
+        };
+        let mut app = app().attached();
+        for event in [said("first"), five_hour(0.14), Event::TurnEnded] {
+            app.apply(&event);
+        }
+        app.resumed();
+        app.leave();
+        let mut record: Vec<Event> = [said("first"), five_hour(0.14), Event::TurnEnded]
+            .into_iter()
+            .chain(app.said())
+            .collect();
+        let next = [said("second"), five_hour(0.61), Event::TurnEnded];
+        for event in &next {
+            app.apply(event);
+        }
+        record.extend(next);
+
+        let shares = |app: &App| -> Vec<Option<u64>> {
+            rules(app)
+                .into_iter()
+                .map(|(_, rule)| rule.five_hour_points)
+                .collect()
+        };
+        assert_eq!(shares(&app), [None, None], "live");
+        let mut read_back = App::new(Repo::default());
+        for event in &record {
+            read_back.apply(event);
+        }
+        assert_eq!(shares(&read_back), [None, None], "read back: {record:?}");
     }
 
     /// A sub-agent working in the background outlives the turn that spawned

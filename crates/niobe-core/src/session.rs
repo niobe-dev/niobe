@@ -676,6 +676,8 @@ pub struct SessionState {
     /// error — which an end straight after it repeats rather than closes a
     /// turn of its own.
     ended_last: bool,
+    /// Whether the last event folded was the session's process leaving it.
+    left_last: bool,
     /// Whether a usage record has landed since the last turn began or ended,
     /// which is the span a turn's tokens are counted over.
     usage_reported: bool,
@@ -796,6 +798,7 @@ impl SessionState {
             event,
             Event::TurnEnded | Event::Error { fatal: true, .. } | Event::SessionLeft
         );
+        self.left_last = matches!(event, Event::SessionLeft);
     }
 
     /// Whether `event` is the first anyone hears of a turn no prompt
@@ -1635,6 +1638,14 @@ impl SessionState {
     /// about a live process, which a fold of a record cannot answer.
     pub fn turn_running(&self) -> bool {
         self.turn_running
+    }
+
+    /// Whether the last thing the session's record says happened in it —
+    /// the operator's looks and prompts that reached no backend aside — is
+    /// its process leaving it: an [`Event::SessionLeft`] that a session taken
+    /// up again need not record a second time.
+    pub fn left(&self) -> bool {
+        self.left_last
     }
 
     /// Whether the turn that typed a clear may still be running: from the
@@ -4924,6 +4935,17 @@ mod tests {
     /// moved the window those 46 points, and the level before it is a reading
     /// from a process that has stopped. Turns after a report of the new
     /// process's are measured again.
+    #[test]
+    fn a_session_says_it_was_left_until_anything_else_happens_in_it() {
+        let mut state = SessionState::replay(&[prompt(), Event::SessionLeft]);
+        assert!(state.left());
+        state.apply(&Event::Looked);
+        assert!(state.left(), "a look is the operator's, not the session's");
+        state.apply(&prompt());
+        assert!(!state.left());
+        assert!(!SessionState::replay(&[prompt(), Event::TurnEnded]).left());
+    }
+
     #[test]
     fn the_first_turn_after_the_session_was_left_is_not_measured_from_before_it() {
         let state = SessionState::replay(&[
