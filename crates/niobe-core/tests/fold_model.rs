@@ -276,6 +276,8 @@ struct Model {
     running_calls: std::collections::BTreeMap<ToolCallId, (String, Option<AgentId>)>,
     /// The sub-agents running.
     running_agents: std::collections::BTreeSet<AgentId>,
+    /// What started the last compaction since the last turn was recorded.
+    compacted: Option<CompactTrigger>,
 }
 
 fn tokens(usage: &Usage) -> u64 {
@@ -305,7 +307,8 @@ impl Model {
             Event::Context(context) => {
                 self.context = Some((context.tokens, context.model.clone()));
             }
-            Event::Compacted { after, .. } => {
+            Event::Compacted { after, trigger, .. } => {
+                self.compacted = Some(*trigger);
                 let last = self.context.take();
                 self.context = last.zip(*after).map(|((_, model), after)| (after, model));
             }
@@ -598,6 +601,17 @@ fn fold_checked(seed: u64, events: &[Event]) -> SessionState {
                 recorded, spent,
                 "the turn recorded at event {at} of seed {seed} ({event:?})"
             );
+            let compacted = model.compacted.take();
+            assert_eq!(
+                state.turns()[turns].compacted,
+                compacted,
+                "the compaction of the turn recorded at event {at} of seed {seed} ({event:?})"
+            );
+            assert_eq!(
+                state.turns()[turns].cut,
+                !matches!(event, Event::TurnEnded),
+                "seed {seed} event {at}"
+            );
             let share = model.share_recorded();
             assert_eq!(
                 state.turns()[turns].five_hour_share,
@@ -700,5 +714,94 @@ fn a_conversation_read_back_from_its_clear_has_the_turns_and_totals_it_had_live(
             live.totals().tokens(),
             "seed {seed}, cleared at event {at}"
         );
+    }
+}
+
+/// What happened since the operator last looked, counted from the events
+/// after the look alone, as the shell keeps its mark: taken at each look and
+/// again at each clear, which starts the conversation's figures over.
+#[derive(Default)]
+struct Since {
+    turns: usize,
+    files: std::collections::BTreeMap<String, (u64, u64, u64)>,
+    started: u64,
+    finished: u64,
+    errors: u64,
+    asked: u64,
+}
+
+impl Since {
+    fn before(&mut self, before: &SessionState, model: &Model, event: &Event) {
+        match event {
+            Event::AgentSpawn { id, .. } if !before.running_agents().contains(id) => {
+                self.started += 1;
+            }
+            Event::AgentExit { id, .. } if !model.ended.contains(id) => self.finished += 1,
+            Event::SessionLeft => self.finished += before.running_agents().len() as u64,
+            Event::Error { fatal, .. } => {
+                self.errors += 1;
+                if *fatal {
+                    self.finished += before.running_agents().len() as u64;
+                }
+            }
+            Event::PermissionRequest { .. } => self.asked += 1,
+            Event::FileChange {
+                path,
+                added,
+                removed,
+                scope: ChangeScope::Project,
+                ..
+            } => {
+                let file = self.files.entry(path.clone()).or_default();
+                file.0 += added.unwrap_or(0);
+                file.1 += removed.unwrap_or(0);
+                file.2 += 1;
+            }
+            _ => {}
+        }
+    }
+}
+
+#[test]
+fn what_happened_since_each_look_or_clear_is_what_the_events_after_it_say() {
+    for seed in 0..SEEDS {
+        let events = sequence(seed, LENGTH);
+        let mut state = SessionState::new();
+        let mut model = Model::default();
+        let mut since = Since::default();
+        let mut mark = Mark::of(&state);
+        for (at, event) in events.iter().enumerate() {
+            since.before(&state, &model, event);
+            model.before(&state, event);
+            let turns = state.turns().len();
+            state.apply(event);
+            if matches!(event, Event::Looked | Event::Cleared) {
+                mark = Mark::of(&state);
+                since = Since::default();
+                continue;
+            }
+            if state.turns().len() > turns {
+                since.turns += 1;
+                model.turn_recorded();
+            }
+            let why = || format!("seed {seed}, after event {at} ({event:?})");
+            let caught = CatchUp::since(&mark, &state);
+            assert_eq!(caught.turns.len(), since.turns, "turns, {}", why());
+            assert_eq!(caught.agents_started, since.started, "started, {}", why());
+            assert_eq!(
+                caught.agents_finished,
+                since.finished,
+                "finished, {}",
+                why()
+            );
+            assert_eq!(caught.errors, since.errors, "errors, {}", why());
+            assert_eq!(caught.asked, since.asked, "asked, {}", why());
+            let files: std::collections::BTreeMap<String, (u64, u64, u64)> = caught
+                .files
+                .iter()
+                .map(|f| (f.path.clone(), (f.added, f.removed, f.changes)))
+                .collect();
+            assert_eq!(files, since.files, "files, {}", why());
+        }
     }
 }
