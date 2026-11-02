@@ -495,6 +495,34 @@ fn a_profile_nobody_defined_runs_no_task() {
     assert!(said.contains("nosuch"), "{said}");
 }
 
+/// A budget on a profile billed as a plan is refused before any task runs,
+/// as `niobe -p` would refuse it for each of them: the suite would otherwise
+/// report every task failed, a pass rate of nothing read as the agent's.
+#[test]
+fn a_budget_on_a_plan_profile_runs_no_task() {
+    let setup = Setup::new(DOES_IT_CLAUDE);
+    setup.task("one", "done.txt");
+    std::fs::write(
+        setup
+            .dir
+            .path()
+            .join("config")
+            .join("niobe")
+            .join("config.toml"),
+        "default_profile = \"max\"\n\n[profiles.max]\nbackend = \"claude\"\nbilling = \"plan\"\n",
+    )
+    .expect("the user config is written");
+    let output = setup.bench(&["--budget", "1", "--json"]);
+    let said = text(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{said}");
+    assert!(text(&output.stdout).is_empty(), "{}", text(&output.stdout));
+    assert!(!said.contains("task 1 of"), "{said}");
+    assert!(
+        said.contains("--budget") && said.contains("`max`"),
+        "{said}"
+    );
+}
+
 /// The repository's own suite: every task fails as it is laid out — so a
 /// pass is the turn's doing — and passes with `solution/` laid over it, so a
 /// failure is the turn's too.
