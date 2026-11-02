@@ -7713,6 +7713,15 @@ impl App {
     fn on_mouse_under(&mut self, mouse: ratatui::crossterm::event::MouseEvent) {
         use ratatui::crossterm::event::{KeyCode, MouseButton, MouseEventKind};
 
+        // The digit after an Esc is an F-key only as the very next thing the
+        // operator does, as a paste ends it: after a click or a notch they
+        // have moved on, and a prompt that opens with a digit would otherwise
+        // quit or clear the conversation. The hint that says so goes with it;
+        // any other hint stays.
+        if std::mem::take(&mut self.escaped) {
+            self.hint = None;
+        }
+
         // Below the smallest window the frame says only that it is too small.
         // Where the bars, a menu's list and the transcript were is what the
         // last full frame drew, and a click there would press a key or a link
@@ -12784,6 +12793,61 @@ mod tests {
         app.on_key(key(KeyCode::Char('9')));
         assert_eq!(app.composer().lines(), ["9"]);
         assert_eq!(*app.theme(), CYBER);
+    }
+
+    /// A session that lists `/clear`, laid out so a click or a notch lands
+    /// on the transcript and the composer under it.
+    fn clearable() -> App {
+        let mut app = offering(&["clear"]);
+        app.measured_session(Rect::new(0, 1, 60, 28));
+        app.measured(100, 20);
+        app
+    }
+
+    #[test]
+    fn esc_then_3_with_nothing_between_is_still_f3() {
+        let mut app = clearable();
+
+        app.on_key(key(KeyCode::Esc));
+        app.on_key(key(KeyCode::Char('3')));
+
+        assert_eq!(
+            app.said(),
+            [Event::UserMessage {
+                text: "/clear".to_owned()
+            }]
+        );
+        assert_eq!(app.composer().lines(), [""]);
+    }
+
+    #[test]
+    fn a_click_after_esc_ends_it_so_the_digit_after_is_typed() {
+        let mut app = clearable();
+
+        app.on_key(key(KeyCode::Esc));
+        app.on_mouse(click_at(10, 27));
+        assert_eq!(
+            app.hint(),
+            None,
+            "the bar no longer says the next digit is an F-key"
+        );
+        app.on_key(key(KeyCode::Char('3')));
+
+        assert_eq!(app.said(), [], "no /clear went to the backend");
+        assert_eq!(app.composer().lines(), ["3"]);
+    }
+
+    #[test]
+    fn a_wheel_notch_after_esc_ends_it_so_the_digit_after_is_typed() {
+        let mut app = clearable();
+
+        app.on_key(key(KeyCode::Esc));
+        wheel(&mut app, MouseEventKind::ScrollUp);
+        assert_eq!(app.hint(), None);
+        app.on_key(key(KeyCode::Char('3')));
+
+        assert_eq!(app.said(), [], "no /clear went to the backend");
+        assert_eq!(app.composer().lines(), ["3"]);
     }
 
     #[test]
