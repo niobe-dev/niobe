@@ -987,7 +987,9 @@ fn prompt(record: &Line) -> Option<String> {
         return None;
     }
     let said = user.message.content.as_ref().and_then(said)?;
-    (!CLI_WROTE_IT.iter().any(|mark| said.starts_with(mark))).then_some(said)
+    let cli_wrote_it =
+        CLI_WROTE_IT.iter().any(|mark| said.starts_with(mark)) || wire::is_interrupt_note(&said);
+    (!cli_wrote_it).then_some(said)
 }
 
 /// Folds one transcript into events.
@@ -1426,6 +1428,10 @@ impl Fold {
             // something the operator said.
             if let Some(printed) = local_output(&text) {
                 self.printed(printed);
+            } else if wire::is_interrupt_note(&text) {
+                // The CLI's note that the operator stopped the request, which
+                // the live stream carries too and the shell does not show as
+                // a prompt: nobody typed it, and it opens no turn.
             } else if let Some(command) = typed_command(&text) {
                 self.flush_command();
                 self.command = Some(command);
@@ -3479,6 +3485,57 @@ mod tests {
             [Event::UserMessage {
                 text: "and this is mine".to_owned()
             }]
+        );
+    }
+
+    /// Stopping a request at the CLI's own prompt leaves its note in the
+    /// session's file as a user turn of plain text, unmarked, as 2.1.285
+    /// writes it. Read as a prompt, it would be recalled by Up and listed in
+    /// the history as one the operator sent, and open a turn of its own.
+    #[test]
+    fn the_note_an_interrupt_leaves_is_not_a_prompt_and_opens_no_turn() {
+        let interrupted = |text: &str| {
+            format!(
+                r#"{{"type":"user","message":{{"role":"user","content":[{{"type":"text","text":{text:?}}}]}},"entrypoint":"cli"}}"#
+            )
+        };
+        let events = folded(&[
+            &prompt("refactor the parser"),
+            r#"{"type":"assistant","message":{"id":"msg_1","model":"claude-opus-5","content":[{"type":"text","text":"Starting"}]}}"#,
+            &interrupted("[Request interrupted by user]"),
+            &interrupted("[Request interrupted by user for tool use]"),
+            &prompt("only the lexer, then"),
+        ]);
+
+        let said: Vec<&str> = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::UserMessage { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(said, ["refactor the parser", "only the lexer, then"]);
+        let state = niobe_core::SessionState::replay(&events);
+        assert_eq!(
+            state.turns().len() + usize::from(state.turn_running()),
+            2,
+            "{events:?}"
+        );
+    }
+
+    #[test]
+    fn an_interrupts_note_is_never_what_a_session_is_listed_by() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let lines = [
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user]"}]}}"#
+                .to_owned(),
+            prompt("what changed in the last commit?"),
+        ];
+        let path = transcript(dir.path(), "s", Duration::ZERO, &lines.join("\n"));
+
+        assert_eq!(
+            opening(&path).first_prompt.as_deref(),
+            Some("what changed in the last commit?")
         );
     }
 

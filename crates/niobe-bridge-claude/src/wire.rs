@@ -360,6 +360,14 @@ impl ResultMeta {
     }
 }
 
+/// Whether `text` is the note the CLI writes into the conversation, as a user
+/// turn of its own, where the operator's interrupt stopped a request:
+/// `[Request interrupted by user]`, or the same words with ` for tool use]`.
+/// The CLI writes it, unmarked, to its transcripts as well as its stream.
+pub(crate) fn is_interrupt_note(text: &str) -> bool {
+    text.starts_with("[Request interrupted by user")
+}
+
 impl Envelope {
     /// Whether this is the note the CLI writes into the conversation where
     /// the operator's interrupt stopped the request in flight:
@@ -371,7 +379,7 @@ impl Envelope {
             return false;
         };
         blocks.iter().any(|block| match block {
-            Block::Text { text } => text.starts_with("[Request interrupted by user"),
+            Block::Text { text } => is_interrupt_note(text),
             Block::ToolUse { .. } | Block::ToolResult { .. } | Block::Other => false,
         })
     }
