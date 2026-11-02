@@ -3519,10 +3519,29 @@ impl App {
     /// Opens the sheet of what `caught` says happened, from which the next
     /// catch-up of either kind counts.
     fn open_catch_up(&mut self, caught: &CatchUp) {
-        let now = self.session.turn_running().then(|| self.doing());
+        let now = self.now_for_catch_up();
         self.sheet = Some(crate::catch_up::sheet(caught, now));
         self.produce(Event::Looked);
         self.caught_up = self.looked.clone();
+    }
+
+    /// What the session is at this moment, for a catch-up's last row, in the
+    /// order the top bar settles its state in: a running turn first, then a
+    /// shell with no backend, then a backend that ended the session. The
+    /// sheet is most often read after a backend died unwatched, and saying
+    /// idle there would tell the operator a prompt will be taken.
+    fn now_for_catch_up(&self) -> crate::catch_up::Now {
+        use crate::catch_up::Now;
+        if self.session.turn_running() {
+            return Now::Working(self.doing());
+        }
+        if !self.attached {
+            return Now::NotAttached;
+        }
+        match self.session.fatal_error() {
+            Some(_) => Now::Ended,
+            None => Now::Idle,
+        }
     }
 
     /// Opens what happened while the operator was away, where this key is
@@ -10858,6 +10877,46 @@ mod tests {
     }
 
     const AWAY: Duration = Duration::from_secs(6 * 60);
+
+    /// The backend ended while the operator was away: the sheet says what
+    /// the session is now as the bar above it does, and an ended session
+    /// is not one waiting for its next prompt.
+    #[test]
+    fn a_session_that_ended_while_away_is_said_to_have_ended_not_to_be_idle() {
+        let mut app = laid_out().attached();
+        let left = Instant::now();
+        app.tick(left, None);
+        app.apply(&Event::UserMessage {
+            text: "go".to_owned(),
+        });
+        app.apply(&changed("src/lib.rs"));
+        app.apply(&Event::Error {
+            message: "the CLI exited".to_owned(),
+            fatal: true,
+        });
+        app.tick(left + AWAY, None);
+
+        app.on_key(key(KeyCode::Char('x')));
+        let rows = &app.sheet().expect("a file changed while away").rows;
+        assert_eq!(
+            rows.last().map(String::as_str),
+            Some("now: ended"),
+            "{rows:?}"
+        );
+    }
+
+    #[test]
+    fn a_session_read_back_with_nothing_attached_is_said_to_be_so_not_idle() {
+        let mut app = laid_out();
+        app.apply(&changed("src/lib.rs"));
+        app.show_catch_up();
+        let rows = &app.sheet().expect("a file changed").rows;
+        assert_eq!(
+            rows.last().map(String::as_str),
+            Some("now: not attached"),
+            "{rows:?}"
+        );
+    }
 
     #[test]
     fn the_first_key_after_minutes_away_shows_what_happened_and_is_spent_on_it() {

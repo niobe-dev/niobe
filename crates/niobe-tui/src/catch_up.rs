@@ -17,9 +17,23 @@ pub const TITLE: &str = "Since you last looked";
 /// looked, in place of a sheet with nothing on it.
 pub const NOTHING: &str = "nothing has happened since you last looked";
 
-/// The sheet for `caught`, with `now` — what the session is doing at this
-/// moment, or `None` where it is doing nothing — as its last row.
-pub fn sheet(caught: &CatchUp, now: Option<String>) -> Sheet {
+/// What the session is at the moment a sheet is opened, which its last row
+/// says in the words the top bar's state is said in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Now {
+    /// A turn is running, doing what this says.
+    Working(String),
+    /// Nothing runs, and the session takes a prompt.
+    Idle,
+    /// The backend ended the session: nothing will take a prompt.
+    Ended,
+    /// No backend is behind the shell, as with a session read back.
+    NotAttached,
+}
+
+/// The sheet for `caught`, with `now`, what the session is at this moment,
+/// as its last row.
+pub fn sheet(caught: &CatchUp, now: Now) -> Sheet {
     let mut rows = Vec::new();
     if !caught.turns.is_empty() {
         let numbers: Vec<String> = caught
@@ -77,8 +91,10 @@ pub fn sheet(caught: &CatchUp, now: Option<String>) -> Sheet {
         waiting => rows.push(format!("{waiting} questions are waiting on you")),
     }
     rows.push(match now {
-        Some(doing) => format!("now: {doing}"),
-        None => "now: idle".to_owned(),
+        Now::Working(doing) => format!("now: {doing}"),
+        Now::Idle => "now: idle".to_owned(),
+        Now::Ended => "now: ended".to_owned(),
+        Now::NotAttached => "now: not attached".to_owned(),
     });
     Sheet {
         title: TITLE.to_owned(),
@@ -120,7 +136,7 @@ mod tests {
             ..CatchUp::default()
         };
         assert_eq!(
-            sheet(&caught, Some("running Bash  cargo test".to_owned())).rows,
+            sheet(&caught, Now::Working("running Bash  cargo test".to_owned())).rows,
             [
                 "1 file changed:",
                 "  src/lib.rs  +6 −2",
@@ -139,7 +155,7 @@ mod tests {
             ..CatchUp::default()
         };
         assert_eq!(
-            sheet(&caught, None).rows,
+            sheet(&caught, Now::Idle).rows,
             ["the five-hour window moved under one point", "now: idle"]
         );
     }
