@@ -1816,6 +1816,11 @@ struct TreeWatch {
     /// what it changed reads in the tree as the turn's would, and nothing
     /// tells the two apart, so the turn is named for none of it.
     operator_ran: bool,
+    /// Whether a tool was called after the turn ended, while the read of the
+    /// tree it ended on was still to come back: the next turn, or an agent
+    /// left working, may have changed files before that read saw them, and
+    /// they would read as the ended turn's, so it is named for none of it.
+    acted_after_end: bool,
 }
 
 /// How many files a notice of changes outside the edit tools names before it
@@ -2230,9 +2235,12 @@ impl App {
         let repeated_end =
             matches!(event, Event::ToolCallEnd { id, .. } if self.session.call_ended(id));
         if let (Event::ToolCallStart { name, .. }, Some(watch)) = (event, self.tree_watch.as_mut())
-            && name == crate::shell::OPERATOR_SHELL
         {
-            watch.operator_ran = true;
+            if name == crate::shell::OPERATOR_SHELL {
+                watch.operator_ran = true;
+            } else if self.session.turns().len() > watch.ended_before {
+                watch.acted_after_end = true;
+            }
         }
         let was_running = self.session.turn_running();
         // Each question waiting, with the entry of the call it is about,
@@ -4364,7 +4372,10 @@ impl App {
     /// replaced by one of the same count in a file already changed — is not
     /// seen, and nothing is said that the counts do not show. Nor is anything
     /// said of a turn during which a `!` command of the operator's ran: what
-    /// that command changed cannot be told from what the turn did.
+    /// that command changed cannot be told from what the turn did. Nor of one
+    /// after whose end a tool was called before the read of the tree it ended
+    /// on came back — the next turn's, say, sent from the queue the moment
+    /// it ended — for what that call changed reads as the ended turn's.
     pub fn settle_tree(&mut self, now: Instant) -> bool {
         let ended = self.session.turns().len();
         let Some(watch) = self.tree_watch.as_mut() else {
@@ -4381,6 +4392,7 @@ impl App {
                     before: None,
                     ended: None,
                     operator_ran,
+                    acted_after_end: false,
                 });
                 return true;
             }
@@ -4413,7 +4425,7 @@ impl App {
         if !fresh(asked_end) {
             return false;
         }
-        let changed = match watch.operator_ran {
+        let changed = match watch.operator_ran || watch.acted_after_end {
             true => Vec::new(),
             false => changed_outside(before, &self.repo.working, &self.turn_edits),
         };
@@ -15205,6 +15217,61 @@ mod tests {
             "the file changed before the turn began is not its: {}",
             said[0].body
         );
+    }
+
+    /// A read asked for at a turn's end can begin, or still be reading the
+    /// tree, after the next turn has started — a prompt queued while the
+    /// turn ran is sent the moment it ends — and what that turn's shell
+    /// commands changed by then reads as the ended turn's. Once the next
+    /// turn has called a tool before that read came back, the read cannot
+    /// say which turn changed what, and names nothing as the ended turn's.
+    #[test]
+    fn a_file_the_next_turn_changed_before_the_end_read_is_not_named_as_the_ended_turns() {
+        let start_at = Instant::now();
+        let at = |ms| start_at + Duration::from_millis(ms);
+        let mut app = app();
+        app.apply(&Event::UserMessage {
+            text: "explain it".to_owned(),
+        });
+        app.settle_tree(at(0));
+        app.set_repo(tree_read(at(1), &[]));
+        app.settle_tree(at(2));
+        app.apply(&Event::TurnEnded);
+        assert!(app.settle_tree(at(3)), "an ended turn asks for the tree");
+
+        // The queued prompt's turn starts and formats the tree before the
+        // read asked for at the first turn's end comes back.
+        app.apply(&Event::UserMessage {
+            text: "format it".to_owned(),
+        });
+        app.apply(&start("b1", "Bash", "cargo fmt", None));
+        app.apply(&end("b1", "Bash"));
+        app.set_repo(tree_read(at(4), &[file("src/main.rs", 2, 2)]));
+        app.settle_tree(at(5));
+        assert!(outside(&app).is_empty(), "{:?}", outside(&app));
+
+        // The running turn takes the tree from here, and is named for what
+        // it changes after.
+        assert!(
+            app.settle_tree(at(6)),
+            "the running turn asks for a tree of its own"
+        );
+        app.set_repo(tree_read(at(8), &[file("src/main.rs", 2, 2)]));
+        app.settle_tree(at(9));
+        app.apply(&start("b2", "Bash", "cargo fmt", None));
+        app.apply(&end("b2", "Bash"));
+        app.apply(&Event::TurnEnded);
+        app.settle_tree(at(10));
+        app.set_repo(tree_read(
+            at(11),
+            &[file("src/main.rs", 2, 2), file("src/lib.rs", 1, 0)],
+        ));
+        app.settle_tree(at(12));
+
+        let said = outside(&app);
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert_eq!(said[0].meta, "turn 2 · 1 file");
+        assert!(!said[0].body.contains("main.rs"), "{}", said[0].body);
     }
 
     /// The backend runs at the repository's root, so an edit names a file
