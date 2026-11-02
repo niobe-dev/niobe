@@ -1867,6 +1867,17 @@ fn changed_outside(
     moved.chain(left).collect()
 }
 
+/// Whether `decision` is a standing rule's answer, which asked nobody,
+/// rather than the operator's.
+fn answered_by_rule(decision: PermissionDecision) -> bool {
+    match decision {
+        PermissionDecision::AllowByRule => true,
+        PermissionDecision::Allow | PermissionDecision::AllowAlways | PermissionDecision::Deny => {
+            false
+        }
+    }
+}
+
 /// Whether the repository's `listed` path and the path an edit call
 /// `named` are one file.
 ///
@@ -2218,6 +2229,15 @@ impl App {
             watch.operator_ran = true;
         }
         let was_running = self.session.turn_running();
+        // Each question waiting, with the entry of the call it is about,
+        // read before the event can take the call out of the transcript's
+        // reach.
+        let waiting: Vec<(ToolCallId, Option<usize>)> = self
+            .session
+            .pending_permissions()
+            .iter()
+            .map(|id| (id.clone(), self.tool_entries.get(id).map(|&(at, _)| at)))
+            .collect();
         self.session.apply(event);
         if was_running && !self.session.turn_running() {
             self.ended_stopped = std::mem::take(&mut self.stop_asked);
@@ -2267,8 +2287,9 @@ impl App {
         self.fold_into_transcript(event, ended);
         self.raise(event, from, reply, ended);
         if let Some((id, decision, row)) = answered {
-            self.settle_asked(id, decision, row);
+            self.settle_asked(id, answered_by_rule(decision), row);
         }
+        self.settle_unanswered(&waiting, answered.map(|(id, _, _)| id));
         if self.session.turns().len() > turns {
             self.rule_turn(ended_at);
         }
@@ -2319,7 +2340,8 @@ impl App {
     }
 
     /// Settles what the question `id` asked of the operator, now that the
-    /// record says who answered it, about the call on the entry at `row`.
+    /// record says who answered it, about the call on the entry at `row`:
+    /// a standing rule where `by_rule`, and the operator otherwise.
     ///
     /// A question is raised as it comes unless a standing rule in force
     /// covers it, which is right while the session runs: the rules answer
@@ -2327,17 +2349,11 @@ impl App {
     /// answer is what says what happened — the operator answering one, though
     /// a rule saved since covers it, was asked; a rule answering one, though
     /// that rule is gone, asked nobody.
-    fn settle_asked(&mut self, id: &ToolCallId, decision: PermissionDecision, row: Option<usize>) {
+    fn settle_asked(&mut self, id: &ToolCallId, by_rule: bool, row: Option<usize>) {
         let raised = self.asked_rows.remove(id);
         let row = raised.or(row);
         let Some(at) = row else {
             return;
-        };
-        let by_rule = match decision {
-            PermissionDecision::AllowByRule => true,
-            PermissionDecision::Allow
-            | PermissionDecision::AllowAlways
-            | PermissionDecision::Deny => false,
         };
         let waiting = self.asked_rows.values().any(|&other| other == at);
         let Some(entry) = self.entries.get_mut(at) else {
@@ -2361,6 +2377,27 @@ impl App {
         }
         if !waiting {
             self.unasked.remove(&at);
+        }
+    }
+
+    /// Settles the questions that were `waiting` before the last event, each
+    /// beside the entry of its call, and that it took away with no answer —
+    /// withdrawn, left by a turn's end, or dropped with the session — as
+    /// asked of the operator, `answered` aside.
+    ///
+    /// Only a rule answering one says nobody was asked, and a rule in force
+    /// answers it with a response the record keeps. One that ended with none
+    /// waited on the operator; read back under a rule saved since, it would
+    /// otherwise read as asking nobody, which it did not.
+    fn settle_unanswered(
+        &mut self,
+        waiting: &[(ToolCallId, Option<usize>)],
+        answered: Option<&ToolCallId>,
+    ) {
+        for (id, row) in waiting {
+            if Some(id) != answered && !self.session.pending_permissions().contains(id) {
+                self.settle_asked(id, false, *row);
+            }
         }
     }
 
@@ -16160,6 +16197,40 @@ mod tests {
             attention(&live),
             "the record says the operator answered it, whatever the rules say now"
         );
+    }
+
+    /// A question withdrawn by the backend, or left waiting as the session
+    /// ended, was answered by nobody, so it was asked of the operator: no
+    /// rule in force answered it, or the record would say so.
+    #[test]
+    fn a_question_nobody_answered_reads_back_as_one_the_operator_was_asked_whatever_the_rules_say_now()
+     {
+        for ending in [
+            Event::PermissionWithdrawn { id: "t1".into() },
+            Event::SessionLeft,
+        ] {
+            let recorded = [
+                Event::UserMessage {
+                    text: "go".to_owned(),
+                },
+                start("t1", "Bash", "{}", Some("rm -rf build")),
+                prompt(Some("rm -rf build")),
+                ending.clone(),
+            ];
+            let mut live = sent(app().attached(), "go");
+            live.extend(&recorded[1..]);
+
+            // Opened again under a rule saved since, which covers the call.
+            let mut back = app().with_rules([Rule::tool("Bash")].into_iter().collect());
+            back.extend(&recorded);
+
+            assert_eq!(attention(&live)[1], Attention::NeedsYou, "{ending:?}");
+            assert_eq!(
+                attention(&back),
+                attention(&live),
+                "the record says nothing answered it after {ending:?}"
+            );
+        }
     }
 
     #[test]
