@@ -259,15 +259,16 @@ pub fn of_command(command: &str) -> Reading {
         None => Work::Other,
     };
     let mut seen = BTreeSet::new();
+    let programs: Vec<&Part> = parts.iter().filter(|part| !part.grammar).collect();
     // A condition that is always met — `while true` — says nothing even
     // beside other quiet programs, where there are any.
     let named: Vec<&Part> = match (
-        parts.iter().any(|part| !part.quiet),
-        parts.iter().any(|part| !part.empty),
+        programs.iter().any(|part| !part.quiet),
+        programs.iter().any(|part| !part.empty),
     ) {
-        (true, _) => parts.iter().filter(|part| !part.quiet).collect(),
-        (false, true) => parts.iter().filter(|part| !part.empty).collect(),
-        (false, false) => parts.iter().collect(),
+        (true, _) => programs.into_iter().filter(|part| !part.quiet).collect(),
+        (false, true) => programs.into_iter().filter(|part| !part.empty).collect(),
+        (false, false) => programs,
     };
     let mut specifics: Vec<String> = named
         .into_iter()
@@ -294,6 +295,10 @@ struct Part {
     /// Whether it does nothing at all — `true`, `:` — and is named only
     /// where nothing else, quiet or not, is.
     empty: bool,
+    /// Whether it is the shell's own grammar rather than a program — the
+    /// `}`, `)` or `done` a group's or a loop's redirection stands on —
+    /// which can save output but is never named.
+    grammar: bool,
 }
 
 /// The simple command `words`, read: the program it runs and, where that
@@ -316,11 +321,15 @@ fn parts_of(marked: &[Word]) -> Vec<Part> {
     let fed = marked
         .iter()
         .any(|word| !word.quoted && word.text.starts_with("<<"));
-    let Some(words) = program_words(marked) else {
-        return Vec::new();
-    };
+    // `{ …; } > out`, `( … ) > out` and `done > out` save what every
+    // command inside wrote, though the words the redirection stands on run
+    // nothing.
+    let words = program_words(marked).unwrap_or_default();
     let Some((program, rest)) = words.split_first() else {
-        return Vec::new();
+        return match saves {
+            true => vec![Part::grammar()],
+            false => Vec::new(),
+        };
     };
     let program = program.rsplit('/').next().unwrap_or(program);
     if let Some(line) = shell_line(program, rest) {
@@ -362,9 +371,25 @@ fn part(program: &str, rest: &[&str], saves: bool, fed: bool) -> Part {
                     .iter()
                     .any(|word| !word.starts_with('-') && is_a_file(word))),
         empty: matches!(program, "true" | "false" | ":"),
+        grammar: false,
         name,
         work,
         quiet,
+    }
+}
+
+impl Part {
+    /// The shell's own grammar where it saves output to a file: it says
+    /// nothing about the work but that a file was written.
+    fn grammar() -> Self {
+        Part {
+            name: String::new(),
+            work: Work::Other,
+            quiet: true,
+            saves: true,
+            empty: true,
+            grammar: true,
+        }
     }
 }
 

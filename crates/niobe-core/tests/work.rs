@@ -192,3 +192,21 @@ fn an_unquoted_redirection_still_saves_the_output() {
         ("grep -rn foo src > hits.txt", Work::Editing, &["grep"]),
     ]);
 }
+
+#[test]
+fn output_a_group_or_a_loop_saves_to_a_file_is_an_edit_named_by_what_ran_inside() {
+    reads_as(&[
+        ("{ echo a; echo b; } > out.txt", Work::Editing, &["echo"]),
+        ("(echo a; echo b) >> notes.md", Work::Editing, &["echo"]),
+        (
+            "for f in *.rs; do head -1 \"$f\"; done > heads.txt",
+            Work::Editing,
+            &["head"],
+        ),
+        ("if true; then echo x; fi > flag", Work::Editing, &["echo"]),
+        ("> empty.log", Work::Editing, &["shell"]),
+        ("{ echo a; } 2>&1", Work::Other, &["echo"]),
+        ("{ ls; } > /dev/null", Work::Exploring, &["ls"]),
+        ("{ cat; } < in.txt", Work::Exploring, &["cat"]),
+    ]);
+}
