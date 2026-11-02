@@ -60,9 +60,11 @@
 //!   runs a sub-agent in the background unless told otherwise, answers the
 //!   call at once with a `tool_use_result` whose `status` is `async_launched`,
 //!   and says the agent stopped only later, in a `system`/`task_notification`
-//!   naming the call. Ending the agent at its call's result would show every
-//!   one of them finished while it is still working. Measured across the
-//!   CLI's own transcripts on the machine this was written on: 465 of 477
+//!   naming the call. A sub-agent's own results carry no `tool_use_result`,
+//!   so an agent one of them launches is told by the sentence the result
+//!   opens with (`LAUNCHED`). Ending the agent at its call's result would
+//!   show every one of them finished while it is still working. Measured
+//!   across the CLI's own transcripts on the machine this was written on: 465 of 477
 //!   sub-agent calls were launched that way.
 //!
 //! # What is recognised and not yet translated
@@ -129,6 +131,12 @@ const AGENT_TOOLS: [&str; 2] = ["Agent", "Task"];
 /// separately, so the two disagree in the last bits. Half a hundredth of a
 /// cent is below anything a screen shows and far above that error.
 const COST_TOLERANCE_USD: f64 = 0.000_05;
+
+/// What the CLI's result of a sub-agent call opens with when it ran the agent
+/// in the background. Read off the transcripts on the machine this was
+/// written on, 2 November 2026: all 966 launches from 2.1.231 on opened with
+/// it, and no other result did.
+const LAUNCHED: &str = "Async agent launched successfully.";
 
 /// Why a call an interrupt cut off did not run to its end.
 const STOPPED: &str = "stopped by the operator";
@@ -2130,8 +2138,11 @@ impl Translator {
             // A sub-agent the CLI ran in the background is still working when
             // its call returns — the result says only that it was launched —
             // and its end arrives later as a `task_notification`. One that ran
-            // in the foreground, or never started, ends with its call.
-            let background = outcome == ToolOutcome::Ok && background;
+            // in the foreground, or never started, ends with its call. The
+            // report beside the result says which, where there is one; a
+            // sub-agent's own results carry none, so for an agent one of them
+            // launched it is the sentence the CLI answers the call with.
+            let background = outcome == ToolOutcome::Ok && (background || says_launched(&output));
             if !background {
                 let stopped_by_limit = self.limited_agents.remove(&tool_use_id).is_some();
                 self.agent_ended(
@@ -4423,6 +4434,12 @@ fn exit_code_in(summary: &str) -> Option<i32> {
         .take_while(|c| c.is_ascii_digit() || *c == '-')
         .collect();
     digits.parse().ok()
+}
+
+/// Whether `output`, a sub-agent call's result, is the CLI's answer that it
+/// launched the agent in the background rather than the agent's answer.
+fn says_launched(output: &str) -> bool {
+    output.starts_with(LAUNCHED)
 }
 
 /// The count a background task's `usage` carries, where it carries one.
@@ -9192,6 +9209,34 @@ mod tests {
                 }
             )),
             "the launch itself is a call that ran: {events:?}"
+        );
+    }
+
+    /// A sub-agent's own results carry no `tool_use_result`, on the live
+    /// stream and in its file alike, so an agent it launched in the
+    /// background is told only by the sentence the CLI answers the call with.
+    /// Read off the transcripts on the machine this was written on, 2
+    /// November 2026: the 964 launches in sessions' own files carried
+    /// `async_launched` and opened with that sentence, and the two in agents'
+    /// files carried no report and opened with it too.
+    #[test]
+    fn an_agent_a_sub_agent_launched_in_the_background_is_still_running_when_its_call_returns() {
+        let mut translator = translator();
+        translator.line(&agent_call("toolu_a", "Agent"));
+        translator.line(&agent_call("toolu_b", "Agent").replace(
+            r#""type":"assistant","#,
+            r#""type":"assistant","parent_tool_use_id":"toolu_a","#,
+        ));
+
+        let events = translator.line(
+            r#"{"type":"user","parent_tool_use_id":"toolu_a","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_b","content":[{"type":"text","text":"Async agent launched successfully. (This tool result is internal metadata.)\nagentId: adddc20b3f8860ddf\nThe agent is working in the background."}]}]},"tool_use_result":null}"#,
+        );
+
+        assert!(exits(&events).is_empty(), "{events:?}");
+        let events = translator.line(&notified("toolu_b", "completed"));
+        assert_eq!(
+            exits(&events),
+            [("toolu_b".to_owned(), AgentOutcome::Completed)]
         );
     }
 
