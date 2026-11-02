@@ -1689,6 +1689,12 @@ pub struct App {
     /// The failure entry that stands for the run of events the journal has
     /// refused since it last kept one, while it keeps refusing.
     unsaved: Option<Unsaved>,
+    /// The entries the shell put in the transcript of its own accord rather
+    /// than from an event — that the store refused or kept an event, that a
+    /// stop or an answer did not reach the backend, that the budget is nearly
+    /// spent — none of which the backend said, so none of which ends a reply
+    /// it is still writing.
+    asides: BTreeSet<usize>,
     /// How long the turns that have ended ran, each from its first prompt to
     /// its end by the clocks they were folded at. `None` from the first turn
     /// that ended without both ends stamped — an imported transcript, a log
@@ -2166,6 +2172,7 @@ impl App {
             now: None,
             at: None,
             unsaved: None,
+            asides: BTreeSet::new(),
             turn_began_at: None,
             turn_began_with: (0, 0),
             prompt_queued: false,
@@ -2539,6 +2546,7 @@ impl App {
         // The entry a refusal was counted on is gone, and an index into the
         // entries that replace it would rewrite whichever one is there.
         self.unsaved = None;
+        self.asides.clear();
         // A mark holds the figures of the conversation that ended. The fold
         // has already started this one over, carrying into it the sub-agents
         // still running, the questions still waiting and the plan's windows:
@@ -3350,6 +3358,13 @@ impl App {
         self.entries.push(entry);
     }
 
+    /// Puts in the transcript a line of the shell's own, which leaves a reply
+    /// the backend is still writing open: see the `asides` field.
+    fn say(&mut self, entry: Entry) {
+        self.asides.insert(self.entries.len());
+        self.push(entry);
+    }
+
     /// The entry a call to `head` by `agent` joins, where the transcript's
     /// last entry is a run of that agent's calls to it that nothing has
     /// broken.
@@ -4131,7 +4146,7 @@ impl App {
     /// Says in the transcript that a standing answer will not outlive the
     /// session, so the operator is not surprised by the prompt returning.
     pub fn not_remembered(&mut self, rule: &Rule, error: &str) {
-        self.push(Entry {
+        self.say(Entry {
             attention: Attention::NeedsYou,
             kind: EntryKind::Failure,
             head: "not saved".to_owned(),
@@ -4152,7 +4167,7 @@ impl App {
     /// it went into is one nobody trusted, and an untrusted config answers no
     /// prompt.
     pub fn kept_until_trusted(&mut self, rule: &Rule) {
-        self.push(Entry {
+        self.say(Entry {
             attention: Attention::Notable,
             kind: EntryKind::Notice,
             head: "not kept".to_owned(),
@@ -4171,7 +4186,7 @@ impl App {
     /// Says in the transcript that a decision never reached the backend, so a
     /// turn that is still waiting is not read as one that was answered.
     pub fn not_answered(&mut self, error: &str) {
-        self.push(Entry {
+        self.say(Entry {
             attention: Attention::NeedsYou,
             kind: EntryKind::Failure,
             head: "not answered".to_owned(),
@@ -4211,7 +4226,7 @@ impl App {
             entry: self.entries.len(),
             count: 1,
         });
-        self.push(Entry {
+        self.say(Entry {
             attention: Attention::NeedsYou,
             kind: EntryKind::Failure,
             head: "not saved".to_owned(),
@@ -4231,7 +4246,7 @@ impl App {
         let Some(unsaved) = self.unsaved.take() else {
             return;
         };
-        self.push(Entry {
+        self.say(Entry {
             attention: Attention::Notable,
             kind: EntryKind::Notice,
             head: "saved again".to_owned(),
@@ -4287,7 +4302,7 @@ impl App {
     /// backend, so a session that is still running as it was is not read as one
     /// that moved.
     fn not_changed(&mut self, what: &str, error: &str) {
-        self.push(Entry {
+        self.say(Entry {
             attention: Attention::NeedsYou,
             kind: EntryKind::Failure,
             head: "not changed".to_owned(),
@@ -4591,7 +4606,7 @@ impl App {
             }
         };
         self.budget_warned = true;
-        self.push(Entry {
+        self.say(Entry {
             attention: Attention::NeedsYou,
             kind: EntryKind::Notice,
             head: "budget".to_owned(),
@@ -6035,9 +6050,10 @@ impl App {
         // being started again below. Nor does a prompt sent while it streams,
         // which the CLI reads once the reply is done. Nor does a `!` command
         // the operator runs meanwhile, which the backend never sees. Nor does
-        // the store refusing the reply's first fragment, or every fragment
-        // after it would start a reply of its own under the failure.
-        let unsaved = self.unsaved.as_ref().map(|unsaved| unsaved.entry);
+        // anything the shell says of its own meanwhile — the store refusing
+        // a fragment of the reply and keeping the next, a stop the backend
+        // did not take — or every fragment after it would start a reply of
+        // its own under it, which the reply's whole text then fills again.
         let ended = self
             .entries
             .iter()
@@ -6047,7 +6063,7 @@ impl App {
                 entry.agent.is_none()
                     && entry.kind != EntryKind::User
                     && !is_operators_command(entry)
-                    && Some(later) != unsaved
+                    && !self.asides.contains(&later)
             });
         if ended {
             return None;
@@ -7698,7 +7714,7 @@ impl App {
     pub fn not_stopped(&mut self, error: &str) {
         self.stop_asked = false;
         self.forget_stopping_hint();
-        self.push(Entry {
+        self.say(Entry {
             attention: Attention::NeedsYou,
             kind: EntryKind::Failure,
             head: "not stopped".to_owned(),
@@ -12844,6 +12860,66 @@ mod tests {
             .collect();
         assert_eq!(saved.len(), 1, "one entry of its own for the new count");
         assert_eq!(saved[0].meta, events(1));
+    }
+
+    /// The replies on screen, each as its body reads.
+    fn replies(app: &App) -> Vec<&str> {
+        app.entries()
+            .iter()
+            .filter(|entry| entry.kind == EntryKind::Agent)
+            .map(|entry| entry.body.as_str())
+            .collect()
+    }
+
+    /// A store that refuses a fragment of a reply and then keeps the next
+    /// says so twice while the reply streams, and neither line is the
+    /// backend's: the reply goes on in the entry it began in, drawn once.
+    #[test]
+    fn a_reply_the_store_refused_and_then_kept_again_mid_stream_is_drawn_once() {
+        let mut app = app();
+        app.apply(&Event::UserMessage {
+            text: "hello".to_owned(),
+        });
+        app.apply(&Event::AssistantDelta {
+            text: "Hello, ".to_owned(),
+        });
+        app.not_kept("locked");
+        app.kept();
+        app.apply(&Event::AssistantDelta {
+            text: "world.".to_owned(),
+        });
+        app.apply(&Event::AssistantMessage {
+            text: "Hello, world.".to_owned(),
+            agent: None,
+        });
+
+        assert_eq!(replies(&app), ["Hello, world."]);
+        assert!(app.entries().iter().all(|entry| !entry.streaming));
+    }
+
+    /// A stop the backend did not take leaves the turn running, and the reply
+    /// it was writing goes on where it was rather than starting again below
+    /// the shell's word that the stop failed.
+    #[test]
+    fn a_reply_streaming_past_a_stop_that_failed_is_drawn_once() {
+        let mut app = app();
+        app.apply(&Event::UserMessage {
+            text: "hello".to_owned(),
+        });
+        app.apply(&Event::AssistantDelta {
+            text: "Hello, ".to_owned(),
+        });
+        app.not_stopped("the CLI is not reading");
+        app.apply(&Event::AssistantDelta {
+            text: "world.".to_owned(),
+        });
+        app.apply(&Event::AssistantMessage {
+            text: "Hello, world.".to_owned(),
+            agent: None,
+        });
+
+        assert_eq!(replies(&app), ["Hello, world."]);
+        assert!(app.entries().iter().all(|entry| !entry.streaming));
     }
 
     /// A usage record carrying a cost the backend reported.
