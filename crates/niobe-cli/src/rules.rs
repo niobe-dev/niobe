@@ -62,7 +62,9 @@ impl ConfigRules {
     /// wrote into it, deciding from the two texts the write itself read and
     /// left, never from a read made afterwards: by then another writer — a
     /// pull, an editor — could have changed the file, and what it wrote would
-    /// be trusted unread.
+    /// be trusted unread. Run while the write still holds the file's lock, so
+    /// that another session's rule cannot land between the two and be judged
+    /// against a record that has not caught up with this one.
     ///
     /// Says how far the rule reaches: a file nobody trusted is withheld from
     /// the next session whether or not this write changed it, so a rule in it
@@ -103,9 +105,8 @@ impl Rules for ConfigRules {
     /// [`crate::repo::writes_inside`].
     fn remember(&mut self, rule: &Rule) -> Result<Reach, RulesError> {
         crate::repo::writes_inside(&self.root, &self.path)?;
-        let remembered =
-            niobe_config::remember(&self.path, rule).map_err(|error| error.to_string())?;
-        self.keep_trust(&remembered)
+        niobe_config::remember_then(&self.path, rule, |remembered| self.keep_trust(remembered))
+            .map_err(|error| error.to_string())?
     }
 }
 
@@ -252,6 +253,113 @@ mod tests {
             "a change nobody read was trusted with the rule"
         );
         assert!(!repo.is_trusted());
+    }
+
+    /// Two sessions answering "always" at once in a trusted repository: the
+    /// first has written its rule and is waiting to record the new text as
+    /// trusted when the second writes its own. Whichever order the two
+    /// records land in, the file that is left must be the one trusted.
+    #[test]
+    fn two_sessions_writing_rules_at_once_leave_the_config_trusted() {
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+
+        let repo = Repo::with_config("[profiles.p]\nbackend = \"claude\"\nenv = { A = \"1\" }\n");
+        repo.trust();
+        let path = crate::repo::config_path(repo.dir.path());
+
+        // The trust record is held, as a third writer would hold it, so that
+        // the first session stops between its rule and its record.
+        let (hold, held) = mpsc::channel();
+        let (release, released) = mpsc::channel::<()>();
+        let record = repo.record.clone();
+        let holder = std::thread::spawn(move || {
+            Trusted::update(&record, |_| {
+                let _ = hold.send(());
+                let _ = released.recv();
+                Ok(())
+            })
+        });
+        held.recv().expect("the record is held");
+
+        let mut first = repo.rules();
+        let first = std::thread::spawn(move || first.remember(&Rule::tool("Read")).is_ok());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !std::fs::read_to_string(&path)
+            .unwrap_or_default()
+            .contains("\"Read\"")
+        {
+            assert!(
+                Instant::now() < deadline,
+                "the first rule was never written"
+            );
+            std::thread::yield_now();
+        }
+
+        let mut second = repo.rules();
+        let (done, finished) = mpsc::channel();
+        let second = std::thread::spawn(move || {
+            let kept = second.remember(&Rule::tool("Glob")).is_ok();
+            let _ = done.send(());
+            kept
+        });
+        // Long enough for the second session to finish where nothing holds
+        // it back; where the first one's lock does, this is only a wait.
+        let _ = finished.recv_timeout(Duration::from_secs(1));
+        release.send(()).expect("the holder is waiting");
+
+        assert!(holder.join().expect("the holder does not panic").is_ok());
+        assert!(first.join().expect("the first session does not panic"));
+        assert!(second.join().expect("the second session does not panic"));
+        let text = std::fs::read_to_string(&path).expect("the config reads");
+        assert!(
+            text.contains("\"Read\"") && text.contains("\"Glob\""),
+            "{text}"
+        );
+        assert!(
+            repo.is_trusted(),
+            "the config left behind lost the operator's trust"
+        );
+    }
+
+    /// The trust record is updated while the config's directory is held, so
+    /// a record kept in that same directory must not wait on the hold its
+    /// own write already has.
+    #[test]
+    fn a_trust_record_beside_the_config_does_not_hold_the_rule_up() {
+        let repo = Repo::with_config("[profiles.p]\nbackend = \"claude\"\n");
+        let path = crate::repo::config_path(repo.dir.path());
+        let record = path.with_file_name("trusted.list");
+        let mut trusted = Trusted::default();
+        let text = std::fs::read_to_string(&path).expect("the config reads");
+        trusted.trust(&path, &text).expect("a plain path");
+        trusted.write(&record).expect("the record is written");
+        let mut rules = ConfigRules {
+            root: repo.dir.path().to_path_buf(),
+            path: path.clone(),
+            trust: Some(record.clone()),
+        };
+
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done.send(
+                rules
+                    .remember(&Rule::tool("Read"))
+                    .map_err(|e| e.to_string()),
+            );
+        });
+        let reach = finished
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the rule is kept without waiting on itself")
+            .expect("the config is written");
+
+        assert_eq!(reach, Reach::NextSession);
+        let text = std::fs::read_to_string(&path).expect("the config reads");
+        assert!(
+            Trusted::read(&record)
+                .expect("the record reads")
+                .trusts(&path, &text)
+        );
     }
 
     /// Written or already listed, a rule in a config nobody trusted is

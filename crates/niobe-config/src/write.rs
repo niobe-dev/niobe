@@ -50,7 +50,25 @@ const INDENT: &str = "    ";
 /// trusted decides about exactly these, and not about whatever a later read
 /// finds once another writer has had its turn.
 pub fn remember(path: &Path, rule: &Rule) -> Result<Remembered, ConfigError> {
-    remember_with(path, rule, |file, bytes| file.write_all(bytes))
+    remember_then(path, rule, Remembered::clone)
+}
+
+/// [`remember`], with `then` handed what the file held either side of the
+/// write while the lock on its directory is still held, and what it returns
+/// handed back.
+///
+/// For what must follow the write in the order the writes were made: the
+/// record that the new text is trusted. Made after the lock is let go, a
+/// second writer could add its rule in between and judge its own text against
+/// a record that does not have the first one's yet, and the two records would
+/// land the wrong way round — the file left trusted at a text it no longer
+/// holds.
+pub fn remember_then<T>(
+    path: &Path,
+    rule: &Rule,
+    then: impl FnOnce(&Remembered) -> T,
+) -> Result<T, ConfigError> {
+    remember_with(path, rule, |file, bytes| file.write_all(bytes), then)
 }
 
 /// The config file's text either side of [`remember`].
@@ -70,11 +88,12 @@ pub struct Remembered {
 /// two sessions answering "always" at once each add their rule to what the
 /// other wrote rather than to what both read; and it is replaced whole, so a
 /// write that fails or a process that dies inside it leaves the file as it was.
-fn remember_with(
+fn remember_with<T>(
     path: &Path,
     rule: &Rule,
     write: impl FnOnce(&mut std::fs::File, &[u8]) -> std::io::Result<()>,
-) -> Result<Remembered, ConfigError> {
+    then: impl FnOnce(&Remembered) -> T,
+) -> Result<T, ConfigError> {
     let failed = |error| ConfigError::Write {
         path: path.to_path_buf(),
         error,
@@ -100,19 +119,19 @@ fn remember_with(
     // that would not load afterwards.
     let config = Config::parse(&text, path)?;
     if lists(&text, rule) {
-        return Ok(Remembered {
+        return Ok(then(&Remembered {
             before,
             after: text,
-        });
+        }));
     }
 
     let written = splice(&text, path, &rule.to_string())?;
     reads_back(&written, path, config, rule)?;
     replace::replace_with(&target, written.as_bytes(), write).map_err(failed)?;
-    Ok(Remembered {
+    Ok(then(&Remembered {
         before,
         after: written,
-    })
+    }))
 }
 
 /// Checks that `written` is a config the next session will load, and that it
@@ -661,10 +680,15 @@ allow = [
         let before = "# mine\n[profiles.max]\nbackend = \"claude\"\n";
         std::fs::write(&file, before).expect("the file is written");
 
-        let failed = remember_with(&file, &Rule::tool("Read"), |out, bytes| {
-            out.write_all(&bytes[..bytes.len() / 2])?;
-            Err(std::io::Error::other("the disk is full"))
-        })
+        let failed = remember_with(
+            &file,
+            &Rule::tool("Read"),
+            |out, bytes| {
+                out.write_all(&bytes[..bytes.len() / 2])?;
+                Err(std::io::Error::other("the disk is full"))
+            },
+            Remembered::clone,
+        )
         .expect_err("the write failed");
 
         assert!(failed.to_string().contains("the disk is full"), "{failed}");

@@ -27,20 +27,41 @@ use std::path::{Path, PathBuf};
 /// editor the operator has the file open in. It is released when it is
 /// dropped, and by the kernel if the process dies holding it, so a crash
 /// cannot leave a directory locked.
+///
+/// A thread that already holds a directory takes it again without waiting:
+/// a rule's write holds its config's directory while the trust record is
+/// updated, and where a link makes the two directories one, a second
+/// `flock` on it would wait on the first for ever.
 #[derive(Debug)]
 pub(crate) struct Lock {
     #[cfg(unix)]
-    _held: File,
+    held: Option<(File, (u64, u64))>,
+}
+
+#[cfg(unix)]
+thread_local! {
+    /// The directories this thread holds a [`Lock`] on, by device and inode.
+    static HELD: std::cell::RefCell<Vec<(u64, u64)>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 impl Lock {
     /// Waits until no other writer holds `directory`, then holds it.
     #[cfg(unix)]
     pub(crate) fn directory(directory: &Path) -> io::Result<Self> {
+        use std::os::unix::fs::MetadataExt as _;
+
         let directory = File::open(directory)?;
+        let metadata = directory.metadata()?;
+        let id = (metadata.dev(), metadata.ino());
+        if HELD.with_borrow(|held| held.contains(&id)) {
+            return Ok(Self { held: None });
+        }
         rustix::fs::flock(&directory, rustix::fs::FlockOperation::LockExclusive)
             .map_err(io::Error::from)?;
-        Ok(Self { _held: directory })
+        HELD.with_borrow_mut(|held| held.push(id));
+        Ok(Self {
+            held: Some((directory, id)),
+        })
     }
 
     /// Niobe runs on macOS and Linux; where there is no `flock` a writer goes
@@ -50,6 +71,15 @@ impl Lock {
     #[cfg(not(unix))]
     pub(crate) fn directory(_directory: &Path) -> io::Result<Self> {
         Ok(Self {})
+    }
+}
+
+#[cfg(unix)]
+impl Drop for Lock {
+    fn drop(&mut self) {
+        if let Some((_, id)) = &self.held {
+            HELD.with_borrow_mut(|held| held.retain(|other| other != id));
+        }
     }
 }
 
