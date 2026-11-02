@@ -500,14 +500,7 @@ fn a_profile_nobody_defined_runs_no_task() {
 /// failure is the turn's too.
 #[test]
 fn every_task_of_the_bundled_suite_fails_as_laid_out_and_passes_when_solved() {
-    let suite = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bench");
-    let mut tasks: Vec<PathBuf> = std::fs::read_dir(&suite)
-        .expect("the bundled suite is in the tree")
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|dir| dir.join("prompt.md").is_file())
-        .collect();
-    tasks.sort();
+    let tasks = bundled_tasks();
     assert_eq!(tasks.len(), 20, "the suite holds twenty tasks");
 
     for task in tasks {
@@ -523,9 +516,56 @@ fn every_task_of_the_bundled_suite_fails_as_laid_out_and_passes_when_solved() {
     }
 }
 
+/// The operator's Python settings are theirs, not the judge's: a bench run
+/// where `PYTHONOPTIMIZE` is set — which strips every `assert` a hidden test
+/// makes — or where `PYTHONPATH` leads somewhere else, judges each task as it
+/// does anywhere, so an untouched task still fails.
+#[test]
+fn the_bundled_checks_judge_the_same_whatever_python_the_environment_asks_for() {
+    let tasks = bundled_tasks();
+    let elsewhere = tempfile::tempdir().expect("a directory for PYTHONPATH");
+    let asked = [
+        ("PYTHONOPTIMIZE", std::ffi::OsStr::new("1")),
+        ("PYTHONPATH", elsewhere.path().as_os_str()),
+    ];
+
+    for task in tasks {
+        let name = task.file_name().map(|n| n.to_string_lossy().into_owned());
+        let work = tempfile::tempdir().expect("a copy to check");
+        copy(&task.join("files"), work.path());
+        assert!(
+            !checks_with(&task, work.path(), &asked),
+            "{name:?} passes untouched under the operator's Python settings"
+        );
+        copy(&task.join("solution"), work.path());
+        assert!(
+            checks_with(&task, work.path(), &asked),
+            "{name:?} fails when solved under the operator's Python settings"
+        );
+    }
+}
+
+/// The task directories of the repository's own suite, in name order.
+fn bundled_tasks() -> Vec<PathBuf> {
+    let suite = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bench");
+    let mut tasks: Vec<PathBuf> = std::fs::read_dir(&suite)
+        .expect("the bundled suite is in the tree")
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|dir| dir.join("prompt.md").is_file())
+        .collect();
+    tasks.sort();
+    tasks
+}
+
 fn checks(task: &Path, work: &Path) -> bool {
+    checks_with(task, work, &[])
+}
+
+fn checks_with(task: &Path, work: &Path, env: &[(&str, &std::ffi::OsStr)]) -> bool {
     Command::new("sh")
         .arg(task.join("check.sh"))
+        .envs(env.iter().copied())
         .current_dir(work)
         .stdout(std::process::Stdio::null())
         .stderr(Stdio::null())

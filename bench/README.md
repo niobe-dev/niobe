@@ -31,7 +31,9 @@ NN-name/
 temporary directory and makes it a git repository. It runs the prompt there
 as one `niobe -p` turn under the profile and `--budget` it was given, then
 runs `check.sh` from this directory, not from the copy, so the agent cannot
-change what judges it. The turn may edit and write files inside its copy and
+change what judges it. Each check runs `python3 -I`, so the Python settings in
+the environment — `PYTHONOPTIMIZE`, which strips the tests' asserts, or a
+`PYTHONPATH` — do not change a verdict. The turn may edit and write files inside its copy and
 nowhere else, and not under the dot-named entries at the copy's root —
 `.claude/`, `.mcp.json`, `.git/`, `.niobe/` — which the CLI and Niobe run
 with: the CLI reads its settings again when they change, so a turn that
