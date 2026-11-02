@@ -60,11 +60,16 @@ impl View {
         key: ratatui::crossterm::event::KeyEvent,
         servers: &[McpServer],
     ) -> Outcome {
-        use ratatui::crossterm::event::KeyCode;
+        use ratatui::crossterm::event::{KeyCode, KeyModifiers};
 
         let last = servers.len().saturating_sub(1);
         self.at = self.at.min(last);
-        if key.code == KeyCode::Char('r') {
+        // Only the letter itself: Ctrl+R is the shell's history key, pressed
+        // from habit with the view open, and a reconnect drops the server's
+        // connection under whatever call of the model's is using it.
+        if key.code == KeyCode::Char('r')
+            && key.modifiers.difference(KeyModifiers::SHIFT).is_empty()
+        {
             let name = match &self.detail {
                 Some((name, _)) => Some(name.clone()),
                 None => servers.get(self.at).map(|server| server.name.clone()),

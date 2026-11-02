@@ -20622,6 +20622,22 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_r_or_alt_r_in_the_mcp_view_reconnects_no_server() {
+        use ratatui::crossterm::event::{KeyEvent, KeyModifiers};
+
+        let mut app = with_mcp_servers();
+        app.on_key(key(KeyCode::F(7)));
+        for modifiers in [KeyModifiers::CONTROL, KeyModifiers::ALT] {
+            app.on_key(KeyEvent::new(KeyCode::Char('r'), modifiers));
+            app.on_key(key(KeyCode::Enter));
+            app.on_key(KeyEvent::new(KeyCode::Char('r'), modifiers));
+            app.on_key(key(KeyCode::Esc));
+        }
+        assert_eq!(app.take_mcp_reconnects(), Vec::<String>::new());
+        assert!(app.mcp().is_some(), "the view closed");
+    }
+
+    #[test]
     fn a_reconnect_the_backend_refused_names_the_failure_in_place_of_reconnecting() {
         let mut app = with_mcp_servers();
         app.on_key(key(KeyCode::F(7)));
