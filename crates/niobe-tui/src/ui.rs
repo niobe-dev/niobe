@@ -491,6 +491,7 @@ fn draw_menu_list(
     let x = start.min(screen.right().saturating_sub(width));
     let area = Rect::new(x, screen.y.saturating_add(1), width, height);
 
+    uncover_left_edge(frame.buffer_mut(), area);
     cast_shadow(frame, area, screen, theme);
     let bar = Style::new().bg(theme.menu_bg).fg(theme.pulldown_fg);
     let block = Block::bordered()
@@ -759,8 +760,10 @@ pub(crate) fn dialog(
 
 /// Blanks each character two columns wide whose second half is under the
 /// left edge of `area`. A terminal draws such a character over the column
-/// after it whatever is drawn there, so the dialog's border would be missing
-/// on that row; the half left outside reads as a blank instead.
+/// after it whatever is drawn there, and ratatui sends nothing for that
+/// column, so the border of whatever is drawn over `area` — a dialog, an open
+/// menu, a completion list — would be missing on that row; the half left
+/// outside reads as a blank instead.
 fn uncover_left_edge(buffer: &mut ratatui::buffer::Buffer, area: Rect) {
     let Some(left) = area.x.checked_sub(1) else {
         return;
@@ -1432,6 +1435,7 @@ fn draw_offer(
         .border_style(Style::new().fg(theme.frame).bg(theme.pane_bg))
         .style(Style::new().bg(theme.pane_bg))
         .title_top(Line::from(title).style(Style::new().fg(theme.title).bold()));
+    uncover_left_edge(frame.buffer_mut(), area);
     frame.render_widget(Clear, area);
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -7186,6 +7190,108 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// An open menu's list, and the list of what a `/` word could become,
+    /// hang over a transcript that can hold a reply in CJK. A character two
+    /// columns wide whose second half is under the list's left border would
+    /// be drawn over that border by the terminal, and ratatui sends nothing
+    /// for the column after such a character, so the border would never
+    /// reach the screen.
+    #[test]
+    fn an_open_menu_and_a_completion_list_over_wide_characters_keep_their_left_border() {
+        use niobe_core::event::Event;
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        /// What a list is called here, and the key that opens it.
+        type Opening = (&'static str, fn(&mut App));
+        let opened: [Opening; 2] = [
+            ("menu", |app| {
+                app.on_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT));
+            }),
+            ("completion", |app| {
+                app.on_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+            }),
+        ];
+        // Shifted by a column, so that one of the two runs has a character
+        // whose second half is under the border.
+        for (what, open) in opened {
+            for lead in ["", "a"] {
+                let mut app = App::new(crate::app::Repo::default());
+                app.apply(&Event::Commands {
+                    commands: vec![niobe_core::event::SlashCommand {
+                        name: "review".to_owned(),
+                        description: "Review the branch".to_owned(),
+                        argument_hint: None,
+                        mid_prompt: false,
+                    }],
+                });
+                // Short enough not to wrap, so every row starts with `lead`.
+                let line = format!("{lead}{}", "漢字".repeat(10));
+                app.apply(&Event::AssistantMessage {
+                    text: vec![line; 30].join("\n\n"),
+                    agent: None,
+                });
+                open(&mut app);
+                let mut terminal =
+                    ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30))
+                        .expect("a test terminal");
+                terminal
+                    .draw(|frame| draw(frame, &mut app))
+                    .expect("drawing never fails on a test backend");
+                let buffer = terminal.backend().buffer();
+                let (left, top) = list_corner(buffer, what);
+                // The right border, which nothing wide is drawn beside, says
+                // which rows the list takes.
+                let right = (left + 1..buffer.area.width)
+                    .find(|&x| buffer[(x, top)].symbol() == "┐")
+                    .expect("the list has a top-right corner");
+                let mut y = top.saturating_add(1);
+                while buffer[(right, y)].symbol() == "│" {
+                    let shown = as_a_terminal_shows(buffer, y);
+                    assert_eq!(
+                        shown.get(usize::from(left)).copied(),
+                        Some("│"),
+                        "{what}, row {y} with {lead:?} before it: {shown:?}"
+                    );
+                    y = y.saturating_add(1);
+                }
+                let shown = as_a_terminal_shows(buffer, y);
+                assert_eq!(
+                    shown.get(usize::from(left)).copied(),
+                    Some("└"),
+                    "{what}, bottom row {y} with {lead:?} before it: {shown:?}"
+                );
+            }
+        }
+    }
+
+    /// Where the list `what` names has its top-left corner: the open View
+    /// menu hangs from its name on the bar, and the completion list is the
+    /// one whose title says it lists commands.
+    fn list_corner(buffer: &ratatui::buffer::Buffer, what: &str) -> (u16, u16) {
+        if what == "menu" {
+            let view = crate::menu::MENUS
+                .iter()
+                .position(|menu| menu.name == "View")
+                .expect("there is a View menu");
+            return (crate::menu::title_columns()[view].0, 1);
+        }
+        for y in 0..buffer.area.height {
+            let row: Vec<&str> = (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect();
+            let joined = row.concat();
+            if let Some(at) = joined.find("/ command") {
+                let column = joined[..at].chars().count();
+                let left = row[..column]
+                    .iter()
+                    .rposition(|symbol| matches!(*symbol, "┌" | "╔" | "╭" | "┏"))
+                    .expect("the title is on the list's top edge");
+                return (u16::try_from(left).expect("a column fits"), y);
+            }
+        }
+        panic!("no completion list drawn");
     }
 
     /// Row `y` of `buffer` as a terminal draws it, a cell to a column: a
