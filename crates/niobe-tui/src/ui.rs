@@ -2465,11 +2465,16 @@ impl DrawnEntries {
                 }
                 Slot::Hidden { count, .. } => hidden(count, width, theme),
             };
+            // The lines kept at a place are reused only for the entry they
+            // were drawn from. The key holds a finished entry's text by its
+            // length alone, which is what keeps a long session's frames
+            // cheap, so it cannot tell that entry from another of the same
+            // shape: narrowed, grouped or with the routine left out, a place
+            // holds another entry than it did, and its own words are drawn.
             match self.drawn.get_mut(at) {
-                Some(drawn) if drawn.key == key => {
-                    self.moved |= drawn.entry != entry || drawn.heading != heading;
-                    drawn.entry = entry;
-                    drawn.heading = heading;
+                Some(drawn)
+                    if drawn.key == key && drawn.entry == entry && drawn.heading == heading =>
+                {
                     drawn.hidden = counted;
                 }
                 Some(drawn) => {
@@ -9209,6 +9214,61 @@ mod tests {
             rows[6].contains("m1.rs"),
             "the session's own row stays: {grouped:?}"
         );
+    }
+
+    /// Narrowed to one agent, the transcript's places hold other entries
+    /// than they did: the agent's second reply now stands where its first
+    /// was drawn. Two replies of one length folded in the same tick differ
+    /// in nothing a laid-out entry was keyed by but their words, and each
+    /// must still be drawn with its own.
+    #[test]
+    fn narrowed_to_one_agent_each_of_its_replies_is_drawn_with_its_own_words() {
+        use niobe_core::event::{AgentId, Event};
+        let mut app = App::new(crate::app::Repo::default());
+        let agent = AgentId::new("toolu_a");
+        app.apply(&Event::UserMessage {
+            text: "look".to_owned(),
+        });
+        app.apply(&Event::AgentSpawn {
+            id: agent.clone(),
+            parent: None,
+            kind: Some("Explore".to_owned()),
+            label: "find it".to_owned(),
+        });
+        for said in ["first words", "later reply"] {
+            app.apply(&Event::AssistantMessage {
+                text: said.to_owned(),
+                agent: Some(agent.clone()),
+            });
+        }
+
+        let theme = Theme::default();
+        let drawn_as = |app: &mut App, only: Option<&str>| -> String {
+            let (entries, commands, drawn) = app.entries_to_draw();
+            drawn.update(
+                entries,
+                commands,
+                60,
+                Detail::default(),
+                Arrangement {
+                    headings: None,
+                    only,
+                },
+                &theme,
+            );
+            drawn
+                .lines(0, 40)
+                .iter()
+                .flat_map(|line| line.spans.iter().map(|span| span.content.to_string()))
+                .collect()
+        };
+
+        let everything = drawn_as(&mut app, None);
+        assert!(everything.contains("later reply"), "{everything}");
+        let tag = app.agent_tags().swap_remove(0);
+        let narrowed = drawn_as(&mut app, Some(&tag));
+        assert_eq!(narrowed.matches("first words").count(), 1, "{narrowed}");
+        assert_eq!(narrowed.matches("later reply").count(), 1, "{narrowed}");
     }
 
     /// An agent's edit, drawn with its diff under it, and a call of its the
