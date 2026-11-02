@@ -18,7 +18,6 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{Duration, UNIX_EPOCH};
 
-use niobe_core::session::SessionState;
 use niobe_store::{Store, read_log};
 
 const FIXTURES: &str = "../niobe-core/tests/fixtures";
@@ -140,61 +139,32 @@ fn the_overview_narrowed_to_the_newest_session_reads_that_one_alone() {
     assert!(!page.contains("Session 1:"), "{page}");
 }
 
-/// The page's totals are the sums of each recording folded on its own, here
-/// and not by the binary: the store and the page between them lose nothing.
+/// The page's totals against what `jq` reads off the two recordings, with the
+/// program in `crates/niobe-core/tests/fixtures/README.md`, rather than
+/// against the fold: a fold that miscounted would agree with itself, and the
+/// store and the page between them must lose nothing of what was recorded.
 #[test]
-fn the_overviews_totals_are_the_sums_of_each_session_folded_alone() {
+fn the_overviews_totals_are_the_ones_the_recordings_hold() {
     let (_dir, root) = repository();
     let page = printed(&root);
 
-    let folds: Vec<SessionState> = ["claude-session.jsonl", "producer-gaps.jsonl"]
-        .iter()
-        .map(|log| {
-            let text = std::fs::read_to_string(fixtures().join(log)).expect("the fixture reads");
-            SessionState::replay(&read_log(&text).expect("the fixture parses"))
-        })
-        .collect();
-    let sum = |of: fn(&SessionState) -> u64| folds.iter().map(of).sum::<u64>();
-    assert_eq!(
-        sum(|s| s.totals().cache_write_unsplit),
-        0,
-        "every record in both recordings split its writes"
-    );
-    let grouped = |n: u64| {
-        let digits = n.to_string();
-        let mut out = String::new();
-        for (i, digit) in digits.chars().enumerate() {
-            if i > 0 && (digits.len() - i).is_multiple_of(3) {
-                out.push(',');
-            }
-            out.push(digit);
-        }
-        out
-    };
-
     for line in [
-        format!(
-            "- {} tokens: {} in · {} out · {} cache read · {} cache write ({} for an hour).",
-            grouped(sum(|s| s.totals().tokens())),
-            grouped(sum(|s| s.totals().input)),
-            grouped(sum(|s| s.totals().output)),
-            grouped(sum(|s| s.totals().cache_read)),
-            grouped(sum(|s| s.totals().cache_write)),
-            grouped(sum(|s| s.totals().cache_write_1h)),
-        ),
-        format!(
-            "- {} prompts sent, {} replies from the agent.",
-            sum(SessionState::user_messages),
-            sum(SessionState::assistant_messages)
-        ),
+        // 25 usage records, every one of which says how long its cache
+        // writes were bought for: 120 + 19,606 + 460,375 + 82,887 + 0
+        // reasoning is 562,988, and 40,054 of the writes were for an hour.
+        "- 562,988 tokens: 120 in · 19,606 out · 460,375 cache read · 82,887 cache write \
+         (40,054 for an hour).",
+        // 6 `user_message` events, and 15 `assistant_message` events, none
+        // of them a sub-agent's.
+        "- 6 prompts sent, 15 replies from the agent.",
         // `jq -s '[.[] | select(.type == "tool_call_end") | .outcome] |
         // group_by(.) | map({(.[0]): length}) | add' claude-session.jsonl
         // producer-gaps.jsonl` reads 23 ok, 3 failed and 1 denied: the denied
         // call did not run, so it is no call that finished without failing.
-        "- 23 of 27 tool calls finished without failing.".to_owned(),
-        format!("- {} errors reported.", sum(SessionState::errors)),
+        "- 23 of 27 tool calls finished without failing.",
+        "- 2 errors reported.",
     ] {
-        assert!(page.contains(&line), "{line} is not in\n{page}");
+        assert!(page.contains(line), "{line} is not in\n{page}");
     }
 }
 

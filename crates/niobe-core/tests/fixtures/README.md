@@ -187,6 +187,27 @@ which print `Agent 3 0`, `Bash 12 3`, `Edit 2 0`, `Read 9 0` and `Write 1 0` —
 the calls that ended per tool and those that failed, the `Read` whose start
 the producer dropped among them — and `catalog/fetch.py` at +20 −4 and +1 −0.
 
+The page's totals are held against these, over both logs:
+
+```sh
+jq -s -c '{
+  input: (map(select(.type=="usage").input) | add),
+  output: (map(select(.type=="usage").output) | add),
+  cache_read: (map(select(.type=="usage").cache_read) | add),
+  cache_write: (map(select(.type=="usage").cache_write) | add),
+  cache_write_1h: (map(select(.type=="usage").cache_write_1h) | add),
+  unsplit: (map(select(.type=="usage" and .cache_write_1h==null)) | length),
+  reasoning: (map(select(.type=="usage").reasoning // 0) | add),
+  prompts: (map(select(.type=="user_message")) | length),
+  replies: (map(select(.type=="assistant_message" and .agent==null)) | length),
+  errors: (map(select(.type=="error")) | length)
+}' claude-session.jsonl producer-gaps.jsonl
+```
+
+which prints 120 in, 19,606 out, 460,375 cache read and 82,887 cache write,
+40,054 of it for an hour and no record leaving its writes unsplit, no
+reasoning — 562,988 tokens in all — 6 prompts, 15 replies and 2 errors.
+
 ### The turns `niobe cost --by-turn` lists
 
 The log predates the event that says a turn ended, so `niobe-cli`'s
