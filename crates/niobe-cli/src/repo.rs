@@ -849,12 +849,19 @@ fn read(root: &Path, name: &str, counts: &mut Counts) -> Result<Repo, String> {
     // commands do, so each path is the one both would name the file by: this
     // is the one scan of the tree for untracked files, and it serves both.
     let tree = tagged(&git(root, LISTED)?);
+    let untracked: Vec<&str> = tree
+        .iter()
+        .filter(|(untracked, _)| *untracked)
+        .map(|(_, path)| path.as_str())
+        .collect();
+    let diffed = diff_attributes(root, &untracked)?;
     let last = std::mem::take(counts);
-    working.extend(
-        tree.iter()
-            .filter(|(untracked, _)| *untracked)
-            .map(|(_, path)| new_file(root, path, &last, counts, began)),
-    );
+    working.extend(untracked.iter().map(|path| {
+        // A path check-attr did not answer for is one git would decide by its
+        // bytes, which is what it does for any file with no `diff` attribute.
+        let diffed = diffed.get(*path).copied().unwrap_or(Diffed::ByContent);
+        new_file(root, path, diffed, &last, counts, began)
+    }));
     working.sort_by(|one, other| one.path.cmp(&other.path));
     let files = files(tree.into_iter().map(|(_, path)| path));
     Ok(Repo {
@@ -925,10 +932,11 @@ fn files(listed: impl Iterator<Item = String>) -> Vec<String> {
 }
 
 /// A file git does not track yet, at `path` under `root`, counted as the
-/// lines it holds where it can be read — the count `git diff --numstat`
-/// gives it once it is added — and not counted where it cannot: a link, not a
-/// regular file, or past [`niobe_config::read::LIMIT`], which is read no
-/// further than that rather than whole on every look at the tree.
+/// lines it holds where it can be read and git, by its `diffed` attribute,
+/// would count them — the count `git diff --numstat` gives it once it is
+/// added — and not counted where it cannot: a link, not a regular file, or
+/// past [`niobe_config::read::LIMIT`], which is read no further than that
+/// rather than whole on every look at the tree.
 ///
 /// A file that looks as it did when `last` counted it keeps that count
 /// without being opened; whatever is counted goes into `now`. `began` is when
@@ -936,6 +944,7 @@ fn files(listed: impl Iterator<Item = String>) -> Vec<String> {
 fn new_file(
     root: &Path,
     path: &str,
+    diffed: Diffed,
     last: &Counts,
     now: &mut Counts,
     began: SystemTime,
@@ -954,7 +963,7 @@ fn new_file(
             if let Some(stamp) = stamp {
                 now.keep(path, stamp, lines);
             }
-            lines
+            lines.and_then(|lines| lines.counted(diffed))
         });
     WorkingFile {
         path: path.to_owned(),
@@ -967,24 +976,28 @@ fn new_file(
 /// The lines counted in each file git does not track, by its path, with the
 /// [`Stamp`] it had when it was counted.
 ///
+/// What is kept is the file's bytes' measure, not the figure drawn: whether
+/// git counts the lines is up to the file's `diff` attribute too, which can
+/// change while the file does not, so it is applied on every read.
+///
 /// Opening every untracked file on every read is what makes a read of a tree
 /// with many of them cost minutes, and almost none of them change between
 /// two reads. A read keeps only the files it saw, so one that is gone is
 /// forgotten with it.
 #[derive(Debug, Default)]
-struct Counts(HashMap<String, (Stamp, Option<u64>)>);
+struct Counts(HashMap<String, (Stamp, Option<Lines>)>);
 
 impl Counts {
     /// The count kept for `path`, where it was taken from a file stamped
     /// `stamp`: `Some(None)` is a file that was read and has no count.
-    fn of(&self, path: &str, stamp: Stamp) -> Option<Option<u64>> {
+    fn of(&self, path: &str, stamp: Stamp) -> Option<Option<Lines>> {
         self.0
             .get(path)
             .filter(|(kept, _)| *kept == stamp)
             .map(|(_, lines)| *lines)
     }
 
-    fn keep(&mut self, path: &str, stamp: Stamp, lines: Option<u64>) {
+    fn keep(&mut self, path: &str, stamp: Stamp, lines: Option<Lines>) {
         self.0.insert(path.to_owned(), (stamp, lines));
     }
 
@@ -1026,16 +1039,140 @@ impl Stamp {
     }
 }
 
-/// The lines in `bytes` as git counts them: a last line with no line break
-/// after it is a line, and a file git would call binary — one with a NUL in
-/// its first 8000 bytes, which is git's test — has no count.
-fn lines_in(bytes: &[u8]) -> Option<u64> {
-    if bytes.iter().take(8000).any(|&byte| byte == 0) {
-        return None;
+/// What a file's bytes say about its lines, before its attributes have their
+/// say.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Lines {
+    /// The lines as git counts them: a last line with no line break after it
+    /// is a line.
+    lines: u64,
+    /// Whether git would call the bytes binary on their own: a NUL in the
+    /// first 8000 of them, which is git's test.
+    nul: bool,
+}
+
+impl Lines {
+    /// The count `git diff --numstat` gives these bytes in a file whose
+    /// `diff` attribute is `diffed`, or `None` where it gives none.
+    fn counted(self, diffed: Diffed) -> Option<u64> {
+        match diffed {
+            Diffed::Text => Some(self.lines),
+            Diffed::Binary => None,
+            Diffed::ByContent => (!self.nul).then_some(self.lines),
+        }
     }
+}
+
+/// The lines in `bytes`, and whether git would call them binary.
+fn lines_in(bytes: &[u8]) -> Option<Lines> {
+    let nul = bytes.iter().take(8000).any(|&byte| byte == 0);
     let breaks = bytes.iter().filter(|&&byte| byte == b'\n').count();
     let unended = usize::from(bytes.last().is_some_and(|&byte| byte != b'\n'));
-    u64::try_from(breaks + unended).ok()
+    let lines = u64::try_from(breaks.saturating_add(unended)).ok()?;
+    Some(Lines { lines, nul })
+}
+
+/// How `git diff` decides whether it counts a file's lines, which its `diff`
+/// attribute says before its bytes do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Diffed {
+    /// `diff` set, or a driver whose `binary` is false: counted, NUL or not.
+    Text,
+    /// `-diff` or `binary`, or a driver whose `binary` is true: never counted.
+    Binary,
+    /// No attribute, or a driver that does not say: counted unless the bytes
+    /// hold a NUL.
+    ByContent,
+}
+
+/// The `diff` attribute of each of `paths` in the repository at `root`, as
+/// git resolves it from every attributes file it reads, and what it means for
+/// counting the file.
+///
+/// Asked of git rather than worked out here: attributes come from every
+/// directory's `.gitattributes`, `.git/info/attributes` and the configured
+/// global file, with patterns and macros of git's own.
+fn diff_attributes(root: &Path, paths: &[&str]) -> Result<HashMap<String, Diffed>, String> {
+    if paths.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let input: Vec<u8> = paths
+        .iter()
+        .flat_map(|path| path.bytes().chain([0]))
+        .collect();
+    let printed = git_fed(root, &["check-attr", "-z", "--stdin", "diff"], input)?;
+    let attributes = check_attr(&printed);
+    let named = attributes
+        .iter()
+        .any(|(_, value)| !matches!(value.as_str(), "set" | "unset" | "unspecified"));
+    let binary = match named {
+        true => drivers_binary(root)?,
+        false => HashMap::new(),
+    };
+    Ok(attributes
+        .into_iter()
+        .map(|(path, value)| {
+            let diffed = match value.as_str() {
+                "set" => Diffed::Text,
+                "unset" => Diffed::Binary,
+                "unspecified" => Diffed::ByContent,
+                driver => match binary.get(driver) {
+                    Some(true) => Diffed::Binary,
+                    Some(false) => Diffed::Text,
+                    None => Diffed::ByContent,
+                },
+            };
+            (path, diffed)
+        })
+        .collect())
+}
+
+/// Each path and its value in what `git check-attr -z` printed for one
+/// attribute: records of path, attribute and value, each NUL-terminated.
+fn check_attr(printed: &str) -> Vec<(String, String)> {
+    let fields: Vec<&str> = printed.split('\0').collect();
+    // The field after the last terminator is empty and left over.
+    fields
+        .chunks_exact(3)
+        .filter_map(|record| match record {
+            [path, _, value] => Some(((*path).to_owned(), (*value).to_owned())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Every diff driver's `binary` setting in the repository at `root`, by the
+/// driver's name, as git reads it from every file it reads configuration
+/// from; nothing where none sets one, which `git config` says by exiting
+/// with 1.
+fn drivers_binary(root: &Path) -> Result<HashMap<String, bool>, String> {
+    let args = [
+        "config",
+        "-z",
+        "--bool",
+        "--get-regexp",
+        r"^diff\..*\.binary$",
+    ];
+    let output = reading(root)
+        .args(args)
+        .output()
+        .map_err(|e| format!("cannot run git: {e}"))?;
+    let listed = match output.status.code() {
+        Some(0) => String::from_utf8_lossy(&output.stdout).into_owned(),
+        Some(1) => return Ok(HashMap::new()),
+        _ => return Err(failed(&args, &output.stderr)),
+    };
+    // A record is a key, a newline and its value; a key is
+    // `diff.<name>.binary`, with dots allowed in the name, and a later file's
+    // setting is listed after an earlier one's, which it overrides.
+    Ok(listed
+        .split('\0')
+        .filter_map(|record| record.split_once('\n'))
+        .filter_map(|(key, value)| {
+            let name = key.strip_prefix("diff.")?.strip_suffix(".binary")?;
+            Some((name.to_owned(), value == "true"))
+        })
+        .collect())
 }
 
 /// What `git status --porcelain=v2 --branch` says in its header lines.
@@ -1171,6 +1308,55 @@ fn changes(numstat: &str) -> Vec<Change> {
 /// None may run here, so every `git` this runs has them turned off, whatever
 /// it was asked.
 fn git(root: &Path, args: &[&str]) -> Result<String, String> {
+    let output = guarded(root)?
+        .args(args)
+        .output()
+        .map_err(|e| format!("cannot run git: {e}"))?;
+    printed(args, &output)
+}
+
+/// Runs one `git` command in `root` as [`git`] does, with `input` on its
+/// standard input, written on a thread of its own so that a git that answers
+/// as it reads is never left waiting on a full pipe for a reader that is still
+/// writing.
+fn git_fed(root: &Path, args: &[&str], input: Vec<u8>) -> Result<String, String> {
+    use std::io::Write;
+
+    let mut child = guarded(root)?
+        .args(args)
+        .stdin(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("cannot run git: {e}"))?;
+    let writer = child.stdin.take().map(|mut stdin| {
+        // A git that stopped reading has failed, which its exit says; what
+        // it was still owed is nothing to report on top of that.
+        std::thread::spawn(move || {
+            let _ = stdin.write_all(&input);
+        })
+    });
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("cannot run git: {e}"))?;
+    if let Some(writer) = writer {
+        let _ = writer.join();
+    }
+    printed(args, &output)
+}
+
+/// What a `git` that ran printed, or the error it is reported as where it
+/// failed.
+fn printed(args: &[&str], output: &std::process::Output) -> Result<String, String> {
+    if !output.status.success() {
+        return Err(failed(args, &output.stderr));
+    }
+    // Lossy: a path that is not UTF-8 is a path the shell cannot draw anyway,
+    // and one of them must not cost the other files their counts.
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// A [`reading`] `git` in `root` with every filter driver the repository
+/// configures given no command, ready for its arguments.
+fn guarded(root: &Path) -> Result<Command, String> {
     let drivers = filter_drivers(&filters_configured(root)?);
     let mut command = reading(root);
     // A filter runs on any file whose attributes name it, and attributes come
@@ -1186,17 +1372,7 @@ fn git(root: &Path, args: &[&str]) -> Result<String, String> {
             .env(format!("GIT_CONFIG_KEY_{at}"), key)
             .env(format!("GIT_CONFIG_VALUE_{at}"), value);
     }
-    let output = command
-        .args(args)
-        .output()
-        .map_err(|e| format!("cannot run git: {e}"))?;
-
-    if !output.status.success() {
-        return Err(failed(args, &output.stderr));
-    }
-    // Lossy: a path that is not UTF-8 is a path the shell cannot draw anyway,
-    // and one of them must not cost the other files their counts.
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    Ok(command)
 }
 
 /// A `git` in `root` that only reads, set up so that nothing the repository
@@ -1519,10 +1695,93 @@ mod tests {
 
     #[test]
     fn a_new_file_git_would_call_binary_is_new_and_not_counted() {
-        assert_eq!(lines_in(b"a\nb\n"), Some(2));
-        assert_eq!(lines_in(b"a\nb"), Some(2));
-        assert_eq!(lines_in(b""), Some(0));
-        assert_eq!(lines_in(b"PNG\0\x01\x02\n"), None);
+        let counted = |bytes: &[u8]| lines_in(bytes).and_then(|l| l.counted(Diffed::ByContent));
+        assert_eq!(counted(b"a\nb\n"), Some(2));
+        assert_eq!(counted(b"a\nb"), Some(2));
+        assert_eq!(counted(b""), Some(0));
+        assert_eq!(counted(b"PNG\0\x01\x02\n"), None);
+    }
+
+    /// A new file is counted as `git diff --numstat` counts it once it is
+    /// added, and that is decided by its `diff` attribute before its bytes:
+    /// `binary` or `-diff` is no count whatever it holds, `diff` is a count
+    /// though it holds a NUL, and a named driver is whatever the driver's
+    /// `binary` setting says. The expected figures are git's own, read after
+    /// the files are added with `--intent-to-add`.
+    #[test]
+    fn a_new_file_is_counted_as_its_diff_attribute_says_git_would_count_it() {
+        let dir = repository();
+        let work = dir.path().join("work");
+        std::fs::write(
+            work.join(".gitattributes"),
+            "*.dat binary\n*.lock -diff\n*.bin diff\n*.on diff=on\n*.off diff=off\n",
+        )
+        .expect("the attributes are written");
+        run(&work, &["add", ".gitattributes"]);
+        run(&work, &["commit", "-m", "attributes"]);
+        run(&work, &["config", "diff.on.binary", "true"]);
+        run(&work, &["config", "diff.off.binary", "false"]);
+        for (name, contents) in [
+            ("image.dat", "one\ntwo\nthree\n"),
+            ("deps.lock", "one\ntwo\n"),
+            ("nul.bin", "a\0b\nc\n"),
+            ("driven.on", "one\n"),
+            ("driven.off", "a\0b\n"),
+            ("plain.txt", "one\ntwo\n"),
+        ] {
+            std::fs::write(work.join(name), contents).expect("the file is written");
+        }
+
+        let read = read(&work, "work", &mut Counts::default()).expect("the repository reads");
+        let ours: Vec<(String, Option<u64>)> = read
+            .working
+            .iter()
+            .map(|file| (file.path.clone(), file.added))
+            .collect();
+
+        run(&work, &["add", "--intent-to-add", "."]);
+        let numstat = std::process::Command::new("git")
+            .args(["diff", "--numstat", "HEAD", "--"])
+            .current_dir(&work)
+            .output()
+            .expect("git diff runs");
+        let mut gits: Vec<(String, Option<u64>)> = String::from_utf8_lossy(&numstat.stdout)
+            .lines()
+            .filter_map(|line| {
+                let mut fields = line.splitn(3, '\t');
+                let added = fields.next()?.parse().ok();
+                let _removed = fields.next()?;
+                Some((fields.next()?.to_owned(), added))
+            })
+            .collect();
+        gits.sort();
+
+        assert_eq!(
+            gits,
+            [
+                ("deps.lock".to_owned(), None),
+                ("driven.off".to_owned(), Some(1)),
+                ("driven.on".to_owned(), None),
+                ("image.dat".to_owned(), None),
+                ("nul.bin".to_owned(), Some(2)),
+                ("plain.txt".to_owned(), Some(2)),
+            ],
+            "git itself counts these files this way"
+        );
+        assert_eq!(ours, gits);
+    }
+
+    #[test]
+    fn a_path_check_attr_prints_with_spaces_and_line_breaks_is_read_whole() {
+        let printed = "a b\nc.dat\0diff\0unset\0plain\0diff\0unspecified\0";
+
+        assert_eq!(
+            check_attr(printed),
+            [
+                ("a b\nc.dat".to_owned(), "unset".to_owned()),
+                ("plain".to_owned(), "unspecified".to_owned()),
+            ]
+        );
     }
 
     /// Writes `contents` to `path` and stamps it as last modified `at`, so
