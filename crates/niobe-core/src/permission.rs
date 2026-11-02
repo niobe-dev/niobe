@@ -16,7 +16,8 @@
 //! * `Bash(cargo *)` — that tool, called on a target starting `cargo `,
 //!   where what follows neither starts another command (`;`, `&&`, `|`, a
 //!   redirection, a substitution or anything else in brackets) nor climbs
-//!   above the prefix with `..`.
+//!   above the prefix with `..` — or with `%2e%2e`, which a URL parser
+//!   reads as `..`.
 //! * `Edit(/repo/src/*)`, `Bash(cat src/*)` — a star inside a word finishes
 //!   that one word and nothing else: a name of plain characters, with no
 //!   space before a second argument and nothing a shell would expand, and one
@@ -300,7 +301,7 @@ fn finishes_word(word: &str, rest: &str) -> bool {
     }
     let (end, after) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
     let name = format!("{started}{end}");
-    !matches!(name.as_str(), "." | "..") && !climbs_out(after)
+    !matches!(as_dots(&name).as_ref(), "." | "..") && !climbs_out(after)
 }
 
 /// Whether a path, read lexically from where the prefix left it, goes above
@@ -308,7 +309,7 @@ fn finishes_word(word: &str, rest: &str) -> bool {
 fn climbs_out(rest: &str) -> bool {
     let mut depth: usize = 0;
     for part in rest.split('/') {
-        match part {
+        match as_dots(part).as_ref() {
             "" | "." => {}
             ".." => match depth.checked_sub(1) {
                 Some(up) => depth = up,
@@ -318,6 +319,20 @@ fn climbs_out(rest: &str) -> bool {
         }
     }
     false
+}
+
+/// `name` with each `%2e` read as the `.` it escapes.
+///
+/// A URL parser reads `%2e%2e`, `.%2e` and `%2e.` in a path as `..`, and
+/// `%2e` as `.`, before it fetches anything, so
+/// `https://docs.rs/serde/%2e%2e/admin` is `https://docs.rs/admin`. Read
+/// this way for every rule, as the other tests are: a file whose name holds
+/// the escape is asked about rather than allowed, and nothing climbs out.
+fn as_dots(name: &str) -> std::borrow::Cow<'_, str> {
+    match name.contains("%2e") || name.contains("%2E") {
+        true => name.replace("%2e", ".").replace("%2E", ".").into(),
+        false => name.into(),
+    }
 }
 
 impl fmt::Display for Rule {
@@ -657,6 +672,30 @@ mod tests {
         let rule = Rule::parse("Bash(cat .*)").expect("the rule is valid");
         assert!(!rule.covers("Bash", Some("cat ../secret")));
         assert!(rule.covers("Bash", Some("cat .env")));
+    }
+
+    #[test]
+    fn a_star_does_not_cover_a_url_whose_escaped_dots_climb_out_of_its_prefix() {
+        // A URL parser reads `%2e` as a dot in a path's segments, so
+        // `https://docs.rs/serde/%2e%2e/admin` is fetched as
+        // `https://docs.rs/admin`.
+        let rule = Rule::parse("WebFetch(https://docs.rs/serde/*)").expect("the rule is valid");
+
+        assert!(!rule.covers("WebFetch", Some("https://docs.rs/serde/%2e%2e/admin")));
+        assert!(!rule.covers("WebFetch", Some("https://docs.rs/serde/%2E%2E/admin")));
+        assert!(!rule.covers("WebFetch", Some("https://docs.rs/serde/.%2e/admin")));
+        assert!(!rule.covers("WebFetch", Some("https://docs.rs/serde/%2e./admin")));
+        assert!(!rule.covers("WebFetch", Some("https://docs.rs/serde/%2e/../admin")));
+        assert!(!rule.covers("WebFetch", Some("https://docs.rs/serde/a/%2e%2e/%2e%2e/x")));
+        assert!(rule.covers("WebFetch", Some("https://docs.rs/serde/a/%2e%2e/b")));
+        assert!(rule.covers("WebFetch", Some("https://docs.rs/serde/100%25")));
+
+        let rule = Rule::parse("WebFetch(https://docs.rs/serde/.*)").expect("the rule is valid");
+        assert!(!rule.covers("WebFetch", Some("https://docs.rs/serde/.%2e/admin")));
+        assert!(!rule.covers("WebFetch", Some("https://docs.rs/serde/.%2E")));
+
+        let rule = Rule::parse("WebFetch(https://docs.rs/serde*)").expect("the rule is valid");
+        assert!(!rule.covers("WebFetch", Some("https://docs.rs/serde/%2e%2e/admin")));
     }
 
     #[test]
