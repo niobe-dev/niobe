@@ -588,6 +588,46 @@ fn a_session_one_recorder_holds_cannot_be_taken_up_by_another_until_it_lets_go()
     .expect("a session nobody holds is taken up");
 }
 
+/// A repository whose path is not UTF-8 — a name Linux keeps as the bytes it
+/// was made with — holds its sessions as any other does: SQLite names the
+/// file only as text, and a store that went by that name alone held nothing
+/// there, so two shells took up one session and wrote two conversations into
+/// one record. macOS refuses such a name, so only Linux can make one.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_session_in_a_store_whose_path_is_not_utf8_is_held_as_any_other() {
+    use std::os::unix::ffi::OsStrExt;
+
+    let dir = tempfile::tempdir().expect("a temporary directory can be created");
+    let repo = dir.path().join(std::ffi::OsStr::from_bytes(b"caf\xe9"));
+    std::fs::create_dir(&repo).expect("Linux makes a directory whose name is not UTF-8");
+    let path = repo.join("sessions.db");
+    let mut first = Recorder::new(Store::open(&path).expect("a store opens"));
+    first
+        .record(&user("from the first window"))
+        .expect("a session in a temporary store takes an event");
+    let session = first.session().expect("a session was opened");
+
+    let looked = Store::open(&path).expect("the store opens again");
+    assert!(
+        looked.is_held(session).expect("the hold is looked at"),
+        "a session another recorder holds reads as free"
+    );
+    let second = Recorder::resume(Store::open(&path).expect("the store opens again"), session);
+    assert!(
+        matches!(second, Err(StoreError::SessionOpen(_))),
+        "a second recorder took up a held session: {second:?}"
+    );
+
+    drop(first);
+    assert!(!looked.is_held(session).expect("the hold is looked at"));
+    Recorder::resume(
+        Store::open(&path).expect("the store file is in a temporary directory"),
+        session,
+    )
+    .expect("a session nobody holds is taken up");
+}
+
 /// What a resume folds is read through the hold it takes, so it is everything
 /// the session holds: read before the hold, it could miss the last events of
 /// a niobe quitting that session at that moment, and the resumed shell would

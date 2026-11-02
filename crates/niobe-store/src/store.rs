@@ -294,22 +294,42 @@ fn unreadable(error: &StoreError) -> Event {
 #[derive(Debug)]
 pub struct Store {
     conn: Connection,
+    /// The file the store was opened at, made absolute; `None` in memory.
+    /// What the store is named by where SQLite cannot name it: see
+    /// [`Store::path`].
+    file: Option<std::path::PathBuf>,
 }
 
 impl Store {
     /// Opens the store at `path`, creating the file and the schema if neither
     /// exists. The parent directory must exist.
     pub fn open(path: &Path) -> Result<Self, StoreError> {
-        Self::prepare(Connection::open(path)?)
+        Ok(Self::prepare(Connection::open(path)?)?.kept_at(path))
+    }
+
+    /// The same store, known to be kept in the file at `path`.
+    fn kept_at(self, path: &Path) -> Self {
+        let file = std::path::absolute(path).unwrap_or_else(|_| path.to_owned());
+        Self {
+            file: Some(file),
+            ..self
+        }
     }
 
     /// The file the store is kept in, or `None` for one kept in memory.
+    ///
+    /// As SQLite names it where it can, which is the name a session's hold is
+    /// made beside, and otherwise as it was opened: SQLite hands its name
+    /// over only as UTF-8, and a path on Linux need not be. Such a store is
+    /// still a file, and a session in it is held as in any other; read as
+    /// one in memory, it held none, and two shells took up one session.
     #[cfg(unix)]
     pub(crate) fn path(&self) -> Option<std::path::PathBuf> {
-        self.conn
-            .path()
-            .filter(|path| !path.is_empty())
-            .map(std::path::PathBuf::from)
+        match self.conn.path() {
+            Some("") => None,
+            Some(named) => Some(std::path::PathBuf::from(named)),
+            None => self.file.clone(),
+        }
     }
 
     /// Opens the store at `path` to read it, as [`Store::open`] does where the
@@ -335,6 +355,10 @@ impl Store {
     /// mode. Only a file this build is to make or bring up to date is opened
     /// to write.
     pub fn open_to_read(path: &Path) -> Result<Self, StoreError> {
+        Self::opened_to_read(path).map(|store| store.kept_at(path))
+    }
+
+    fn opened_to_read(path: &Path) -> Result<Self, StoreError> {
         if path.is_file() {
             let looking = OpenFlags::SQLITE_OPEN_READ_ONLY
                 | OpenFlags::SQLITE_OPEN_NO_MUTEX
@@ -392,7 +416,7 @@ impl Store {
                 supported: SCHEMA_VERSION,
             });
         }
-        Ok(Self { conn })
+        Ok(Self { conn, file: None })
     }
 
     /// A store that lives only as long as the value, for tests and for a
@@ -413,7 +437,7 @@ impl Store {
         use_wal(&conn)?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         migrate(&mut conn)?;
-        Ok(Self { conn })
+        Ok(Self { conn, file: None })
     }
 
     /// Opens a transaction holding the store's write lock, which what is
