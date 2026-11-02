@@ -1208,6 +1208,54 @@ fn a_read_back_refusal_and_banner_are_shown_at_the_level_the_cli_gave_them() {
     );
 }
 
+/// The README's three requests that failed — the one the model refused, the
+/// one that ran out of retries and the one the API refused outright — each
+/// end on a `<synthetic>` reply in the CLI's words, which the live `result`
+/// repeats with `is_error: true` and the transcript has no `result` to
+/// repeat. Each is the turn's failure, said once, in those words, on both
+/// carriers: read back as a reply alone, an imported session's failed turns
+/// would ask nothing of the operator and count no error.
+#[test]
+fn a_request_that_failed_is_one_error_in_the_clis_words_live_and_read_back() {
+    let mut translator = niobe_bridge_claude::Translator::new("max");
+    let live: Vec<Event> = include_str!("fixtures/api-errors.jsonl")
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .flat_map(|line| translator.line(line))
+        .collect();
+    let read_back = api_errors();
+    let failures = |events: &[Event]| -> Vec<String> {
+        warnings(events)
+            .into_iter()
+            .filter(|warning| !warning.contains("retrying") && !warning.contains("declined"))
+            .map(str::to_owned)
+            .collect()
+    };
+    let replies_saying = |events: &[Event], words: &str| {
+        events
+            .iter()
+            .filter(|event| {
+                matches!(event, Event::AssistantMessage { text, .. } if text.contains(words))
+            })
+            .count()
+    };
+
+    let expected = [
+        "API Error: Sonnet 5 can't help with this. Start a new session to continue.\n\nLearn \
+         more: https://www.anthropic.com/legal/aup\n\nRequest ID: req_fake\n\nMessage ID: \
+         msg_fake3",
+        "API Error: 529 Overloaded. This is a server-side issue, usually temporary — try again \
+         in a moment. If it persists, check your inference gateway (127.0.0.1:8765).",
+        "Credit balance is too low",
+    ];
+    assert_eq!(failures(&live), expected, "{live:#?}");
+    assert_eq!(failures(&read_back), expected, "{read_back:#?}");
+    for events in [&live, &read_back] {
+        assert_eq!(replies_saying(events, "API Error"), 0, "{events:#?}");
+        assert_eq!(replies_saying(events, "Credit balance"), 0, "{events:#?}");
+    }
+}
+
 #[test]
 fn a_read_back_local_commands_output_is_its_answer_and_a_stop_hook_says_nothing() {
     let events = api_errors();

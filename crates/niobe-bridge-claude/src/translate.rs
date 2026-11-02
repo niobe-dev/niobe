@@ -476,6 +476,11 @@ pub struct Translator {
     /// kept so that the turn's closing `result`, which repeats them as an
     /// error, folds into the one notice already shown.
     usage_limit: Option<String>,
+    /// The CLI's own words for a request of the session's that failed —
+    /// retries run out, the API refusing it — held for the turn's closing
+    /// `result`, which repeats them as the turn's failure, so that the
+    /// failure is said once, as an error, where the turn ends on it.
+    failure: Option<String>,
     /// The sub-agent calls whose agent ran into the usage limit: they ended
     /// because the plan stopped them, not because they failed.
     limited_agents: BTreeMap<String, ()>,
@@ -689,6 +694,7 @@ impl Translator {
             tool_calls: BTreeMap::new(),
             ended_agents: BTreeMap::new(),
             usage_limit: None,
+            failure: None,
             limited_agents: BTreeMap::new(),
             asked: Vec::new(),
             withdrawn: Vec::new(),
@@ -1069,6 +1075,7 @@ impl Translator {
     /// carried, as one cut off mid-turn is.
     pub(crate) fn finish(&mut self) -> Vec<Event> {
         let mut out = self.take_aside();
+        out.extend(self.take_failure());
         for (stream, message) in std::mem::take(&mut self.in_flight) {
             self.cut_off(&stream, message, CarriedOn::No, &mut out);
         }
@@ -1985,7 +1992,7 @@ impl Translator {
         }));
     }
 
-    fn assistant(&mut self, envelope: wire::Envelope, out: &mut Vec<Event>) {
+    fn assistant(&mut self, mut envelope: wire::Envelope, out: &mut Vec<Event>) {
         self.note_snapshot(&envelope);
         if let (Some(agent), Some(model)) = (
             envelope.parent_tool_use_id.as_deref(),
@@ -2004,6 +2011,19 @@ impl Translator {
                     self.limited_agents.insert(call, ());
                 }
                 None => self.usage_limit_hit(words, out),
+            }
+            return;
+        }
+        // The message the CLI writes for a request of the session's that
+        // failed is the turn's failure, not a reply: the CLI shows it as an
+        // error, and its `result` repeats it as one.
+        if envelope.parent_tool_use_id.is_none()
+            && envelope.error.is_some()
+            && envelope.message.model.as_deref() == Some(CLI_WRITTEN)
+            && let Some(words) = said(envelope.message.content.take().map(render_content))
+        {
+            if let Some(earlier) = self.failure.replace(words) {
+                out.push(warn(earlier));
             }
             return;
         }
@@ -2079,6 +2099,13 @@ impl Translator {
             out.push(Event::AssistantMessage { text, agent });
         }
         out.append(&mut calls);
+    }
+
+    /// The CLI's words for a request of the session's that failed, said as
+    /// an error, where no `result` is to come and say them: a transcript,
+    /// which keeps no `result`, or output that ended before one.
+    pub(crate) fn take_failure(&mut self) -> Option<Event> {
+        self.failure.take().map(warn)
     }
 
     /// Says once a turn that the plan's usage limit stopped it, in the CLI's
@@ -2874,7 +2901,9 @@ impl Translator {
         }
         self.ended_agents.clear();
 
+        let failure = self.failure.take();
         if interrupted {
+            out.extend(failure.map(warn));
             // The CLI reports an interrupt as an error with a diagnostic for
             // its own developers; to the operator it is the stop they asked
             // for, and the session goes on.
@@ -2882,6 +2911,7 @@ impl Translator {
                 message: STOPPED_TURN.to_owned(),
             });
         } else if let Some(words) = limit_words {
+            out.extend(failure.map(warn));
             // The turn ended on the plan's usage limit. The session has said
             // so already when the CLI sent the message; a result that repeats
             // it as a failure would show the same event as an error.
@@ -2894,8 +2924,20 @@ impl Translator {
             // both are reported rather than whichever one was looked at first.
             let mut said: Vec<String> = outcome.result.into_iter().collect();
             said.extend(outcome.errors);
-            out.push(Event::Error {
-                message: format!(
+            // The subprocess is still there with its stdin open, so the
+            // session goes on; it is this turn that failed.
+            out.push(warn(match failure {
+                // The CLI's words for the failed request, which it shows its
+                // own operator and the transcript keeps, are the failure; the
+                // `result` only repeats them.
+                Some(words) => {
+                    said.retain(|repeated| *repeated != words);
+                    std::iter::once(words)
+                        .chain(said)
+                        .collect::<Vec<_>>()
+                        .join(" · ")
+                }
+                None => format!(
                     "the turn ended as `{}`: {}",
                     outcome.subtype.as_deref().unwrap_or("(no subtype)"),
                     match said.is_empty() {
@@ -2903,10 +2945,9 @@ impl Translator {
                         false => said.join(" · "),
                     }
                 ),
-                // The subprocess is still there with its stdin open, so the
-                // session goes on; it is this turn that failed.
-                fatal: false,
-            });
+            }));
+        } else {
+            out.extend(failure.map(warn));
         }
 
         if owes_a_turn {
@@ -8259,6 +8300,61 @@ mod tests {
         );
         assert!(
             matches!(events.last(), Some(Event::TurnEnded)),
+            "{events:?}"
+        );
+    }
+
+    /// The CLI's message for a request that ran out of retries, as Claude
+    /// Code 2.1.296 sends it (`api-errors.jsonl`), for the session or for
+    /// the sub-agent `parent` names.
+    fn failed_request(parent: Option<&str>) -> String {
+        let parent = parent.map_or("null".to_owned(), |id| format!("\"{id}\""));
+        format!(
+            r#"{{"type":"assistant","parent_tool_use_id":{parent},"error":"server_error","message":{{"model":"<synthetic>","id":"m-fail","role":"assistant","content":[{{"type":"text","text":"API Error: 529 Overloaded."}}],"usage":{{"input_tokens":0,"output_tokens":0}}}}}}"#
+        )
+    }
+
+    #[test]
+    fn a_failed_request_whose_result_never_comes_is_still_said_as_an_error() {
+        let mut translator = translator();
+
+        let mut events = translator.line(&failed_request(None));
+        events.extend(translator.finish());
+
+        assert_eq!(
+            warnings(&events),
+            ["API Error: 529 Overloaded."],
+            "{events:?}"
+        );
+    }
+
+    #[test]
+    fn a_failed_request_the_result_adds_a_reason_to_is_said_with_it() {
+        let mut translator = translator();
+
+        let mut events = translator.line(&failed_request(None));
+        events.extend(translator.line(
+            r#"{"type":"result","subtype":"error_during_execution","is_error":true,"result":"API Error: 529 Overloaded.","errors":["gave up"]}"#,
+        ));
+
+        assert_eq!(
+            warnings(&events),
+            ["API Error: 529 Overloaded. · gave up"],
+            "{events:?}"
+        );
+    }
+
+    #[test]
+    fn a_sub_agents_failed_request_is_its_reply_and_not_the_sessions_failure() {
+        let mut translator = translator();
+
+        let events = translator.line(&failed_request(Some("toolu_task")));
+
+        assert!(warnings(&events).is_empty(), "{events:?}");
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, Event::AssistantMessage { agent: Some(_), .. })),
             "{events:?}"
         );
     }

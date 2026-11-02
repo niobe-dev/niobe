@@ -1216,7 +1216,12 @@ impl Fold {
             message: wire::ApiMessage {
                 content: message.content,
                 // Reported above, off the message's head, as the stream does.
-                model: None,
+                // A message of the session's that the CLI wrote itself keeps
+                // its mark, which is what the stream reads such a message by:
+                // a failed request's words are the turn's failure, and a
+                // command's answer keeps its lines. An agent's is left
+                // unmarked, since the mark would be read as the agent's model.
+                model: (written_by_cli && parent.is_none()).then(|| NO_MODEL.to_owned()),
                 // Counted below, once per response, from the record's own
                 // figures: a transcript holds every message whole, so none of
                 // them is left to be counted from a snapshot.
@@ -1231,6 +1236,10 @@ impl Fold {
             error,
             api_error,
         }));
+        // A request that failed is the turn's failure, which the live stream
+        // says when the turn's `result` repeats it; a transcript keeps no
+        // `result`, so it is said where the CLI wrote it.
+        self.out.extend(self.translator.take_failure());
 
         // Counted here only where no accounting is still to come. A message
         // names the model it ran on as the family — `claude-opus-5` — and the

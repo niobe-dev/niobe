@@ -1597,7 +1597,10 @@ with `attempt`, `max_retries`, `retry_delay_ms`, `error_status` and `error`
 on the live stream as a `<synthetic>` reply and a `result`; neither hook is.
 The request that ran out of retries and the one the API refused outright end
 the same way on both carriers: a `<synthetic>` reply in the CLI's words, which
-the live `result` repeats with `is_error: true`.
+the live `result` repeats with `is_error: true`. The bridge reads each as the
+turn's failure, one error entry in those words on both carriers, and not as a
+reply: the transcript has no `result` to say it, and a live turn would
+otherwise show the words twice.
 
 **Not observed on the live stream**, from Claude Code 2.1.296, though the
 transcripts on the machine this was written on carry them: `turn_duration`,
