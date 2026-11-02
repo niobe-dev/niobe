@@ -596,8 +596,26 @@ pub fn editor_spots(
         }
         let word_width = advance(word, row_width, tab).saturating_sub(row_width);
         if row_width.saturating_add(word_width) <= columns {
-            for grapheme in word.graphemes(true) {
-                row_width = place(grapheme, &mut at, row, row_width, &mut drawn);
+            // A word of plain ASCII that holds no wanted character moves both
+            // measures by its length, so it is stepped over whole: the draw
+            // walks the line up to the cursor every frame, and a grapheme at
+            // a time that walk cost a 64 KiB line most of a frame.
+            let unwanted = plain_width(word).filter(|&chars| {
+                wanted
+                    .get(wanted.partition_point(|wanted| wanted.end <= at))
+                    .is_none_or(|wanted| wanted.start >= at.saturating_add(chars))
+            });
+            match unwanted {
+                Some(chars) => {
+                    at += chars;
+                    drawn += chars;
+                    row_width += word_width;
+                }
+                None => {
+                    for grapheme in word.graphemes(true) {
+                        row_width = place(grapheme, &mut at, row, row_width, &mut drawn);
+                    }
+                }
             }
             row_open = true;
             words.next();
@@ -631,6 +649,15 @@ pub fn editor_spots(
         }
     }
     spots
+}
+
+/// The characters of `word` where every one is printable ASCII, and so a
+/// grapheme of its own one cell wide by the editor's sum and by ratatui's
+/// measure alike; `None` for any other word.
+fn plain_width(word: &str) -> Option<usize> {
+    word.bytes()
+        .all(|byte| matches!(byte, b' '..=b'~'))
+        .then_some(word.len())
 }
 
 /// The rows a word wider than the row is cut into, a grapheme at a time, as
@@ -754,6 +781,44 @@ mod tests {
             editor_spots("ab /cd /e", 80, 4, &[3..5, 7..9]),
             [(0, 3, 1), (0, 4, 1), (0, 7, 1), (0, 8, 1)]
         );
+    }
+
+    #[test]
+    fn a_character_is_spotted_where_it_is_whether_or_not_the_words_before_it_are_wanted_too() {
+        let lines = [
+            "the quick brown fox jumps over the lazy dog ".repeat(7),
+            "word  \t two\tthree\t\tfour ".repeat(5),
+            "🦀 crabs and 🎉 parties, ❤️ and 👨‍👩‍👧 ".repeat(6),
+            "a漢 /review it 🇺🇦 ok ".repeat(9),
+            format!("see {} and /review", "x".repeat(70)),
+        ];
+        for line in &lines {
+            let count = line.chars().count();
+            for columns in [1usize, 7, 20, 33, 80] {
+                // Every character wanted walks each grapheme on its own, as
+                // the line was always walked, so it is what the others match.
+                let all = 0..count;
+                let every = editor_spots(line, columns, 4, std::slice::from_ref(&all));
+                let (last, third) = (count - 1..count, count / 3..count / 3 + 1);
+                let spread = [0..1, count / 2..count / 2 + 3, count - 2..count];
+                let cases: [&[std::ops::Range<usize>]; 3] = [
+                    std::slice::from_ref(&last),
+                    &spread,
+                    std::slice::from_ref(&third),
+                ];
+                for wanted in cases {
+                    let expected: Vec<(usize, usize, usize)> = wanted
+                        .iter()
+                        .flat_map(|range| every[range.clone()].iter().copied())
+                        .collect();
+                    assert_eq!(
+                        editor_spots(line, columns, 4, wanted),
+                        expected,
+                        "{line:?} at {columns} columns, {wanted:?} wanted"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

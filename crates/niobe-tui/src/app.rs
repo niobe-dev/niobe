@@ -9956,14 +9956,7 @@ fn keep_off_a_glyph(composer: &mut TextArea<'static>, before: ratatui_textarea::
     let Some(line) = composer.lines().get(row) else {
         return;
     };
-    let mut start = 0usize;
-    let edge = line.graphemes(true).find_map(|glyph| {
-        let end = start + glyph.chars().count();
-        let inside = (start < col && col < end).then_some((start, end));
-        start = end;
-        inside
-    });
-    let Some((start, end)) = edge else {
+    let Some((start, end)) = glyph_around(line, col) else {
         return;
     };
     let forward = before.0 == row && before.1 < col;
@@ -9981,6 +9974,27 @@ fn keep_off_a_glyph(composer: &mut TextArea<'static>, before: ratatui_textarea::
             }
         }
     }
+}
+
+/// The first and the past-last character of the glyph of `line` that the
+/// character position `col` falls inside, or `None` where it falls between
+/// two glyphs, at either end included.
+///
+/// Only the glyph around `col` is segmented: this runs after every key, and
+/// segmenting the line from its start cost a key typed at the end of a
+/// 64 KiB line milliseconds.
+fn glyph_around(line: &str, col: usize) -> Option<(usize, usize)> {
+    use unicode_segmentation::GraphemeCursor;
+
+    let (byte, _) = line.char_indices().nth(col)?;
+    let cursor = || GraphemeCursor::new(byte, line.len(), true);
+    if cursor().is_boundary(line, 0).ok()? {
+        return None;
+    }
+    let first = cursor().prev_boundary(line, 0).ok()??;
+    let past = cursor().next_boundary(line, 0).ok()??;
+    let start = line[..first].chars().count();
+    Some((start, start + line[first..past].chars().count()))
 }
 
 /// A paste with every line break in it written as `\n`, which is what the
@@ -21673,6 +21687,29 @@ mod tests {
                 }],
                 "{name}: the question is still the one to answer"
             );
+        }
+    }
+
+    #[test]
+    fn the_glyph_around_a_position_is_the_one_a_walk_from_the_line_start_finds() {
+        let lines = [
+            "plain words only".to_owned(),
+            "a\u{301}e\u{301} ❤\u{fe0f} 👨\u{200d}👩\u{200d}👧 🇺🇦🇺🇦🇦 x".to_owned(),
+            "🏴\u{e0067}\u{e0062}\u{e0073}\u{e0063}\u{e0074}\u{e007f}\r\n\tका\u{94d}ष".to_owned(),
+            "🇺🇦".repeat(5),
+            String::new(),
+        ];
+        for line in &lines {
+            for col in 0..=line.chars().count() + 1 {
+                let mut start = 0usize;
+                let walked = line.graphemes(true).find_map(|glyph| {
+                    let end = start + glyph.chars().count();
+                    let inside = (start < col && col < end).then_some((start, end));
+                    start = end;
+                    inside
+                });
+                assert_eq!(glyph_around(line, col), walked, "{line:?} at {col}");
+            }
         }
     }
 }
