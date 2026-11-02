@@ -398,6 +398,38 @@ mod tests {
         assert!(said.contains("to 1 against its background"), "{said}");
     }
 
+    /// A dialog draws the accent's hints and the warning colour's failures
+    /// on its own face, as text, so a light dialog under the base's bright
+    /// accent cannot be read however legible its body text is.
+    #[test]
+    fn a_dialog_face_the_accent_cannot_be_read_on_is_refused() {
+        let said = themed(
+            "[colors]\ndialog_bg = \"#e6e6e6\"\ndialog_fg = \"#000000\"\n\
+             dialog_dim = \"#444444\"\n",
+        )
+        .expect_err("the cyber green on light grey");
+
+        assert!(said.contains("in a dialog"), "{said}");
+        assert!(said.contains("to 1 against its background"), "{said}");
+    }
+
+    /// The menu row names the errors in the removed line's colour, and a
+    /// diff numbers its lines in the secondary colour: text either way.
+    #[test]
+    fn text_the_menu_row_and_a_diff_draw_is_measured_against_their_backgrounds() {
+        let menu = themed("[colors]\nmenu_bg = \"#5a5a5a\"\n")
+            .expect_err("the error count on its own hue");
+        assert!(said_of(&menu, "an error count in the menu row"), "{menu}");
+
+        let diff =
+            themed("[colors]\ndiff_bg = \"#5a5a5a\"\n").expect_err("line numbers on their own hue");
+        assert!(said_of(&diff, "a diff's line numbers"), "{diff}");
+    }
+
+    fn said_of(said: &str, what: &str) -> bool {
+        said.contains(what) && said.contains("to 1 against its background")
+    }
+
     #[test]
     fn a_theme_may_not_take_a_built_in_ones_name() {
         let said = themed("name = \"Neo\"\n").expect_err("neo is built in");

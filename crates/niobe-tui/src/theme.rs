@@ -862,7 +862,10 @@ impl Theme {
     }
 
     /// The pairings a person reads text in, which have to be told apart by
-    /// more than being different colours at 24-bit.
+    /// more than being different colours at 24-bit: every text pairing of
+    /// [`Theme::pairings`] but those dimmed on purpose — an open menu's item
+    /// that can do nothing, what a shadow falls on — and a dialog's title,
+    /// drawn bold in its border's colour.
     fn legible_pairings(&self) -> Vec<(Color, Color, &'static str)> {
         let t = self;
         vec![
@@ -879,10 +882,12 @@ impl Theme {
             (t.code, t.pane_bg, "code in a reply"),
             (t.command, t.pane_bg, "a command named in a prompt"),
             (t.fg, t.diff_bg, "a diff's unchanged line"),
+            (t.dim, t.diff_bg, "a diff's line numbers"),
             (t.add, t.add_bg, "a diff's added line"),
             (t.del, t.del_bg, "a diff's removed line"),
             (t.menu_fg, t.menu_bg, "the menu bar"),
             (t.hot, t.menu_bg, "a menu hot key"),
+            (t.del, t.menu_bg, "an error count in the menu row"),
             (t.fkey_fg, t.fkey_bg, "an F-key label"),
             (t.keybar_fg, t.keybar_bg, "an F-key's number"),
             (t.pulldown_fg, t.menu_bg, "an open menu's item"),
@@ -893,6 +898,8 @@ impl Theme {
             ),
             (t.dialog_fg, t.dialog_bg, "dialog text"),
             (t.dialog_dim, t.dialog_bg, "secondary text in a dialog"),
+            (t.warn, t.dialog_bg, "a failure in a dialog"),
+            (t.hot, t.dialog_bg, "a hint in a dialog"),
             (t.cursor_fg, t.cursor_bg, "the cursor row's text"),
         ]
     }
