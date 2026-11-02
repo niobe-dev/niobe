@@ -10430,11 +10430,18 @@ struct Offers {
 /// The composer is `ratatui-textarea`, which keeps the styles it draws with
 /// rather than taking them per frame, so a theme reaches it by being written
 /// into it. Everything else the shell draws reads the theme at draw time.
+///
+/// Every style it draws with is written, the selection's included: one left
+/// out is the editor's own default, a colour no theme chose — a named light
+/// blue, which the user's scheme paints even under a designed theme's 24-bit
+/// table. A selection is drawn as the transcript's is, the panes' background
+/// on the body text.
 fn paint_composer(composer: &mut TextArea<'static>, theme: &Theme) {
     composer.set_placeholder_style(Style::new().fg(theme.dim).bg(theme.pane_bg));
     composer.set_style(Style::new().fg(theme.fg).bg(theme.pane_bg));
     composer.set_cursor_line_style(Style::new().fg(theme.fg).bg(theme.pane_bg));
     composer.set_cursor_style(Style::new().fg(theme.pane_bg).bg(theme.hot));
+    composer.set_selection_style(Style::new().fg(theme.pane_bg).bg(theme.fg));
 }
 
 /// What a reply the session was writing when its process stopped says of
@@ -12787,6 +12794,38 @@ mod tests {
         ] {
             app.choose(Purpose::Theme, name.to_owned());
             assert_eq!(*app.theme(), drawn);
+        }
+    }
+
+    /// What is selected in the composer, or in the search's query, is drawn
+    /// as a selection of the transcript is: the panes' background on the body
+    /// text. Left to the editor's own default it is a named light blue, which
+    /// no theme chose and which the user's scheme paints even under a
+    /// designed theme's 24-bit table.
+    #[test]
+    fn a_selection_in_the_composer_or_the_search_is_drawn_in_the_theme() {
+        use crate::theme::{Depth, THEMES};
+
+        for theme in THEMES {
+            for depth in [Depth::Sixteen, Depth::TrueColour] {
+                let mut app = app().with_depth(depth).with_theme(theme);
+                let drawn = *app.theme();
+                let selected = Style::new().fg(drawn.pane_bg).bg(drawn.fg);
+                assert_eq!(
+                    app.composer.selection_style(),
+                    selected,
+                    "{} at {depth:?}: the composer",
+                    drawn.name
+                );
+                ctrl_f(&mut app);
+                let find = app.find.as_mut().expect("Ctrl+F opened a search");
+                assert_eq!(
+                    find.query.selection_style(),
+                    selected,
+                    "{} at {depth:?}: the search",
+                    drawn.name
+                );
+            }
         }
     }
 
