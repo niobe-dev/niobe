@@ -8043,8 +8043,9 @@ impl App {
     /// Handles the keys one read of the terminal held, in order, as
     /// [`App::on_key_read`] would one at a time.
     ///
-    /// An Enter among several keys is a line break, never a send: see the
-    /// comment on it below.
+    /// An Enter among several keys is a line break, never a send, and a Tab
+    /// among them is a tab, never a pick or a move: see the comments on them
+    /// below.
     ///
     /// Where a character has just been typed into the prompt, the characters
     /// that follow it in the same read go in with one insert, as a paste
@@ -8062,6 +8063,18 @@ impl App {
             if !arrival.alone && is_plain_enter(key) && self.composer_has_the_keyboard() {
                 if self.composer_has_room_for(1) {
                     self.composer.insert_newline();
+                }
+                continue;
+            }
+            // A Tab among them was pasted too, and is the tab a bracketed
+            // paste keeps. Pressed, it would take the file or command a list
+            // under the pasted word offers in place of that word, or move the
+            // keyboard to a side pane and hand it the rest of the paste.
+            if !arrival.alone && is_plain_tab(key) && self.composer_has_the_keyboard() {
+                if self.composer_has_room_for(1) {
+                    self.composer.insert_char('\t');
+                    self.offer_selected = 0;
+                    self.reopen_offers();
                 }
                 continue;
             }
@@ -10424,6 +10437,14 @@ fn is_plain_enter(key: ratatui::crossterm::event::KeyEvent) -> bool {
     use ratatui::crossterm::event::{KeyCode, KeyModifiers};
 
     key.code == KeyCode::Enter && key.modifiers == KeyModifiers::NONE
+}
+
+/// Whether `key` is Tab with nothing held, which is also what a terminal
+/// that does not bracket pastes sends for a tab in one.
+fn is_plain_tab(key: ratatui::crossterm::event::KeyEvent) -> bool {
+    use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+
+    key.code == KeyCode::Tab && key.modifiers == KeyModifiers::NONE
 }
 
 /// `key`, with Ctrl+H read as the Backspace it is.
@@ -18309,6 +18330,43 @@ mod tests {
             .collect();
         assert!(sent.is_empty(), "{sent:?}");
         assert_eq!(app.composer().lines(), ["hello", "world", ""]);
+    }
+
+    #[test]
+    fn a_tab_pasted_into_a_prompt_is_a_tab_and_the_rest_of_the_paste_follows_it() {
+        let mut app = app();
+
+        read(&mut app, b"if ok {\r\treturn done\r}", Instant::now());
+
+        assert_eq!(app.focus(), Focus::Session, "a pasted tab moved the focus");
+        assert_eq!(app.composer().lines(), ["if ok {", "\treturn done", "}"]);
+    }
+
+    #[test]
+    fn a_tab_pasted_after_an_at_word_picks_no_file() {
+        let mut app = app();
+        app.set_repo(Repo {
+            files: vec!["src/main.rs".to_owned()],
+            ..Repo::default()
+        });
+
+        read(&mut app, b"see @ma\tthen", Instant::now());
+
+        assert_eq!(app.composer().lines(), ["see @ma\tthen"]);
+    }
+
+    #[test]
+    fn a_tab_pressed_alone_after_an_at_word_still_picks_the_file() {
+        let mut app = app();
+        app.set_repo(Repo {
+            files: vec!["src/main.rs".to_owned()],
+            ..Repo::default()
+        });
+        read(&mut app, b"see @ma", Instant::now());
+
+        read(&mut app, b"\t", Instant::now());
+
+        assert_eq!(app.composer().lines(), ["see @src/main.rs "]);
     }
 
     #[test]

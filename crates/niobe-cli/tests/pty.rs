@@ -2394,7 +2394,10 @@ fn an_imported_session_counts_nothing_it_read_in_as_news() {
     terminal.shows("Done: the catalog response carries an etag.");
     written(&repo.path().join("args.log"));
     // Tab gives the keyboard to a side pane, where `c` asks what happened.
+    // A Tab read together with the key after it is a pasted tab, so the two
+    // are typed apart, as a person types them.
     terminal.typed(b"\t");
+    std::thread::sleep(KEY_GAP);
     let asked = terminal.mark();
     terminal.typed(b"c");
     terminal.shows_since(asked, "nothing has happened since");
