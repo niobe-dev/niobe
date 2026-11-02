@@ -105,8 +105,15 @@ pub struct Totals {
     /// so an agent at work is money no usage record holds yet. While this is
     /// set, [`Totals::reported_cost_usd`] and anything valued beside it are a
     /// floor, not the bill. The next settlement clears it, since a bill is the
-    /// backend's running total and takes in everything spent before it.
+    /// backend's running total and takes in everything spent before it —
+    /// unless the work was left unbilled by a process that has since ended:
+    /// the process that takes the session up again bills from the totals it
+    /// restored, and no bill of it takes that work in.
     pub agent_work_unbilled: bool,
+    /// Whether a process the session ran in ended with a sub-agent's work
+    /// unbilled, so that no settlement clears
+    /// [`Totals::agent_work_unbilled`] again.
+    agent_work_stranded: bool,
 }
 
 /// The records of one model that no reported cost covers.
@@ -120,6 +127,9 @@ pub struct Totals {
 pub struct Owed {
     total: Usage,
     records: Vec<Usage>,
+    /// How many of the first records no settlement covers: those of a
+    /// process that ended before a bill reached them. See [`Totals::strand`].
+    stranded: usize,
 }
 
 impl Owed {
@@ -138,7 +148,23 @@ impl Owed {
                 fast: false,
             },
             records: Vec::new(),
+            stranded: 0,
         }
+    }
+
+    /// Forgets the records a settlement covers — every one but those a
+    /// process that has ended left behind — and says how many that was.
+    fn settle(&mut self) -> usize {
+        let stranded = self.records.len().min(self.stranded);
+        let covered = self.records.len() - stranded;
+        let left: Vec<Usage> = self.records.drain(..stranded).collect();
+        let mut kept = Self::new(&self.total.model);
+        for record in &left {
+            kept.push(record);
+        }
+        kept.stranded = stranded;
+        *self = kept;
+        covered
     }
 
     fn push(&mut self, usage: &Usage) {
@@ -238,7 +264,7 @@ impl Totals {
         let cost = reported_cost(usage);
         if usage.settles_model == Some(true) && cost.is_some() {
             self.clear_unsettled(&usage.model);
-            self.agent_work_unbilled = false;
+            self.agent_work_unbilled = self.agent_work_stranded;
         }
         if usage.settles_model.is_none() && cost.is_some() {
             bump(&mut self.costs_unsaid);
@@ -271,10 +297,32 @@ impl Totals {
 
     /// Forgets what `model` was owed for, because a cost has now covered it.
     fn clear_unsettled(&mut self, model: &str) {
-        if let Some(covered) = self.unsettled.remove(model) {
-            let covered = u64::try_from(covered.records.len()).unwrap_or(u64::MAX);
-            self.records_unsettled = self.records_unsettled.saturating_sub(covered);
+        let Some(owed) = self.unsettled.get_mut(model) else {
+            return;
+        };
+        let covered = u64::try_from(owed.settle()).unwrap_or(u64::MAX);
+        if owed.records.is_empty() {
+            self.unsettled.remove(model);
         }
+        self.records_unsettled = self.records_unsettled.saturating_sub(covered);
+    }
+
+    /// Keeps everything still owed for owed from here on, because the
+    /// process that spent it has ended without a bill reaching it.
+    ///
+    /// A backend's bill is a running total of its own process, and one that
+    /// takes the session up again bills from the totals it restored — which
+    /// the `claude` CLI writes as it leaves and Niobe takes as already
+    /// reported, or which the process killed under a turn never wrote. Either
+    /// way the money for what was owed at the end reaches no record, so a
+    /// later settlement of the same model covers none of it: read as covered,
+    /// the session's figure would be shown whole while it is short by
+    /// whatever the ended process spent last.
+    fn strand(&mut self) {
+        for owed in self.unsettled.values_mut() {
+            owed.stranded = owed.records.len();
+        }
+        self.agent_work_stranded |= self.agent_work_unbilled;
     }
 }
 
@@ -994,6 +1042,7 @@ impl SessionState {
                 self.pending_assistant.clear();
                 self.interrupt_backend_work();
                 self.cut_short();
+                self.process_ended();
                 self.five_hour_left = true;
                 self.turn_last_ended.five_hour = None;
             }
@@ -1100,6 +1149,7 @@ impl SessionState {
                     self.pending_assistant.clear();
                     self.interrupt_backend_work();
                     self.cut_short();
+                    self.process_ended();
                 }
             }
 
@@ -1247,6 +1297,13 @@ impl SessionState {
                         agent: agent.cloned(),
                     }),
             );
+    }
+
+    /// Notes that the process the session ran in has ended, taking with it
+    /// any bill of what is still owed for: see [`Totals::strand`].
+    fn process_ended(&mut self) {
+        self.totals.strand();
+        self.metered.strand();
     }
 
     /// Notes that a sub-agent did something a backend bills for — wrote a
@@ -1874,6 +1931,66 @@ mod tests {
         nonsense.apply(&agent_said("reading"));
         nonsense.apply(&settlement("opus-5", f64::NAN));
         assert!(nonsense.totals().agent_work_unbilled);
+    }
+
+    /// A process that ended with records no bill of its had settled took
+    /// their money with it: the process that takes the session up again
+    /// bills from the running totals it restored, which never reached the
+    /// fold, so its settlement covers its own records and not those.
+    #[test]
+    fn what_a_process_left_unbilled_stays_owed_past_the_next_process_bill() {
+        for ended in [
+            Event::SessionLeft,
+            Event::Error {
+                message: "the `claude` session ended while a turn was running".to_owned(),
+                fatal: true,
+            },
+        ] {
+            let mut state = SessionState::replay(&[
+                Event::UserMessage {
+                    text: "first".to_owned(),
+                },
+                usage(100, 10, None),
+                settlement("opus-5", 0.25),
+                Event::TurnEnded,
+                Event::UserMessage {
+                    text: "second".to_owned(),
+                },
+                usage(300, 30, None),
+                ended.clone(),
+                Event::UserMessage {
+                    text: "third".to_owned(),
+                },
+                usage(500, 50, None),
+                settlement("opus-5", 0.5),
+                Event::TurnEnded,
+            ]);
+            let totals = state.totals();
+            assert!(!totals.cost_fully_reported(), "{ended:?}");
+            assert_eq!(totals.records_unsettled, 1, "{ended:?}");
+            let owed = &totals.unsettled["opus-5"];
+            assert_eq!(owed.records().len(), 1, "{ended:?}");
+            assert_eq!(owed.total().tokens(), 330, "{ended:?}");
+
+            // A clear starts the money over, what was left with it.
+            state.apply(&Event::Cleared);
+            assert!(state.totals().cost_fully_reported(), "{ended:?}");
+        }
+    }
+
+    /// An agent's work no bill had reached when its process ended is in no
+    /// later bill either.
+    #[test]
+    fn an_agents_work_a_process_left_unbilled_stays_unbilled_past_the_next_bill() {
+        let state = SessionState::replay(&[
+            settlement("opus-5", 0.25),
+            agent_said("reading"),
+            Event::SessionLeft,
+            usage(500, 50, None),
+            settlement("opus-5", 0.5),
+        ]);
+        assert!(state.totals().agent_work_unbilled);
+        assert!(!state.totals().cost_fully_reported());
     }
 
     /// A clear starts the money over, and with it what an agent left

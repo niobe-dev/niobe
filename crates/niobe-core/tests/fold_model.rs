@@ -257,6 +257,12 @@ struct Model {
     /// Whether a sub-agent wrote or called anything since the last record
     /// that settled a cost which is a sum of money, or since the last clear.
     agent_unbilled: bool,
+    /// Whether a process ended with an agent's work unbilled, which no later
+    /// bill takes in, since the last clear.
+    agent_stranded: bool,
+    /// Per model, the records that reported no money and no settlement has
+    /// covered since: how many a process that ended left, and how many in all.
+    owed: std::collections::BTreeMap<String, (u64, u64)>,
     /// Tokens folded while the session was last said to be billed by use.
     metered: u64,
     /// The last request's prompt and model, or a compaction's floor.
@@ -355,6 +361,10 @@ impl Model {
                 self.ended.extend(before.running_agents().iter().cloned());
                 self.clear_open = false;
                 self.left |= matches!(event, Event::SessionLeft);
+                self.agent_stranded |= self.agent_unbilled;
+                for (stranded, all) in self.owed.values_mut() {
+                    *stranded = *all;
+                }
             }
             Event::TurnEnded => self.clear_open = false,
             Event::UserMessage { .. } if !before.turn_running() && !self.clear_open => {
@@ -369,7 +379,13 @@ impl Model {
                     .cost_usd
                     .is_some_and(|cost| cost.is_finite() && cost >= 0.0);
                 if usage.settles_model == Some(true) && money {
-                    self.agent_unbilled = false;
+                    self.agent_unbilled = self.agent_stranded;
+                    if let Some((stranded, all)) = self.owed.get_mut(&usage.model) {
+                        *all = *stranded;
+                    }
+                }
+                if !money {
+                    self.owed.entry(usage.model.clone()).or_default().1 += 1;
                 }
                 *self.by_model.entry(usage.model.clone()).or_default() += tokens(usage);
                 if self.billing == Some(Billing::Metered) {
@@ -447,6 +463,13 @@ fn check(seed: u64, at: usize, event: &Event, state: &SessionState, model: &Mode
     );
     let owed: usize = totals.unsettled.values().map(|o| o.records().len()).sum();
     assert_eq!(owed as u64, totals.records_unsettled, "owed, {}", why());
+    let owed: u64 = model.owed.values().map(|(_, all)| all).sum();
+    assert_eq!(
+        totals.records_unsettled,
+        owed,
+        "owed by the events, {}",
+        why()
+    );
     assert_eq!(
         totals.cost_fully_reported(),
         totals.records_unsettled == 0 && !model.agent_unbilled,
