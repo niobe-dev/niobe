@@ -557,6 +557,62 @@ fn a_question_for_a_hundred_thousand_line_write_redraws_inside_the_write_budget(
     );
 }
 
+/// How long the one line of [`a_question_for_a_one_line_write_redraws_inside_the_write_budget`]
+/// is: a minified bundle of four megabytes, which a build writes on one line.
+const ONE_LINE_BYTES: usize = 4 * 1024 * 1024;
+
+/// A permission question for a write of one very long line — a minified
+/// bundle, a JSON document on one line — is drawn with every tick while it
+/// waits. The twenty rows it shows are the first of that one line wrapped, so
+/// the frame has to cost those rows and not the rows the rest of the line
+/// would wrap to, cut or under Ctrl+T.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "a frame is timed in an optimised build")]
+fn a_question_for_a_one_line_write_redraws_inside_the_write_budget() {
+    let _alone = ALONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let content: String = "var a=1;".repeat(ONE_LINE_BYTES / 8);
+    let path = "dist/bundle.min.js";
+    let mut app = running_session();
+    app.apply(&Event::PermissionRequest {
+        id: "bundle".into(),
+        tool: "Write".to_owned(),
+        input: serde_json::json!({ "file_path": path, "content": content }).to_string(),
+        target: Some(path.to_owned()),
+        proposal: Some(niobe_core::Proposal::new(
+            niobe_core::Action::Write {
+                path: path.to_owned(),
+                content: content.clone(),
+                existed: Some(false),
+            },
+            ["file_path", "content"],
+        )),
+        reason: None,
+        agent: None,
+    });
+    let first = screen(&mut app, 200, 60);
+    assert!(
+        first.contains("more rows"),
+        "the line is drawn cut, or its time says nothing: {first}"
+    );
+
+    let cut = median_frame(&mut app, &[(200, 60)]);
+    assert!(
+        cut <= WRITE_BUDGET,
+        "the median frame of a one-line write's question took {cut:?}, over {WRITE_BUDGET:?}"
+    );
+
+    app.on_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
+    let _ = screen(&mut app, 200, 60);
+    let open = median_frame(&mut app, &[(200, 60)]);
+    assert!(
+        open <= WRITE_BUDGET,
+        "the median frame of the same question under Ctrl+T took {open:?}, over \
+         {WRITE_BUDGET:?}"
+    );
+}
+
 /// A resize with a file of [`WRITTEN_LINES`] in the transcript lays its diff
 /// out again at every width, and still redraws inside a frame.
 #[test]

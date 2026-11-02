@@ -218,7 +218,13 @@ pub(crate) fn proposed(
             rows.push(elided(0, width, theme));
         }
         dropped = false;
-        rows.extend(wrapped_row(line, width, theme));
+        // One line can wrap to more rows than the ceiling on its own — a
+        // minified bundle is one line of megabytes — so it is laid out only
+        // as far as the ceiling and the rest of its rows are counted.
+        let left = (ceiling + 1).saturating_sub(rows.len());
+        let (laid, all) = wrapped_row(line, width, left, theme);
+        uncounted += all.saturating_sub(laid.len());
+        rows.extend(laid);
     }
     let total = rows.len() + uncounted;
     if open && total > OPEN_ROWS + 1 {
@@ -259,16 +265,24 @@ fn capped_marker(beyond: usize, width: usize, theme: &Theme) -> Line<'static> {
     ))
 }
 
-/// One line of a proposed change as the rows it wraps to: its sign on the
-/// first, and the rest under its text.
-fn wrapped_row(line: &DiffLine, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+/// One line of a proposed change as the first `rows` of the rows it wraps
+/// to — its sign on the first, and the rest under its text — and how many
+/// rows it wraps to in all, counted without laying out the ones not drawn.
+fn wrapped_row(
+    line: &DiffLine,
+    width: usize,
+    rows: usize,
+    theme: &Theme,
+) -> (Vec<Line<'static>>, usize) {
     let (sign, sign_colour, text_colour, bg) = look(line, theme);
     let room = width.saturating_sub(2).max(1);
-    let mut parts = text::wrap_exact(line.text(), room);
-    if parts.is_empty() {
+    // An empty line is still a row of the change.
+    let all = text::wrap_exact_rows(line.text(), room).max(1);
+    let mut parts = text::wrap_exact_first(line.text(), room, rows);
+    if parts.is_empty() && rows > 0 {
         parts.push(String::new());
     }
-    parts
+    let laid = parts
         .into_iter()
         .enumerate()
         .map(|(at, part)| {
@@ -283,7 +297,8 @@ fn wrapped_row(line: &DiffLine, width: usize, theme: &Theme) -> Vec<Line<'static
             ])
             .style(Style::new().bg(bg))
         })
-        .collect()
+        .collect();
+    (laid, all)
 }
 
 /// A line's sign, the colour of its sign or number, of its text, and of what
@@ -713,6 +728,36 @@ mod tests {
     fn a_change_nobody_can_say_was_gated_has_no_footer() {
         let rows = drawn(&change(vec![hunk(1, 1, vec![added("b")])], None), 20);
         assert_eq!(rows, vec!["1 + b               "]);
+    }
+
+    /// A line laid out only as far as the cut still counts every row it
+    /// wraps to in the marker, before the cut and under Ctrl+T.
+    #[test]
+    fn a_proposed_line_longer_than_the_cut_counts_every_row_it_wraps_to() {
+        // Twenty cells a row once the sign takes two of twenty-two: 35 rows.
+        let line = [context("keep"), added(&"x".repeat(700))];
+        let text = |rows: &[Line<'_>]| -> Vec<String> {
+            rows.iter()
+                .map(|row| row.spans.iter().map(|s| s.content.as_ref()).collect())
+                .collect()
+        };
+
+        let (cut, beyond) = proposed(&line, 22, false, &CLASSIC);
+        let cut = text(&cut);
+        assert_eq!(cut.len(), MAX_ROWS + 1);
+        assert_eq!(cut[1], format!("+ {}", "x".repeat(20)));
+        assert_eq!(cut[MAX_ROWS].trim_end(), "… 16 more rows");
+        assert_eq!(beyond, 16);
+
+        let (open, beyond) = proposed(&line, 22, true, &CLASSIC);
+        let open = text(&open);
+        assert_eq!(
+            open.len(),
+            1 + 35 + 1,
+            "the context, every row and the marker"
+        );
+        assert_eq!(open[35], format!("  {}", "x".repeat(20)));
+        assert_eq!(beyond, 0);
     }
 
     #[test]

@@ -672,7 +672,8 @@ Where tests live:
     deep, a resize of a paragraph of thousands of links, and the steady redraw of a long session of markdown replies, against a 16 ms budget, and a long line typed or pasted into
     the composer: a paste as long as the composer holds against 50 ms, a key typed into it
     against 16 ms, and keys read together against a linear ratio — and a
-    100,000-line file written from scratch, applied and drawn against 50 ms — and a key in the
+    100,000-line file written from scratch, applied and drawn against 50 ms, and the question for a
+    one-line write of four megabytes drawn against 50 ms — and a key in the
     history dialog over 20,000 remembered prompts, landed and drawn against 16 ms — and a
     megabyte prompt under the history dialog's cursor drawn against 16 ms — and a mebibyte memory
     file opened and paged in the Memory view against 16 ms — and the transcript of
