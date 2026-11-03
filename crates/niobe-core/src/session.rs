@@ -642,6 +642,10 @@ pub struct SessionState {
     /// Whether the session has been billed more than one way: resumed under
     /// a profile billed differently from the one it was recorded under.
     billing_changed: bool,
+    /// Whether usage has been folded since `billing` was last said, so that
+    /// a billing put right before anything was spent under it — the
+    /// profile's, said at spawn, then the backend's — is not a second way.
+    billed_since_said: bool,
     /// The usage folded while the session was billed by use.
     metered: Totals,
     /// The main agent's last request. `None` until one has been reported.
@@ -1003,6 +1007,7 @@ impl SessionState {
             }
 
             Event::Usage(usage) => {
+                self.billed_since_said = true;
                 self.totals.add(usage);
                 if self.billing == Some(Billing::Metered) {
                     self.metered.add(usage);
@@ -1043,8 +1048,11 @@ impl SessionState {
             // The last report stands for what the session is billed from here
             // on; what was spent before a change was spent the other way.
             Event::Billing { billing } => {
-                if self.billing.is_some_and(|before| before != *billing) {
+                if self.billed_since_said && self.billing.is_some_and(|before| before != *billing) {
                     self.billing_changed = true;
+                }
+                if self.billing != Some(*billing) {
+                    self.billed_since_said = false;
                 }
                 self.billing = Some(*billing);
             }
@@ -2328,6 +2336,36 @@ mod tests {
             );
             assert_eq!(state.totals().tokens(), 330, "{first:?} then {then:?}");
         }
+    }
+
+    /// A billing said before the backend spoke — the profile's, at spawn — and
+    /// put right before anything was spent is not a second way the session
+    /// was billed: nothing was billed the first way.
+    #[test]
+    fn a_billing_put_right_before_anything_was_spent_is_the_only_one() {
+        let events = [
+            Event::Billing {
+                billing: Billing::Plan,
+            },
+            Event::Billing {
+                billing: Billing::Metered,
+            },
+            usage(100, 10, None),
+            settlement("opus-5", 0.25),
+        ];
+        let state = SessionState::replay(&events);
+
+        assert_eq!(state.billing(), Some(Billing::Metered));
+        assert!(!state.billing_changed(), "nothing was spent on the plan");
+
+        let mut then_plan = events.to_vec();
+        then_plan.push(Event::Billing {
+            billing: Billing::Plan,
+        });
+        assert!(
+            SessionState::replay(&then_plan).billing_changed(),
+            "what was spent by use was billed one way, and the rest another"
+        );
     }
 
     #[test]
@@ -5404,7 +5442,11 @@ mod tests {
         let once = SessionState::replay(&[billed(Billing::Plan), billed(Billing::Plan)]);
         assert!(!once.billing_changed());
 
-        let twice = SessionState::replay(&[billed(Billing::Plan), billed(Billing::Metered)]);
+        let twice = SessionState::replay(&[
+            billed(Billing::Plan),
+            usage(100, 10, None),
+            billed(Billing::Metered),
+        ]);
         assert!(twice.billing_changed());
         assert_eq!(twice.billing(), Some(Billing::Metered));
     }

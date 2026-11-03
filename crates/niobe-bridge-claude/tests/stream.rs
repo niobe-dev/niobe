@@ -2507,6 +2507,28 @@ fn the_mcp_servers_the_cli_configured_come_from_its_init() {
 /// `tests/fixtures/README.md`.
 const API_ERRORS: &str = include_str!("fixtures/api-errors.jsonl");
 
+/// The recording ran on an API key. Under a profile that says `plan`, the
+/// driver says so before the CLI does, and the CLI's `init` then names the
+/// key: the session is billed by use, and only that way, since nothing was
+/// spent before the key was named.
+#[test]
+fn a_recorded_session_on_an_api_key_is_metered_under_a_profile_that_says_plan() {
+    let mut translator = Translator::new("max").billed_as(Billing::Plan);
+    let mut events = vec![Event::Billing {
+        billing: Billing::Plan,
+    }];
+    events.extend(
+        API_ERRORS
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .flat_map(|line| translator.line(line)),
+    );
+    let state = SessionState::replay(&events);
+
+    assert_eq!(state.billing(), Some(Billing::Metered));
+    assert!(!state.billing_changed(), "{events:?}");
+}
+
 #[test]
 fn a_recorded_retry_refusal_and_banner_are_each_read_rather_than_reported_as_unknown() {
     let events = translate(API_ERRORS);

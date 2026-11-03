@@ -631,8 +631,9 @@ pub struct Translator {
     /// was recorded doing so for each prompt on its standard input — and the
     /// release it reports there has not changed.
     checked_release: bool,
-    /// How the profile says the session is billed, which stands over anything
-    /// the stream suggests. `None` where the profile left it to the stream.
+    /// How the profile says the session is billed, which stands over what
+    /// the stream suggests but for a `plan` the stream shows billed by use.
+    /// `None` where the profile left it to the stream.
     billed_as: Option<Billing>,
     /// Where the CLI's credential came from, off its `init`. `None` where it
     /// has not said, which is not the same as `none`.
@@ -640,6 +641,11 @@ pub struct Translator {
     /// The billing last reported, so that it is reported when it changes
     /// rather than with every turn.
     billing: Option<Billing>,
+    /// Whether the stream has shown the session billed by use — a key, or a
+    /// provider that is not Anthropic's own API — which a profile's `plan`
+    /// gives way to. Kept for the process: the provider is named only with a
+    /// turn's result, and the `init` that every turn repeats names none.
+    served_metered: bool,
     /// What reads a shell result the CLI saved to a file, where the caller
     /// handed one in. `None` leaves every such result unread.
     read_spilled: Option<ReadSpilled>,
@@ -740,6 +746,7 @@ impl Translator {
             billed_as: None,
             api_key_source: None,
             billing: None,
+            served_metered: false,
             read_spilled: None,
             file_exists: None,
             compacting: false,
@@ -807,7 +814,9 @@ impl Translator {
     ///
     /// Taken over what the stream suggests: the stream shows which API served
     /// a request and where its key came from, and a seat billed by use signs
-    /// in exactly as a flat-rate plan does.
+    /// in exactly as a flat-rate plan does. A `plan` gives way where the
+    /// stream names an API key or a provider other than Anthropic's own API,
+    /// which no plan is served on (see `report_billing`).
     #[must_use]
     pub fn billed_as(mut self, billing: Billing) -> Self {
         self.billed_as = Some(billing);
@@ -3064,20 +3073,31 @@ impl Translator {
     /// Reports how the session is billed, where that is known and has
     /// changed: what the profile said, or else what the credential and the
     /// providers that served the turn's models say.
+    ///
+    /// A profile's `plan` gives way where the stream says the session is
+    /// billed by use: the profile is there for what the stream cannot tell, a
+    /// login billed by use, and no plan is served on an API key or by a cloud
+    /// provider. Taken at its word there, the shell would hide money being
+    /// spent — the session a settings file put on Bedrock, or one a key in
+    /// the environment took off the login.
     fn report_billing(
         &mut self,
         served: Option<&BTreeMap<String, wire::ModelUsage>>,
         out: &mut Vec<Event>,
     ) {
-        let billing = self.billed_as.or_else(|| {
-            billing_of(
-                self.api_key_source.as_deref(),
-                served
-                    .into_iter()
-                    .flat_map(|served| served.values())
-                    .filter_map(|usage| usage.provider.as_deref()),
-            )
-        });
+        let streamed = billing_of(
+            self.api_key_source.as_deref(),
+            served
+                .into_iter()
+                .flat_map(|served| served.values())
+                .filter_map(|usage| usage.provider.as_deref()),
+        );
+        self.served_metered |= streamed == Some(Billing::Metered);
+        let billing = match self.billed_as {
+            Some(Billing::Plan) if self.served_metered => Some(Billing::Metered),
+            Some(said) => Some(said),
+            None => streamed,
+        };
         if let Some(billing) = billing
             && self.billing != Some(billing)
         {
@@ -5115,6 +5135,36 @@ mod tests {
         );
         assert_eq!(billing(&opened), [Billing::Metered]);
         assert_eq!(billing(&translator.line(&served_by("firstParty"))), []);
+    }
+
+    /// What a profile can say that the stream cannot is that a login is
+    /// billed by use. No plan is served on an API key or by a cloud provider,
+    /// so a profile that says `plan` over one is mistaken about where its
+    /// session went — a settings file that put it on Bedrock, a key in its
+    /// environment — and the money is shown.
+    #[test]
+    fn a_profile_that_says_plan_yields_to_a_key_or_a_provider_no_plan_is_served_by() {
+        let mut keyed = Translator::new("max").billed_as(Billing::Plan);
+        let opened = keyed.line(
+            r#"{"type":"system","subtype":"init","session_id":"s-1","model":"opus-5","apiKeySource":"ANTHROPIC_API_KEY"}"#,
+        );
+        assert_eq!(billing(&opened), [Billing::Metered]);
+        assert_eq!(billing(&keyed.line(&served_by("firstParty"))), []);
+
+        let mut clouded = Translator::new("max").billed_as(Billing::Plan);
+        let opened = clouded.line(
+            r#"{"type":"system","subtype":"init","session_id":"s-1","model":"opus-5","apiKeySource":"none"}"#,
+        );
+        assert_eq!(billing(&opened), [Billing::Plan]);
+        assert_eq!(
+            billing(&clouded.line(&served_by("bedrock"))),
+            [Billing::Metered]
+        );
+        // The next turn's `init` names no provider, and is no news.
+        let again = clouded.line(
+            r#"{"type":"system","subtype":"init","session_id":"s-1","model":"opus-5","apiKeySource":"none"}"#,
+        );
+        assert_eq!(billing(&again), []);
     }
 
     /// One `message_delta`, which is where the counts that reconcile live.
