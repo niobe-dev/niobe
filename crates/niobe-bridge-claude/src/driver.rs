@@ -258,8 +258,8 @@ pub struct Options {
     /// can reach a flag Niobe does not model. A `--model` among them is left
     /// out where [`Options::model`] names one, and a `--permission-mode`
     /// where [`Options::resume`] carries a conversation on in
-    /// [`Options::mode`]: those are the session's, which the profile's would
-    /// undo.
+    /// [`Options::mode`] and [`Options::mode_known`] says that is the mode it
+    /// was in: those are the session's, which the profile's would undo.
     pub args: Vec<String>,
     /// The profile the session runs under, for [`Event::SessionMeta`].
     pub profile: String,
@@ -270,6 +270,15 @@ pub struct Options {
     pub model: Option<String>,
     /// How tool calls are gated.
     pub mode: Mode,
+    /// Whether [`Options::mode`] is the mode the conversation was last in.
+    ///
+    /// Off where the CLI last said it gates calls in a mode Niobe has no word
+    /// for — `acceptEdits`, `dontAsk` — or nothing recorded a mode. A
+    /// profile's own `--permission-mode` is how Niobe's CLI comes to be in
+    /// such a mode, so a conversation carried on then keeps the profile's
+    /// flag rather than being moved to [`Options::mode`], which the CLI was
+    /// not in.
+    pub mode_known: bool,
     /// The most the CLI may spend on this session, in USD. `None` leaves it
     /// unlimited. The CLI checks it between turns, so a session can finish
     /// above the figure by the cost of the turn that crossed it.
@@ -354,6 +363,7 @@ impl Options {
             billing: None,
             model: None,
             mode: Mode::Ask,
+            mode_known: true,
             budget_usd: None,
             resume: None,
             spent: Spent::default(),
@@ -416,14 +426,15 @@ impl Options {
     /// what the operator chose: a model picked in the session, or a mode a
     /// conversation carried on was left in — plan undone into a mode that
     /// edits without asking, after the CLI is started again on the
-    /// conversation. Where the session holds nothing of its own, the
-    /// profile's flag is the one the CLI starts with.
+    /// conversation. Where the session holds nothing of its own, or does not
+    /// know the mode the conversation is in, the profile's flag is the one
+    /// the CLI starts with.
     fn own_args(&self) -> Vec<String> {
         let mut overridden = Vec::new();
         if self.model.is_some() {
             overridden.push("--model");
         }
-        if self.resume.is_some() {
+        if self.resume.is_some() && self.mode_known {
             overridden.push("--permission-mode");
         }
         without(&self.args, &overridden)
@@ -1091,6 +1102,7 @@ impl Session {
             serde_json::json!({ "subtype": "set_permission_mode", "mode": spelt(mode) }),
         ))?;
         self.next.mode = mode;
+        self.next.mode_known = true;
         Ok(())
     }
 
@@ -1331,6 +1343,10 @@ impl Session {
         }
         if let Event::ModeSelected { mode } = event {
             self.next.mode = *mode;
+            self.next.mode_known = true;
+        }
+        if matches!(event, Event::ModeUnknown) {
+            self.next.mode_known = false;
         }
         // A prompt sent while the turn ran and still queued is the CLI's next
         // turn, started as soon as it wrote this end: a CLI stopped now took
@@ -4444,6 +4460,67 @@ read -r rest
             "{events:#?}"
         );
         assert!(session.next().is_none());
+    }
+
+    /// A CLI the profile put in a mode Niobe has no word for, stopped between
+    /// turns, with `mode_change` asked of it before the stop.
+    #[cfg(unix)]
+    fn stopped_in_a_profiles_mode(mode_change: Option<Mode>) -> Options {
+        let init = r#"printf '%s\n' '{"type":"system","subtype":"init","session_id":"s-9","model":"claude-sonnet-5","permissionMode":"acceptEdits"}' '{"type":"result","subtype":"success","is_error":false,"session_id":"s-9"}'"#;
+        let mode = r#"printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"niobe-2"}}'"#;
+        let after = match mode_change {
+            Some(_) => format!("read -r mode\n{mode}\n"),
+            None => String::new(),
+        };
+        let (mut session, _dir) = started_with(
+            &format!("read -r initialize\nread -r turn\n{init}\n{after}kill -TERM $$\n"),
+            |options| {
+                options.carry_on = true;
+                options.args = ["--permission-mode", "acceptEdits"]
+                    .map(str::to_owned)
+                    .to_vec();
+            },
+        );
+        session
+            .send("list the files", &[])
+            .expect("the turn is queued");
+        drained_until(&mut session, |event| matches!(event, Event::TurnEnded));
+        if let Some(mode) = mode_change {
+            session.set_mode(mode).expect("the request is queued");
+        }
+        let events = drained_to_the_end(&mut session);
+        session
+            .next()
+            .unwrap_or_else(|| panic!("the session can carry on: {events:#?}"))
+    }
+
+    /// The CLI said it gates calls as `acceptEdits`, which the profile asked
+    /// for and Niobe has no mode for: the conversation was in that mode, so
+    /// the CLI started again on it is started in it too, rather than in the
+    /// mode Niobe started the first one in, which the profile's flag undid.
+    #[cfg(unix)]
+    #[test]
+    fn a_conversation_in_a_mode_niobe_does_not_model_carries_on_in_it() {
+        let next = stopped_in_a_profiles_mode(None);
+
+        let argv = next.argv();
+        assert_eq!(next.resume.as_deref(), Some("s-9"));
+        assert_eq!(
+            taken(&argv, "--permission-mode"),
+            Some("acceptEdits"),
+            "{argv:?}"
+        );
+    }
+
+    /// Once the operator moves the conversation to a mode Niobe models, that
+    /// mode is the one it carries on in, over the profile's.
+    #[cfg(unix)]
+    #[test]
+    fn a_conversation_moved_out_of_the_profiles_mode_carries_on_where_it_was_moved() {
+        let next = stopped_in_a_profiles_mode(Some(Mode::Plan));
+
+        let argv = next.argv();
+        assert_eq!(taken(&argv, "--permission-mode"), Some("plan"), "{argv:?}");
     }
 
     #[cfg(unix)]

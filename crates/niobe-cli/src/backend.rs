@@ -618,6 +618,9 @@ fn claude_options(
     if let Some(mode) = with.mode {
         options.mode = mode;
     }
+    // A resumed session that recorded no mode Niobe models was in the one
+    // the profile's own arguments put it in, which it is taken up in again.
+    options.mode_known = with.mode.is_some();
     // The shell answers permission prompts, so the CLI is told to ask. The
     // flag is not set for a backend with nothing answering: the CLI stops the
     // turn on every gated call and waits for an answer that would never come.
@@ -1642,6 +1645,42 @@ mod tests {
             .carry_on,
             "a run of one turn, which no prompt follows"
         );
+    }
+
+    /// A session that recorded no mode Niobe models — the CLI said it gated
+    /// calls as the profile's `acceptEdits` — is taken up in the mode the
+    /// profile puts it in, and one that recorded a mode in that mode.
+    #[test]
+    fn a_resumed_session_with_no_mode_niobe_models_keeps_the_profiles_mode() {
+        let config = config(
+            "[profiles.max]\nbackend = \"claude\"\nargs = [\"--permission-mode\", \"acceptEdits\"]\n",
+        );
+        let selected = config
+            .select(Some("max"))
+            .expect("the profile is defined")
+            .expect("a profile was selected");
+        let mode_taken = |mode: Option<Mode>| {
+            let argv = claude_options(
+                Path::new("/repo"),
+                &selected,
+                &Attach {
+                    resume: Some("s-9".to_owned()),
+                    mode,
+                    ..Attach::default()
+                },
+                NO_HOME,
+            )
+            .expect("the profile names no settings file to be missing")
+            .argv();
+            let at = argv
+                .iter()
+                .rposition(|arg| arg == "--permission-mode")
+                .expect("a mode is passed");
+            argv[at + 1].clone()
+        };
+
+        assert_eq!(mode_taken(None), "acceptEdits");
+        assert_eq!(mode_taken(Some(Mode::Plan)), "plan");
     }
 
     #[test]
