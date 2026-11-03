@@ -306,6 +306,7 @@ fn no_content_puts_a_control_or_a_direction_mark_on_the_terminal() {
                 new: false,
             }],
             files: vec![],
+            head: None,
             began: None,
         });
         app.apply(&Event::UserMessage { text: "hi".into() });

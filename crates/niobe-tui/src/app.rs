@@ -72,6 +72,11 @@ pub struct Repo {
     /// What the working tree has changed against the last commit, one entry per
     /// file, in the order the repository reported them.
     pub working: Vec<WorkingFile>,
+    /// The commit [`Repo::working`] is counted against, as the repository
+    /// names it; `None` where it has no commit yet, or nobody has read it.
+    /// Two reads' counts say the same thing about a file only where this is
+    /// the same in both.
+    pub head: Option<String>,
     /// Every file under the directory the session runs in that the repository
     /// has or would take — committed, staged, or new and not ignored — by the
     /// path the agent names it by, relative to that directory. What `@`
@@ -1818,8 +1823,9 @@ struct TreeWatch {
     ended_before: usize,
     /// When the shell asked for the tree the turn began on.
     asked: Instant,
-    /// That tree, once a read that began after `asked` came back.
-    before: Option<Vec<WorkingFile>>,
+    /// That tree, once a read that began after `asked` came back, with the
+    /// commit it was counted against.
+    before: Option<(Option<String>, Vec<WorkingFile>)>,
     /// When the shell asked for the tree the turn ended on, once it has.
     ended: Option<Instant>,
     /// Whether a `!` command of the operator's ran while the watch was held:
@@ -4445,7 +4451,10 @@ impl App {
     /// from what the turn did. Nor of one after whose end a tool was called
     /// before the read of the tree it ended on came back — the next turn's,
     /// say, sent from the queue the moment it ended — for what that call
-    /// changed reads as the ended turn's.
+    /// changed reads as the ended turn's. Nor of one at whose end the tree is
+    /// counted against another commit than at its start — a commit the turn
+    /// made, or a checkout — for a file it committed leaves the list as one
+    /// put back would, and one that was new as one deleted would.
     pub fn settle_tree(&mut self, now: Instant) -> bool {
         let ended = self.session.turns().len();
         let Some(watch) = self.tree_watch.as_mut() else {
@@ -4480,12 +4489,12 @@ impl App {
             return false;
         }
         if watch.before.is_none() && !turn_over && fresh(watch.asked) {
-            watch.before = Some(self.repo.working.clone());
+            watch.before = Some((self.repo.head.clone(), self.repo.working.clone()));
         }
         if !turn_over {
             return false;
         }
-        let (Some(before), Some(asked_end)) = (&watch.before, watch.ended) else {
+        let (Some((began_on, before)), Some(asked_end)) = (&watch.before, watch.ended) else {
             if watch.before.is_none() {
                 self.tree_watch = None;
                 return false;
@@ -4496,7 +4505,14 @@ impl App {
         if !fresh(asked_end) {
             return false;
         }
-        let changed = match watch.operator_ran || watch.carried_command || watch.acted_after_end {
+        // Counts against one commit say nothing about counts against another:
+        // a file the turn committed leaves the list just as one put back does.
+        let moved_head = *began_on != self.repo.head;
+        let changed = match watch.operator_ran
+            || watch.carried_command
+            || watch.acted_after_end
+            || moved_head
+        {
             true => Vec::new(),
             false => changed_outside(before, &self.repo.working, &self.turn_edits),
         };
@@ -15635,6 +15651,40 @@ mod tests {
             "{}",
             said[0].body
         );
+    }
+
+    /// A turn that commits moves what the tree is counted against: every file
+    /// it committed leaves the list as though put back, or deleted where it
+    /// was new, and neither is what happened to it.
+    #[test]
+    fn a_turn_that_moved_the_commit_the_tree_is_counted_against_is_not_judged() {
+        let start = Instant::now();
+        let at = |ms| start + Duration::from_millis(ms);
+        let on = |head: &str, read: Repo| Repo {
+            head: Some(head.to_owned()),
+            ..read
+        };
+        let mut app = app();
+        app.apply(&Event::UserMessage {
+            text: "commit the work".to_owned(),
+        });
+        app.settle_tree(at(0));
+        let scratch = WorkingFile {
+            new: true,
+            ..file("notes.md", 12, 0)
+        };
+        app.set_repo(on(
+            "a1",
+            tree_read(at(1), &[scratch, file("src/lib.rs", 3, 1)]),
+        ));
+        app.settle_tree(at(2));
+        app.apply(&Event::TurnEnded);
+        app.settle_tree(at(3));
+        app.set_repo(on("b2", tree_read(at(4), &[])));
+        app.settle_tree(at(5));
+        app.settle_tree(at(6));
+
+        assert!(outside(&app).is_empty(), "{:?}", outside(&app));
     }
 
     #[test]

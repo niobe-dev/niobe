@@ -871,6 +871,7 @@ fn read(root: &Path, name: &str, counts: &mut Counts) -> Result<Repo, String> {
         ahead: status.ahead,
         behind: status.behind,
         working,
+        head: status.head,
         files,
         began: Some(started),
     })
@@ -1913,6 +1914,34 @@ mod tests {
             }],
             "with nothing committed, every file in the tree is new"
         );
+    }
+
+    /// A read says which commit it counted the tree against, so that two
+    /// reads either side of a commit are not compared as though one were.
+    #[test]
+    fn a_read_names_the_commit_its_counts_are_against() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let work = dir.path();
+        run(work, &["init", "--initial-branch=main", "."]);
+        run(work, &["config", "user.email", "test@example.invalid"]);
+        run(work, &["config", "user.name", "A Test"]);
+        pin_the_config(work);
+        std::fs::write(work.join("new.txt"), "a\n").expect("the file is written");
+        let unborn = read(work, "work", &mut Counts::default()).expect("the repository reads");
+
+        run(work, &["add", "new.txt"]);
+        run(work, &["commit", "-m", "first"]);
+        let committed = read(work, "work", &mut Counts::default()).expect("the repository reads");
+
+        let out = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(work)
+            .output()
+            .expect("git runs");
+        let head = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+        assert_eq!(unborn.head, None, "nothing was committed yet");
+        assert_eq!(committed.head, Some(head));
+        assert!(committed.working.is_empty(), "{:?}", committed.working);
     }
 
     /// A file named `HEAD` is a file like any other, and not a reason the
