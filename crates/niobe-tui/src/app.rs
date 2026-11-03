@@ -1825,6 +1825,11 @@ struct TreeWatch {
     /// what it changed reads in the tree as the turn's would, and nothing
     /// tells the two apart, so the turn is named for none of it.
     operator_ran: bool,
+    /// Whether a shell command an earlier turn moved to the background was
+    /// still running when this turn began: what it writes while the turn runs
+    /// reads in the tree as the turn's would, so the turn is named for none
+    /// of it.
+    carried_command: bool,
     /// Whether a tool was called after the turn ended, while the read of the
     /// tree it ended on was still to come back: the next turn, or an agent
     /// left working, may have changed files before that read saw them, and
@@ -4433,11 +4438,13 @@ impl App {
     /// the last commit, so a change that leaves them as they were — a line
     /// replaced by one of the same count in a file already changed — is not
     /// seen, and nothing is said that the counts do not show. Nor is anything
-    /// said of a turn during which a `!` command of the operator's ran: what
-    /// that command changed cannot be told from what the turn did. Nor of one
-    /// after whose end a tool was called before the read of the tree it ended
-    /// on came back — the next turn's, say, sent from the queue the moment
-    /// it ended — for what that call changed reads as the ended turn's.
+    /// said of a turn during which a `!` command of the operator's ran, or
+    /// one that began with a shell command an earlier turn moved to the
+    /// background still running: what that command changed cannot be told
+    /// from what the turn did. Nor of one after whose end a tool was called
+    /// before the read of the tree it ended on came back — the next turn's,
+    /// say, sent from the queue the moment it ended — for what that call
+    /// changed reads as the ended turn's.
     pub fn settle_tree(&mut self, now: Instant) -> bool {
         let ended = self.session.turns().len();
         let Some(watch) = self.tree_watch.as_mut() else {
@@ -4454,6 +4461,7 @@ impl App {
                     before: None,
                     ended: None,
                     operator_ran,
+                    carried_command: !self.session.background_commands().is_empty(),
                     acted_after_end: false,
                 });
                 return true;
@@ -4487,7 +4495,7 @@ impl App {
         if !fresh(asked_end) {
             return false;
         }
-        let changed = match watch.operator_ran || watch.acted_after_end {
+        let changed = match watch.operator_ran || watch.carried_command || watch.acted_after_end {
             true => Vec::new(),
             false => changed_outside(before, &self.repo.working, &self.turn_edits),
         };
@@ -15331,6 +15339,65 @@ mod tests {
         let said = outside(&app);
         assert_eq!(said.len(), 1, "{said:?}");
         assert_eq!(said[0].meta, "turn 2 · 1 file");
+    }
+
+    /// A shell command an earlier turn moved to the background goes on
+    /// writing while the next turn runs, and what it writes reads in the tree
+    /// as that turn's would: the turn is named for none of it.
+    #[test]
+    fn a_file_an_earlier_turns_background_command_changed_is_not_named_as_the_next_turns() {
+        let began = Instant::now();
+        let at = |ms| began + Duration::from_millis(ms);
+        let mut app = app();
+        app.apply(&Event::UserMessage {
+            text: "regenerate the bindings in the background".to_owned(),
+        });
+        app.settle_tree(at(0));
+        app.set_repo(tree_read(at(1), &[]));
+        app.settle_tree(at(2));
+        app.apply(&start("b1", "Bash", "make bindings", None));
+        app.apply(&end("b1", "Bash"));
+        app.apply(&Event::BackgroundCommandStarted { id: "b1".into() });
+        app.apply(&Event::TurnEnded);
+        app.settle_tree(at(3));
+        app.set_repo(tree_read(at(4), &[]));
+        app.settle_tree(at(5));
+        app.settle_tree(at(6));
+
+        app.apply(&Event::UserMessage {
+            text: "explain the parser".to_owned(),
+        });
+        app.settle_tree(at(7));
+        app.set_repo(tree_read(at(8), &[]));
+        app.settle_tree(at(9));
+        app.apply(&Event::TurnEnded);
+        app.settle_tree(at(10));
+        app.set_repo(tree_read(at(11), &[file("src/bindings.rs", 40, 12)]));
+        app.settle_tree(at(12));
+        app.settle_tree(at(13));
+
+        assert!(outside(&app).is_empty(), "{:?}", outside(&app));
+
+        // Once the command has ended, the next turn is named again.
+        app.apply(&Event::BackgroundCommandEnded { id: "b1".into() });
+        app.apply(&Event::UserMessage {
+            text: "format it".to_owned(),
+        });
+        app.settle_tree(at(14));
+        app.set_repo(tree_read(at(15), &[file("src/bindings.rs", 40, 12)]));
+        app.settle_tree(at(16));
+        app.apply(&Event::TurnEnded);
+        app.settle_tree(at(17));
+        app.set_repo(tree_read(
+            at(18),
+            &[file("src/bindings.rs", 40, 12), file("src/lib.rs", 1, 0)],
+        ));
+        app.settle_tree(at(19));
+        app.settle_tree(at(20));
+        let said = outside(&app);
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert_eq!(said[0].meta, "turn 3 · 1 file");
+        assert!(!said[0].body.contains("bindings"), "{}", said[0].body);
     }
 
     /// A read asked for at a turn's end that failed is the only answer that
