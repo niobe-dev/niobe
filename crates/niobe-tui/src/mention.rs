@@ -80,9 +80,52 @@ fn reads_whole_bare(path: &str) -> bool {
 
 /// Whether a listed path can be named at all. A line break ends a mention in
 /// every form the CLI reads, and in the prompt it would start a new line of
-/// the message, so a file whose name holds one is not offered.
+/// the message, so a file whose name holds one is not offered. Nor is one
+/// the CLI would read as a shorter path at a `#` ([`cut_at_hash`]), which
+/// neither form of mention escapes.
 fn nameable(path: &str) -> bool {
-    !path.contains(['\n', '\r'])
+    !path.contains(['\n', '\r']) && !cut_at_hash(path)
+}
+
+/// Whether the CLI reads a mention of `path` as only what comes before its
+/// first `#`. Claude Code (2.1.316) reads every mention, bare or quoted,
+/// through `^([^#]+)(?:#L(\d+)(?:-(\d+))?)?(?:#[^#]*)?$`, taking the first
+/// group as the file and what follows as a line range or a fragment; where
+/// the pattern does not match the mention, it reads it whole.
+fn cut_at_hash(path: &str) -> bool {
+    let Some(hash) = path.find('#') else {
+        return false;
+    };
+    if hash == 0 {
+        return false;
+    }
+    let rest = &path[hash + 1..];
+    let fragment =
+        |rest: &str| rest.is_empty() || rest.strip_prefix('#').is_some_and(|f| !f.contains('#'));
+    !rest.contains('#')
+        || rest
+            .strip_prefix('L')
+            .and_then(after_lines)
+            .is_some_and(fragment)
+}
+
+/// What follows a line range `\d+(?:-\d+)?` at the start of `text`, where one
+/// is there.
+fn after_lines(text: &str) -> Option<&str> {
+    let rest = after_digits(text)?;
+    Some(
+        rest.strip_prefix('-')
+            .and_then(after_digits)
+            .unwrap_or(rest),
+    )
+}
+
+/// What follows the ASCII digits `text` opens with, where it opens with one.
+fn after_digits(text: &str) -> Option<&str> {
+    let end = text
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(text.len());
+    (end > 0).then(|| &text[end..])
 }
 
 /// Where in `line` the character at `column` starts, or its end where
@@ -357,6 +400,36 @@ mod tests {
 
         assert_eq!(candidates(&files, "", 10), ["newer.txt"]);
         assert_eq!(Files::new(&files).candidates(&files, "", 10), ["newer.txt"]);
+    }
+
+    /// Claude Code (2.1.316) reads every mention, bare or quoted, through
+    /// `^([^#]+)(?:#L(\d+)(?:-(\d+))?)?(?:#[^#]*)?$`, the file being the
+    /// first group: `@"C#/Program.cs"` names `C`, `@notes#1.md` names
+    /// `notes`, and `@"a#L5#b"` names `a` from its fifth line. Where the
+    /// pattern does not match, it reads the mention whole.
+    #[test]
+    fn a_file_the_cli_would_read_up_to_a_hash_is_not_offered() {
+        let files: Vec<String> = [
+            "C#/Program.cs",
+            "notes#1.md",
+            "a#L5#b",
+            "x#L5-9",
+            "#autosave#",
+            "#top",
+            "a#b#c",
+            "a#L5-#b",
+            "plain.md",
+        ]
+        .map(str::to_owned)
+        .to_vec();
+        let named = ["#autosave#", "#top", "a#L5-#b", "a#b#c", "plain.md"];
+
+        let mut offered = candidates(&files, "", 20);
+        offered.sort_unstable();
+        assert_eq!(offered, named);
+        let mut indexed = Files::new(&files).candidates(&files, "", 20);
+        indexed.sort_unstable();
+        assert_eq!(indexed, named);
     }
 
     #[test]
