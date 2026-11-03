@@ -1462,9 +1462,15 @@ impl Translator {
 
     /// The servers an `init` lists, with what the CLI last said of each in
     /// answer to `mcp_status`: where it is configured and how it is reached
-    /// for every one it named, and why it failed for one that still stands
-    /// as it did then. One that stands otherwise is asked about again.
+    /// for every one it named, and why it failed and its tools for one that
+    /// still stands as it did then. One that stands otherwise is asked about
+    /// again.
+    ///
+    /// The tools are what the answer said only where `init`'s list cannot
+    /// tell them apart from another server's (see [`alike_in_tool_names`]);
+    /// otherwise `init`'s, which is the newer word.
     fn mcp_servers(&mut self, servers: Vec<wire::McpServer>, tools: &[String]) -> Event {
+        let alike = alike_in_tool_names(&servers);
         let mut listed = Vec::with_capacity(servers.len());
         for server in mcp_servers(servers, tools) {
             let said = self.mcp_said.get(&server.name);
@@ -1477,13 +1483,20 @@ impl Translator {
                 self.mcp_status_wanted = true;
             }
             listed.push(match said {
-                Some(said) => McpServer {
-                    scope: said.scope.clone(),
-                    endpoint: said.endpoint.clone(),
-                    reports_as: said.reports_as.clone(),
-                    error: said.error.clone().filter(|_| said.status == server.status),
-                    ..server
-                },
+                Some(said) => {
+                    let stands = said.status == server.status;
+                    McpServer {
+                        scope: said.scope.clone(),
+                        endpoint: said.endpoint.clone(),
+                        reports_as: said.reports_as.clone(),
+                        error: said.error.clone().filter(|_| stands),
+                        tools: match stands && alike.contains(&server.name) {
+                            true => said.tools.clone(),
+                            false => server.tools,
+                        },
+                        ..server
+                    }
+                }
                 None => server,
             });
         }
@@ -4590,6 +4603,30 @@ fn mcp_servers(servers: Vec<wire::McpServer>, tools: &[String]) -> Vec<McpServer
             reports_as: None,
         })
         .collect()
+}
+
+/// The names of the servers among `servers` whose tools `init`'s list cannot
+/// tell from another's: the CLI writes the two names alike in its tools'
+/// names (`my.docs` and `my docs` are both `mcp__my_docs__…`), or one's is
+/// the start of the other's (`mcp__a__` starts `mcp__a__b__…`), so a tool
+/// under either reads as both servers'.
+fn alike_in_tool_names(servers: &[wire::McpServer]) -> BTreeSet<String> {
+    let prefixes: Vec<(&str, String)> = servers
+        .iter()
+        .map(|server| {
+            let prefix = format!("mcp__{}__", tool_prefix_name(&server.name));
+            (server.name.as_str(), prefix)
+        })
+        .collect();
+    let mut alike = BTreeSet::new();
+    for (at, (name, prefix)) in prefixes.iter().enumerate() {
+        for (other_at, (_, other)) in prefixes.iter().enumerate() {
+            if at != other_at && (prefix.starts_with(other) || other.starts_with(prefix)) {
+                alike.insert((*name).to_owned());
+            }
+        }
+    }
+    alike
 }
 
 /// The servers an answer to `mcp_status` named, with those the last `init`
@@ -10472,6 +10509,44 @@ error: could not compile `demo` (lib test) due to 1 previous error";
             panic!("no server list: {events:?}");
         };
         assert_eq!(servers[0].tools, ["list_issues", "get_issue"]);
+    }
+
+    /// Two servers whose names the CLI writes alike in its tools' names —
+    /// `my.docs` and `my docs` both become `mcp__my_docs__…`, and `a`'s
+    /// prefix starts `a__b`'s — cannot have their tools told apart from
+    /// `init`'s list, which would give each the other's. What the CLI's
+    /// answer to `mcp_status` said of each is kept for every later `init`
+    /// that lists it standing as it did.
+    #[test]
+    fn servers_whose_tool_names_the_cli_writes_alike_keep_the_tools_the_cli_said_were_theirs() {
+        let mut translator = Translator::new("max");
+        let init = r#"{"type":"system","subtype":"init","session_id":"s","tools":["Read","mcp__my_docs__search","mcp__my_docs__fetch","mcp__a__b__run","mcp__a__look"],"mcp_servers":[{"name":"my.docs","status":"connected","source":"project"},{"name":"my docs","status":"connected","source":"user"},{"name":"a","status":"connected","source":"user"},{"name":"a__b","status":"connected","source":"user"}]}"#;
+        translator.line(init);
+        translator.asked_for_mcp_status("niobe-2");
+        translator.line(
+            r#"{"type":"control_response","response":{"subtype":"success","request_id":"niobe-2","response":{"mcpServers":[{"name":"my.docs","status":"connected","tools":[{"name":"search"}]},{"name":"my docs","status":"connected","tools":[{"name":"fetch"}]},{"name":"a","status":"connected","tools":[{"name":"look"}]},{"name":"a__b","status":"connected","tools":[{"name":"run"}]}]}}}"#,
+        );
+
+        let events = translator.line(init);
+        let Some(Event::McpServers { servers }) = events
+            .iter()
+            .find(|event| matches!(event, Event::McpServers { .. }))
+        else {
+            panic!("no server list: {events:?}");
+        };
+        let tools: Vec<(&str, &[String])> = servers
+            .iter()
+            .map(|server| (server.name.as_str(), server.tools.as_slice()))
+            .collect();
+        assert_eq!(
+            tools,
+            [
+                ("my.docs", ["search".to_owned()].as_slice()),
+                ("my docs", ["fetch".to_owned()].as_slice()),
+                ("a", ["look".to_owned()].as_slice()),
+                ("a__b", ["run".to_owned()].as_slice()),
+            ]
+        );
     }
 
     #[test]
