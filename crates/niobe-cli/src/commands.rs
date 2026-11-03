@@ -233,7 +233,9 @@ impl Drop for Commands {
     /// operator's behalf is left running with no one to see it end. Each
     /// group is asked first and killed if anything in it is still running
     /// after [`QUIT_GRACE`]; a quit with nothing still running, or only what
-    /// ends when asked, is not held up.
+    /// ends when asked, is not held up. A command's own shell is ended
+    /// outright first, as [`Shell::stop`] ends it, so that a line whose shell
+    /// traps the signal does not go on to its next step while the quit waits.
     ///
     /// What is stopped is what is still in a command's process group. A
     /// process that calls `setsid` leaves it for a session and a group of its
@@ -245,6 +247,9 @@ impl Drop for Commands {
         if let Ok(mut groups) = self.groups.lock() {
             let_go_of_the_empty(&mut groups, self.reaper.as_ref());
             for group in groups.iter() {
+                if !group.ended {
+                    end_the_shell(group.leader);
+                }
                 stop(group.leader);
             }
         }
@@ -929,6 +934,32 @@ mod tests {
 
         ended(&mut commands, PATIENCE).expect("the command ends");
         assert!(!after.exists(), "the line ran on after its stop");
+    }
+
+    /// The session ending stops a line as the operator's stop does: a shell
+    /// with a trap on the signal would otherwise act on it once the step it
+    /// waits on has ended, and go on to the next while the quit waits.
+    #[test]
+    fn a_command_the_session_ends_runs_none_of_the_rest_of_its_line() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let started = dir.path().join("started");
+        let after = dir.path().join("marker");
+        let mut commands = Commands::at(dir.path());
+        commands
+            .run(
+                &ToolCallId::new("t"),
+                &format!(
+                    "trap 'echo stopping' TERM; echo $$ > {}; sleep 30; echo done > {}",
+                    started.display(),
+                    after.display()
+                ),
+            )
+            .expect("sh starts");
+        pid_in(&started);
+
+        drop(commands);
+
+        assert!(!after.exists(), "the line ran on after the session ended");
     }
 
     #[test]
