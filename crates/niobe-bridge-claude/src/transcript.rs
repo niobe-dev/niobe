@@ -1057,6 +1057,12 @@ struct Fold {
     /// follows it, so it is the CLI's note between turns and no turn of its
     /// own. Anything else that follows makes it the prompt it was.
     command: Option<String>,
+    /// A compaction the operator asked for, held until the `/compact` that
+    /// asked for it: the CLI writes the command after the compaction's
+    /// boundary and summary, and live the compaction is part of that
+    /// command's turn rather than of the turn before it. Anything else the
+    /// session records first puts it down where it stands.
+    asked_compaction: Option<Event>,
 }
 
 impl Fold {
@@ -1089,6 +1095,7 @@ impl Fold {
             answered: false,
             compacted: false,
             command: None,
+            asked_compaction: None,
         }
     }
 
@@ -1101,6 +1108,7 @@ impl Fold {
 
     /// Every event folded, each with the time of the record it came from.
     fn timed(mut self) -> Vec<Timed> {
+        self.put_down_compaction();
         self.flush_command();
         self.times.resize(self.out.len(), None);
         self.out
@@ -1135,6 +1143,9 @@ impl Fold {
         record: Result<Line, serde_json::Error>,
         agent: Option<&str>,
     ) {
+        if agent.is_none() && !waits_on_a_command(&record) {
+            self.put_down_compaction();
+        }
         match record {
             Ok(Line::Assistant(record)) => self.assistant(record, agent),
             Ok(Line::User(record)) => self.user(record, agent),
@@ -1320,10 +1331,13 @@ impl Fold {
         let content = record.content.as_ref().and_then(|content| content.as_str());
         match record.subtype.as_deref() {
             Some("compact_boundary") => {
-                let compacted = self
-                    .translator
-                    .compacted(record.compact_metadata.unwrap_or_default());
-                self.out.push(compacted);
+                let metadata = record.compact_metadata.unwrap_or_default();
+                let asked = metadata.trigger.as_deref() == Some("manual");
+                let compacted = self.translator.compacted(metadata);
+                match asked {
+                    true => self.asked_compaction = Some(compacted),
+                    false => self.out.push(compacted),
+                }
                 self.compacted = true;
             }
             // A request that failed and was made again, which the live stream
@@ -1442,8 +1456,10 @@ impl Fold {
             // What a local command printed is the CLI's answer to it, not
             // something the operator said.
             if let Some(printed) = local_output(&text) {
+                self.put_down_compaction();
                 self.printed(printed);
             } else if let Some(ran) = shell_mode(&text) {
+                self.put_down_compaction();
                 self.flush_command();
                 // A command that printed nothing leaves nothing to show.
                 if !ran.is_empty() {
@@ -1455,8 +1471,18 @@ impl Fold {
                 // a prompt: nobody typed it, and it opens no turn.
             } else if let Some(command) = typed_command(&text) {
                 self.flush_command();
-                self.command = Some(command);
+                match self.asked_compaction.take() {
+                    Some(compaction) if is_compact(&command) => {
+                        self.compacted_by(command, compaction);
+                    }
+                    held => {
+                        self.asked_compaction = held;
+                        self.put_down_compaction();
+                        self.command = Some(command);
+                    }
+                }
             } else {
+                self.put_down_compaction();
                 self.flush_command();
                 self.said(text);
             }
@@ -1663,6 +1689,23 @@ impl Fold {
         self.out.push(Event::UserMessage { text });
     }
 
+    /// The `/compact` the operator typed, as the turn it was live: the
+    /// prompt, the compaction it ran, and an answer the operator's next
+    /// prompt ends, as a reply's would be.
+    fn compacted_by(&mut self, command: String, compaction: Event) {
+        self.said(command);
+        self.out.push(compaction);
+        self.answered = true;
+    }
+
+    /// A compaction held for the command that asked for it, where it stands
+    /// now that something else came first.
+    fn put_down_compaction(&mut self) {
+        if let Some(compaction) = self.asked_compaction.take() {
+            self.out.push(compaction);
+        }
+    }
+
     /// The command line held back, as the prompt it turned out to be.
     fn flush_command(&mut self) {
         if let Some(command) = self.command.take() {
@@ -1718,6 +1761,26 @@ fn shell_mode(text: &str) -> Option<String> {
         .filter(|printed| !printed.is_empty())
         .collect();
     Some(printed.join("\n"))
+}
+
+/// Whether `command` is the `/compact` command line, with its arguments or
+/// none.
+fn is_compact(command: &str) -> bool {
+    command == "/compact" || command.starts_with("/compact ")
+}
+
+/// Whether `record` can stand between a compaction the operator asked for and
+/// the command that asked for it, as the CLI writes them: its own furniture,
+/// and the summary, the caveat and the command, which are user turns.
+fn waits_on_a_command(record: &Result<Line, serde_json::Error>) -> bool {
+    matches!(
+        record,
+        Ok(Line::User(_)
+            | Line::PermissionMode(_)
+            | Line::AiTitle(_)
+            | Line::Attachment(_)
+            | Line::Aside)
+    )
 }
 
 /// The command line the operator typed, where `text` is the markup the CLI
@@ -3935,6 +3998,42 @@ mod tests {
             (3 + 5, 40 + 7),
             "the first process's response from its message, the second's from its accounting: \
              {events:?}"
+        );
+    }
+
+    /// The CLI writes a `/compact` the operator typed after the compaction it
+    /// ran: the boundary, the summary, and only then the command and what it
+    /// printed. Live, the command is a turn of its own that the compaction
+    /// is part of; read back, it is the same turn, and the turn the operator
+    /// worked in before it is no compaction.
+    #[test]
+    fn a_typed_compact_is_a_turn_of_its_own_and_the_turn_before_it_did_not_compact() {
+        let events = imported(&[
+            &prompt("first"),
+            &response("msg_1", "claude-opus-5", 150_000, 40),
+            r#"{"type":"system","subtype":"compact_boundary","compactMetadata":{"trigger":"manual","preTokens":150040,"postTokens":4282}}"#,
+            COMPACT_SUMMARY,
+            r#"{"type":"user","isMeta":true,"message":{"role":"user","content":"<local-command-caveat>Caveat: the messages below were generated while running local commands.</local-command-caveat>"}}"#,
+            r#"{"type":"user","message":{"role":"user","content":"<command-name>/compact</command-name>\n<command-message>compact</command-message>\n<command-args>keep the plan</command-args>"}}"#,
+            r#"{"type":"user","message":{"role":"user","content":"<local-command-stdout>Compacted </local-command-stdout>"}}"#,
+            &prompt("second"),
+            &response("msg_2", "claude-opus-5", 9_000, 20),
+        ]);
+
+        let said: Vec<&str> = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::UserMessage { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(said, ["first", "/compact keep the plan", "second"]);
+        let state = niobe_core::SessionState::replay(&events);
+        let compacted: Vec<_> = state.turns().iter().map(|turn| turn.compacted).collect();
+        assert_eq!(
+            compacted,
+            [None, Some(CompactTrigger::Manual)],
+            "the last turn is still open: {events:?}"
         );
     }
 
