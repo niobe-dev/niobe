@@ -292,6 +292,71 @@ fn a_link_wider_than_its_row_opens_whole_from_either_part() {
     }
 }
 
+/// A reply's markdown can write a link otherwise than it is drawn — an
+/// underscore escaped, an ampersand as an entity — and a link cut where its
+/// row ends opens whole from either part all the same, not the part before
+/// the cut, which can be another host.
+#[test]
+fn a_link_written_with_an_escape_opens_whole_from_either_part_when_cut() {
+    for length in 71..=150 {
+        let path = "a".repeat(length - 28);
+        let written = format!("https://example.com/{path}/x\\_y&amp;z");
+        let link = format!("https://example.com/{path}/x_y&z");
+        let mut app = replied(&format!("{written} nextword here"));
+        let frame = screen(&mut app, WIDTH, HEIGHT);
+
+        for part in ["https://example.com/", "nextword"] {
+            let Some((column, row)) = frame
+                .lines()
+                .enumerate()
+                .filter_map(|(row, line)| Some((line[..line.find(part)?].chars().count(), row)))
+                .last()
+            else {
+                continue;
+            };
+            let column = u16::try_from(column).expect("the screen is 120 wide");
+            let row = u16::try_from(row).expect("the screen is 30 high");
+            let column = match part {
+                "nextword" => column.saturating_sub(2),
+                _ => column,
+            };
+            click(&mut app, (column, row));
+            let opened = app.take_handoffs();
+            if part == "nextword" && opened.is_empty() {
+                continue;
+            }
+
+            assert_eq!(
+                opened,
+                vec![Handoff::Open(link.clone())],
+                "a link {length} long, clicked on {part:?}:\n{frame}"
+            );
+        }
+    }
+}
+
+/// A link written with an escape that fills its row exactly ends there: the
+/// word that starts the next row is not part of it.
+#[test]
+fn a_link_written_with_an_escape_that_fills_its_row_opens_without_the_word_on_the_next() {
+    for length in 30..=120 {
+        let path = "a".repeat(length - 25);
+        let written = format!("https://example.com/{path}/x\\_y");
+        let link = format!("https://example.com/{path}/x_y");
+        let mut app = replied(&format!("{written} nextword here"));
+        let frame = screen(&mut app, WIDTH, HEIGHT);
+        let at = cell_of(&frame, "https://example.com/");
+
+        click(&mut app, at);
+
+        assert_eq!(
+            app.take_handoffs(),
+            vec![Handoff::Open(link.clone())],
+            "a link {length} long:\n{frame}"
+        );
+    }
+}
+
 /// The click was the dialog's, not the transcript's under it: a link there
 /// would hand the machine's opener an address nobody aimed at, and a drag
 /// would copy text the dialog hides.

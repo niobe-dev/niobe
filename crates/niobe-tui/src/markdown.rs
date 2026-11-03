@@ -175,6 +175,37 @@ pub fn render(source: &str, width: usize, theme: &Theme) -> Vec<Line<'static>> {
     renderer.finish()
 }
 
+/// The room [`unbroken`] draws in: more than any line of a reply takes, yet
+/// far enough below `usize::MAX` that adding an indent to it cannot overflow.
+const UNBROKEN: usize = usize::MAX / 4;
+
+/// `source`'s words as [`render`] draws them, a line to each line the source
+/// breaks and none broken for want of room: an escaped `\_` as the `_` drawn,
+/// `&amp;` as `&`, a link's destination after its text.
+///
+/// For telling a word the pane cut at the end of a row from two words, by the
+/// text the rows were drawn from: the source as written holds a link with an
+/// escape in it otherwise than it is drawn, so it read as holding the part
+/// before the cut and never the two parts together, and a click opened the
+/// part before the cut.
+pub(crate) fn unbroken(source: &str) -> Vec<String> {
+    let mut renderer = Renderer::new(UNBROKEN, &crate::theme::CLASSIC);
+    renderer.unbroken = true;
+    for event in Parser::new_ext(source, options()) {
+        renderer.event(event);
+    }
+    renderer
+        .finish()
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect()
+        })
+        .collect()
+}
+
 /// Whether [`render`] would leave some of `source`'s words undrawn, as
 /// markdown means it to: a link reference definition, which only lends its
 /// destination and title to the links that name it, a link's or an image's
@@ -278,6 +309,9 @@ struct Renderer<'t> {
     /// For each link or image open, where it leads and how much text had
     /// been gathered when it opened, so its own text can be told apart.
     destinations: Vec<(String, usize)>,
+    /// Whether the room is [`UNBROKEN`]'s, where a rule is drawn short: as
+    /// wide as the room, each would be gigabytes.
+    unbroken: bool,
 }
 
 impl<'t> Renderer<'t> {
@@ -294,6 +328,7 @@ impl<'t> Renderer<'t> {
             code: None,
             table: None,
             destinations: Vec::new(),
+            unbroken: false,
         }
     }
 
@@ -329,7 +364,11 @@ impl<'t> Renderer<'t> {
             Event::Rule => {
                 self.flush();
                 self.gap();
-                let rule = "─".repeat(self.room());
+                let cells = match self.unbroken {
+                    true => 1,
+                    false => self.room(),
+                };
+                let rule = "─".repeat(cells);
                 let style = Style::new().fg(self.theme.dim);
                 self.emit(vec![Span::styled(rule, style)]);
             }
@@ -1390,6 +1429,25 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn unbroken_reads_a_reply_as_drawn_with_no_line_cut_for_room() {
+        let words = format!(
+            "{} https://x.invalid/a\\_b?c=1&amp;d=2",
+            "word ".repeat(200)
+        );
+        let source = format!("{words}\n\n---\n\n- [docs](https://y.invalid)");
+        let lines = unbroken(&source);
+        assert_eq!(
+            lines,
+            [
+                format!("{}https://x.invalid/a_b?c=1&d=2", "word ".repeat(200)),
+                String::new(),
+                "─".to_owned(),
+                "• docs (https://y.invalid)".to_owned(),
+            ]
+        );
     }
 
     #[test]

@@ -2808,10 +2808,22 @@ fn letters(line: &Line<'_>) -> usize {
         .count()
 }
 
-/// The text `entry` is drawn from: its head, its detail, its body, and what
-/// each of its calls did, failed with and printed.
+/// The text `entry` is drawn from: its head, its detail, its body — a
+/// reply's both as written and as its markdown draws it — and what each of
+/// its calls did, failed with and printed.
 fn said_in(entry: &Entry) -> Vec<String> {
     let mut said = vec![entry.head.clone(), entry.meta.clone(), entry.body.clone()];
+    match entry.kind {
+        EntryKind::Agent | EntryKind::SubAgent => {
+            said.extend(crate::markdown::unbroken(entry.body.trim_end()));
+        }
+        EntryKind::User
+        | EntryKind::Tool
+        | EntryKind::Failure
+        | EntryKind::Notice
+        | EntryKind::Turn(_)
+        | EntryKind::Compacted(_) => {}
+    }
     for call in &entry.calls {
         said.push(call.what.clone());
         said.extend(call.error.clone());
