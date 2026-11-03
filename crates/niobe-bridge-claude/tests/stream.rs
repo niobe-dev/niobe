@@ -2290,6 +2290,12 @@ fn a_recorded_sessions_kinds_of_work_add_up_to_its_calls() {
         );
         assert_eq!(sum(|kind| kind.failed), tools.failed, "{:?}", tools.by_work);
         assert_eq!(sum(|kind| kind.denied), tools.denied, "{:?}", tools.by_work);
+        assert_eq!(
+            sum(|kind| kind.stopped),
+            tools.stopped,
+            "{:?}",
+            tools.by_work
+        );
     }
 }
 

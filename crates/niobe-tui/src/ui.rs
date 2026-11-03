@@ -5786,6 +5786,9 @@ fn name_rows(tools: &ToolTotals, width: usize, theme: &Theme) -> Vec<Line<'stati
         family.denied = family
             .denied
             .saturating_add(of(&tools.denied_by_name, name));
+        family.stopped = family
+            .stopped
+            .saturating_add(of(&tools.stopped_by_name, name));
     }
     let mut mix: Vec<(&String, &Family)> = families.iter().collect();
     mix.sort_by(|a, b| b.1.calls.cmp(&a.1.calls).then_with(|| a.0.cmp(b.0)));
@@ -5811,29 +5814,34 @@ fn name_rows(tools: &ToolTotals, width: usize, theme: &Theme) -> Vec<Line<'stati
                 bar_width,
                 theme,
             );
-            push_denied(&mut row, family.denied, theme);
+            push_unrun(&mut row, (family.denied, family.stopped), theme);
             row
         })
         .collect()
 }
 
-/// One family of tools' calls, and how many of them failed or were refused.
+/// One family of tools' calls, and how many of them failed, were refused or
+/// were stopped.
 #[derive(Debug, Default)]
 struct Family {
     calls: u64,
     failed: u64,
     denied: u64,
+    stopped: u64,
 }
 
-/// Ends a tools row with how many of its calls were refused, where any were:
-/// a refused call never ran, and a row that counted it without saying so
+/// Ends a tools row with how many of its calls were refused and how many
+/// stopped, where any were: a refused call never ran and a stopped one did
+/// not run to its end, and a row that counted either without saying so
 /// would read as work done.
-fn push_denied(row: &mut Line<'static>, denied: u64, theme: &Theme) {
-    if denied > 0 {
-        row.spans.push(Span::styled(
-            format!(" {denied} denied"),
-            Style::new().fg(theme.dim),
-        ));
+fn push_unrun(row: &mut Line<'static>, (denied, stopped): (u64, u64), theme: &Theme) {
+    for (count, said) in [(denied, "denied"), (stopped, "stopped")] {
+        if count > 0 {
+            row.spans.push(Span::styled(
+                format!(" {count} {said}"),
+                Style::new().fg(theme.dim),
+            ));
+        }
     }
 }
 
@@ -5861,7 +5869,7 @@ fn work_rows(tools: &ToolTotals, width: usize, theme: &Theme) -> Vec<Line<'stati
             bar_width,
             theme,
         );
-        push_denied(&mut row, kind.denied, theme);
+        push_unrun(&mut row, (kind.denied, kind.stopped), theme);
         rows.push(row);
         rows.push(
             Line::from(specifics_line(&kind.specifics, width)).style(Style::new().fg(theme.dim)),
@@ -5930,6 +5938,16 @@ fn tool_summary(tools: &ToolTotals, theme: &Theme) -> Vec<Figure> {
         2,
         Span::styled(format!("{} denied", tools.denied), dim),
     ));
+    // Said only where a call was stopped, as the failures are: a stop is the
+    // operator's own act, and a header that counted it among the calls
+    // without saying so would read it as one that ran.
+    if tools.stopped > 0 {
+        figures.push(Figure::after(
+            " · ",
+            2,
+            Span::styled(format!("{} stopped", tools.stopped), dim),
+        ));
+    }
     figures.push(Figure::after(
         " · ",
         3,
@@ -8746,6 +8764,7 @@ mod tests {
             finished: 1234,
             failed: 17,
             denied: 3,
+            stopped: 5,
             output_bytes: 168_000,
             ..ToolTotals::default()
         };

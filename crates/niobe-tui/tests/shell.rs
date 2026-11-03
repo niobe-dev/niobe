@@ -4016,6 +4016,64 @@ fn a_refused_call_is_marked_on_its_tools_row_as_on_its_kind_of_work() {
     assert!(!read.contains("denied"), "{read:?}");
 }
 
+/// A call the operator stopped did not run to its end, and the Tools section
+/// says so where it counts it — in its header, on its kind of work's row and
+/// on its tool's row — as it does a refused one: `Write 2` with nothing
+/// beside it, where both were stopped, reads as two files written.
+#[test]
+fn a_stopped_call_is_marked_in_the_tools_header_and_on_its_rows() {
+    let mut app = running_session();
+    for id in ["w1", "w2"] {
+        app.apply(&Event::ToolCallStart {
+            id: id.into(),
+            name: "Write".to_owned(),
+            input: "{}".to_owned(),
+            summary: Some("notes.md".to_owned()),
+            agent: None,
+        });
+        app.apply(&Event::ToolCallEnd {
+            id: id.into(),
+            name: "Write".to_owned(),
+            input: "{}".to_owned(),
+            output: String::new(),
+            bytes: 0,
+            outcome: niobe_core::event::ToolOutcome::Interrupted,
+            summary: Some("notes.md".to_owned()),
+            exit_code: None,
+            error: Some("stopped by the operator".to_owned()),
+            command: None,
+            untrimmed: None,
+        });
+    }
+    let kinds = screen(&mut app, 200, 60);
+    let header = kinds
+        .lines()
+        .find(|line| line.contains("Tools") && line.contains("calls"))
+        .unwrap_or_default();
+    assert!(header.contains("2 stopped"), "{header:?}");
+    let editing = kinds
+        .lines()
+        .find(|line| line.contains("Editing"))
+        .unwrap_or_default();
+    assert!(editing.contains("2 stopped"), "{editing:?}");
+
+    app.count_tools_by_name();
+    let names = screen(&mut app, 200, 60);
+    let write = names
+        .lines()
+        .find(|line| line.contains("Write ") && line.contains('▓'))
+        .unwrap_or_default();
+    assert!(
+        write.contains("2 stopped"),
+        "the stops are on the tool's own row:\n{names}"
+    );
+    let read = names
+        .lines()
+        .find(|line| line.contains("Read ") && line.contains('▓'))
+        .unwrap_or_default();
+    assert!(!read.contains("stopped"), "{read:?}");
+}
+
 /// The Tools section counts calls by the kind of work they did, with what did
 /// it on a dim line under each kind, and `t` in the Activity pane turns it to
 /// the tools' own names and back.

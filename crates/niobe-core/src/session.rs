@@ -363,12 +363,17 @@ pub struct ToolTotals {
     /// Denied calls per tool name, kept as the failures are and for the same
     /// reason: a pane counting calls by tool says which of them never ran.
     pub denied_by_name: BTreeMap<String, u64>,
+    /// Stopped calls per tool name, kept as the refusals are and for the
+    /// same reason: a stopped call did not run to its end.
+    pub stopped_by_name: BTreeMap<String, u64>,
     /// Ends that arrived without a matching start. A non-zero count means the
     /// producer is dropping events, so it is surfaced rather than swallowed.
     pub unmatched_ends: u64,
     /// Finished calls by the kind of work they did ([`crate::work`]). Every
     /// finished call is under exactly one kind, so the kinds' calls add up to
-    /// [`ToolTotals::finished`] and their failures to [`ToolTotals::failed`].
+    /// [`ToolTotals::finished`], their failures to [`ToolTotals::failed`],
+    /// their refusals to [`ToolTotals::denied`] and their stops to
+    /// [`ToolTotals::stopped`].
     pub by_work: BTreeMap<Work, WorkTotals>,
     /// Calls the session or their turn ended under: still running when a
     /// fatal error ended the backend, or when the backend ended the turn
@@ -398,6 +403,8 @@ pub struct WorkTotals {
     pub failed: u64,
     /// Of those, the calls the operator denied.
     pub denied: u64,
+    /// Of those, the calls the operator stopped.
+    pub stopped: u64,
     /// How many of the calls each program or tool took part in: once per
     /// call however often the call ran it, so a pipeline of two `grep`s is
     /// one call that used `grep`.
@@ -967,7 +974,11 @@ impl SessionState {
                     }
                     // The operator's own stop: the tool neither failed nor
                     // was refused, so it counts against neither.
-                    ToolOutcome::Interrupted => bump(&mut self.tools.stopped),
+                    ToolOutcome::Interrupted => {
+                        bump(&mut self.tools.stopped);
+                        bump(self.tools.stopped_by_name.entry(name.clone()).or_default());
+                        bump(&mut kind.stopped);
+                    }
                 }
                 if self.in_flight_tools.remove(id).is_none() {
                     // A call that was cut short and has now ended: it ran to
@@ -5509,6 +5520,12 @@ mod tests {
             (4, 1, 1, 1)
         );
         assert_eq!(tools.succeeded(), 1);
+        assert_eq!(
+            tools.stopped_by_name,
+            BTreeMap::from([("Bash".to_owned(), 1)])
+        );
+        let stopped: u64 = tools.by_work.values().map(|kind| kind.stopped).sum();
+        assert_eq!(stopped, tools.stopped);
     }
 
     #[test]
