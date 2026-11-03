@@ -4051,6 +4051,53 @@ fn a_sigkill_to_the_sessions_whole_group_leaves_nothing_it_started_running() {
     });
 }
 
+/// A `!` command line whose `sh` traps SIGTERM goes on to its next step once
+/// the step it waits on has ended. SIGKILL leaves the shell no way to end that
+/// `sh` itself, so what outlives the session has to end it outright before it
+/// asks the line's group to end.
+///
+/// Nobody reads the command's output once the shell has gone, so a `sh` that
+/// writes to it is ended by SIGPIPE whatever the reaper did. The line's trap
+/// writes nothing, and its step leaves on SIGTERM with an exit status of its
+/// own, as a build tool that cleans up does, so that `sh` does not report it
+/// killed.
+#[test]
+fn a_sigkill_stops_a_bang_command_line_before_its_next_step() {
+    let repo = repo();
+    let (terminal, slave) = Terminal::open();
+    let mut shell = shell_on(&slave, repo.path());
+    terminal.shows(OPENING_FRAME);
+    terminal.typed(b"!");
+    terminal.shows("what it prints");
+    terminal.typed(
+        b"trap 'rm -f lock' TERM; sh -c 'trap \"exit 1\" TERM; echo $1 > bang.tmp && mv bang.tmp bang.pid; sleep 77108 & wait' sh $$; touch ran\r",
+    );
+    let marker = repo.path().join("bang.pid");
+    let deadline = Instant::now() + PATIENCE;
+    while !marker.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let written = std::fs::read_to_string(&marker).expect("the command wrote down its process");
+    let raw: i32 = written.trim().parse().expect("a pid is a number");
+    let group = Pid::from_raw(raw).expect("a pid is positive");
+
+    signal(&shell, Signal::KILL);
+
+    ended(&mut shell);
+    drop(slave);
+    terminal.drained();
+    let deadline = Instant::now() + 2 * DEADLINE;
+    let left = || rustix::process::test_kill_process_group(group).is_ok();
+    while left() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(!left(), "the `!` command was still running after a SIGKILL");
+    assert!(
+        !repo.path().join("ran").exists(),
+        "the `!` command line ran its next step after a SIGKILL"
+    );
+}
+
 /// Ctrl+Z, which a terminal in raw mode hands the shell as a key rather than
 /// as SIGTSTP.
 const CTRL_Z: &[u8] = b"\x1a";

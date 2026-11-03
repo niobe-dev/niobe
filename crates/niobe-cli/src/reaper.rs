@@ -13,8 +13,9 @@
 //! So a `sh` of its own, in a process group of its own, is told each group
 //! the session starts and each it has seen end, and holds a pipe from the
 //! session whose other end nothing else has. The pipe closes when the session
-//! has gone however it went; `sh` reads the end of it, asks every group it
-//! still knows of to end, and kills what is left a second later. A session
+//! has gone however it went; `sh` reads the end of it, kills each `!`
+//! command's own `sh` that is still running, asks every group it still knows
+//! of to end, and kills what is left a second later. A session
 //! that ends by its own way out kills that `sh` first, so the groups it has
 //! already stopped are not signalled again.
 
@@ -28,17 +29,37 @@ use std::sync::{Arc, Mutex};
 /// A group taken off is one the session saw empty. Its number can then be
 /// given to a new process, which could lead a group of its own, so it is not
 /// signalled on the session's behalf.
+///
+/// `!` adds a `!` command's group and also lists its leader, the line's own
+/// `sh`, which is killed outright before its group is asked to end, as the
+/// session's own quit does: a `sh` that traps SIGTERM would otherwise run the
+/// next step of its line in the second before the group is killed. `=` takes
+/// a leader off that list once its `sh` has ended, so that only a `sh` the
+/// session started is ever killed by its number; the group stays listed, for
+/// what the line put in the background.
 const WATCH: &str = r#"groups=' '
+shells=' '
 while read -r line; do
   case $line in
     +*) groups="$groups${line#+} " ;;
+    !*) g=${line#!}
+        groups="$groups$g "
+        shells="$shells$g " ;;
+    =*) g=${line#=}
+        case $shells in
+          *" $g "*) shells="${shells%%" $g "*} ${shells#*" $g "}" ;;
+        esac ;;
     -*) g=${line#-}
         case $groups in
           *" $g "*) groups="${groups%%" $g "*} ${groups#*" $g "}" ;;
+        esac
+        case $shells in
+          *" $g "*) shells="${shells%%" $g "*} ${shells#*" $g "}" ;;
         esac ;;
   esac
 done
 [ "$groups" = ' ' ] && exit 0
+for g in $shells; do kill -s KILL -- "$g" 2>/dev/null; done
 for g in $groups; do kill -s TERM -- "-$g" 2>/dev/null; done
 sleep 1
 for g in $groups; do kill -s KILL -- "-$g" 2>/dev/null; done
@@ -82,6 +103,21 @@ impl Reaper {
         self.tell(&format!("+{group}\n"));
     }
 
+    /// Tells the reaper the session has started the `!` command whose `sh`
+    /// leads the process group `leader`: that `sh` is killed outright before
+    /// the group is asked to end, so that the line goes no further.
+    pub fn watch_command(&self, leader: u32) {
+        self.tell(&format!("!{leader}\n"));
+    }
+
+    /// Tells the reaper the `sh` leading the command group `leader` has ended
+    /// and been reaped. The group is still watched, for what that `sh` put in
+    /// the background; the number is no longer killed as a process, since
+    /// once the group empties it can be given to anyone's.
+    pub fn shell_ended(&self, leader: u32) {
+        self.tell(&format!("={leader}\n"));
+    }
+
     /// Tells the reaper the group `group` leads has nobody left in it.
     pub fn forget(&self, group: u32) {
         self.tell(&format!("-{group}\n"));
@@ -118,7 +154,7 @@ mod tests {
     use super::*;
     use std::io::{BufRead, BufReader};
     use std::os::unix::process::{CommandExt, ExitStatusExt};
-    use std::process::ExitStatus;
+    use std::process::{ChildStdout, ExitStatus};
     use std::time::{Duration, Instant};
 
     /// How long a test waits for something the reaper does. A `sh` takes a
@@ -200,6 +236,78 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         None
+    }
+
+    /// A `!` command line, run as the shell runs one, whose `sh` traps
+    /// SIGTERM and has a step after the one it waits on; returned once the
+    /// trap is in place. The step after writes `ran` in `dir`.
+    ///
+    /// Its output is returned to be held open, as the shell holds a
+    /// command's: a trap that prints to a closed pipe would end `sh` on
+    /// SIGPIPE before it reached the next step.
+    fn command_line_trapping_term(dir: &std::path::Path) -> (Child, BufReader<ChildStdout>) {
+        let mut sh = Command::new("sh");
+        sh.args([
+            "-c",
+            "exec 2>&1\neval \"$1\"",
+            "sh",
+            &format!("trap 'echo bye' TERM; echo trapped; sleep {ASLEEP}; touch ran"),
+        ])
+        .current_dir(dir)
+        .stdout(Stdio::piped())
+        .process_group(0);
+        let mut line = sh.spawn().expect("sh starts");
+        let mut said = String::new();
+        let mut printed = BufReader::new(line.stdout.take().expect("its output is piped"));
+        printed
+            .read_line(&mut said)
+            .expect("sh says the trap is in place");
+        assert_eq!(said, "trapped\n");
+        (line, printed)
+    }
+
+    #[test]
+    fn a_command_line_goes_no_further_when_the_session_is_killed() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let reaper = Reaper::start().expect("sh starts");
+        let (mut line, _printed) = command_line_trapping_term(dir.path());
+        reaper.watch_command(line.id());
+
+        session_killed(&reaper);
+
+        assert!(
+            reaper_ended_within(&reaper, PATIENCE),
+            "the reaper never ended"
+        );
+        let status = ended_within(&mut line, PATIENCE).expect("the line outlived the session");
+        assert_eq!(
+            status.signal(),
+            Some(9),
+            "the line's sh ended on something other than SIGKILL: {status:?}"
+        );
+        assert!(
+            !dir.path().join("ran").exists(),
+            "the command line ran its next step after the session was killed"
+        );
+    }
+
+    /// Once a command's `sh` has ended, its number leads only what it put in
+    /// the background, which is asked to end and given its grace.
+    #[test]
+    fn a_command_group_whose_shell_has_ended_is_asked_to_end_first() {
+        let reaper = Reaper::start().expect("sh starts");
+        let mut started = group();
+        reaper.watch_command(started.id());
+        reaper.shell_ended(started.id());
+
+        session_killed(&reaper);
+
+        let status = ended_within(&mut started, PATIENCE).expect("the group outlived the session");
+        assert_eq!(
+            status.signal(),
+            Some(15),
+            "the group ended on something other than SIGTERM: {status:?}"
+        );
     }
 
     #[test]

@@ -158,7 +158,7 @@ impl Shell for Commands {
             });
         }
         if let Some(reaper) = &self.reaper {
-            reaper.watch(leader);
+            reaper.watch_command(leader);
         }
 
         let id = id.clone();
@@ -170,6 +170,9 @@ impl Shell for Commands {
             if let Ok(mut groups) = groups.lock() {
                 for group in groups.iter_mut().filter(|group| group.leader == leader) {
                     group.ended = true;
+                }
+                if let Some(reaper) = &reaper {
+                    reaper.shell_ended(leader);
                 }
                 let_go_of_the_empty(&mut groups, reaper.as_ref());
             }
