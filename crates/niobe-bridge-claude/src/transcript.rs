@@ -151,6 +151,19 @@ const META: &str = ".meta.json";
 /// session was working would read back as running for ever.
 const QUEUED_NOTIFICATION: &str = "task-notification";
 
+/// The `commandMode` of the attachment the CLI writes when a prompt reaches a
+/// turn that is still running, which the CLI hands the model with the next
+/// result rather than as a turn of its own and keeps no user turn for.
+const QUEUED_PROMPT: &str = "prompt";
+
+/// The `origin.kind` of a queued prompt the operator typed. Read off the
+/// transcripts on the machine this was written on, 3 November 2026: of 214
+/// queued prompts from 2.1.285 to 2.1.316, each attached to a call's result
+/// in a running turn, 24 were the operator's and marked so; 189 were a
+/// sub-agent's report handed back (`peer`, marked `isMeta`) and one the CLI's
+/// own `auto-continuation`, neither of which the operator said.
+const TYPED: &str = "human";
+
 /// The variable the CLI takes its configuration directory from.
 pub const CONFIG_DIR_VAR: &str = "CLAUDE_CONFIG_DIR";
 
@@ -1152,7 +1165,7 @@ impl Fold {
             Ok(Line::CostState(record)) => self.cost(record),
             Ok(Line::PermissionMode(record)) => self.mode(record),
             Ok(Line::AiTitle(record)) => self.title(record),
-            Ok(Line::Attachment(record)) => self.attachment(record),
+            Ok(Line::Attachment(record)) => self.attachment(record, agent),
             Ok(Line::System(record)) => self.system(record),
             Ok(Line::Aside) => {}
             Ok(Line::Unknown) => self.out.push(translate::unread(format!(
@@ -1510,22 +1523,38 @@ impl Fold {
         }));
     }
 
-    /// What the CLI attached to a running turn. The one attachment read is a
-    /// notification that background work stopped while the turn ran; the
+    /// What the CLI attached to a running turn. Two attachments are read: a
+    /// notification that background work stopped while the turn ran, and a
+    /// prompt the operator typed while it ran, in the session's own file; the
     /// rest is context the CLI gave the model, and says nothing about what
     /// the session did.
-    fn attachment(&mut self, record: Attachment) {
+    fn attachment(&mut self, record: Attachment, agent: Option<&str>) {
         let Some(attached) = record.attachment else {
             return;
         };
         let field = |key: &str| attached.get(key).and_then(serde_json::Value::as_str);
-        if field("type") == Some("queued_command")
-            && field("commandMode") == Some(QUEUED_NOTIFICATION)
+        if field("type") != Some("queued_command") {
+            return;
+        }
+        if field("commandMode") == Some(QUEUED_NOTIFICATION)
             && let Some(text) = field("prompt")
         {
             let text = text.to_owned();
             self.notified(&text);
+        } else if agent.is_none()
+            && field("commandMode") == Some(QUEUED_PROMPT)
+            && let Some(text) = typed_into_a_turn(&attached)
+        {
+            self.joined(text);
         }
+    }
+
+    /// The operator speaking while a turn runs. The prompt joins that turn,
+    /// as one sent while a turn runs does live, so it ends nothing.
+    fn joined(&mut self, text: String) {
+        self.put_down_compaction();
+        self.flush_command();
+        self.out.push(Event::UserMessage { text });
     }
 
     /// The CLI's word, in its own markup, that background work stopped. What
@@ -1730,6 +1759,23 @@ impl Fold {
     }
 }
 
+/// The words of a queued prompt the CLI `attached` to a running turn, where
+/// the operator typed them rather than the CLI or a sub-agent writing them;
+/// see [`TYPED`]. A prompt with an image pasted into it is written as blocks,
+/// and only its text is what was said.
+fn typed_into_a_turn(attached: &serde_json::Value) -> Option<String> {
+    let by = attached
+        .get("origin")
+        .and_then(|origin| origin.get("kind"))
+        .and_then(serde_json::Value::as_str);
+    let meta = attached.get("isMeta").and_then(serde_json::Value::as_bool);
+    if by != Some(TYPED) || meta == Some(true) {
+        return None;
+    }
+    let prompt = serde_json::from_value::<wire::Content>(attached.get("prompt")?.clone()).ok()?;
+    said(&prompt)
+}
+
 /// What a local command printed, where `text` is the CLI's record of that
 /// rather than something typed: the inside of its `<local-command-stdout>` or
 /// `<local-command-stderr>`.
@@ -1851,7 +1897,8 @@ enum Line {
     #[serde(rename = "ai-title")]
     AiTitle(AiTitle),
     /// Something the CLI attached to a turn: mostly context it gave the
-    /// model, and once in a while the notice that a sub-agent stopped.
+    /// model, and once in a while the notice that a sub-agent stopped or a
+    /// prompt the operator typed while the turn ran.
     #[serde(rename = "attachment")]
     Attachment(Attachment),
     /// The CLI's own notes to the screen: a compaction's boundary, a retried
@@ -3046,6 +3093,62 @@ mod tests {
                 .all(|event| !matches!(event, Event::Error { .. } | Event::Notice { .. })),
             "{events:?}"
         );
+    }
+
+    /// What the operator said, and where a turn ended, in order.
+    fn spoken(events: &[Event]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                Event::UserMessage { text } => Some(text.clone()),
+                Event::TurnEnded => Some("end".to_owned()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A turn that ran a command and answered, with `attached` attached to
+    /// the result of the command, as the CLI attaches a prompt typed while
+    /// the turn ran.
+    fn typed_while_working(attached: &str) -> Vec<Event> {
+        folded(&[
+            r#"{"type":"user","message":{"role":"user","content":"List the files."}}"#,
+            r#"{"type":"assistant","message":{"id":"msg_1","model":"claude-opus-5","content":[{"type":"tool_use","id":"toolu_b","name":"Bash","input":{"command":"ls"}}]}}"#,
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_b","content":"a.txt"}]}}"#,
+            attached,
+            r#"{"type":"assistant","message":{"id":"msg_2","model":"claude-opus-5","content":[{"type":"text","text":"Listed, hidden ones skipped."}]}}"#,
+            r#"{"type":"user","message":{"role":"user","content":"Thanks."}}"#,
+        ])
+    }
+
+    #[test]
+    fn a_prompt_the_operator_typed_while_a_turn_ran_is_said_in_that_turn() {
+        let typed = typed_while_working(
+            r#"{"type":"attachment","attachment":{"type":"queued_command","commandMode":"prompt","prompt":"Skip the hidden ones.","origin":{"kind":"human"},"humanTurn":true}}"#,
+        );
+        assert_eq!(
+            spoken(&typed),
+            ["List the files.", "Skip the hidden ones.", "end", "Thanks."]
+        );
+
+        let pasted = typed_while_working(
+            r#"{"type":"attachment","attachment":{"type":"queued_command","commandMode":"prompt","prompt":[{"type":"text","text":"Skip the hidden ones."},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgo="}}],"origin":{"kind":"human"},"humanTurn":true,"imagePasteIds":[1]}}"#,
+        );
+        assert_eq!(spoken(&pasted), spoken(&typed));
+    }
+
+    #[test]
+    fn a_report_or_a_continuation_the_cli_queued_into_a_turn_is_not_the_operator_speaking() {
+        for attached in [
+            r#"{"type":"attachment","attachment":{"type":"queued_command","commandMode":"prompt","prompt":"[Subagent hand-back] The files are listed.","origin":{"kind":"peer","from":"a1"},"isMeta":true}}"#,
+            r#"{"type":"attachment","attachment":{"type":"queued_command","commandMode":"prompt","prompt":"Goal set: continue working.","origin":{"kind":"auto-continuation"}}}"#,
+        ] {
+            assert_eq!(
+                spoken(&typed_while_working(attached)),
+                ["List the files.", "end", "Thanks."],
+                "{attached}"
+            );
+        }
     }
 
     #[test]
