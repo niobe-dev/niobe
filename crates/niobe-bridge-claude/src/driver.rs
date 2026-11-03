@@ -661,6 +661,9 @@ pub struct Session {
     /// The sub-agents the CLI has spawned and not said have ended. A CLI
     /// stopped between turns takes those running in the background with it.
     running_agents: BTreeSet<AgentId>,
+    /// The calls whose shell commands the CLI moved to the background and
+    /// has not said have ended. They run in its process group too.
+    background_commands: BTreeSet<ToolCallId>,
 }
 
 impl Session {
@@ -934,6 +937,7 @@ impl Session {
             model_answers,
             turn_open: false,
             running_agents: BTreeSet::new(),
+            background_commands: BTreeSet::new(),
             stopped_between_turns: false,
         };
         // The writer has only just been started, so the queue cannot be
@@ -1351,6 +1355,12 @@ impl Session {
         if let Event::AgentExit { id, .. } = event {
             self.running_agents.remove(id);
         }
+        if let Event::BackgroundCommandStarted { id } = event {
+            self.background_commands.insert(id.clone());
+        }
+        if let Event::BackgroundCommandEnded { id } = event {
+            self.background_commands.remove(id);
+        }
     }
 
     /// An exit, cancelled, for each sub-agent still running when the CLI was
@@ -1480,13 +1490,25 @@ impl Session {
                 fatal: true,
             });
         }
-        match self.turn_open {
-            true => Some(Event::Error {
+        // Nor is one with work still going in the background: it ran in the
+        // CLI's group, which has gone with the CLI, and the end the CLI
+        // would have answered in a turn of its own will never be reported.
+        // Read as a clean end, the agent would show as working for good, and
+        // `niobe -p`, which waits on that work, would wait for ever.
+        let left_working = !self.running_agents.is_empty() || !self.background_commands.is_empty();
+        match (self.turn_open, left_working) {
+            (true, _) => Some(Event::Error {
                 message: "the `claude` session ended while a turn was running, and said nothing."
                     .to_owned(),
                 fatal: true,
             }),
-            false => Some(Event::Notice {
+            (false, true) => Some(Event::Error {
+                message: "the `claude` session ended while work it ran in the background was \
+                          still going, and said nothing."
+                    .to_owned(),
+                fatal: true,
+            }),
+            (false, false) => Some(Event::Notice {
                 message: "the `claude` session ended.".to_owned(),
             }),
         }
@@ -4115,6 +4137,41 @@ read -r rest
         let state = niobe_core::session::SessionState::replay(&events);
         assert!(state.running_agents().is_empty(), "{events:#?}");
         assert!(session.next().is_some());
+    }
+
+    /// A turn that moves a shell command to the background and ends while it
+    /// runs, in the shapes `background-commands.jsonl` recorded from 2.1.309.
+    #[cfg(unix)]
+    const BACKGROUND_COMMAND: &str = r#"printf '%s\n' '{"type":"system","subtype":"init","session_id":"s-9","model":"claude-sonnet-5","permissionMode":"default"}' '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_cmd","name":"Bash","input":{"command":"cargo test","run_in_background":true}}]}}' '{"type":"user","message":{"content":[{"tool_use_id":"toolu_cmd","type":"tool_result","is_error":false,"content":"Command running in background with ID: b1. You will be notified when it completes."}]},"tool_use_result":{"stdout":"","stderr":"","interrupted":false,"isImage":false,"noOutputExpected":false,"backgroundTaskId":"b1"}}' '{"type":"result","subtype":"success","is_error":false,"session_id":"s-9"}'"#;
+
+    /// A CLI that leaves of itself, with an exit status of 0, while work it
+    /// ran in the background is still going has not ended cleanly: that work
+    /// ran in its process group, which has gone, and no word of its end can
+    /// come. Read as a clean end, the session would show it working for good
+    /// and `niobe -p` would wait on it for ever.
+    #[cfg(unix)]
+    #[test]
+    fn a_cli_that_exits_cleanly_with_work_in_the_background_ends_the_session_with_that_work() {
+        for background in [BACKGROUND_AGENT, BACKGROUND_COMMAND] {
+            for carry_on in [false, true] {
+                let (mut session, mut events, _dir) = carried_on(
+                    &format!("read -r initialize\nread -r turn\n{background}\nexit 0\n"),
+                    carry_on,
+                );
+                events.extend(drained_to_the_end(&mut session));
+
+                assert!(
+                    matches!(events.last(), Some(Event::Error { message, fatal: true })
+                        if message == "the `claude` session ended while work it ran in the \
+                                       background was still going, and said nothing."),
+                    "{events:#?}"
+                );
+                let state = niobe_core::session::SessionState::replay(&events);
+                assert!(state.running_agents().is_empty(), "{events:#?}");
+                assert!(state.background_commands().is_empty(), "{events:#?}");
+                assert!(session.next().is_none());
+            }
+        }
     }
 
     /// The CLI starting a turn of its own once the background agent of the

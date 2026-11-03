@@ -276,7 +276,37 @@ const KILLED_WHILE_AN_AGENT_WORKS_CLAUDE: &str = "#!/bin/sh\n\
 
 #[test]
 fn a_cli_killed_while_a_sub_agent_works_in_the_background_fails_the_run_rather_than_hang_it() {
-    let setup = Setup::new(KILLED_WHILE_AN_AGENT_WORKS_CLAUDE, METERED);
+    let printed = failed_rather_than_hung(KILLED_WHILE_AN_AGENT_WORKS_CLAUDE);
+    assert!(
+        printed["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("SIGKILL")),
+        "the reason says what ended the CLI: {printed:#}"
+    );
+}
+
+/// A CLI that leaves of itself with an exit status of 0 while its sub-agent
+/// works in the background takes the agent with it as surely as one killed:
+/// no turn of its own will come to answer the agent's end.
+#[test]
+fn a_cli_that_exits_cleanly_while_a_sub_agent_works_in_the_background_fails_the_run_rather_than_hang_it()
+ {
+    let printed = failed_rather_than_hung(
+        &KILLED_WHILE_AN_AGENT_WORKS_CLAUDE.replace("kill -KILL $$", "exit 0"),
+    );
+    assert!(
+        printed["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("background")),
+        "the reason says the work in the background went with the CLI: {printed:#}"
+    );
+}
+
+/// Runs `niobe -p` on `script`, a `claude` that leaves while its sub-agent
+/// works in the background, and returns the JSON of the failed run it ends
+/// as, failing if it waits on.
+fn failed_rather_than_hung(script: &str) -> Value {
+    let setup = Setup::new(script, METERED);
     let mut niobe = Command::new(env!("CARGO_BIN_EXE_niobe"))
         .args(["-p", "review fetch.py", "--json"])
         .current_dir(setup.repo())
@@ -310,13 +340,8 @@ fn a_cli_killed_while_a_sub_agent_works_in_the_background_fails_the_run_rather_t
     assert_eq!(output.status.code(), Some(1), "{}", text(&output.stderr));
     let printed = json(&output);
     assert_eq!(printed["outcome"], "failed", "{printed:#}");
-    assert!(
-        printed["reason"]
-            .as_str()
-            .is_some_and(|reason| reason.contains("SIGKILL")),
-        "the reason says what ended the CLI: {printed:#}"
-    );
     assert_eq!(printed["cost"]["reported_usd"], 0.1);
+    printed
 }
 
 #[test]
