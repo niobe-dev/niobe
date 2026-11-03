@@ -290,8 +290,13 @@ fn run_waiting(
             // the backend reports a turn that failed with the warning just
             // before its end, while one it went on from — a request retried,
             // a CLI release nobody recorded, a write slow to be read — is
-            // followed by the rest of the turn.
-            if !matches!(event, Event::Error { fatal: false, .. }) {
+            // followed by the rest of the turn. The backend's word that a turn
+            // of its own follows is part of the end, said between the warning
+            // and the end itself, and is not the turn going on.
+            if !matches!(
+                event,
+                Event::Error { fatal: false, .. } | Event::TurnFollows
+            ) {
                 failure = None;
             }
             if outcome.is_none() {
@@ -762,6 +767,37 @@ mod tests {
             matches!(turn.outcome, Outcome::Failed(_)),
             "{:?}",
             turn.outcome
+        );
+    }
+
+    /// The backend says a turn of its own follows after its word for the
+    /// failure and before the end, as the bridge does for work that ended
+    /// under a turn that then failed: the turn still ended on the failure.
+    #[test]
+    fn a_turn_that_failed_with_a_turn_said_to_follow_still_failed() {
+        let failed = || {
+            vec![
+                vec![
+                    metered(),
+                    cost(0.5),
+                    said("checking"),
+                    warning("the turn ended as `error_max_budget_usd`"),
+                    Event::TurnFollows,
+                    Event::TurnEnded,
+                ],
+                vec![said("the review is in"), Event::TurnEnded],
+            ]
+        };
+
+        let (failed_turn, ..) = ran(failed(), &Allowlist::new(), None);
+        assert_eq!(
+            failed_turn.outcome,
+            Outcome::Failed("the turn ended as `error_max_budget_usd`".to_owned())
+        );
+        let (budget_turn, ..) = ran(failed(), &Allowlist::new(), Some(0.5));
+        assert_eq!(
+            budget_turn.outcome,
+            Outcome::Budget("the turn ended as `error_max_budget_usd`".to_owned())
         );
     }
 

@@ -448,6 +448,36 @@ fn a_failed_turn_exits_one_with_the_backends_reason() {
     assert!(schema::refusals("print.schema.json", &printed).is_empty());
 }
 
+/// A `claude` whose turn launches a sub-agent in the background, hears it end
+/// while the turn is still under way, and then fails; it then starts a turn
+/// of its own to tell the agent of the end, which finishes.
+const FAILS_AFTER_AN_AGENT_ENDS_UNDER_IT_CLAUDE: &str = "#!/bin/sh\n\
+    read -r first\n\
+    read -r turn\n\
+    printf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"model\":\"claude-sonnet-5\",\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_a\",\"name\":\"Agent\",\"input\":{\"subagent_type\":\"reviewer\",\"description\":\"Review fetch.py\",\"prompt\":\"review fetch.py\"}}]},\"parent_tool_use_id\":null}'\n\
+    printf '%s\\n' '{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"tool_use_id\":\"toolu_a\",\"type\":\"tool_result\",\"content\":\"Async agent launched successfully.\"}]},\"parent_tool_use_id\":null,\"tool_use_result\":{\"status\":\"async_launched\"}}'\n\
+    printf '%s\\n' '{\"type\":\"system\",\"subtype\":\"task_notification\",\"tool_use_id\":\"toolu_a\",\"status\":\"completed\",\"summary\":\"fetch.py drops the etag\"}'\n\
+    printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"is_error\":true,\"errors\":[\"the model is overloaded\"],\"total_cost_usd\":0.1,\"usage\":{\"input_tokens\":10,\"output_tokens\":5,\"cache_read_input_tokens\":0,\"cache_creation_input_tokens\":0}}'\n\
+    printf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"model\":\"claude-sonnet-5\",\"id\":\"msg_2\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"The review found one bug: fetch.py drops the etag.\"}]},\"parent_tool_use_id\":null}'\n\
+    printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"The review found one bug: fetch.py drops the etag.\",\"total_cost_usd\":0.2,\"usage\":{\"input_tokens\":20,\"output_tokens\":15,\"cache_read_input_tokens\":0,\"cache_creation_input_tokens\":0}}'\n\
+    while read -r line; do :; done\n";
+
+#[test]
+fn a_turn_that_fails_after_background_work_ended_under_it_exits_one() {
+    let setup = Setup::new(FAILS_AFTER_AN_AGENT_ENDS_UNDER_IT_CLAUDE, METERED);
+    let output = setup.run(&["-p", "review fetch.py", "--json"]);
+
+    assert_eq!(output.status.code(), Some(1), "{}", text(&output.stderr));
+    let printed = json(&output);
+    assert_eq!(printed["outcome"], "failed", "{printed:#}");
+    assert!(
+        printed["reason"]
+            .as_str()
+            .is_some_and(|why| why.contains("the model is overloaded")),
+        "{printed:#}"
+    );
+}
+
 #[test]
 fn a_turn_the_budget_stopped_exits_three_apart_from_a_failure() {
     let setup = Setup::new(SPENDS_THE_BUDGET_CLAUDE, METERED);
