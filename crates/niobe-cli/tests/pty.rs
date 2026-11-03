@@ -2311,6 +2311,10 @@ fn reported_from(
 ) -> String {
     let (terminal, slave) = Terminal::open();
     let mut command = shell_driving_the_stand_in(&slave, repo, home);
+    // On Linux the shell copies only where a display is named, with
+    // `xclip` for an X one; the machine running the tests may name none, and
+    // the stand-in `xclip` is the copier asked for here.
+    command.env("DISPLAY", ":0").env_remove("WAYLAND_DISPLAY");
     configure(&mut command);
     let mut shell = command.spawn().expect("the niobe binary runs");
     // The command holds its own copies of the terminal, which would keep the
