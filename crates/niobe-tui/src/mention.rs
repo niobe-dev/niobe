@@ -57,34 +57,48 @@ pub(crate) fn rest_of_word(after: &str) -> &str {
 /// is not all that cuts a bare mention short: the CLI ends one at any blank
 /// JavaScript's `\s` matches and drops every character at its end that is not
 /// an ASCII letter, digit or `_`, so bare, `notes~` would name `notes` and
-/// `docs/café` would name `docs/caf`. A path holding a `"` cannot be quoted,
-/// and goes in bare.
+/// `docs/café` would name `docs/caf`. A path that neither form names whole
+/// is not offered ([`nameable`]).
 pub(crate) fn written(path: &str) -> String {
-    match reads_whole_bare(path) || path.contains('"') {
+    match reads_whole_bare(path) {
         true => path.to_owned(),
         false => format!("\"{path}\""),
     }
 }
 
 /// Whether the CLI reads `@` and `path`, bare, as `path` and nothing less.
+/// It passes over a bare mention that opens with `"`, which it leaves to
+/// its reading of a quoted one.
 fn reads_whole_bare(path: &str) -> bool {
     // Rust's whitespace is JavaScript's `\s` but for the byte order mark,
     // which `\s` takes as a blank too.
     let blank = |c: char| c.is_whitespace() || c == '\u{feff}';
-    !path.chars().any(blank)
+    !path.starts_with('"')
+        && !path.chars().any(blank)
         && path
             .chars()
             .next_back()
             .is_some_and(|last| last.is_ascii_alphanumeric() || last == '_')
 }
 
+/// Whether the CLI reads `@"path"` as `path`. Claude Code (2.1.317) reads a
+/// quoted mention through `@"([^"]+)"`, so a `"` in the path ends it early,
+/// and passes over one that ends ` (agent)`, which names an agent instead.
+fn reads_whole_quoted(path: &str) -> bool {
+    !path.contains('"') && !path.ends_with(" (agent)")
+}
+
 /// Whether a listed path can be named at all. A line break ends a mention in
 /// every form the CLI reads, and in the prompt it would start a new line of
 /// the message, so a file whose name holds one is not offered. Nor is one
 /// the CLI would read as a shorter path at a `#` ([`cut_at_hash`]), which
-/// neither form of mention escapes.
+/// neither form of mention escapes, nor one that neither the bare nor the
+/// quoted form reads whole, as `notes"` or `say "hi".txt`: offered, it would
+/// put a mention of another file in the prompt.
 fn nameable(path: &str) -> bool {
-    !path.contains(['\n', '\r']) && !cut_at_hash(path)
+    !path.contains(['\n', '\r'])
+        && !cut_at_hash(path)
+        && (reads_whole_bare(path) || reads_whole_quoted(path))
 }
 
 /// Whether the CLI reads a mention of `path` as only what comes before its
@@ -430,6 +444,37 @@ mod tests {
         let mut indexed = Files::new(&files).candidates(&files, "", 20);
         indexed.sort_unstable();
         assert_eq!(indexed, named);
+    }
+
+    /// Claude Code (2.1.317) reads a quoted mention through
+    /// `(^|[\s。、？！])@"([^"]+)"`, passing over one that ends ` (agent)`,
+    /// and a bare one as the blank-free word after the `@`, its end cut back
+    /// to an ASCII letter, digit or `_`, passing over one that opens with
+    /// `"`. So a file holding a `"` that cannot go bare cannot be named:
+    /// `@"say "hi".txt` names `say `, bare `@notes"` names `notes`, and
+    /// `@"q".rs` names `q`. Nor can `x (agent)`, which is read as an agent.
+    #[test]
+    fn a_file_no_mention_would_name_whole_is_not_offered() {
+        let files: Vec<String> = [
+            "say \"hi\".txt",
+            "notes\"",
+            "\"q\".rs",
+            "\"open.rs",
+            "x (agent)",
+            "a\"b.rs",
+            "plain.md",
+        ]
+        .map(str::to_owned)
+        .to_vec();
+        let named = ["a\"b.rs", "plain.md"];
+
+        let mut offered = candidates(&files, "", 20);
+        offered.sort_unstable();
+        assert_eq!(offered, named);
+        let mut indexed = Files::new(&files).candidates(&files, "", 20);
+        indexed.sort_unstable();
+        assert_eq!(indexed, named);
+        assert_eq!(written("a\"b.rs"), "a\"b.rs");
     }
 
     #[test]
