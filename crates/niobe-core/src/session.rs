@@ -800,10 +800,17 @@ impl SessionState {
         if let Event::PromptNotSent { .. } | Event::Looked | Event::TurnFollows = event {
             return;
         }
+        let was_running = self.turn_running;
         if self.opens_a_turn(event) {
             self.turn_running = true;
         }
         self.fold(event);
+        // A turn after the error that ended the process is the session taken
+        // up again in another, as `--resume` takes it: the error ended that
+        // process and not the session, which is still counted as reporting it.
+        if self.turn_running && !was_running {
+            self.fatal_error = None;
+        }
         self.ended_last = matches!(
             event,
             Event::TurnEnded | Event::Error { fatal: true, .. } | Event::SessionLeft
@@ -1831,7 +1838,8 @@ impl SessionState {
         &self.models
     }
 
-    /// The error that ended the session, if one did.
+    /// The error that ended the session, if one did: the last that ended
+    /// the process it ran in, where no turn has run since.
     pub fn fatal_error(&self) -> Option<&str> {
         self.fatal_error.as_deref()
     }
@@ -3545,6 +3553,35 @@ mod tests {
         });
         assert_eq!(state.errors(), 2);
         assert_eq!(state.fatal_error(), Some("backend exited"));
+    }
+
+    /// A session taken up again after the error that ended its process —
+    /// `niobe --resume` starts the CLI again on its conversation — and
+    /// carried on did not end on that error, whether the operator or the CLI
+    /// opened the turn; it still reported it.
+    #[test]
+    fn a_turn_after_the_error_that_ended_the_process_means_it_did_not_end_the_session() {
+        let died = Event::Error {
+            message: "backend exited".to_owned(),
+            fatal: true,
+        };
+        let replied = Event::AssistantMessage {
+            text: "back".to_owned(),
+            agent: None,
+        };
+        for opening in [prompt(), replied] {
+            let state = SessionState::replay(&[
+                prompt(),
+                died.clone(),
+                Event::SessionLeft,
+                opening,
+                Event::TurnEnded,
+            ]);
+            assert_eq!(state.fatal_error(), None);
+            assert_eq!(state.errors(), 1);
+        }
+        let ended = SessionState::replay(&[prompt(), died.clone(), Event::SessionLeft]);
+        assert_eq!(ended.fatal_error(), Some("backend exited"));
     }
 
     #[test]

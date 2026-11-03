@@ -1509,6 +1509,38 @@ mod tests {
         );
     }
 
+    /// A session whose CLI died on an error, taken up again with
+    /// `niobe --resume` and carried on, did not end on that error: the error
+    /// is still one it reported, and the session went on past it.
+    #[test]
+    fn a_session_carried_on_past_the_error_that_ended_its_cli_did_not_end_on_it() {
+        let died = || Event::Error {
+            message: "the `claude` session ended: exit status 1".to_owned(),
+            fatal: true,
+        };
+        let carried_on = read_whole(
+            1,
+            vec![
+                prompt(),
+                died(),
+                Event::SessionLeft,
+                prompt(),
+                Event::TurnEnded,
+                Event::SessionLeft,
+            ],
+        );
+        let ended = read_whole(2, vec![prompt(), died(), Event::SessionLeft]);
+
+        assert_eq!(
+            lowlights(&[carried_on, ended])[4..],
+            [
+                "- Session 1: 1 error — `niobe --resume 1`",
+                "- Session 2: 1 error, ended on an error: the `claude` session ended: \
+                 exit status 1 — `niobe --resume 2`",
+            ]
+        );
+    }
+
     /// A store at `root`, with a recorder that starts a record of its own
     /// for each list of `records`, every event dated as it says; and the
     /// records' ids, in order.
