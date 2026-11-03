@@ -2741,6 +2741,10 @@ fn e_in_the_memory_view_opens_an_imported_command_file_in_the_editor_and_runs_no
     let closing = terminal.mark();
     terminal.typed(b"\x1b");
     terminal.drew_since(closing);
+    // A draw since the mark may be the clock's rather than the Esc's, and
+    // Ctrl+Q read in one go with an Esc still unread is Alt+Ctrl+Q, which
+    // quits nothing: the shell would wait out the test's deadline.
+    std::thread::sleep(KEY_GAP);
     terminal.typed(CTRL_Q);
 
     let (_, status) = ended(&mut shell);
@@ -2802,6 +2806,10 @@ fn an_editor_that_suspends_itself_does_not_stop_the_shell_after_it_ends() {
     let closing = terminal.mark();
     terminal.typed(b"\x1b");
     terminal.drew_since(closing);
+    // A draw since the mark may be the clock's rather than the Esc's, and
+    // Ctrl+Q read in one go with an Esc still unread is Alt+Ctrl+Q, which
+    // quits nothing: the shell would wait out the test's deadline.
+    std::thread::sleep(KEY_GAP);
     terminal.typed(CTRL_Q);
 
     let (_, status) = ended(&mut shell);
@@ -2869,6 +2877,10 @@ fn an_editor_that_stops_on_ctrl_z_stops_the_shell_with_it_until_the_job_is_conti
     let closing = terminal.mark();
     terminal.typed(b"\x1b");
     terminal.drew_since(closing);
+    // A draw since the mark may be the clock's rather than the Esc's, and
+    // Ctrl+Q read in one go with an Esc still unread is Alt+Ctrl+Q, which
+    // quits nothing: the shell would wait out the test's deadline.
+    std::thread::sleep(KEY_GAP);
     terminal.typed(CTRL_Q);
 
     let (_, status) = ended(&mut shell);
@@ -3005,6 +3017,10 @@ fn an_editor_that_dies_in_raw_mode_does_not_leave_the_terminal_raw_after_the_qui
     let closing = terminal.mark();
     terminal.typed(b"\x1b");
     terminal.drew_since(closing);
+    // A draw since the mark may be the clock's rather than the Esc's, and
+    // Ctrl+Q read in one go with an Esc still unread is Alt+Ctrl+Q, which
+    // quits nothing: the shell would wait out the test's deadline.
+    std::thread::sleep(KEY_GAP);
     terminal.typed(CTRL_Q);
 
     let (_, status) = ended(&mut shell);
