@@ -688,6 +688,12 @@ pub fn stops_can_be_continued() -> bool {
     true
 }
 
+/// How long a continue from a stop waits for a signal sent before it, such
+/// as the SIGTERM of `kill %1`, to be handled on another thread: see
+/// [`Shutdown::requested_after_continue`].
+#[cfg(unix)]
+const CONTINUE_SETTLE: std::time::Duration = std::time::Duration::from_millis(20);
+
 /// Why a signal is ending the session.
 ///
 /// The two are not the same ending. A process asked to stop ran on a terminal
@@ -892,6 +898,39 @@ impl Shutdown {
     #[cfg(not(unix))]
     pub fn requested(&self) -> Option<Stop> {
         None
+    }
+
+    /// What a signal has asked of the session, read just after the process
+    /// was continued from a stop, waiting up to [`CONTINUE_SETTLE`] for one.
+    ///
+    /// bash's `kill %1` sends a stopped job SIGTERM and then SIGCONT, and a
+    /// terminal that hangs up sends SIGHUP and SIGCONT. The process stops on
+    /// the thread that asked to, but a signal sent to it while it was stopped
+    /// is handled by whichever of its threads the kernel picks once it runs
+    /// again, and that thread's handler can set its flag a moment after the
+    /// stopping thread has returned and looked. Read at once, the ending was
+    /// sometimes missed and the terminal taken back over the operator's
+    /// shell; the wait is the time a signal already sent needs to land, paid
+    /// once by a continue that brings no ending.
+    #[cfg(unix)]
+    pub fn requested_after_continue(&self) -> Option<Stop> {
+        let deadline = std::time::Instant::now() + CONTINUE_SETTLE;
+        loop {
+            if let Some(stop) = self.requested() {
+                return Some(stop);
+            }
+            if std::time::Instant::now() >= deadline {
+                return None;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    /// What a signal has asked of the session after a continue. There is no
+    /// stop to be continued from off the POSIX side.
+    #[cfg(not(unix))]
+    pub fn requested_after_continue(&self) -> Option<Stop> {
+        self.requested()
     }
 
     /// Whether a SIGTSTP has asked the process to stop since this was last

@@ -249,7 +249,7 @@ fn open(app: App, around: Around<'_>) -> io::Result<(Ended, App)> {
             Hold::Suspend => {
                 guard.suspend()?;
                 stop_until_continued()?;
-                match shutdown.requested() {
+                match shutdown.requested_after_continue() {
                     Some(_) => Ok(()),
                     None => guard.resume(),
                 }
