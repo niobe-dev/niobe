@@ -119,11 +119,20 @@ fn ci() -> Result<(), String> {
     // machine: a shared CI runner lands a frame a few milliseconds over its
     // budget now and then with no change of ours, and a regression fails
     // both runs.
-    for (package, test) in [
-        ("niobe-tui", "frame_budget"),
-        ("niobe-store", "replay_budget"),
-        ("niobe-cli", "replay_budget"),
-    ] {
+    // `NIOBE_UNTIMED` is set by the CI job on a runner the budgets were not
+    // set on; it skips the timed tests and nothing else, and says so.
+    let timed: &[(&str, &str)] = match std::env::var_os("NIOBE_UNTIMED") {
+        Some(value) if !value.is_empty() => {
+            println!("NIOBE_UNTIMED is set: the timed tests were not run on this machine");
+            &[]
+        }
+        _ => &[
+            ("niobe-tui", "frame_budget"),
+            ("niobe-store", "replay_budget"),
+            ("niobe-cli", "replay_budget"),
+        ],
+    };
+    for &(package, test) in timed {
         let timed = ["test", "--release", "--package", package, "--test", test];
         if let Err(first) = cargo(&timed) {
             println!("{first}; a timing test is run once more before it fails the gate");
