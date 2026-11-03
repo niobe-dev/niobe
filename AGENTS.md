@@ -746,6 +746,10 @@ cargo xtask size
 
 `cargo xtask ci` runs the same sequence with `fmt --check` and `RUSTFLAGS` denying warnings,
 exactly as CI does, and lints `install.sh` with `shellcheck -s sh` where shellcheck is installed.
+It runs a timed test binary a second time where the first run fails, as §9 says of a timing
+test on a loaded machine, so only a budget missed twice fails the gate. CI pins its compiler
+(`RUSTUP_TOOLCHAIN` in `.github/workflows/ci.yml`); run the gate under that toolchain before a
+push, since a newer stable brings lints an older local compiler does not.
 
 **Definition of done**: the gate is green, every acceptance criterion of the change has passed
 RED-GREEN-REFACTOR, and the work is committed (§7.9). If a subagent reports a failure as

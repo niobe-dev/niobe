@@ -114,13 +114,21 @@ fn ci() -> Result<(), String> {
     ])?;
     cargo(&["test", "--workspace"])?;
     // The timed tests, each a binary of its own, in the optimised build that
-    // ships: the debug suite reports them ignored.
+    // ships: the debug suite reports them ignored. Each is given a second run
+    // where the first fails, as AGENTS.md says of a timing test on a loaded
+    // machine: a shared CI runner lands a frame a few milliseconds over its
+    // budget now and then with no change of ours, and a regression fails
+    // both runs.
     for (package, test) in [
         ("niobe-tui", "frame_budget"),
         ("niobe-store", "replay_budget"),
         ("niobe-cli", "replay_budget"),
     ] {
-        cargo(&["test", "--release", "--package", package, "--test", test])?;
+        let timed = ["test", "--release", "--package", package, "--test", test];
+        if let Err(first) = cargo(&timed) {
+            println!("{first}; a timing test is run once more before it fails the gate");
+            cargo(&timed)?;
+        }
     }
     layering()?;
     headers()?;
