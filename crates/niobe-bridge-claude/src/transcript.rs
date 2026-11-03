@@ -98,13 +98,19 @@ const EXTENSION: &str = "jsonl";
 const LIMIT: u64 = 256 * 1024 * 1024;
 
 /// What the CLI wraps a turn it wrote itself in, rather than one the operator
-/// typed: a slash command as the CLI expanded it, and the output of one.
+/// typed: a slash command as the CLI expanded it, and the output of one; a
+/// command the operator ran in the CLI's own `!` mode, and what it printed.
 ///
-/// Read off transcripts recorded by Claude Code 2.1.277 on 18 September 2026.
-/// Only the session list uses this — a turn the CLI wrote is still a turn the
-/// model was given, so the imported history carries it as it stands, and only
-/// the one line that says what a session was about skips over it.
-const CLI_WROTE_IT: [&str; 2] = ["<command-name>", "<local-command-stdout>"];
+/// Read off transcripts recorded by Claude Code 2.1.277 on 18 September 2026,
+/// and the `!` mode's off 2.1.308 on 3 November 2026. Only the session list
+/// and the caption use this — the line that says what a session was about
+/// skips over it.
+const CLI_WROTE_IT: [&str; 4] = [
+    "<command-name>",
+    "<local-command-stdout>",
+    "<bash-input>",
+    "<bash-stdout>",
+];
 
 /// The `origin.kind` of the turn the CLI writes when background work stops.
 ///
@@ -1437,6 +1443,12 @@ impl Fold {
             // something the operator said.
             if let Some(printed) = local_output(&text) {
                 self.printed(printed);
+            } else if let Some(ran) = shell_mode(&text) {
+                self.flush_command();
+                // A command that printed nothing leaves nothing to show.
+                if !ran.is_empty() {
+                    self.out.push(Event::Notice { message: ran });
+                }
             } else if wire::is_interrupt_note(&text) {
                 // The CLI's note that the operator stopped the request, which
                 // the live stream carries too and the shell does not show as
@@ -1683,6 +1695,29 @@ fn local_output(text: &str) -> Option<&str> {
         .into_iter()
         .find(|name| text.starts_with(&format!("<{name}>")))
         .map(|name| tag(text, name).unwrap_or_default())
+}
+
+/// What the CLI's own `!` mode wrote, where `text` is its record of that: the
+/// command line the operator ran, as the CLI's screen shows it, or what the
+/// command printed, its error output after the rest.
+///
+/// Such a command makes no request — the CLI hands it to the model as
+/// context with the next prompt — so it is a note between turns, as a local
+/// command's output is, and no turn of the operator's. The CLI keeps no exit
+/// status for it, so none is said.
+fn shell_mode(text: &str) -> Option<String> {
+    if text.starts_with("<bash-input>") {
+        return Some(format!("! {}", tag(text, "bash-input").unwrap_or_default()));
+    }
+    if !text.starts_with("<bash-stdout>") {
+        return None;
+    }
+    let printed: Vec<&str> = ["bash-stdout", "bash-stderr"]
+        .into_iter()
+        .filter_map(|name| tag(text, name))
+        .filter(|printed| !printed.is_empty())
+        .collect();
+    Some(printed.join("\n"))
 }
 
 /// The command line the operator typed, where `text` is the markup the CLI
@@ -2331,6 +2366,93 @@ mod tests {
             state.turns().len() + usize::from(state.turn_running()),
             1,
             "the command opened no turn of its own"
+        );
+    }
+
+    /// A session in which the operator ran a shell command in the CLI's own
+    /// `!` mode between two prompts, written as the CLI wrote it on 2.1.308:
+    /// the caveat it marks, then the command line and what it printed, each
+    /// a user turn it leaves unmarked.
+    const SHELL_MODE_BETWEEN: &str = concat!(
+        r#"{"type":"user","message":{"role":"user","content":"first real prompt"}}"#,
+        "\n",
+        r#"{"type":"assistant","message":{"id":"msg_1","model":"claude-opus-5","content":[{"type":"text","text":"one"}]}}"#,
+        "\n",
+        r#"{"type":"user","isMeta":true,"message":{"role":"user","content":"<local-command-caveat>The command below was run directly in Claude Code, not sent to you as a request, and its output goes straight to the user.</local-command-caveat>"}}"#,
+        "\n",
+        r#"{"type":"user","message":{"role":"user","content":"<bash-input> git push</bash-input>"}}"#,
+        "\n",
+        r#"{"type":"user","message":{"role":"user","content":"<bash-stdout></bash-stdout><bash-stderr>Everything up-to-date</bash-stderr>"}}"#,
+        "\n",
+        r#"{"type":"user","message":{"role":"user","content":"second prompt"}}"#,
+        "\n",
+        r#"{"type":"assistant","message":{"id":"msg_2","model":"claude-opus-5","content":[{"type":"text","text":"two"}]}}"#,
+        "\n",
+    );
+
+    #[test]
+    fn a_command_run_in_the_clis_shell_mode_is_a_note_and_no_turn_of_the_operators() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        transcript(
+            dir.path(),
+            "shell-mode",
+            Duration::from_secs(60),
+            SHELL_MODE_BETWEEN,
+        );
+
+        let events = events(
+            &dir.path().join("shell-mode.jsonl"),
+            "max",
+            Path::new("/repo"),
+        )
+        .expect("the transcript folds");
+
+        let said: Vec<&str> = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::UserMessage { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(said, ["first real prompt", "second prompt"]);
+        let notes: Vec<&str> = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Notice { message } => Some(message.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(notes, ["! git push", "Everything up-to-date"]);
+        let state = niobe_core::SessionState::replay(&events);
+        assert_eq!(state.turns().len(), 1, "the first answered turn ended");
+        assert!(
+            state.turn_running(),
+            "the second is the one the record stops in"
+        );
+    }
+
+    #[test]
+    fn a_session_opened_with_a_shell_mode_command_is_listed_by_its_first_prompt() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let opened = concat!(
+            r#"{"type":"user","message":{"role":"user","content":"<bash-input>ls</bash-input>"}}"#,
+            "\n",
+            r#"{"type":"user","message":{"role":"user","content":"<bash-stdout>Cargo.toml</bash-stdout><bash-stderr></bash-stderr>"}}"#,
+            "\n",
+            r#"{"type":"user","message":{"role":"user","content":"rename the crate"}}"#,
+            "\n",
+        );
+        transcript(dir.path(), "opened", Duration::from_secs(60), opened);
+
+        let listed = list(dir.path(), Path::new("/repo")).expect("the directory lists");
+        assert_eq!(listed[0].first_prompt.as_deref(), Some("rename the crate"));
+        let events = events(&dir.path().join("opened.jsonl"), "max", Path::new("/repo"))
+            .expect("the transcript folds");
+        assert!(
+            events.iter().any(
+                |event| matches!(event, Event::Titled { title } if title == "rename the crate")
+            ),
+            "{events:?}"
         );
     }
 
