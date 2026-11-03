@@ -248,7 +248,7 @@ pub(crate) fn proposed(
 /// How many rows of a proposed change are laid out with the diffs open: more
 /// than a pane scrolls through in a reading, and a bound on what a frame
 /// costs however large the change is.
-const OPEN_ROWS: usize = 2_000;
+pub(crate) const OPEN_ROWS: usize = 2_000;
 
 /// The marker under a proposed change too long to lay out whole even open: how
 /// many rows it leaves out.

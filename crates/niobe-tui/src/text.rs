@@ -356,7 +356,9 @@ pub fn wrap_exact_first(text: &str, columns: usize, rows: usize) -> Vec<String> 
     if columns == 0 || text.is_empty() {
         return shown;
     }
-    let text = controls_shown_in_rows(text);
+    // Each line's controls are shown as it is reached rather than the whole
+    // text's first: a line break is not one of them, so it is the same
+    // text, and the lines past the rows asked for are never read.
     for line in text.split('\n') {
         let left = rows.saturating_sub(shown.len());
         if left == 0 {
@@ -365,7 +367,7 @@ pub fn wrap_exact_first(text: &str, columns: usize, rows: usize) -> Vec<String> 
         match line.is_empty() {
             true => shown.push(String::new()),
             false => shown.extend(
-                chunks_to_width(&tabs_expanded(line), columns)
+                chunks_to_width(&tabs_expanded(&controls_shown_in_rows(line)), columns)
                     .take(left)
                     .map(str::to_owned),
             ),

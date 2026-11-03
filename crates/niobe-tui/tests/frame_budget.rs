@@ -651,6 +651,55 @@ fn a_question_for_a_one_line_write_redraws_inside_the_write_budget() {
     );
 }
 
+/// A permission question for a command that writes a file of
+/// [`WRITTEN_LINES`] lines through a heredoc is drawn with every tick while it
+/// waits, and the file is in the command it draws: the frame has to cost the
+/// rows it shows, not the file, cut and under Ctrl+T, as a write's does.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "a frame is timed in an optimised build")]
+fn a_question_for_a_hundred_thousand_line_command_redraws_inside_the_write_budget() {
+    let _alone = ALONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let command = format!("cat > catalog/generated.ts <<'EOF'\n{}EOF", written_file());
+    let mut app = running_session();
+    app.apply(&Event::PermissionRequest {
+        id: "heredoc".into(),
+        tool: "Bash".to_owned(),
+        input: serde_json::json!({ "command": command }).to_string(),
+        target: Some(command.clone()),
+        proposal: Some(niobe_core::Proposal::new(
+            niobe_core::Action::Command {
+                command: command.clone(),
+            },
+            ["command"],
+        )),
+        reason: None,
+        agent: None,
+    });
+    let first = screen(&mut app, 200, 60);
+    assert!(
+        first.contains("more lines"),
+        "the command is drawn cut, or its time says nothing: {first}"
+    );
+
+    let cut = median_frame(&mut app, &[(200, 60)]);
+    assert!(
+        cut <= WRITE_BUDGET,
+        "the median frame of a {WRITTEN_LINES}-line command's question took {cut:?}, over \
+         {WRITE_BUDGET:?}"
+    );
+
+    app.on_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
+    let _ = screen(&mut app, 200, 60);
+    let open = median_frame(&mut app, &[(200, 60)]);
+    assert!(
+        open <= WRITE_BUDGET,
+        "the median frame of the same question under Ctrl+T took {open:?}, over \
+         {WRITE_BUDGET:?}"
+    );
+}
+
 /// A resize with a file of [`WRITTEN_LINES`] in the transcript lays its diff
 /// out again at every width, and still redraws inside a frame.
 #[test]

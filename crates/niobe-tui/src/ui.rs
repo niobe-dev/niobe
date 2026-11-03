@@ -3466,9 +3466,7 @@ fn question_body(app: &App, ask: &Ask, inner: usize, theme: &Theme) -> QuestionB
     if !cut.is_empty() {
         consequences.push(Line::from(""));
         for (number, hint) in cut {
-            for wrapped in text::wrap_exact(&format!("{number}. {hint}"), inner) {
-                consequences.push(Line::from(wrapped).style(Style::new().fg(theme.dim)));
-            }
+            consequences.extend(consequence_rows(&format!("{number}. {hint}"), inner, theme));
         }
     }
     let mut rest = Vec::new();
@@ -3489,6 +3487,35 @@ fn question_body(app: &App, ask: &Ask, inner: usize, theme: &Theme) -> QuestionB
         consequences,
         rest,
     }
+}
+
+/// A consequence said again whole, `inner` columns wide — but for one that
+/// wraps to more rows than a proposed change is laid out to, which is drawn
+/// that far with a row saying the rest is not. A standing answer about
+/// a command names the command, and a command can carry a whole file in a
+/// heredoc: laid out whole, it was laid out again with every tick.
+fn consequence_rows(said: &str, inner: usize, theme: &Theme) -> Vec<Line<'static>> {
+    let dim = Style::new().fg(theme.dim);
+    let mut rows: Vec<Line<'static>> =
+        text::wrap_exact_first(said, inner, crate::hunks::OPEN_ROWS + 2)
+            .into_iter()
+            .map(|wrapped| Line::from(wrapped).style(dim))
+            .collect();
+    if rows.len() > crate::hunks::OPEN_ROWS + 1 {
+        rows.truncate(crate::hunks::OPEN_ROWS);
+        rows.extend(
+            text::wrap(
+                &format!(
+                    "▴ the first {} rows are shown · the rest is not drawn",
+                    crate::hunks::OPEN_ROWS
+                ),
+                inner,
+            )
+            .into_iter()
+            .map(|wrapped| Line::from(wrapped).style(dim)),
+        );
+    }
+    rows
 }
 
 /// What would run, `inner` columns wide: what the call does where the
@@ -3648,6 +3675,10 @@ fn question_top(app: &App, ask: &Ask, outer: usize, theme: &Theme) -> Line<'stat
     ])
 }
 
+/// The most of an answer's hint its row reads: more bytes than any row has
+/// cells, even with every character four bytes long.
+const HINT_BYTES: usize = 4 * 1024;
+
 /// One numbered answer: the selection mark, the number, what the answer is
 /// and, at the right, what choosing it does — with whether the consequence
 /// fitted whole.
@@ -3673,8 +3704,23 @@ fn option_row(
     // glyph, and a tab or a line break turned into a space or a `↵`, which is
     // not the rule as it is kept, so it is said again whole below however
     // short it is.
-    let altered = hint.contains(char::is_control);
-    let hint = text::controls_shown_in_rows(&hint);
+    //
+    // Read no further than a row could show: a hint past [`HINT_BYTES`] is
+    // wider than any row, so it is not whole either, and a rule naming a
+    // command that carries a file was read whole with every tick.
+    let long = hint.len() > HINT_BYTES;
+    let read = match long {
+        true => hint
+            .char_indices()
+            .map(|(at, _)| at)
+            .take_while(|at| *at <= HINT_BYTES)
+            .last()
+            .unwrap_or_default(),
+        false => hint.len(),
+    };
+    let hint = &hint[..read];
+    let altered = long || hint.contains(char::is_control);
+    let hint = text::controls_shown_in_rows(hint);
     let whole = text::width(&hint) <= hint_room && !altered;
     let hint = text::truncate(&hint, hint_room);
     let gap = rest.saturating_sub(text::width(&label) + text::width(&hint));
@@ -6552,6 +6598,45 @@ pub(crate) fn compact(n: u64) -> String {
 mod tests {
     use super::*;
     use niobe_core::event::UsageWindows;
+
+    #[test]
+    fn a_rule_naming_a_command_that_carries_a_file_is_said_again_only_as_far_as_a_change_is_laid_out()
+     {
+        let command = (0..crate::hunks::OPEN_ROWS + 50)
+            .map(|at| format!("line {at}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let said = format!("3. niobe saves Bash(cat <<'EOF'\n{command}\nEOF)");
+        let rows: Vec<String> = consequence_rows(&said, 60, &crate::theme::CLASSIC)
+            .iter()
+            .map(|row| row.spans.iter().map(|span| span.content.as_ref()).collect())
+            .collect();
+        assert_eq!(rows.len(), crate::hunks::OPEN_ROWS + 1);
+        assert_eq!(rows[1], "line 0");
+        assert_eq!(
+            rows[crate::hunks::OPEN_ROWS],
+            "▴ the first 2000 rows are shown · the rest is not drawn"
+        );
+
+        let short = consequence_rows("3. niobe saves Bash(ls)", 60, &crate::theme::CLASSIC);
+        assert_eq!(short.len(), 1);
+    }
+
+    #[test]
+    fn an_answer_whose_consequence_is_longer_than_any_row_is_not_whole() {
+        let hint = format!("niobe saves Bash({})", "x".repeat(HINT_BYTES * 2));
+        let (row, whole) = option_row(
+            3,
+            ("Always allow this target".to_owned(), hint),
+            false,
+            60,
+            &crate::theme::CLASSIC,
+        );
+        assert!(!whole);
+        let drawn: String = row.spans.iter().map(|span| span.content.as_ref()).collect();
+        assert!(drawn.contains("niobe saves Bash(x"), "{drawn}");
+        assert!(drawn.ends_with('…'), "{drawn}");
+    }
     use niobe_core::event::{Backend, SessionMeta, Usage, UsageWindow};
 
     fn priced(cost: Option<f64>) -> niobe_core::event::Event {

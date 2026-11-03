@@ -34,6 +34,9 @@ pub struct Proposed {
     /// input the first time they are drawn and kept: the input can be the
     /// whole of a file, and the question is drawn again with every tick.
     others: std::cell::OnceCell<Option<serde_json::Map<String, serde_json::Value>>>,
+    /// The rows the call's subject wraps to in all, and the width they were
+    /// counted at: see [`Proposed::subject_rows`].
+    subject_count: std::cell::Cell<Option<(usize, usize)>>,
 }
 
 /// What a question's call is drawn as, with what the rows leave out.
@@ -95,6 +98,7 @@ impl Proposed {
             proposal,
             lines,
             others: std::cell::OnceCell::new(),
+            subject_count: std::cell::Cell::new(None),
         }
     }
 
@@ -175,11 +179,17 @@ impl Proposed {
             (Action::Command { command }, _) => (command, None),
             (Action::Plan { .. }, _) => return None,
         };
+        let (subject_rows, beyond) = self.subject_rows(subject, width);
         rows.extend(
-            text::wrap_exact(subject, width)
+            subject_rows
                 .into_iter()
                 .map(|row| Line::from(row).style(plain.bold())),
         );
+        if beyond > 0 {
+            let cut = text::wrap(&subject_cut(beyond), width);
+            markers.push((rows.len(), cut.len(), beyond));
+            rows.extend(cut.into_iter().map(|row| Line::from(row).style(dim)));
+        }
         rows.extend(
             said.iter()
                 .flat_map(|said| text::wrap(said, width))
@@ -195,6 +205,29 @@ impl Proposed {
         }
         self.others_under(input, width, theme, &mut rows, &mut markers);
         Some(Call { rows, markers })
+    }
+
+    /// The first rows of `subject` — a command, or a file's path — wrapped
+    /// exactly, `width` cells wide, and how many rows past them it wraps to.
+    ///
+    /// Laid out no further than a proposed change is with the diffs open: a
+    /// command can carry a whole file in a heredoc, and the question is drawn
+    /// again with every tick. The rows it wraps to in all are counted once
+    /// for each width, since counting them reads the whole of it.
+    fn subject_rows(&self, subject: &str, width: usize) -> (Vec<String>, usize) {
+        let all = match self.subject_count.get() {
+            Some((counted_at, all)) if counted_at == width => all,
+            _ => {
+                let all = text::wrap_exact_rows(subject, width);
+                self.subject_count.set(Some((width, all)));
+                all
+            }
+        };
+        let laid = match all > hunks::OPEN_ROWS + 1 {
+            true => hunks::OPEN_ROWS,
+            false => all,
+        };
+        (text::wrap_exact_first(subject, width, laid), all - laid)
     }
 
     /// Whether what is asked is a plan going ahead, which no standing answer
@@ -236,6 +269,20 @@ const NO_PLAN: &str = "No plan came with this question.";
 /// above the plan drawn as written.
 const PLAN_AS_WRITTEN: &str =
     "Drawn as written: as markdown, some of this plan would not be shown.";
+
+/// The row under a command too long to lay out whole: how many of its rows
+/// are not drawn, which nothing on screen shows; the arguments as sent behind
+/// Ctrl+T are cut too.
+fn subject_cut(beyond: usize) -> String {
+    let rows = match beyond {
+        1 => "row",
+        _ => "rows",
+    };
+    format!(
+        "▴ the first {} rows are shown · {beyond} more {rows} are not drawn",
+        hunks::OPEN_ROWS
+    )
+}
 
 /// What a write does to the file beyond the lines it writes: a file that was
 /// there loses everything it held, which the call does not carry, so nothing
@@ -463,6 +510,35 @@ mod tests {
                 "timeout: 60000"
             ]
         );
+    }
+
+    #[test]
+    fn a_command_too_long_to_lay_out_whole_is_drawn_to_the_rows_a_change_is_and_counts_the_rest() {
+        let command = (0..hunks::OPEN_ROWS + 500)
+            .map(|at| format!("echo {at}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let proposal = Proposal::new(
+            Action::Command {
+                command: command.clone(),
+            },
+            ["command"],
+        );
+        let input = serde_json::json!({ "command": command }).to_string();
+        for open in [false, true] {
+            let call = Proposed::new(proposal.clone())
+                .call(&input, 80, open, &CLASSIC)
+                .expect("a command has a view");
+            assert_eq!(call.rows.len(), hunks::OPEN_ROWS + 1, "open: {open}");
+            let last: String = call.rows[hunks::OPEN_ROWS]
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect();
+            assert!(last.contains("500 more rows"), "{last}");
+            assert_eq!(call.hidden_after(0), hunks::OPEN_ROWS + 500, "open: {open}");
+            assert_eq!(call.hidden_after(hunks::OPEN_ROWS), 500, "open: {open}");
+        }
     }
 
     #[test]
