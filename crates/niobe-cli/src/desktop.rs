@@ -24,9 +24,10 @@
 //! and is reaped on a thread of its own when it ends.
 //!
 //! A file to edit is the exception to all of that. It goes to `$VISUAL` or
-//! `$EDITOR` — split on whitespace and run with no shell, the path its last
-//! argument — on the terminal the shell lends it, in the session's own
-//! process group so that it may read the terminal, and is waited on — this
+//! `$EDITOR` — read into words with its quotes as a shell would, and run with
+//! no shell, the path its last argument — on the terminal the shell lends it,
+//! in the session's own process group so that it may read the terminal, and
+//! is waited on — this
 //! process stopping whenever the editor stops, so that the operator's
 //! job-control shell sees the job stop and can continue it. Where
 //! neither is set it goes to `open -t` on macOS, which opens a file in the
@@ -135,19 +136,76 @@ fn ended_stopping_with(child: &Child) -> std::io::Result<std::process::ExitStatu
 }
 
 /// The text editor a file is edited in: the first of `visual` and `editor`
-/// that names a program, split on whitespace, and otherwise the platform's,
-/// `open -t` on macOS and `vi` elsewhere.
+/// that names a program, read into words as [`shell_words`] reads them, and
+/// otherwise the platform's, `open -t` on macOS and `vi` elsewhere.
 fn editor_from(visual: Option<&str>, editor: Option<&str>, macos: bool) -> Program {
     let named = [visual, editor].into_iter().flatten().find_map(|named| {
-        let mut words = named.split_whitespace();
-        let name = words.next()?;
-        Some(Program::new(name, &words.collect::<Vec<_>>()))
+        let mut words = shell_words(named).into_iter();
+        let name = words.next().filter(|name| !name.is_empty())?;
+        Some(Program {
+            name,
+            args: words.collect(),
+        })
     });
     match (named, macos) {
         (Some(named), _) => named,
         (None, true) => Program::new("open", &["-t"]),
         (None, false) => Program::new("vi", &[]),
     }
+}
+
+/// The words of `line` as a POSIX shell splits and unquotes them, with
+/// nothing expanded: separated by unquoted whitespace, a single-quoted run
+/// taken as written, a double-quoted one with a backslash escaping only `$`,
+/// `` ` ``, `"`, `\` and a line break, and a backslash outside quotes
+/// escaping whatever follows it.
+///
+/// `$VISUAL` and `$EDITOR` are written for a shell — git, `crontab -e` and
+/// `less` hand them to one — so an editor at a path with a space in it is
+/// quoted, as is the empty alternate editor of `emacsclient -a ''`. Read
+/// here rather than by `sh`, so that nothing else in the value, a `$` or a
+/// `;`, does anything. A quote left open is closed at the end.
+fn shell_words(line: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    // `None` between words; `Some` from the first character of one, a quote
+    // included, so that `''` is a word that is empty.
+    let mut word: Option<String> = None;
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            c if c.is_whitespace() => words.extend(word.take()),
+            '\'' => {
+                let word = word.get_or_insert_with(String::new);
+                word.extend(chars.by_ref().take_while(|&c| c != '\''));
+            }
+            '"' => {
+                let word = word.get_or_insert_with(String::new);
+                while let Some(c) = chars.next() {
+                    match c {
+                        '"' => break,
+                        '\\' => match chars.next() {
+                            Some(next @ ('$' | '`' | '"' | '\\')) => word.push(next),
+                            Some('\n') => {}
+                            Some(next) => {
+                                word.push('\\');
+                                word.push(next);
+                            }
+                            None => word.push('\\'),
+                        },
+                        c => word.push(c),
+                    }
+                }
+            }
+            '\\' => match chars.next() {
+                Some('\n') => {}
+                Some(next) => word.get_or_insert_with(String::new).push(next),
+                None => word.get_or_insert_with(String::new).push('\\'),
+            },
+            c => word.get_or_insert_with(String::new).push(c),
+        }
+    }
+    words.extend(word);
+    words
 }
 
 /// The text editor this process's environment names, or the platform's.
@@ -614,6 +672,51 @@ mod tests {
             assert_ne!(run, ("open".to_owned(), Vec::new()));
             assert_ne!(run, ("xdg-open".to_owned(), Vec::new()));
         }
+    }
+
+    #[test]
+    fn an_editor_is_read_with_its_quotes_as_a_shell_reads_the_variable() {
+        assert_eq!(
+            named(&editor_from(
+                Some("'/Applications/Sublime Text.app/Contents/SharedSupport/bin/subl' -w"),
+                None,
+                true
+            )),
+            (
+                "/Applications/Sublime Text.app/Contents/SharedSupport/bin/subl".to_owned(),
+                vec!["-w".to_owned()]
+            ),
+            "a quoted path with a space in it is one program"
+        );
+        assert_eq!(
+            named(&editor_from(None, Some("emacsclient -t -a ''"), false)),
+            (
+                "emacsclient".to_owned(),
+                vec!["-t".to_owned(), "-a".to_owned(), String::new()]
+            ),
+            "an empty quoted word is an empty argument, not two quote marks"
+        );
+        assert_eq!(
+            named(&editor_from(
+                Some(r#""/opt/my editor/bin/ed" --title "a \"b\" c" one\ two"#),
+                None,
+                false
+            )),
+            (
+                "/opt/my editor/bin/ed".to_owned(),
+                vec![
+                    "--title".to_owned(),
+                    "a \"b\" c".to_owned(),
+                    "one two".to_owned()
+                ]
+            ),
+            "double quotes, escaped quotes inside them and a backslash-escaped space"
+        );
+        assert_eq!(
+            named(&editor_from(Some("''"), Some("nano"), false)),
+            ("nano".to_owned(), Vec::new()),
+            "a variable whose program is an empty word names none"
+        );
     }
 
     #[test]
