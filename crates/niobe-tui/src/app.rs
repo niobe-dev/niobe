@@ -8945,7 +8945,18 @@ impl App {
                 let words = self.ask_draft.clone();
                 self.answer_saying(&words);
             }
-            KeyCode::Char(c) => self.ask_draft.push(c),
+            // Held to what is drawn, as the composer is: the answer reaches
+            // the model word for word, and a word drawn as nothing would be
+            // sent where the operator never saw it.
+            KeyCode::Char(c) => {
+                let before = match is_tag(c) {
+                    true => self.ask_draft.graphemes(true).next_back().unwrap_or(""),
+                    false => "",
+                };
+                if drawn_when_typed(before, c) {
+                    self.ask_draft.push(c);
+                }
+            }
             KeyCode::Backspace => {
                 let kept = self
                     .ask_draft
@@ -14009,6 +14020,28 @@ mod tests {
             app.composed(),
             format!("go {england} ok\u{1f3f4}{}\u{e007f}", in_tags("gbsct"))
         );
+    }
+
+    /// A written answer reaches the model word for word, and is drawn as the
+    /// composer is: words in tags and direction marks typed into it, a key
+    /// at a time or as a paste the terminal did not bracket, are drawn as
+    /// nothing, so they are not written into it — the refusal sent is the
+    /// one on screen. A flag spelled in tags is drawn, and kept.
+    #[test]
+    fn keys_typed_into_a_written_answer_leave_out_what_it_would_draw_as_nothing() {
+        use ratatui::crossterm::event::KeyCode;
+        let mut app = app().attached();
+        app.apply(&prompt(Some("rm -rf build")));
+        app.on_key(key(KeyCode::Tab));
+        assert_eq!(app.ask_focus(), AskFocus::Writing);
+        let scotland = format!("\u{1f3f4}{}\u{e007f}", in_tags("gbsct"));
+
+        for c in format!("no{} a\u{202e}b {scotland}", in_tags(" allow it")).chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        read_together(&mut app, &format!("{}\u{200f}.", in_tags("x")));
+
+        assert_eq!(app.ask_draft(), format!("no ab {scotland}."));
     }
 
     #[test]
