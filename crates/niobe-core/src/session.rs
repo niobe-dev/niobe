@@ -1416,7 +1416,10 @@ impl SessionState {
             self.end_turn(cut);
             return;
         }
-        self.clear_open = false;
+        // No turn to record, but the backend has still said this one is
+        // over: a question or a call of its own it left open ends with it,
+        // as any turn's does, or the panes would say it waits for ever.
+        self.close_what_the_turn_left();
         self.turn_running = false;
     }
 
@@ -1437,10 +1440,9 @@ impl SessionState {
         }
     }
 
-    /// Ends the running turn, and records what it spent.
-    /// Records the running turn as ended, and whether it was `cut` off rather
-    /// than ended by the backend.
-    fn end_turn(&mut self, cut: bool) {
+    /// Closes what the ending turn left open, whether or not it is recorded
+    /// as a turn.
+    fn close_what_the_turn_left(&mut self) {
         self.clear_open = false;
         // Nothing more of the turn comes until the next prompt, so a question
         // it left open waits on nobody: an answer to it would reach nothing.
@@ -1458,6 +1460,12 @@ impl SessionState {
         self.pending_assistant.clear();
         self.interrupt_what_the_turn_left();
         self.compacting = false;
+    }
+
+    /// Records the running turn as ended, and whether it was `cut` off rather
+    /// than ended by the backend.
+    fn end_turn(&mut self, cut: bool) {
+        self.close_what_the_turn_left();
         let ended = self.mark();
         let began = self.turn_began.take().unwrap_or(self.turn_last_ended);
         let five_hour_share = match self.window_reported {
@@ -3170,6 +3178,41 @@ mod tests {
         }
 
         assert!(state.turns().is_empty());
+    }
+
+    #[test]
+    fn the_end_of_a_clears_turn_closes_what_that_turn_left_though_it_is_no_turn() {
+        let mut state = SessionState::new();
+        for event in [
+            said("/clear"),
+            spawn("a1"),
+            start("a1c", "Read", Some("a1")),
+            asked("q1"),
+            Event::Cleared,
+            start("t1", "Edit", None),
+            Event::AssistantDelta {
+                text: "half".to_owned(),
+            },
+            Event::CompactionStarted,
+            Event::TurnEnded,
+        ] {
+            state.apply(&event);
+        }
+
+        assert!(state.turns().is_empty(), "{:?}", state.turns());
+        assert_eq!(
+            state.in_flight_tools().keys().collect::<Vec<_>>(),
+            [&ToolCallId::from("a1c")],
+            "the sub-agent's call goes on; the turn's own call ended with it"
+        );
+        assert_eq!(state.tools().interrupted, 1);
+        assert!(
+            state.pending_permissions().is_empty(),
+            "the turn's question waits on nobody"
+        );
+        assert_eq!(state.pending_assistant(), "");
+        assert!(!state.compacting());
+        assert!(!state.turn_running());
     }
 
     /// The store keeps the conversation after a clear as a session of its

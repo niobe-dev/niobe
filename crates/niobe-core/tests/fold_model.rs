@@ -5,7 +5,10 @@
 //! backend could plausibly produce — ends said twice or late, exits with no
 //! spawn, a clear in the middle of a turn, a session left and taken up again —
 //! folded one event at a time, with the figures every pane derives from
-//! checked after each against what must hold whatever arrived.
+//! checked after each against what must hold whatever arrived. Background
+//! commands and sub-agents run across turns and clears, usage lands after a
+//! turn's end, prompts reach no backend, and a session is left, or ends on a
+//! fatal error, between any two events.
 //!
 //! The expected figures are kept by a model in this file, counted from the
 //! events themselves, so a fold that drifts cannot agree with itself. The
@@ -95,9 +98,12 @@ fn agent(rng: &mut Rng) -> Option<AgentId> {
     rng.chance(40).then(|| AgentId::new(rng.pick(AGENTS)))
 }
 
-fn event(rng: &mut Rng) -> Event {
+/// How many kinds of event [`event`] draws from.
+const KINDS: u64 = 40;
+
+fn event(rng: &mut Rng, kinds: &[u64]) -> Event {
     let call = ToolCallId::new(rng.pick(CALLS));
-    match rng.below(30) {
+    match kinds[rng.below(kinds.len() as u64) as usize] {
         0..=2 => Event::UserMessage {
             text: "go".to_owned(),
         },
@@ -218,15 +224,40 @@ fn event(rng: &mut Rng) -> Event {
             2 => Event::TurnFollows,
             _ => Event::Looked,
         },
-        _ => Event::Notice {
+        29 => Event::Notice {
             message: "note".to_owned(),
         },
+        30 | 31 => Event::BackgroundCommandStarted { id: call },
+        32 | 33 => Event::BackgroundCommandEnded { id: call },
+        34 => Event::PromptNotSent {
+            text: "go".to_owned(),
+            why: None,
+        },
+        35 => Event::TurnFollows,
+        36 => Event::CompactionEnded,
+        37 => Event::SessionLeft,
+        38 => Event::Error {
+            message: "boom".to_owned(),
+            fatal: true,
+        },
+        _ => Event::Cleared,
     }
 }
 
+/// A stream drawn from every kind of event, or, for two seeds in three, from
+/// a few kinds and the prompt, end and usage that make turns of them: the
+/// shapes a rare kind makes only beside another rare one — a clear while a
+/// sub-agent runs and the turn it ends — are drawn often enough to be met.
 fn sequence(seed: u64, len: usize) -> Vec<Event> {
     let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
-    (0..len).map(|_| event(&mut rng)).collect()
+    let kinds: Vec<u64> = match seed % 3 {
+        0 => (0..KINDS).collect(),
+        _ => (0..KINDS)
+            .filter(|_| rng.chance(30))
+            .chain([0, 11, 14])
+            .collect(),
+    };
+    (0..len).map(|_| event(&mut rng, &kinds)).collect()
 }
 
 /// The figures counted from the events alone, for the conversation since the
@@ -367,7 +398,10 @@ impl Model {
                     *stranded = *all;
                 }
             }
-            Event::TurnEnded => self.clear_open = false,
+            Event::TurnEnded => {
+                self.clear_open = false;
+                self.close_turn_calls();
+            }
             Event::UserMessage { .. } if !before.turn_running() && !self.clear_open => {
                 self.began_at = Some(self.five_hour.filter(|_| !self.left));
                 self.window_said = false;
@@ -415,12 +449,19 @@ impl Model {
         }
     }
 
-    /// Takes in a turn the fold has just recorded, and says what it spent.
-    fn turn_recorded(&mut self) -> u64 {
+    /// Drops the calls an ended turn leaves no one to end, whether or not it
+    /// is recorded as a turn: all but the operator's commands and the calls
+    /// of sub-agents still running.
+    fn close_turn_calls(&mut self) {
         let agents = &self.running_agents;
         self.running_calls.retain(|_, (name, agent)| {
             name == OPERATOR_SHELL || agent.as_ref().is_some_and(|a| agents.contains(a))
         });
+    }
+
+    /// Takes in a turn the fold has just recorded, and says what it spent.
+    fn turn_recorded(&mut self) -> u64 {
+        self.close_turn_calls();
         let spent = self.between + self.in_turn;
         self.between = 0;
         self.in_turn = 0;
@@ -633,11 +674,157 @@ fn check(seed: u64, at: usize, event: &Event, state: &SessionState, model: &Mode
     );
 }
 
+/// What the events say is open, and how many turns they can have made, since
+/// the last clear.
+#[derive(Default)]
+struct Open {
+    /// The commands the backend moved to the background and has not said
+    /// ended, which go on across a turn's end and a clear.
+    background: std::collections::BTreeSet<ToolCallId>,
+    /// The agent each call was last started by, where one was.
+    callers: std::collections::BTreeMap<ToolCallId, Option<AgentId>>,
+    /// Ends of any kind — the backend's, the process leaving, a fatal error.
+    ends: usize,
+    /// Prompts that opened a turn: sent while none ran or was clearing.
+    prompted: usize,
+    /// Whether the event being folded ends a turn that was running or
+    /// clearing, rather than repeating an end.
+    ending: bool,
+}
+
+/// The counts that only a clear starts over.
+fn counters(state: &SessionState) -> [u64; 12] {
+    let tools = state.tools();
+    [
+        state.totals().tokens(),
+        state.totals().records,
+        state.turns().len() as u64,
+        tools.started,
+        tools.finished,
+        state.agents_spawned(),
+        state.agents_completed()
+            + state.agents_failed()
+            + state.agents_cancelled()
+            + state.agents_interrupted(),
+        state.errors(),
+        state.user_messages(),
+        state.permission_requests(),
+        state.files().iter().map(|f| f.changes).sum(),
+        state.decisions().len() as u64,
+    ]
+}
+
+impl Open {
+    fn before(&mut self, before: &SessionState, event: &Event) {
+        self.ending =
+            matches!(event, Event::TurnEnded) && (before.turn_running() || before.clearing());
+        match event {
+            Event::Cleared => {
+                let background = std::mem::take(&mut self.background);
+                *self = Open {
+                    background,
+                    callers: std::mem::take(&mut self.callers),
+                    ..Open::default()
+                };
+            }
+            Event::ToolCallStart { id, agent, .. } => {
+                if agent.is_some() || !before.in_flight_tools().contains_key(id) {
+                    self.callers.insert(id.clone(), agent.clone());
+                }
+            }
+            Event::BackgroundCommandStarted { id } => {
+                self.background.insert(id.clone());
+            }
+            Event::BackgroundCommandEnded { id } => {
+                self.background.remove(id);
+            }
+            Event::UserMessage { .. } if !before.turn_running() && !before.clearing() => {
+                self.prompted += 1;
+            }
+            _ => {}
+        }
+        if matches!(
+            event,
+            Event::TurnEnded | Event::SessionLeft | Event::Error { fatal: true, .. }
+        ) {
+            self.ends += 1;
+        }
+        if matches!(event, Event::SessionLeft | Event::Error { fatal: true, .. }) {
+            self.background.clear();
+        }
+    }
+
+    /// Whether `id` is a call a sub-agent still running made.
+    fn agents(&self, state: &SessionState, id: &ToolCallId) -> bool {
+        self.callers
+            .get(id)
+            .cloned()
+            .flatten()
+            .is_some_and(|agent| state.running_agents().contains(&agent))
+    }
+
+    fn check(&self, why: &str, before: [u64; 12], event: &Event, state: &SessionState) {
+        assert_eq!(
+            state.background_commands(),
+            &self.background,
+            "background, {why}"
+        );
+        if !matches!(event, Event::Cleared) {
+            let after = counters(state);
+            for (i, (was, is)) in before.iter().zip(after).enumerate() {
+                assert!(is >= *was, "counter {i} went from {was} to {is}, {why}");
+            }
+        }
+        assert!(state.turns().len() <= self.ends, "turns no end made, {why}");
+        assert!(
+            self.prompted
+                <= state.turns().len() + usize::from(state.turn_running() || state.clearing()),
+            "a prompted turn neither running nor recorded, {why}"
+        );
+        if matches!(event, Event::SessionLeft | Event::Error { fatal: true, .. }) {
+            assert!(!state.turn_running() && !state.clearing(), "{why}");
+            assert!(state.running_agents().is_empty(), "{why}");
+            assert!(state.pending_permissions().is_empty(), "{why}");
+            assert!(
+                state
+                    .in_flight_tools()
+                    .values()
+                    .all(|n| n == OPERATOR_SHELL),
+                "{why}"
+            );
+        }
+        // Whether or not it was recorded as a turn — the one that typed a
+        // clear is not — a turn the backend ended leaves nothing of its own
+        // running or waiting: only the operator's commands and what the
+        // sub-agents still running have under way.
+        if self.ending {
+            assert!(!state.turn_running() && !state.clearing(), "{why}");
+            for (id, name) in state.in_flight_tools() {
+                assert!(
+                    name == OPERATOR_SHELL || self.agents(state, id),
+                    "call {id:?} running past its turn's end, {why}"
+                );
+            }
+            for id in state.pending_permissions() {
+                assert!(
+                    state.in_flight_tools().contains_key(id) && self.agents(state, id),
+                    "question {id:?} waiting past its turn's end, {why}"
+                );
+            }
+            assert_eq!(state.pending_assistant(), "", "{why}");
+            assert!(!state.compacting(), "{why}");
+        }
+    }
+}
+
 fn fold_checked(seed: u64, events: &[Event]) -> SessionState {
     let mut state = SessionState::new();
     let mut model = Model::default();
+    let mut open = Open::default();
     for (at, event) in events.iter().enumerate() {
         model.before(&state, event);
+        open.before(&state, event);
+        let counted = counters(&state);
         let turns = state.turns().len();
         let cleared = matches!(event, Event::Cleared);
         state.apply(event);
@@ -673,6 +860,12 @@ fn fold_checked(seed: u64, events: &[Event]) -> SessionState {
             model.ended_at = None;
         }
         check(seed, at, event, &state, &model);
+        open.check(
+            &format!("seed {seed}, after event {at} ({event:?})"),
+            counted,
+            event,
+            &state,
+        );
     }
     state
 }
@@ -745,28 +938,38 @@ fn what_happened_since_a_look_is_what_the_events_after_it_say() {
 fn a_conversation_read_back_from_its_clear_has_the_turns_and_totals_it_had_live() {
     for seed in 0..SEEDS {
         let events = sequence(seed, LENGTH);
-        let Some(at) = events.iter().position(|e| matches!(e, Event::Cleared)) else {
-            continue;
-        };
-        let live = SessionState::replay(&events);
-        let read_back = SessionState::replay(&events[at..]);
-        let turns = |state: &SessionState| {
-            state
-                .turns()
-                .iter()
-                .map(|turn| (turn.number, turn.tokens, turn.cut))
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(
-            turns(&read_back),
-            turns(&live),
-            "seed {seed}, cleared at event {at}"
-        );
-        assert_eq!(
-            read_back.totals().tokens(),
-            live.totals().tokens(),
-            "seed {seed}, cleared at event {at}"
-        );
+        let clears: Vec<usize> = (0..events.len())
+            .filter(|&at| matches!(events[at], Event::Cleared))
+            .collect();
+        for (i, &at) in clears.iter().enumerate() {
+            let next = clears.get(i + 1).copied().unwrap_or(events.len());
+            let live = SessionState::replay(&events[..next]);
+            let read_back = SessionState::replay(&events[at..next]);
+            let why = format!("seed {seed}, cleared at event {at} until {next}");
+            let turns = |state: &SessionState| {
+                state
+                    .turns()
+                    .iter()
+                    .map(|turn| (turn.number, turn.tokens, turn.cut, turn.compacted))
+                    .collect::<Vec<_>>()
+            };
+            let files = |state: &SessionState| {
+                state
+                    .files()
+                    .iter()
+                    .map(|f| (f.path.clone(), f.added, f.removed, f.changes))
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(turns(&read_back), turns(&live), "{why}");
+            assert_eq!(read_back.totals().tokens(), live.totals().tokens(), "{why}");
+            assert_eq!(read_back.totals().records, live.totals().records, "{why}");
+            assert_eq!(read_back.user_messages(), live.user_messages(), "{why}");
+            assert_eq!(read_back.errors(), live.errors(), "{why}");
+            assert_eq!(read_back.decisions(), live.decisions(), "{why}");
+            assert_eq!(files(&read_back), files(&live), "{why}");
+            assert_eq!(read_back.clearing(), live.clearing(), "{why}");
+            assert_eq!(read_back.fatal_error(), live.fatal_error(), "{why}");
+        }
     }
 }
 
