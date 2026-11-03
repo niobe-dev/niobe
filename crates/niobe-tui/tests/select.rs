@@ -811,3 +811,44 @@ fn a_selection_stays_on_what_it_covered_when_an_entry_above_it_grows() {
         vec![Handoff::Copy("niobe.toml".to_owned())]
     );
 }
+
+/// A call's row is one line, cut with `…` where what the call did is wider
+/// than the room left for it. A link cut there is not the link the call
+/// fetched, and opening the part drawn would open another page: the click
+/// opens the call instead, which shows the link whole.
+#[test]
+fn a_click_on_a_link_a_calls_row_cut_short_opens_the_call_and_not_the_part_drawn() {
+    let link = format!("https://example.com/{}/end", "segment".repeat(20));
+    let input = format!("{{\"url\":\"{link}\",\"prompt\":\"read it\"}}");
+    let mut app = running_session();
+    app.apply(&Event::UserMessage {
+        text: "Fetch it.".to_owned(),
+    });
+    let (start, end) = call_events("f1", "WebFetch", &input, "the page");
+    let start = match start {
+        Event::ToolCallStart {
+            id,
+            name,
+            input,
+            agent,
+            ..
+        } => Event::ToolCallStart {
+            id,
+            name,
+            input,
+            summary: Some(link.clone()),
+            agent,
+        },
+        other => other,
+    };
+    app.apply(&start);
+    app.apply(&end);
+    let frame = screen(&mut app, WIDTH, 60);
+    assert!(!frame.contains("/end"), "the row is cut short: {frame}");
+
+    click(&mut app, cell_of(&frame, "example.com/segment"));
+
+    assert_eq!(app.take_handoffs(), Vec::new(), "{frame}");
+    let detail = app.detail().expect("the click opened the call on its row");
+    assert!(detail.text().contains(&link), "{frame}");
+}

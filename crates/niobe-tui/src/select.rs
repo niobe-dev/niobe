@@ -248,6 +248,9 @@ fn in_link(c: char) -> bool {
 /// link that ends a line the words wrapped on is whole: the next line's first
 /// word is another word.
 ///
+/// A link the drawing cut short with `…`, as a row drawn on one line is
+/// where it is too wide, is no link: what was drawn is not where it leads.
+///
 /// A word exactly as wide as the line fills it too, and is drawn just as the
 /// first part of a cut one is: the lines alone cannot tell the two apart. So
 /// `said`, the text the lines were drawn from, decides: two parts are one
@@ -286,6 +289,9 @@ pub(crate) fn link_at(
         at -= 1;
         from = before;
     }
+    if lines.get(at)?.get(..from)?.ends_with(CUT) {
+        return None;
+    }
     let mut at = row;
     let mut to = end;
     while to == lines.get(at)?.trim_end().len() {
@@ -309,8 +315,18 @@ pub(crate) fn link_at(
         at += 1;
         to = next.1;
     }
+    if lines.get(at)?.get(to..)?.starts_with(CUT) {
+        return None;
+    }
     link_in(&word)
 }
+
+/// The mark a row drawn on one line ends or starts with where the text was
+/// too wide for it ([`text::truncate`], [`text::truncate_start`]). A link
+/// against it is not the link the text holds but the part of it that fitted,
+/// another address, so it is not opened: a click on a call's row then opens
+/// the call, which shows the link whole.
+const CUT: char = '…';
 
 /// Whether `first`, which ends a line, and `then`, which starts the next, are
 /// one word cut in two, by what `said` holds: they are, unless some of it
@@ -756,5 +772,18 @@ mod tests {
     #[test]
     fn a_scheme_with_nothing_after_it_is_no_link() {
         assert_eq!(link(&["  https:// alone"], 80, 0, 4), None);
+    }
+
+    #[test]
+    fn a_link_a_row_was_cut_short_at_is_not_opened_from_the_part_drawn() {
+        let cut = "⚙ WebFetch  https://example.com/docs/a/lo…  8 B";
+        assert_eq!(link(&[cut], 80, 0, 20), None);
+        let front = "⚙ Read  …?next=https://example.com/b  8 B";
+        assert_eq!(link(&[front], 80, 0, 25), None);
+        let after = "⚙ WebFetch  https://example.com/docs …more";
+        assert_eq!(
+            link(&[after], 80, 0, 20).as_deref(),
+            Some("https://example.com/docs")
+        );
     }
 }
