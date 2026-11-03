@@ -4089,7 +4089,10 @@ const METER_CELLS: usize = 12;
 /// that rounds to it reads `>99%`, as [`share_label`] draws them: `100%` says
 /// the window is gone, which the meter beside it, keeping a cell of track,
 /// does not. A level of the whole or past it is drawn as it is.
-fn window_share(utilization: f64) -> String {
+///
+/// Cost & usage reads a window out in these words too, so that the menu and
+/// the pane never say two things about one window.
+pub(crate) fn window_share(utilization: f64) -> String {
     if !utilization.is_finite() || utilization < 0.0 {
         return format!("{:>3} ", "—");
     }

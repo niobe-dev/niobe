@@ -10410,17 +10410,22 @@ const UNMEASURED: f64 = f64::NAN;
 
 /// One window, as Cost & usage reads it out: `5h window 62%, resets in 2h 14m`.
 ///
+/// The level is in the Usage pane's words — `<1%`, `>99%`, an em dash for a
+/// level below nothing — since a `0%` beside a touched window, or a `100%`
+/// beside one with room left, says something the pane above it does not.
+///
 /// The reset is shown as the time left rather than as a wall clock, because
 /// what the operator is deciding is whether to wait, and a clock time would
 /// have to pick a time zone to be read in. A window whose reset has passed
 /// says so instead of counting down from nothing: a replayed session is read
 /// long after the window it recorded came back.
 fn window_hint(label: &str, window: UsageWindow, now: u64) -> String {
-    let used = percent(window.utilization);
+    let share = crate::ui::window_share(window.utilization);
+    let used = share.trim();
     match window.resets_at {
-        None => format!("{label} window {used}%, no reset time reported"),
-        Some(at) if at <= now => format!("{label} window {used}%, already reset"),
-        Some(at) => format!("{label} window {used}%, resets in {}", left(at - now)),
+        None => format!("{label} window {used}, no reset time reported"),
+        Some(at) if at <= now => format!("{label} window {used}, already reset"),
+        Some(at) => format!("{label} window {used}, resets in {}", left(at - now)),
     }
 }
 
@@ -15847,6 +15852,38 @@ mod tests {
         assert_eq!(
             app.cost_hint(NOW),
             "Cost & usage — 5h window 33%, resets in 1h 30m · 7d window 23%, resets in 4d 6h"
+        );
+    }
+
+    /// Cost & usage reads out the level the Usage pane draws, in the pane's
+    /// words: a window touched but under half a percent is not one nobody
+    /// used, one half a percent short of the whole is not gone, and a level
+    /// below nothing is no level at all.
+    #[test]
+    fn cost_and_usage_reads_a_window_as_the_usage_pane_draws_it() {
+        const NOW: u64 = 1_789_000_000;
+        let read_out = |five_hour: f64, seven_day: f64| {
+            let mut app = app();
+            let mut levels = windows(NOW);
+            levels.five_hour = levels.five_hour.map(|window| UsageWindow {
+                utilization: five_hour,
+                ..window
+            });
+            levels.seven_day = levels.seven_day.map(|window| UsageWindow {
+                utilization: seven_day,
+                ..window
+            });
+            app.apply(&Event::UsageWindows(levels));
+            app.cost_hint(NOW)
+        };
+
+        assert_eq!(
+            read_out(0.004, 0.995),
+            "Cost & usage — 5h window <1%, resets in 1h 30m · 7d window >99%, resets in 4d 6h"
+        );
+        assert_eq!(
+            read_out(-0.2, 1.0),
+            "Cost & usage — 5h window —, resets in 1h 30m · 7d window 100%, resets in 4d 6h"
         );
     }
 
