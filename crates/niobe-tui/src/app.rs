@@ -7578,15 +7578,21 @@ impl App {
     }
 
     /// Scrolls the transcript so `line` is on screen, in the middle of it
-    /// where the view has to move at all.
+    /// where the view has to move at all, and holds it there.
+    ///
+    /// The view is held even where the line is in the last screenful: a
+    /// view left on the newest line follows it, and a reply streaming on
+    /// below would carry the match the operator is reading off the top of
+    /// the pane. Only a transcript that fits its pane, which nothing can
+    /// scroll, is left following.
     fn reveal_line(&mut self, line: usize) {
         let top = self.scroll();
         let rows = self.viewport_lines.max(1);
-        if (top..top.saturating_add(rows)).contains(&line) {
-            return;
-        }
-        self.scroll = line.saturating_sub(rows / 2).min(self.max_scroll());
-        self.follow = self.scroll >= self.max_scroll();
+        self.scroll = match (top..top.saturating_add(rows)).contains(&line) {
+            true => top,
+            false => line.saturating_sub(rows / 2).min(self.max_scroll()),
+        };
+        self.follow = self.max_scroll() == 0;
     }
 
     /// Opens a search through the transcript, remembering where the view is.

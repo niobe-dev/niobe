@@ -5212,6 +5212,52 @@ fn a_reply_arriving_while_the_search_is_open_is_counted() {
     assert!(find_row(&frame).contains("2 of 3"), "{frame}");
 }
 
+/// The match the search lands on is what the operator is reading: a reply
+/// streaming on below it, with the view at the newest line when the search
+/// found it, does not carry it off the top of the pane.
+#[test]
+fn a_match_found_at_the_newest_line_stays_on_screen_while_a_reply_streams_on() {
+    let mut app = empty_session();
+    for n in 0..10 {
+        app.apply(&Event::UserMessage {
+            text: format!("prompt {n}"),
+        });
+        app.apply(&Event::AssistantMessage {
+            text: format!("reply {n}"),
+            agent: None,
+        });
+        app.apply(&Event::TurnEnded);
+    }
+    app.apply(&Event::UserMessage {
+        text: "go on".to_owned(),
+    });
+    app.apply(&Event::AssistantDelta {
+        text: "the needle is here\n\n".to_owned(),
+    });
+    let _ = screen(&mut app, 80, 24);
+    assert!(app.follows_tail(), "the test needs the view at the tail");
+    ctrl_f(&mut app);
+    type_keys(&mut app, "needle");
+    let theme = app.theme().to_owned();
+    let chip = Some((Some(theme.pane_bg), Some(theme.hot)));
+    let current =
+        |app: &mut App| style_at(app, 80, 24, "needle is").map(|style| (style.fg, style.bg));
+    assert_eq!(current(&mut app), chip, "{}", screen(&mut app, 80, 24));
+
+    for n in 0..30 {
+        app.apply(&Event::AssistantDelta {
+            text: format!("a line streamed after it, {n}\n\n"),
+        });
+        let frame = screen(&mut app, 80, 24);
+        assert!(find_row(&frame).contains("1 of 1"), "{frame}");
+        assert_eq!(
+            current(&mut app),
+            chip,
+            "the reply streaming on carried the match off the pane:\n{frame}"
+        );
+    }
+}
+
 #[test]
 fn a_slash_anywhere_but_the_start_of_a_prompt_is_a_slash() {
     use ratatui::crossterm::event::KeyCode;
