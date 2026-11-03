@@ -46,6 +46,11 @@ jobs:
       - name: Install the toolchain
         run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component rustfmt,clippy
 
+      # The gate lints install.sh with shellcheck, which `CI` makes
+      # mandatory, and the macOS image does not carry it.
+      - name: Install shellcheck where the image lacks it
+        run: command -v shellcheck || { if [ "$RUNNER_OS" = macOS ]; then brew install shellcheck; else sudo apt-get install -y shellcheck; fi; }
+
       # Untimed, for the reason CI's gate is: a shared runner's frame times
       # move by tens of percent between runs of one commit.
       - name: The gate
