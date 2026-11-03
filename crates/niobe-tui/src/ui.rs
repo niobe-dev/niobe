@@ -6924,6 +6924,31 @@ mod tests {
         );
     }
 
+    /// The key that clears a session, pressed after its CLI has ended, sends
+    /// nothing anywhere: the row still says the session ended, not that it
+    /// is idle and would take the next prompt.
+    #[test]
+    fn a_clear_the_ended_backend_never_took_leaves_the_session_ended() {
+        let mut app = started_on_max();
+        app.apply(&niobe_core::event::Event::Commands {
+            commands: vec![niobe_core::event::SlashCommand {
+                name: "clear".to_owned(),
+                description: String::new(),
+                argument_hint: None,
+                mid_prompt: false,
+            }],
+        });
+        app.apply(&niobe_core::event::Event::Error {
+            message: "the `claude` session ended with exit status: 1".to_owned(),
+            fatal: true,
+        });
+
+        app.perform(crate::menu::Action::NewSession);
+        app.not_sent("the `claude` session has ended");
+
+        assert_eq!(row_of(&app).last(), Some(&"○ ended".to_owned()));
+    }
+
     /// A CLI that has answered what it offers has spoken, though it says what
     /// it runs only when a turn starts: the row no longer says it is
     /// starting.

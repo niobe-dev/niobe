@@ -5269,9 +5269,24 @@ impl App {
         // still being written stay with it.
         self.images.send_none();
         self.focus = Focus::Session;
-        self.produce(Event::UserMessage { text });
+        self.produce_prompt(text);
         self.sent_here = true;
         self.scroll_to_tail();
+    }
+
+    /// Folds in `text` as a prompt for the backend, keeping how the session
+    /// stood before it, so that [`App::not_sent`] can put it back where the
+    /// backend does not take it: a prompt typed and a command sent from a
+    /// key alike, since either reaching no backend opens no turn.
+    fn produce_prompt(&mut self, text: String) {
+        let before = BeforePrompt {
+            session: self.session.clone(),
+            turn_began_at: self.turn_began_at,
+            turn_began_with: self.turn_began_with,
+            prompt_queued: self.prompt_queued,
+        };
+        self.produce(Event::UserMessage { text });
+        self.before_prompt = Some(before);
     }
 
     /// Sends the backend's command `name` where it lists one, and says
@@ -9126,16 +9141,7 @@ impl App {
         self.images.send(&text, &kept);
         self.sent_here = self.attached;
         match self.attached {
-            true => {
-                let before = BeforePrompt {
-                    session: self.session.clone(),
-                    turn_began_at: self.turn_began_at,
-                    turn_began_with: self.turn_began_with,
-                    prompt_queued: self.prompt_queued,
-                };
-                self.produce(Event::UserMessage { text });
-                self.before_prompt = Some(before);
-            }
+            true => self.produce_prompt(text),
             false => self.produce(Event::PromptNotSent { text, why: None }),
         }
         self.give_back(&draft);
@@ -22464,6 +22470,50 @@ mod tests {
                 }],
                 "{name}: the question is still the one to answer"
             );
+        }
+    }
+
+    /// A backend command the backend would not take — the CLI has ended, and
+    /// the key that clears it is the first thing reached for — is taken
+    /// back as a typed prompt is: no turn opened, and the session still ended
+    /// on the error that ended it, rather than idle with a turn open that
+    /// nothing will ever end.
+    #[test]
+    fn a_backend_command_that_reached_no_backend_opens_no_turn() {
+        use crate::menu::Action;
+
+        let presses: [(&str, Opens); 3] = [
+            ("F3", |app| app.on_key(key(KeyCode::F(3)))),
+            ("Session › Clear", |app| app.perform(Action::NewSession)),
+            ("typed /clear", |app| {
+                for c in "/clear".chars() {
+                    app.type_into_composer(Input {
+                        key: Key::Char(c),
+                        ..Default::default()
+                    });
+                }
+                app.submit();
+            }),
+        ];
+        for (name, press) in presses {
+            let mut app = offering(&["clear", "compact"]);
+            app.apply(&Event::Error {
+                message: "the `claude` session ended with exit status: 1".to_owned(),
+                fatal: true,
+            });
+
+            press(&mut app);
+            assert_eq!(app.said(), [said("/clear")], "{name}");
+            let taken_back = app.not_sent("the `claude` session has ended");
+
+            assert!(taken_back, "{name}: the record would keep it as sent");
+            assert!(!app.session().turn_running(), "{name}: a turn is open");
+            assert_eq!(
+                app.session().fatal_error(),
+                Some("the `claude` session ended with exit status: 1"),
+                "{name}"
+            );
+            assert_eq!(app.session().user_messages(), 0, "{name}");
         }
     }
 
