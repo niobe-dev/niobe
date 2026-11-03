@@ -8444,6 +8444,54 @@ mod tests {
         );
     }
 
+    /// What Claude Code 2.1.317 writes where the API answered 429 and the
+    /// window was not spent: `rate_limit` names the status, and no
+    /// `usage_limit_reached` beside it, which the CLI adds only to a message
+    /// that says a limit was hit. The words are the CLI's own for a plan.
+    const THROTTLED: &str = "API Error: Server is temporarily limiting requests (not your usage \
+                             limit) · Rate limited";
+
+    fn throttled(parent: Option<&str>) -> String {
+        let parent = parent.map_or("null".to_owned(), |id| format!("\"{id}\""));
+        format!(
+            r#"{{"type":"assistant","parent_tool_use_id":{parent},"error":"rate_limit","message":{{"model":"<synthetic>","id":"m-429","role":"assistant","content":[{{"type":"text","text":"{THROTTLED}"}}],"usage":{{"input_tokens":0,"output_tokens":0}}}}}}"#
+        )
+    }
+
+    #[test]
+    fn a_request_the_api_throttled_is_the_turns_failure_and_not_the_plans_limit() {
+        let mut translator = translator();
+
+        let mut events = translator.line(&throttled(None));
+        events.extend(translator.line(&format!(
+            r#"{{"type":"result","subtype":"success","is_error":true,"result":"{THROTTLED}","usage":{{"input_tokens":0,"output_tokens":0}}}}"#
+        )));
+
+        assert!(limits(&events).is_empty(), "{events:?}");
+        assert_eq!(warnings(&events), [THROTTLED], "{events:?}");
+    }
+
+    #[test]
+    fn a_sub_agents_throttled_request_is_its_reply_and_does_not_stop_it_as_the_limit() {
+        let mut translator = translator();
+        translator.line(&agent_call("toolu_a", "Agent"));
+
+        let mut events = translator.line(&throttled(Some("toolu_a")));
+        events.extend(translator.line(&result("toolu_a", &format!("\"{THROTTLED}\""), true)));
+
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                Event::AssistantMessage { agent: Some(_), text } if text == THROTTLED
+            )),
+            "{events:?}"
+        );
+        assert_eq!(
+            exits(&events),
+            [("toolu_a".to_owned(), AgentOutcome::Failed)]
+        );
+    }
+
     #[test]
     fn a_failure_that_is_not_the_limit_still_reports_as_one() {
         let mut translator = translator();

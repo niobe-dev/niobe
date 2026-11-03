@@ -310,7 +310,8 @@ pub(crate) struct Envelope {
     #[serde(default)]
     pub(crate) aborted: bool,
     /// On an `assistant` line the CLI wrote itself after a request failed:
-    /// the kind of failure, `rate_limit` for a plan's usage limit.
+    /// the kind of failure. `rate_limit` names the API's 429, which a spent
+    /// plan window answers with and so does a server limiting requests.
     #[serde(default)]
     pub(crate) error: Option<String>,
     /// On the same line, the API's own name for the failure —
@@ -390,10 +391,13 @@ impl Envelope {
     /// if this line is that note: `You've hit your session limit · resets
     /// 11:10pm (Europe/Berlin)`.
     ///
-    /// Read from the failure the CLI names on the line (`rate_limit`,
-    /// `usage_limit_reached`) and, for a release that names none, from the
+    /// Read from the API's name for the failure the CLI puts on the line
+    /// (`usage_limit_reached`) and, for a release that names none, from the
     /// opening words of a message no model wrote — the transcripts of 2.1.292
-    /// carry both.
+    /// carry both. The kind of failure beside it (`rate_limit`) is not enough:
+    /// Claude Code 2.1.317 gives it to every 429, among them the one it words
+    /// "Server is temporarily limiting requests (not your usage limit)", which
+    /// is a request that failed and not a window spent.
     pub(crate) fn usage_limit(&self) -> Option<String> {
         let Some(Content::Blocks(blocks)) = &self.message.content else {
             return None;
@@ -402,8 +406,7 @@ impl Envelope {
             Block::Text { text } => Some(text.clone()),
             Block::ToolUse { .. } | Block::ToolResult { .. } | Block::Other => None,
         })?;
-        let named = self.error.as_deref() == Some("rate_limit")
-            || self.api_error.as_deref() == Some("usage_limit_reached");
+        let named = self.api_error.as_deref() == Some("usage_limit_reached");
         let written_by_the_cli =
             self.message.model.as_deref() == Some("<synthetic>") && is_usage_limit_text(&text);
         (named || written_by_the_cli).then_some(text)

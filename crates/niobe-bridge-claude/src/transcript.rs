@@ -1887,7 +1887,7 @@ struct ApiErrorRecord {
 struct Assistant {
     message: AssistantBody,
     /// Set on a message the CLI wrote itself after a request failed: the kind
-    /// of failure, `rate_limit` for a plan's usage limit.
+    /// of failure, `rate_limit` for any 429 the API answered.
     #[serde(default)]
     error: Option<String>,
     /// The API's name for that failure, `usage_limit_reached` for a spent
