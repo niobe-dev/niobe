@@ -185,6 +185,10 @@ pub enum ShapeState {
     /// It is there and does not read as a config. Why is not kept: the
     /// reason quotes the text it stopped at.
     Unreadable,
+    /// It is the repository's config and a link to a file outside the
+    /// repository, which is not read: a clone chose where it leads, and it
+    /// can lead to a file of the operator's, a CLI's credentials among them.
+    Outside,
     /// It reads, and sets these.
     Set {
         /// The top-level keys it sets.
@@ -344,7 +348,21 @@ fn config_rows(facts: &Facts) -> Vec<Row> {
         .iter()
         .map(|file| {
             let shown = shown_path(&file.path, &facts.homes);
-            match (file.exists, unreadable(facts, &file.path)) {
+            if state_is(facts, &file.path, &ShapeState::Outside) {
+                return Row::problem(
+                    "config",
+                    Status::Fail,
+                    format!(
+                        "{shown} links outside the repository; niobe reads a repository's \
+                         config only from inside it"
+                    ),
+                    "put the config itself at that path in place of the link",
+                );
+            }
+            match (
+                file.exists,
+                state_is(facts, &file.path, &ShapeState::Unreadable),
+            ) {
                 (_, true) => Row::problem(
                     "config",
                     Status::Fail,
@@ -389,12 +407,12 @@ fn config_rows(facts: &Facts) -> Vec<Row> {
 /// value this report must not hold.
 const UNREADABLE_FIX: &str = "`niobe profiles` names the line and key it stops at; fix it there";
 
-/// Whether the config file at `path` was found not to read as a config.
-fn unreadable(facts: &Facts, path: &Path) -> bool {
+/// Whether the config file at `path` was found in `state`.
+fn state_is(facts: &Facts, path: &Path, state: &ShapeState) -> bool {
     facts
         .shapes
         .iter()
-        .any(|shape| shape.path == path && shape.state == ShapeState::Unreadable)
+        .any(|shape| shape.path == path && shape.state == *state)
 }
 
 fn terminal_row(facts: &Facts) -> Row {
@@ -482,6 +500,7 @@ pub fn json(rows: &[Row], facts: &Facts) -> Value {
             match &shape.state {
                 ShapeState::Absent => json!({"path": path, "state": "absent"}),
                 ShapeState::Unreadable => json!({"path": path, "state": "does not parse"}),
+                ShapeState::Outside => json!({"path": path, "state": "outside the repository"}),
                 ShapeState::Set { keys, profiles } => json!({
                     "path": path,
                     "state": "set",
@@ -669,14 +688,26 @@ pub fn gather(
             .iter()
             .map(|path| Shape {
                 path: path.clone(),
-                state: match niobe_config::Config::read(path) {
-                    Ok(None) => ShapeState::Absent,
-                    Ok(Some(config)) => shape_of(&config),
-                    Err(_) => ShapeState::Unreadable,
-                },
+                state: shape_at(path, root),
             })
             .collect(),
         newest_session_errors: newest_session_errors(root),
+    }
+}
+
+/// How the config file at `path` reads, for the repository rooted at `root`.
+///
+/// The repository's own file is read only where it stays inside the
+/// repository, as a session reads it: a link a clone planted there would
+/// otherwise choose which of the operator's files this reads.
+fn shape_at(path: &Path, root: &Path) -> ShapeState {
+    if path == crate::repo::config_path(root) && crate::repo::inside(root, path).is_err() {
+        return ShapeState::Outside;
+    }
+    match niobe_config::Config::read(path) {
+        Ok(None) => ShapeState::Absent,
+        Ok(Some(config)) => shape_of(&config),
+        Err(_) => ShapeState::Unreadable,
     }
 }
 
@@ -1062,6 +1093,63 @@ mod tests {
         assert_eq!(
             report["config"][0]["path"],
             json!("~/repo/.niobe/config.toml")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_repository_config_is_read_only_where_it_stays_inside_the_repository() {
+        let scratch = tempfile::tempdir().expect("a temporary directory can be created");
+        let root = scratch.path().join("repo");
+        std::fs::create_dir_all(root.join(".niobe")).expect("a .niobe directory");
+        let config = crate::repo::config_path(&root);
+        let profile = "[profiles.p]\nbackend = \"claude\"\n";
+
+        let outside = scratch.path().join("elsewhere.toml");
+        std::fs::write(&outside, profile).expect("the file is written");
+        std::os::unix::fs::symlink(&outside, &config).expect("the link is made");
+        assert_eq!(shape_at(&config, &root), ShapeState::Outside);
+
+        std::fs::remove_file(&config).expect("the link is removed");
+        std::fs::write(root.join("shared.toml"), profile).expect("the file is written");
+        std::os::unix::fs::symlink(root.join("shared.toml"), &config).expect("the link is made");
+        assert!(
+            matches!(shape_at(&config, &root), ShapeState::Set { .. }),
+            "a link that stays inside is read as a session reads it"
+        );
+    }
+
+    #[test]
+    fn a_repository_config_that_links_outside_fails_its_row_by_its_shown_path() {
+        let repo = PathBuf::from("/home/me/repo/.niobe/config.toml");
+        let facts = Facts {
+            loads: false,
+            shapes: vec![Shape {
+                path: repo.clone(),
+                state: ShapeState::Outside,
+            }],
+            ..facts()
+        };
+
+        let rows = rows(&facts);
+        let row = rows
+            .iter()
+            .find(|row| row.name == "config" && row.status == Status::Fail)
+            .expect("the config row fails");
+        assert_eq!(
+            row.detail,
+            "~/repo/.niobe/config.toml links outside the repository; niobe reads a \
+             repository's config only from inside it"
+        );
+        assert_eq!(
+            rows.iter().filter(|row| row.status == Status::Fail).count(),
+            1,
+            "{rows:?}"
+        );
+        let report = json(&rows, &facts);
+        assert_eq!(
+            report["config"][0]["state"],
+            json!("outside the repository")
         );
     }
 

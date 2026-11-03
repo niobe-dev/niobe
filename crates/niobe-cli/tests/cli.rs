@@ -1941,6 +1941,53 @@ fn a_config_that_links_outside_the_repository_is_not_read() {
     }
 }
 
+/// `niobe doctor` reads the repository's config too, for the keys it sets,
+/// and a cloned link would otherwise have it read whichever of the operator's
+/// files it points at — a CLI's credentials among them — and print the keys
+/// and profile names of one that reads as a config into a report meant for an
+/// issue.
+#[cfg(unix)]
+#[test]
+fn doctor_does_not_read_a_config_that_links_outside_the_repository() {
+    let setup = Configured::new(USER_CONFIG, "");
+    let elsewhere = tempfile::tempdir().expect("a temporary directory can be created");
+    let outside = elsewhere.path().join("config.toml");
+    std::fs::write(
+        &outside,
+        "[profiles.only-elsewhere]\nbackend = \"claude\"\n",
+    )
+    .expect("the file is written");
+    std::fs::create_dir(setup.repo.path().join(".niobe")).expect("a .niobe directory");
+    std::os::unix::fs::symlink(&outside, repo_config(setup.repo.path())).expect("the link is made");
+    let run = |args: &[&str]| {
+        niobe_command(
+            setup.repo.path(),
+            setup.user.path(),
+            &setup.repo.path().join("c"),
+            args,
+        )
+        .env("PATH", setup.repo.path().join("nothing-here"))
+        .output()
+        .expect("the niobe binary runs")
+    };
+
+    let text = run(&["doctor"]);
+    let said = stdout(&text);
+    assert!(!said.contains("only-elsewhere"), "{said}");
+    assert!(said.contains("outside the repository"), "{said}");
+
+    let json = run(&["doctor", "--json"]);
+    let out = stdout(&json);
+    assert!(!out.contains("only-elsewhere"), "{out}");
+    let report: serde_json::Value = serde_json::from_str(&out).expect("the report is JSON");
+    assert_eq!(report["ok"], serde_json::json!(false));
+    assert_eq!(
+        report["config"][1]["state"],
+        serde_json::json!("outside the repository"),
+        "{out}"
+    );
+}
+
 #[test]
 fn a_repository_config_that_sets_no_environment_needs_no_trust() {
     let setup = Configured::new(USER_CONFIG, "[profiles.plain]\nbackend = \"codex\"\n");
