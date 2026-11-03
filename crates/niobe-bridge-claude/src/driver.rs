@@ -607,9 +607,10 @@ pub struct Session {
     ends_read: Arc<AtomicU64>,
     /// How many turn ends the drain has handed on.
     ends_heard: u64,
-    /// How many turn ends the thread reading the CLI had read when the last
-    /// turn was sent. A turn sent after the reader read an end cannot be
-    /// part of the turn that end closed, nor counted in its queue.
+    /// How many turn ends the thread reading the CLI had read before the
+    /// last turn's line was queued. A turn sent after the reader read an end
+    /// cannot be part of the turn that end closed, nor counted in its queue;
+    /// an end read after the line was queued may be the turn's own.
     sent_after_ends: u64,
     /// Whether [`Options::ask_title`] was on when the session started, which
     /// is what a clear puts back.
@@ -981,13 +982,21 @@ impl Session {
     /// sent — arrives through [`Session::drain`].
     pub fn send(&mut self, prompt: &str, images: &[Image]) -> std::io::Result<()> {
         let id = prompt_id();
+        // Counted before the line goes out, never after: the CLI can read
+        // it, answer and end the turn, and the reader count that end, before
+        // this thread runs again. Counted then, the turn's own end would read
+        // as one written before the prompt reached the CLI, and leave the
+        // turn running after it.
+        let ends_before = self.ends_read.load(Ordering::Acquire);
         self.queue(turn_line(prompt, images, &id).to_string(), "turn")?;
+        #[cfg(test)]
+        tests::turn_queued();
         self.next.sent.push(Sent {
             id,
             label: label_of(prompt),
         });
         self.turn_open = true;
-        self.sent_after_ends = self.ends_read.load(Ordering::Acquire);
+        self.sent_after_ends = ends_before;
         // The turn went in. A title that could not follow it is no reason to
         // say it did not, and a closed input is reported by the next drain.
         let _ = self.ask_for_title(prompt);
@@ -2254,6 +2263,24 @@ fn add_saturating(counter: &AtomicU64, by: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::cell::RefCell;
+
+    thread_local! {
+        /// What [`Session::send`] does on the test's thread once the turn's
+        /// line is queued, standing in for the scheduler holding that
+        /// thread back while the CLI answers.
+        static WHEN_A_TURN_IS_QUEUED: RefCell<Option<Box<dyn FnMut()>>> = RefCell::new(None);
+    }
+
+    /// Runs the test's [`WHEN_A_TURN_IS_QUEUED`], where one is set.
+    pub(super) fn turn_queued() {
+        WHEN_A_TURN_IS_QUEUED.with(|hook| {
+            if let Some(hook) = hook.borrow_mut().as_mut() {
+                hook();
+            }
+        });
+    }
 
     #[test]
     fn a_count_of_ended_turns_stops_at_its_ceiling_rather_than_wrapping() {
@@ -4384,6 +4411,40 @@ read -r rest
             "{events:#?}"
         );
         assert!(session.next().is_none());
+    }
+
+    /// The CLI can read a turn, answer it and end it, and the reader count
+    /// that end, before the thread that sent the turn runs again — on a
+    /// loaded machine it is not run for seconds. That end is the turn's own
+    /// and closes it, so a CLI that then exits cleanly left between turns.
+    #[cfg(unix)]
+    #[test]
+    fn a_turn_the_cli_ends_before_its_send_returns_is_closed_by_that_end() {
+        let ended = r#"printf '%s\n' '{"type":"system","subtype":"init","session_id":"s-9","model":"claude-sonnet-5","permissionMode":"default"}' '{"type":"result","subtype":"success","is_error":false,"session_id":"s-9","queued_turn_count":0}'"#;
+        let (mut session, _dir) = started_with(
+            &format!("read -r initialize\nread -r turn\n{ended}\nexit 0\n"),
+            |_| {},
+        );
+        let ends_read = Arc::clone(&session.ends_read);
+        WHEN_A_TURN_IS_QUEUED.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                let started = Instant::now();
+                while ends_read.load(Ordering::Acquire) == 0 {
+                    assert!(started.elapsed() < PATIENCE, "the turn never ended");
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }));
+        });
+        let sent = session.send("list the files", &[]);
+        WHEN_A_TURN_IS_QUEUED.with(|hook| hook.borrow_mut().take());
+        sent.expect("the turn is queued");
+        let events = drained_to_the_end(&mut session);
+
+        assert!(
+            matches!(events.last(), Some(Event::Notice { message })
+                if message == "the `claude` session ended."),
+            "{events:#?}"
+        );
     }
 
     /// The count is what says a turn follows, not that two prompts were
