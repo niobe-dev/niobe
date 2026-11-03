@@ -46,8 +46,12 @@ jobs:
       - name: Install the toolchain
         run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component rustfmt,clippy
 
+      # Untimed, for the reason CI's gate is: a shared runner's frame times
+      # move by tens of percent between runs of one commit.
       - name: The gate
         run: cargo xtask ci
+        env:
+          NIOBE_UNTIMED: "1"
 
   build:
     name: ${{ matrix.target }}

@@ -748,8 +748,9 @@ cargo xtask size
 exactly as CI does, and lints `install.sh` with `shellcheck -s sh` where shellcheck is installed.
 It runs a timed test binary a second time where the first run fails, as §9 says of a timing
 test on a loaded machine, so only a budget missed twice fails the gate. `NIOBE_UNTIMED=1` skips the
-timed tests and nothing else; CI's Linux job sets it, because the budgets are set on Apple
-Silicon and the macOS job keeps them. CI pins its compiler
+timed tests and nothing else. CI sets it, because a hosted runner is a shared virtual machine
+whose frame times move by tens of percent between runs of one commit; the budgets are kept by
+this gate, run on the developer's machine before every push. CI pins its compiler
 (`RUSTUP_TOOLCHAIN` in `.github/workflows/ci.yml`); run the gate under that toolchain before a
 push, since a newer stable brings lints an older local compiler does not.
 

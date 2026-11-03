@@ -119,8 +119,9 @@ fn ci() -> Result<(), String> {
     // machine: a shared CI runner lands a frame a few milliseconds over its
     // budget now and then with no change of ours, and a regression fails
     // both runs.
-    // `NIOBE_UNTIMED` is set by the CI job on a runner the budgets were not
-    // set on; it skips the timed tests and nothing else, and says so.
+    // `NIOBE_UNTIMED` is set by CI, whose shared runners time a frame
+    // differently from one run to the next; it skips the timed tests and
+    // nothing else, and says so.
     let timed: &[(&str, &str)] = match std::env::var_os("NIOBE_UNTIMED") {
         Some(value) if !value.is_empty() => {
             println!("NIOBE_UNTIMED is set: the timed tests were not run on this machine");
