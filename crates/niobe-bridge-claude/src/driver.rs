@@ -865,9 +865,7 @@ impl Session {
                     .count();
                 if ends > 0 {
                     let ends = u64::try_from(ends).unwrap_or(u64::MAX);
-                    let _ = ended_turns.fetch_update(Ordering::AcqRel, Ordering::Acquire, |read| {
-                        Some(read.saturating_add(ends))
-                    });
+                    add_saturating(&ended_turns, ends);
                 }
                 // A line's events go out together, so that no drain takes
                 // the first of them without the rest: a call the CLI refused
@@ -2195,9 +2193,38 @@ fn file_exists(path: &Path) -> Option<bool> {
     }
 }
 
+/// Adds `by` to `counter`, stopping at `u64::MAX` rather than wrapping.
+///
+/// A compare-and-swap loop rather than `fetch_update`, which Rust 1.99
+/// deprecates in favour of `try_update`, a method the oldest compiler the
+/// workspace builds on does not have.
+fn add_saturating(counter: &AtomicU64, by: u64) {
+    let mut read = counter.load(Ordering::Acquire);
+    loop {
+        match counter.compare_exchange_weak(
+            read,
+            read.saturating_add(by),
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => return,
+            Err(now) => read = now,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_count_of_ended_turns_stops_at_its_ceiling_rather_than_wrapping() {
+        let counter = AtomicU64::new(3);
+        add_saturating(&counter, 4);
+        assert_eq!(counter.load(Ordering::Acquire), 7);
+        add_saturating(&counter, u64::MAX);
+        assert_eq!(counter.load(Ordering::Acquire), u64::MAX);
+    }
 
     /// How long a test waits on a stand-in to do what it was written to.
     ///

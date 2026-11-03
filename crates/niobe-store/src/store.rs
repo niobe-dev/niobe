@@ -312,6 +312,13 @@ pub struct Store {
     /// The file the store was opened at, made absolute; `None` in memory.
     /// What the store is named by where SQLite cannot name it: see
     /// [`Store::path`].
+    #[cfg_attr(
+        not(unix),
+        expect(
+            dead_code,
+            reason = "only the Unix session hold reads the store's file"
+        )
+    )]
     file: Option<std::path::PathBuf>,
 }
 

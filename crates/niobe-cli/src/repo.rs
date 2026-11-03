@@ -1132,12 +1132,10 @@ fn diff_attributes(root: &Path, paths: &[&str]) -> Result<HashMap<String, Diffed
 fn check_attr(printed: &str) -> Vec<(String, String)> {
     let fields: Vec<&str> = printed.split('\0').collect();
     // The field after the last terminator is empty and left over.
-    fields
-        .chunks_exact(3)
-        .filter_map(|record| match record {
-            [path, _, value] => Some(((*path).to_owned(), (*value).to_owned())),
-            _ => None,
-        })
+    let (records, _) = fields.as_chunks::<3>();
+    records
+        .iter()
+        .map(|[path, _, value]| ((*path).to_owned(), (*value).to_owned()))
         .collect()
 }
 
