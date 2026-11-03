@@ -527,13 +527,7 @@ impl Store {
         at: SystemTime,
     ) -> Result<u64, StoreError> {
         let json = serde_json::to_string(event).map_err(StoreError::Encode)?;
-        let inserted = self.conn.query_row(
-            "INSERT INTO events (session_id, seq, at, event)
-             SELECT ?1, COALESCE(MAX(seq), 0) + 1, ?2, ?3 FROM events WHERE session_id = ?1
-             RETURNING seq",
-            params![session.0, unix_millis(at), json],
-            |row| row.get::<_, i64>(0),
-        );
+        let inserted = self.insert_event(session, unix_millis(at), &json);
 
         match inserted {
             Ok(seq) => Ok(seq.unsigned_abs()),
@@ -543,6 +537,32 @@ impl Store {
                 Ok(false) => Err(StoreError::NoSuchSession(session)),
                 _ => Err(e.into()),
             },
+        }
+    }
+
+    /// Inserts one event row and returns the sequence number it was given,
+    /// once the write has committed.
+    ///
+    /// The statement is stepped to its end rather than read for its one row
+    /// and dropped: outside a transaction SQLite commits only as the
+    /// statement finishes, and that is when it writes the row to the
+    /// write-ahead log, so a disk that fills then refuses the event after
+    /// its number was handed back. A statement dropped early is reset, and
+    /// rusqlite passes over what the reset says, which is that refusal.
+    fn insert_event(&self, session: SessionId, at: i64, json: &str) -> rusqlite::Result<i64> {
+        let mut statement = self.conn.prepare(
+            "INSERT INTO events (session_id, seq, at, event)
+             SELECT ?1, COALESCE(MAX(seq), 0) + 1, ?2, ?3 FROM events WHERE session_id = ?1
+             RETURNING seq",
+        )?;
+        let mut rows = statement.query(params![session.0, at, json])?;
+        let seq = match rows.next()? {
+            Some(row) => row.get::<_, i64>(0)?,
+            None => return Err(rusqlite::Error::QueryReturnedNoRows),
+        };
+        match rows.next()? {
+            None => Ok(seq),
+            Some(_) => Err(rusqlite::Error::QueryReturnedMoreThanOneRow),
         }
     }
 
@@ -964,6 +984,47 @@ mod tests {
             .map(|stored| stored.seq)
             .collect();
         assert_eq!(seqs, (1..=next).collect::<Vec<_>>());
+    }
+
+    /// SQLite writes a commit's pages to the write-ahead log only as it
+    /// commits, so a disk that fills then, or fails the write, refuses the
+    /// event after the row was inserted and its number handed back. Taken as
+    /// kept, it is gone from the session without a word, and the next event
+    /// takes its number, so not even a gap tells. A commit hook that turns
+    /// the commit into a rollback stands in for the disk.
+    #[test]
+    fn an_event_the_store_refuses_as_it_commits_is_reported_and_not_kept() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let store = Store::open(&dir.path().join("sessions.db")).expect("a store opens");
+        let session = store.create_session().expect("a session is created");
+        let said = |text: &str| Event::UserMessage {
+            text: text.to_owned(),
+        };
+        store
+            .append(session, &said("kept"))
+            .expect("a session in a temporary store takes an event");
+
+        store
+            .conn
+            .commit_hook(Some(|| true))
+            .expect("a commit hook can be set");
+        let refused = store.append(session, &said("lost"));
+        store
+            .conn
+            .commit_hook(None::<fn() -> bool>)
+            .expect("the commit hook can be taken away");
+
+        let kept: Vec<Event> = store
+            .events(session)
+            .expect("the session loads")
+            .into_iter()
+            .map(|stored| stored.event)
+            .collect();
+        assert_eq!(kept, [said("kept")]);
+        assert!(
+            refused.is_err(),
+            "an event the store did not keep was reported kept as {refused:?}"
+        );
     }
 
     /// A session read in whole — an import of a transcript — that the store

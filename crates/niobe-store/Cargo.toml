@@ -27,6 +27,9 @@ serde_json = { workspace = true, features = ["float_roundtrip"] }
 rustix = { workspace = true, features = ["fs"] }
 
 [dev-dependencies]
+# `hooks` for a commit hook, which is how a test makes SQLite refuse a write
+# as it commits, as a disk that fills while the write-ahead log grows does.
+rusqlite = { workspace = true, features = ["hooks"] }
 tempfile.workspace = true
 
 [lints]
