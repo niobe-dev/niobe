@@ -39,6 +39,25 @@ fn an_option_that_takes_a_value_is_not_read_as_an_in_place_edit() {
 }
 
 #[test]
+fn perl_s_record_separator_takes_only_digits_so_an_i_after_it_still_edits_in_place() {
+    reads_as(&[
+        (
+            "perl -0pi -e 's/a\\nb/c/s' f.rs",
+            Work::Editing,
+            &["perl -i"],
+        ),
+        (
+            "perl -0777pi -e 's/a/b/s' f.rs",
+            Work::Editing,
+            &["perl -i"],
+        ),
+        ("perl -0x1Fpi -e 's/a/b/' f.rs", Work::Editing, &["perl -i"]),
+        ("perl -00 -pe 's/a/b/' f.rs", Work::Other, &["script"]),
+        ("perl -0777 -ne 'print' f.rs", Work::Other, &["script"]),
+    ]);
+}
+
+#[test]
 fn a_command_handed_to_a_shell_on_the_line_is_read_as_the_command() {
     reads_as(&[
         ("bash -c 'cargo test'", Work::Building, &["cargo test"]),

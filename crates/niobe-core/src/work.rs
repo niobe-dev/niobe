@@ -702,12 +702,13 @@ fn with_subcommand(program: &str, rest: &[&str], takes_a_value: &[&str]) -> Stri
 ///
 /// An `i` after an option that takes a value is part of the value:
 /// `perl -Mstrict` loads a module, and `perl -I lib -e …` reads its script
-/// from the word after `-e`.
+/// from the word after `-e`. Perl's `-0` takes only digits, so the options
+/// after them are options again: `perl -0pi -e …` edits in place.
 fn in_place(program: &str, rest: &[&str]) -> bool {
     // The options whose value is the rest of the word or, where nothing is
     // left of it, the next word; and those whose value can only be the rest.
     let (valued, attached_only) = match program {
-        "perl" => ("eEIMm", "0CdDxF"),
+        "perl" => ("eEIMm", "CdDxF"),
         _ => ("efl", ""),
     };
     let mut words = rest.iter();
@@ -721,12 +722,17 @@ fn in_place(program: &str, rest: &[&str]) -> bool {
         else {
             continue;
         };
-        for (at, flag) in flags.char_indices() {
+        let mut chars = flags.chars();
+        while let Some(flag) = chars.next() {
             if flag == 'i' {
                 return true;
             }
+            if program == "perl" && flag == '0' {
+                chars = past_record_separator(chars.as_str()).chars();
+                continue;
+            }
             if valued.contains(flag) {
-                if at + flag.len_utf8() == flags.len() {
+                if chars.as_str().is_empty() {
                     words.next();
                 }
                 break;
@@ -737,6 +743,24 @@ fn in_place(program: &str, rest: &[&str]) -> bool {
         }
     }
     false
+}
+
+/// What is left of a word of perl's options after the value `-0` took from
+/// `after`, the rest of the word past the `0`: `x` and the hexadecimal digits
+/// after it, or at most three more octal digits, as perl reads them.
+fn past_record_separator(after: &str) -> &str {
+    let taken = match after.strip_prefix('x') {
+        Some(hex) if !hex.is_empty() => {
+            1 + hex
+                .find(|c: char| !c.is_ascii_hexdigit())
+                .unwrap_or(hex.len())
+        }
+        _ => after
+            .find(|c: char| !matches!(c, '0'..='7'))
+            .unwrap_or(after.len())
+            .min(3),
+    };
+    after.get(taken..).unwrap_or_default()
 }
 
 /// Whether an interpreter is handed its script inline rather than by a file:
