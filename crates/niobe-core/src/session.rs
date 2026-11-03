@@ -360,6 +360,9 @@ pub struct ToolTotals {
     /// failures belong to. A tool with no failures has no entry rather than a
     /// zero, so a caller cannot read an absent count as a measured none.
     pub failed_by_name: BTreeMap<String, u64>,
+    /// Denied calls per tool name, kept as the failures are and for the same
+    /// reason: a pane counting calls by tool says which of them never ran.
+    pub denied_by_name: BTreeMap<String, u64>,
     /// Ends that arrived without a matching start. A non-zero count means the
     /// producer is dropping events, so it is surfaced rather than swallowed.
     pub unmatched_ends: u64,
@@ -959,6 +962,7 @@ impl SessionState {
                     }
                     ToolOutcome::Denied => {
                         bump(&mut self.tools.denied);
+                        bump(self.tools.denied_by_name.entry(name.clone()).or_default());
                         bump(&mut kind.denied);
                     }
                     // The operator's own stop: the tool neither failed nor

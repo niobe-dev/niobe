@@ -3964,6 +3964,58 @@ fn the_tools_of_one_mcp_server_are_counted_as_one_family() {
     assert!(!read.contains('✗'), "{read:?}");
 }
 
+/// A call the operator refused never ran, and the tools counted by their own
+/// names say so on the tool's row, as the kinds of work do on theirs: a row
+/// reading `Write 2` where both were refused would be two files written.
+#[test]
+fn a_refused_call_is_marked_on_its_tools_row_as_on_its_kind_of_work() {
+    let mut app = running_session();
+    for id in ["w1", "w2"] {
+        app.apply(&Event::ToolCallStart {
+            id: id.into(),
+            name: "Write".to_owned(),
+            input: "{}".to_owned(),
+            summary: Some("notes.md".to_owned()),
+            agent: None,
+        });
+        app.apply(&Event::ToolCallEnd {
+            id: id.into(),
+            name: "Write".to_owned(),
+            input: "{}".to_owned(),
+            output: String::new(),
+            bytes: 0,
+            outcome: niobe_core::event::ToolOutcome::Denied,
+            summary: Some("notes.md".to_owned()),
+            exit_code: None,
+            error: None,
+            command: None,
+            untrimmed: None,
+        });
+    }
+    let kinds = screen(&mut app, 200, 60);
+    let editing = kinds
+        .lines()
+        .find(|line| line.contains("Editing"))
+        .unwrap_or_default();
+    assert!(editing.contains("2 denied"), "{editing:?}");
+
+    app.count_tools_by_name();
+    let names = screen(&mut app, 200, 60);
+    let write = names
+        .lines()
+        .find(|line| line.contains("Write ") && line.contains('▓'))
+        .unwrap_or_default();
+    assert!(
+        write.contains("2 denied"),
+        "the refusals are on the tool's own row:\n{names}"
+    );
+    let read = names
+        .lines()
+        .find(|line| line.contains("Read ") && line.contains('▓'))
+        .unwrap_or_default();
+    assert!(!read.contains("denied"), "{read:?}");
+}
+
 /// The Tools section counts calls by the kind of work they did, with what did
 /// it on a dim line under each kind, and `t` in the Activity pane turns it to
 /// the tools' own names and back.

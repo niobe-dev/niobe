@@ -5773,23 +5773,27 @@ fn tool_rows(app: &App, session: &SessionState, width: usize, theme: &Theme) -> 
 }
 
 /// A row per family of tools, busiest first, with a bar for how it compares
-/// and its own failures beside it.
+/// and its own failures and refusals beside it, as a kind of work's row has.
 fn name_rows(tools: &ToolTotals, width: usize, theme: &Theme) -> Vec<Line<'static>> {
-    let mut families: BTreeMap<String, (u64, u64)> = BTreeMap::new();
+    let mut families: BTreeMap<String, Family> = BTreeMap::new();
+    let of = |counts: &BTreeMap<String, u64>, name: &str| counts.get(name).copied().unwrap_or(0);
     for (name, count) in &tools.by_name {
-        let entry = families.entry(tool_family(name)).or_default();
-        entry.0 = entry.0.saturating_add(*count);
-        entry.1 = entry
-            .1
-            .saturating_add(tools.failed_by_name.get(name).copied().unwrap_or(0));
+        let family = families.entry(tool_family(name)).or_default();
+        family.calls = family.calls.saturating_add(*count);
+        family.failed = family
+            .failed
+            .saturating_add(of(&tools.failed_by_name, name));
+        family.denied = family
+            .denied
+            .saturating_add(of(&tools.denied_by_name, name));
     }
-    let mut mix: Vec<(&String, &(u64, u64))> = families.iter().collect();
-    mix.sort_by(|a, b| b.1.0.cmp(&a.1.0).then_with(|| a.0.cmp(b.0)));
+    let mut mix: Vec<(&String, &Family)> = families.iter().collect();
+    mix.sort_by(|a, b| b.1.calls.cmp(&a.1.calls).then_with(|| a.0.cmp(b.0)));
 
     // The pane scrolls, so every family the session reached for gets a row.
     // The cap the Usage pane drew them under was the price of a pane sized to
     // its content; here the rows below the fold are scrolled to.
-    let busiest = mix.first().map(|(_, n)| n.0).unwrap_or(1).max(1);
+    let busiest = mix.first().map(|(_, n)| n.calls).unwrap_or(1).max(1);
     let name = mix
         .iter()
         .map(|(family, _)| text::width(family))
@@ -5798,10 +5802,39 @@ fn name_rows(tools: &ToolTotals, width: usize, theme: &Theme) -> Vec<Line<'stati
         .min(BAR_NAME);
     let bar_width = bar_width(width, name);
     mix.into_iter()
-        .map(|(family, (count, failed))| {
-            bar_line((family, name), *count, *failed, busiest, bar_width, theme)
+        .map(|(name_of, family)| {
+            let mut row = bar_line(
+                (name_of, name),
+                family.calls,
+                family.failed,
+                busiest,
+                bar_width,
+                theme,
+            );
+            push_denied(&mut row, family.denied, theme);
+            row
         })
         .collect()
+}
+
+/// One family of tools' calls, and how many of them failed or were refused.
+#[derive(Debug, Default)]
+struct Family {
+    calls: u64,
+    failed: u64,
+    denied: u64,
+}
+
+/// Ends a tools row with how many of its calls were refused, where any were:
+/// a refused call never ran, and a row that counted it without saying so
+/// would read as work done.
+fn push_denied(row: &mut Line<'static>, denied: u64, theme: &Theme) {
+    if denied > 0 {
+        row.spans.push(Span::styled(
+            format!(" {denied} denied"),
+            Style::new().fg(theme.dim),
+        ));
+    }
 }
 
 /// A row per kind of work, busiest first, with a bar for how it compares, its
@@ -5828,12 +5861,7 @@ fn work_rows(tools: &ToolTotals, width: usize, theme: &Theme) -> Vec<Line<'stati
             bar_width,
             theme,
         );
-        if kind.denied > 0 {
-            row.spans.push(Span::styled(
-                format!(" {} denied", kind.denied),
-                Style::new().fg(theme.dim),
-            ));
-        }
+        push_denied(&mut row, kind.denied, theme);
         rows.push(row);
         rows.push(
             Line::from(specifics_line(&kind.specifics, width)).style(Style::new().fg(theme.dim)),

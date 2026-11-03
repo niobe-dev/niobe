@@ -527,6 +527,12 @@ fn check(seed: u64, at: usize, event: &Event, state: &SessionState, model: &Mode
         why()
     );
     assert_eq!(
+        tools.denied_by_name.values().sum::<u64>(),
+        tools.denied,
+        "{}",
+        why()
+    );
+    assert_eq!(
         tools.by_work.values().map(|w| w.failed).sum::<u64>(),
         tools.failed,
         "{}",
