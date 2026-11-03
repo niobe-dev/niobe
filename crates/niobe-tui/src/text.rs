@@ -42,6 +42,37 @@ fn cells(grapheme: &str) -> usize {
     }
 }
 
+/// Whether `c` is one of Unicode's tag characters, U+E0000–U+E007F.
+pub(crate) fn is_tag(c: char) -> bool {
+    ('\u{e0000}'..='\u{e007f}').contains(&c)
+}
+
+/// Whether `glyph` is a subdivision flag: the black flag, the subdivision's
+/// code in tag letters and digits — a region and up to four more, as
+/// `gbeng` — and the cancel tag that ends it. Tags any longer, or any other
+/// glyph holding them, carry text that is drawn as nothing.
+pub(crate) fn is_tag_flag(glyph: &str) -> bool {
+    glyph.ends_with('\u{e007f}') && could_be_tag_flag(glyph)
+}
+
+/// Whether `glyph` is a subdivision flag or the start of one, as a flag
+/// typed a key at a time is before its cancel tag arrives.
+pub(crate) fn could_be_tag_flag(glyph: &str) -> bool {
+    let Some(rest) = glyph.strip_prefix('\u{1f3f4}') else {
+        return false;
+    };
+    let (code, ended) = match rest.strip_suffix('\u{e007f}') {
+        Some(code) => (code, true),
+        None => (rest, false),
+    };
+    let letters = code.chars().count();
+    letters <= 6
+        && (!ended || letters >= 3)
+        && code
+            .chars()
+            .all(|c| matches!(c, '\u{e0030}'..='\u{e0039}' | '\u{e0061}'..='\u{e007a}'))
+}
+
 /// `text` with every control character in it shown rather than dropped: a C0
 /// control by its Control Pictures glyph (`␛` for an escape, `␤` for a line
 /// break, `␉` for a tab), DEL by `␡` and a C1 control by `�`.

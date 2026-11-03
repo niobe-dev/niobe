@@ -14,6 +14,7 @@
 //! is what the operator saw marked, and a link is the one the pointer was on.
 
 use ratatui::text::Line;
+use unicode_segmentation::UnicodeSegmentation as _;
 
 use crate::text;
 
@@ -132,24 +133,36 @@ pub(crate) fn plain(line: &Line<'_>) -> String {
 }
 
 /// The text of a drawn line as the terminal shows it: without its styles,
-/// the control characters ratatui drops as it lays the line out, or the
-/// direction marks the draw takes out after.
+/// the control characters ratatui drops as it lays the line out, the
+/// direction marks the draw takes out after, or the tag characters that are
+/// not part of a flag they spell.
 ///
 /// For text that leaves the shell, which must be what the operator saw. A
 /// reply can hold an escape that ends a bracketed paste, or a carriage
 /// return, and both draw as nothing: on the clipboard they would act in the
 /// shell the text is pasted into, running a line the operator meant to read
-/// first. Every character dropped here draws in no cell, so the columns of
-/// what is left are the columns it was drawn in.
+/// first. Tag characters draw as nothing too, and can spell whole words that
+/// a model the text is pasted to reads as an instruction. Every character
+/// dropped here draws in no cell, so the columns of what is left are the
+/// columns it was drawn in.
 pub(crate) fn shown(line: &Line<'_>) -> String {
-    let drawn = |c: &char| !c.is_control() && !crate::ui::is_direction_mark(*c);
+    let drawn = |c: char| !c.is_control() && !crate::ui::is_direction_mark(c);
     let mut shown = String::new();
     for span in &line.spans {
         // Most spans hold nothing to drop, and are copied whole rather than
         // a character at a time.
-        match span.content.chars().all(|c| drawn(&c)) {
-            true => shown.push_str(&span.content),
-            false => shown.extend(span.content.chars().filter(drawn)),
+        if span.content.chars().all(|c| drawn(c) && !text::is_tag(c)) {
+            shown.push_str(&span.content);
+            continue;
+        }
+        // A tag is kept only inside the flag it draws, which is one glyph.
+        for glyph in span.content.graphemes(true) {
+            let flag = text::is_tag_flag(glyph);
+            shown.extend(
+                glyph
+                    .chars()
+                    .filter(|&c| drawn(c) && (flag || !text::is_tag(c))),
+            );
         }
     }
     shown
@@ -452,6 +465,24 @@ mod tests {
 
     fn drawn<'a>(lines: &'a [&'a str]) -> impl Fn(usize) -> Option<String> + 'a {
         |line| lines.get(line).map(|line| (*line).to_owned())
+    }
+
+    #[test]
+    fn a_line_as_shown_leaves_out_tags_wherever_they_stand_but_keeps_those_of_a_flag() {
+        let tags = |words: &str| -> String {
+            words
+                .chars()
+                .filter_map(|c| char::from_u32(0xE0000 + u32::from(c)))
+                .collect()
+        };
+        let scotland = format!("\u{1f3f4}{}\u{e007f}", tags("gbsct"));
+        let line = Line::from(vec![
+            ratatui::text::Span::raw(format!("{}run{}", tags("rm"), tags(" -rf"))),
+            ratatui::text::Span::raw(format!("{} it {scotland}", tags("x"))),
+            ratatui::text::Span::raw(format!("\u{1f3f4}{}\u{e007f}", tags("ignoreall"))),
+        ]);
+
+        assert_eq!(shown(&line), format!("run it {scotland}\u{1f3f4}"));
     }
 
     #[test]

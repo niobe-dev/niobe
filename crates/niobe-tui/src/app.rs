@@ -37,6 +37,7 @@ use crate::history::{Browser, Listed, Newer, PromptRow, Recall, SessionRow, Targ
 use crate::images::{Attachments, DraftId, Fetched, Source, image_path};
 use crate::prices::Prices;
 use crate::proposed::Proposed;
+use crate::text::{could_be_tag_flag, is_tag, is_tag_flag};
 use crate::theme::{Depth, Theme};
 use crate::trust;
 
@@ -10269,37 +10270,6 @@ fn drawn_of_paste(text: &str) -> (String, LeftOut) {
         }
     }
     (kept, left_out)
-}
-
-/// Whether `c` is one of Unicode's tag characters, U+E0000–U+E007F.
-fn is_tag(c: char) -> bool {
-    ('\u{e0000}'..='\u{e007f}').contains(&c)
-}
-
-/// Whether `glyph` is a subdivision flag: the black flag, the subdivision's
-/// code in tag letters and digits — a region and up to four more, as
-/// `gbeng` — and the cancel tag that ends it. Tags any longer, or any other
-/// glyph holding them, carry text that is drawn as nothing.
-fn is_tag_flag(glyph: &str) -> bool {
-    glyph.ends_with('\u{e007f}') && could_be_tag_flag(glyph)
-}
-
-/// Whether `glyph` is a subdivision flag or the start of one, as a flag
-/// typed a key at a time is before its cancel tag arrives.
-fn could_be_tag_flag(glyph: &str) -> bool {
-    let Some(rest) = glyph.strip_prefix('\u{1f3f4}') else {
-        return false;
-    };
-    let (code, ended) = match rest.strip_suffix('\u{e007f}') {
-        Some(code) => (code, true),
-        None => (rest, false),
-    };
-    let letters = code.chars().count();
-    letters <= 6
-        && (!ended || letters >= 3)
-        && code
-            .chars()
-            .all(|c| matches!(c, '\u{e0030}'..='\u{e0039}' | '\u{e0061}'..='\u{e007a}'))
 }
 
 /// Whether `c`, typed after `before` — the glyph before the cursor — is
