@@ -1365,8 +1365,13 @@ What it settles is where the models a session can run on are listed:
   runs on today — `fable` is `claude-fable-5-1`, `default` and `sonnet` both
   `claude-sonnet-5-5`. Nothing else carries the list: `init` names only the
   model the session runs on.
+- **`supportsAutoMode` is written only as `true`**: eleven models carry it,
+  and `haiku` carries no such key. The CLI leaves the key off a model that
+  cannot run `auto`, as it does `supportsFastMode` off one with no fast mode,
+  so `haiku` is read as one that cannot.
 - `tests/stream.rs` folds it and expects the session to hold all twelve
-  values in that order, Fable 5.1 named and described as the CLI wrote it;
+  values in that order, Fable 5.1 named and described as the CLI wrote it,
+  and `haiku` alone unable to run `auto`;
   `tests/conformance.rs` holds every listed model to carrying `value`,
   `displayName` and `description`.
 

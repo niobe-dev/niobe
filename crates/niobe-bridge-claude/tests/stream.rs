@@ -2345,6 +2345,33 @@ fn the_models_the_cli_offers_come_from_the_answer_to_initialize() {
     assert!(notices(&events).is_empty(), "{events:?}");
 }
 
+/// The CLI marks a model that can run `auto` with `supportsAutoMode: true`
+/// and leaves the key off one that cannot — Haiku, in the recording — so
+/// among a list that marks any, an unmarked model is one the CLI said cannot.
+/// Read as unknown, Shift+Tab would ask a Haiku session for `auto`, be
+/// refused and land back on `ask` every time, and `plan` would be out of reach.
+#[test]
+fn a_model_the_cli_leaves_unmarked_among_marked_ones_cannot_run_auto() {
+    let state = SessionState::replay(&translate(MODELS_LISTED));
+
+    let unmarked: Vec<&str> = state
+        .models()
+        .iter()
+        .filter(|model| model.auto_mode == Some(false))
+        .map(|model| model.id.as_str())
+        .collect();
+    assert_eq!(unmarked, ["haiku"]);
+    assert!(
+        state
+            .models()
+            .iter()
+            .filter(|model| model.id != "haiku")
+            .all(|model| model.auto_mode == Some(true)),
+        "{:?}",
+        state.models()
+    );
+}
+
 const MCP_SERVERS: &str = include_str!("fixtures/mcp-servers.jsonl");
 const MCP_STATUS: &str = include_str!("fixtures/mcp-status.jsonl");
 

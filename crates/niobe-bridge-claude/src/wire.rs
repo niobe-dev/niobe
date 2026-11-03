@@ -242,7 +242,9 @@ pub(crate) struct Model {
     /// The exact model the value runs on today.
     #[serde(rename = "resolvedModel")]
     pub(crate) resolved_model: Option<String>,
-    /// Whether the model can run in `auto` mode, where the CLI says.
+    /// Whether the model can run in `auto` mode. The CLI writes it only as
+    /// `true` and leaves it off a model that cannot, which only the rest of
+    /// the list can tell from a CLI that does not say.
     #[serde(rename = "supportsAutoMode")]
     pub(crate) supports_auto_mode: Option<bool>,
 }

@@ -4837,8 +4837,17 @@ fn mcp_status(status: String) -> McpStatus {
 
 /// The models the CLI offers, as the event that replaces the list before
 /// them. A name or a description the CLI wrote empty is one it did not give.
+///
+/// The CLI writes `supportsAutoMode` only as `true`, leaving the key off a
+/// model that cannot run `auto` — Claude Code 2.1.288 lists Haiku so, in
+/// `tests/fixtures/models-listed.jsonl`. So where the list marks any model,
+/// one it leaves unmarked is one it said cannot; where it marks none, the
+/// CLI said nothing about any, which is not a refusal.
 fn offered_models(models: Vec<wire::Model>) -> Event {
     let given = |text: Option<String>| text.filter(|text| !text.trim().is_empty());
+    let marks_auto = models
+        .iter()
+        .any(|model| model.supports_auto_mode.is_some());
     Event::Models {
         models: models
             .into_iter()
@@ -4848,7 +4857,7 @@ fn offered_models(models: Vec<wire::Model>) -> Event {
                 name: given(model.display_name),
                 description: given(model.description),
                 resolves_to: given(model.resolved_model),
-                auto_mode: model.supports_auto_mode,
+                auto_mode: model.supports_auto_mode.or(marks_auto.then_some(false)),
             })
             .collect(),
     }
@@ -4959,7 +4968,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn whether_a_model_runs_auto_is_what_the_cli_said_and_unknown_where_it_did_not() {
+    fn whether_a_model_runs_auto_is_what_the_cli_said_and_unknown_where_it_marked_none() {
         let model = |value: &str, supports: Option<bool>| wire::Model {
             value: value.to_owned(),
             display_name: None,
@@ -4978,7 +4987,13 @@ mod tests {
             panic!("models were offered");
         };
         let said: Vec<Option<bool>> = models.iter().map(|model| model.auto_mode).collect();
-        assert_eq!(said, [Some(true), Some(false), None]);
+        assert_eq!(said, [Some(true), Some(false), Some(false)]);
+
+        let unmarked = offered_models(vec![model("opus", None), model("haiku", None)]);
+        let Event::Models { models } = unmarked else {
+            panic!("models were offered");
+        };
+        assert!(models.iter().all(|model| model.auto_mode.is_none()));
     }
 
     /// A name, a description or a model the CLI wrote empty or blank is one
