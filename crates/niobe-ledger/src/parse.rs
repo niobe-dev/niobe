@@ -818,4 +818,15 @@ mod tests {
             "p.toml:2: model[0].ids[1]: `m-1` is listed twice"
         );
     }
+
+    #[test]
+    fn a_price_table_rejects_scientific_notation_and_non_decimal_numbers_for_rates() {
+        let text = one_model(
+            "from = 2026-07-24\ninput = 1e3\noutput = 25\ncache_read = 0.5\ncache_write = 6.25\n",
+        );
+        assert_eq!(
+            error(&text),
+            "p.toml:6: model[0].price[0].input: `1e3`: expected dollars per million tokens as a decimal with at most six places, such as `2.50`"
+        );
+    }
 }

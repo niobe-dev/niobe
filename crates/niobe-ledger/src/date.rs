@@ -157,4 +157,32 @@ mod tests {
         assert!(date(2025, 12, 31) < date(2026, 1, 1));
         assert!(date(2026, 3, 13) > date(2026, 3, 12));
     }
+
+    #[test]
+    fn leap_year_february_dates_are_validated_correctly_across_century_and_quadcentennial_boundaries()
+     {
+        assert!(Date::new(2000, 2, 29).is_some());
+        assert!(Date::new(2400, 2, 29).is_some());
+        assert!(Date::new(2100, 2, 29).is_none());
+        assert!(Date::new(2200, 2, 29).is_none());
+        assert!(Date::new(2300, 2, 29).is_none());
+
+        let d = Date::new(2024, 2, 29).expect("valid leap day");
+        assert_eq!(d.year(), 2024);
+        assert_eq!(d.month(), 2);
+        assert_eq!(d.day(), 29);
+    }
+
+    #[test]
+    fn date_from_system_time_clamps_pre_epoch_and_distant_future_timestamps_to_valid_calendar_bounds()
+     {
+        let epoch = UNIX_EPOCH;
+        assert_eq!(Date::of(epoch).to_string(), "1970-01-01");
+
+        let pre_epoch = UNIX_EPOCH - Duration::from_secs(86400 * 365);
+        assert_eq!(Date::of(pre_epoch).to_string(), "1970-01-01");
+
+        let far_future = UNIX_EPOCH + Duration::from_secs(300_000_000_000);
+        assert_eq!(Date::of(far_future).to_string(), "9999-12-31");
+    }
 }

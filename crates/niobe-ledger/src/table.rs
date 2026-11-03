@@ -348,4 +348,32 @@ cache_write = 0.625
         assert_eq!(merged.context_window("m", date(2026, 2, 1)), Some(500_000));
         assert_eq!(merged.context_window("m", date(2026, 1, 15)), None);
     }
+
+    #[test]
+    fn a_context_window_lookup_returns_none_before_first_date_and_latest_size_on_or_after_date() {
+        let user = PriceTable::parse(
+            "[[context]]\nids = [\"m_win\"]\n[[context.window]]\nfrom = 2026-02-01\ntokens = 200_000\n[[context.window]]\nfrom = 2026-05-01\ntokens = 1_000_000\n",
+            Origin::Bundled,
+        )
+        .expect("valid window table");
+
+        assert_eq!(user.context_window("m_win", date(2026, 1, 31)), None);
+        assert_eq!(
+            user.context_window("m_win", date(2026, 2, 1)),
+            Some(200_000)
+        );
+        assert_eq!(
+            user.context_window("m_win", date(2026, 4, 30)),
+            Some(200_000)
+        );
+        assert_eq!(
+            user.context_window("m_win", date(2026, 5, 1)),
+            Some(1_000_000)
+        );
+        assert_eq!(
+            user.context_window("m_win", date(2027, 1, 1)),
+            Some(1_000_000)
+        );
+        assert_eq!(user.context_window("unknown_model", date(2026, 5, 1)), None);
+    }
 }
