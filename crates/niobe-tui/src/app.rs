@@ -5356,7 +5356,7 @@ impl App {
             );
             return;
         }
-        self.composer.clear();
+        empty(&mut self.composer);
         self.offer_closed = None;
         self.insert_into_composer("/");
     }
@@ -7249,7 +7249,7 @@ impl App {
     /// the next `!` text.
     fn run_command(&mut self) {
         let command = self.composed();
-        self.composer.clear();
+        empty(&mut self.composer);
         if command.trim().is_empty() {
             return;
         }
@@ -8731,7 +8731,7 @@ impl App {
                 if self.composer_is_blank() && self.runs_commands =>
             {
                 self.focus = Focus::Session;
-                self.composer.clear();
+                empty(&mut self.composer);
                 self.shell_mode = true;
             }
             // A shell's line editor deletes back to the start of the line
@@ -9154,7 +9154,7 @@ impl App {
             return;
         }
 
-        self.composer.clear();
+        empty(&mut self.composer);
         self.offer_closed = None;
         let draft = self.take_draft();
         let kept = kept_with(&draft, &self.drafts);
@@ -9232,7 +9232,7 @@ impl App {
     /// sending, and returns the draft that is to come back after it. The
     /// images attached to it go with it; those of drafts set aside stay.
     fn take_composer_for_the_shell(&mut self) -> (DraftId, String) {
-        self.composer.clear();
+        empty(&mut self.composer);
         self.offer_closed = None;
         let draft = self.take_draft();
         let kept = kept_with(&draft, &self.drafts);
@@ -10010,7 +10010,7 @@ impl App {
     fn show_in_composer(&mut self, text: &str, at_top: bool) {
         use ratatui_textarea::CursorMove;
 
-        self.composer.clear();
+        empty(&mut self.composer);
         self.composer.insert_str(text);
         match at_top {
             true => self.composer.move_cursor(CursorMove::Top),
@@ -10155,6 +10155,21 @@ pub(crate) fn cursor_row_in_view(editor: &mut TextArea<'static>) -> Option<usize
     let top = editor.screen_cursor().row;
     editor.move_cursor(CursorMove::Jump(row, col));
     at.checked_sub(top)
+}
+
+/// Empties `composer` for the shell — a prompt sent or run, a walk through
+/// earlier prompts putting another in its place — leaving what Ctrl+Y gives
+/// back as it was.
+///
+/// The editor empties itself by deleting its whole text, and keeps whatever
+/// it deletes as the text Ctrl+Y gives back, so a line the operator set
+/// aside with Ctrl+U to send a quick prompt came back as that prompt, and a
+/// draft a walk set aside came back with its `[Image #N]` placeholders into
+/// another prompt, sent naming images that did not go with it.
+fn empty(composer: &mut TextArea<'static>) {
+    let yanked = composer.yank_text();
+    composer.clear();
+    composer.set_yank_text(yanked);
 }
 
 /// Puts a cursor the editor's own moves left inside what the operator sees
@@ -13902,6 +13917,48 @@ mod tests {
         app.on_key(ctrl('y'));
         assert_eq!(app.composed().len(), COMPOSER_CAP / 2 + 1);
         assert_eq!(app.hint(), Some(TOO_LONG_HINT));
+    }
+
+    /// A line set aside with Ctrl+U while a quick prompt is sent comes back
+    /// with Ctrl+Y, as it does in a shell's line editor: the shell emptying
+    /// the composer to send is not the operator deleting what they wrote.
+    #[test]
+    fn ctrl_y_after_a_prompt_is_sent_gives_back_what_ctrl_u_deleted() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+        let mut app = app().attached();
+        app.on_paste("the long draft");
+        app.on_key(ctrl('u'));
+        app.on_paste("a quick question");
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.composed(), "");
+
+        app.on_key(ctrl('y'));
+
+        assert_eq!(app.composed(), "the long draft");
+    }
+
+    /// Up and Down put earlier prompts in the composer and take them out
+    /// again; none of that is deleting, so Ctrl+Y still gives back the word
+    /// Ctrl+W deleted before the walk, not a prompt the walk showed.
+    #[test]
+    fn ctrl_y_after_a_walk_through_earlier_prompts_gives_back_what_ctrl_w_deleted() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+        let mut app = app().attached();
+        send_prompt(&mut app, "earlier");
+        app.apply(&Event::TurnEnded);
+        app.on_paste("one two");
+        app.on_key(ctrl('w'));
+        assert_eq!(app.composed(), "one ");
+
+        app.on_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(app.composed(), "earlier");
+        app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.composed(), "one ");
+        app.on_key(ctrl('y'));
+
+        assert_eq!(app.composed(), "one two");
     }
 
     /// Ctrl+M reaches the shell as itself where the terminal tells it from
