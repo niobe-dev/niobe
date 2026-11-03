@@ -229,8 +229,11 @@ fn in_link(c: char) -> bool {
 ///
 /// A link too long for the line was cut where the line ended and carried on
 /// at the start of the next, so a link that fills a line from where its text
-/// starts takes in the start of the next. A link that ends a line the words
-/// wrapped on is whole: the next line's first word is another word.
+/// starts takes in the start of the next — and in a code block, whose lines
+/// are cut at the width wherever a word stands, a link that fills a line from
+/// anywhere along it does, where `said` holds the two parts run together. A
+/// link that ends a line the words wrapped on is whole: the next line's first
+/// word is another word.
 ///
 /// A word exactly as wide as the line fills it too, and is drawn just as the
 /// first part of a cut one is: the lines alone cannot tell the two apart. So
@@ -254,19 +257,19 @@ pub(crate) fn link_at(
     while from == lead(lines.get(at)?) && at > 0 {
         let above = lines.get(at - 1)?;
         let this = lines.get(at)?;
-        if !cut_between(above, this, width) {
+        let (Some((before, _)), Some((_, after))) = (
+            last_word(above),
+            word_at(this, text::width(this.get(..from)?)),
+        ) else {
+            break;
+        };
+        let (first, then) = (above.get(before..)?.trim_end(), this.get(from..after)?);
+        if !cut_between(above, this, width, held_together(said, first, then))
+            || !one_word(said, first, then)
+        {
             break;
         }
-        let (before, _) = last_word(above)?;
-        let (_, after) = word_at(this, text::width(this.get(..from)?))?;
-        if !one_word(
-            said,
-            above.get(before..)?.trim_end(),
-            this.get(from..after)?,
-        ) {
-            break;
-        }
-        word.insert_str(0, above.get(before..)?.trim_end());
+        word.insert_str(0, first);
         at -= 1;
         from = before;
     }
@@ -276,18 +279,20 @@ pub(crate) fn link_at(
         let (this, Some(below)) = (lines.get(at)?, lines.get(at + 1)) else {
             break;
         };
-        if !cut_between(this, below, width) {
-            break;
-        }
         let first = lead(below);
-        let Some(next) = word_at(below, text::width(below.get(..first)?)) else {
+        let (Some(next), Some((last, _))) = (
+            word_at(below, text::width(below.get(..first)?)),
+            last_word(this),
+        ) else {
             break;
         };
-        let (last, _) = last_word(this)?;
-        if !one_word(said, this.get(last..to)?, below.get(next.0..next.1)?) {
+        let (cut, then) = (this.get(last..to)?, below.get(next.0..next.1)?);
+        if !cut_between(this, below, width, held_together(said, cut, then))
+            || !one_word(said, cut, then)
+        {
             break;
         }
-        word.push_str(below.get(next.0..next.1)?);
+        word.push_str(then);
         at += 1;
         to = next.1;
     }
@@ -298,9 +303,13 @@ pub(crate) fn link_at(
 /// one word cut in two, by what `said` holds: they are, unless some of it
 /// holds `first` and none of it holds the two run together.
 fn one_word(said: &[&str], first: &str, then: &str) -> bool {
+    held_together(said, first, then) || !said.iter().any(|text| text.contains(first))
+}
+
+/// Whether some of `said` holds `first` and `then` run together.
+fn held_together(said: &[&str], first: &str, then: &str) -> bool {
     let together = format!("{first}{then}");
     said.iter().any(|text| text.contains(&together))
-        || !said.iter().any(|text| text.contains(first))
 }
 
 /// The link a run of link characters holds: from its scheme, without the
@@ -410,7 +419,14 @@ fn placed(drawn: &str) -> impl Iterator<Item = (usize, &str)> {
 /// filled to the width, or to one cell short of it where a two-cell character
 /// did not fit in the last. A word that merely did not fit after the others
 /// is an ordinary wrap, not a cut.
-fn cut_between(above: &str, below: &str, width: usize) -> bool {
+///
+/// A code block's line is cut where the pane ends rather than wrapped between
+/// words, so a word on it is cut wherever it stands — a link after the
+/// command that fetches it as much as one alone on its line. Where `said`, the
+/// text the lines were drawn from, holds the two parts run together
+/// (`held_together`), the word may start anywhere on `above`; a word wrapped
+/// whole to the next line never leaves its parts run together in that text.
+fn cut_between(above: &str, below: &str, width: usize, held_together: bool) -> bool {
     let ends = above.trim_end();
     let Some((word, _)) = last_word(above) else {
         return false;
@@ -418,7 +434,7 @@ fn cut_between(above: &str, below: &str, width: usize) -> bool {
     let starts = lead(below);
     let text_column = |line: &str, byte: usize| line.get(..byte).map(text::width);
     starts < below.len()
-        && text_column(above, word) == text_column(below, starts)
+        && (held_together || text_column(above, word) == text_column(below, starts))
         && above
             .get(..word)
             .zip(below.get(..starts))
@@ -637,6 +653,21 @@ mod tests {
             format!("> - see {whole} end"),
             format!("```\n{whole}\n```"),
             format!("| a | b |\n|---|---|\n| x | {whole} |"),
+        ] {
+            assert_eq!(links_clicked(&source, 26), [whole], "{source}");
+        }
+    }
+
+    /// A code block's line is cut where the pane ends, wherever a word is on
+    /// it, so a link after a command is cut part way along its line rather
+    /// than starting one of its own, as a cut word does in prose.
+    #[test]
+    fn a_link_cut_after_other_words_on_a_code_line_opens_whole_from_every_part() {
+        let whole = "https://example.com/a/very/long/path/that/wraps/here";
+        for source in [
+            format!("```\ncurl -sL {whole}\n```"),
+            format!("```\ngit clone {whole} out\n```"),
+            format!("> ```\n> curl {whole}\n> ```"),
         ] {
             assert_eq!(links_clicked(&source, 26), [whole], "{source}");
         }

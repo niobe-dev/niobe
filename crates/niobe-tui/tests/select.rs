@@ -217,6 +217,28 @@ fn a_link_too_long_for_its_line_opens_whole_from_the_part_on_the_next() {
     assert_eq!(app.take_handoffs(), vec![Handoff::Open(link)], "{frame}");
 }
 
+/// A code block's line is cut at the pane's edge wherever its words stand, so
+/// a link after the command that fetches it is cut part way along the line,
+/// and a click on either part opens all of it rather than the part drawn.
+#[test]
+fn a_link_cut_after_a_command_in_a_code_block_opens_whole_from_either_part() {
+    let link = format!("https://example.com/{}/end", "segment".repeat(16));
+    let mut app = replied(&format!("Fetch it:\n\n```\ncurl -sL {link}\n```"));
+    let frame = screen(&mut app, WIDTH, HEIGHT);
+
+    for part in ["curl -sL https", "/end"] {
+        let (column, row) = cell_of(&frame, part);
+        let column = column + u16::try_from(part.len()).expect("the part is short") - 1;
+        click(&mut app, (column, row));
+
+        assert_eq!(
+            app.take_handoffs(),
+            vec![Handoff::Open(link.clone())],
+            "clicked on {part:?}:\n{frame}"
+        );
+    }
+}
+
 /// A link as long as its row is wide, or anywhere near, fits on it whole, and
 /// the word after it starts the next row: that word is not part of the link,
 /// however exactly the link filled the row it ended.
