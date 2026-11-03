@@ -12,6 +12,7 @@ use std::time::SystemTime;
 
 use niobe_core::event::Event;
 use niobe_store::{Recorder, SessionId};
+use niobe_tui::app::App;
 use niobe_tui::journal::{Journal, JournalError};
 
 use crate::repo;
@@ -115,6 +116,36 @@ impl StoreJournal {
         self.session
     }
 
+    /// Keeps what `app` made of the record it was taken up from — the end of
+    /// a command that record never saw end, the session it left — dated
+    /// where that record stops, by [`App::left_at`]: that is when the process
+    /// before this one stopped. Dated when it is written, a session read back
+    /// again would have had the command and the turn the kill cut run on
+    /// until the moment it was opened.
+    pub fn keep_taking_up(&mut self, app: &mut App) {
+        let at = app.left_at().unwrap_or_else(SystemTime::now);
+        for event in app.take_produced() {
+            self.append_at(&event, at);
+        }
+    }
+
+    /// Hands one event over to be kept, dated `at`.
+    fn append_at(&mut self, event: &Event, at: SystemTime) {
+        panic_if_the_environment_asks();
+        let handed = Handed {
+            event: event.clone(),
+            at,
+        };
+        match &self.events {
+            Some(events) if events.send(handed).is_ok() => {
+                self.waiting = self.waiting.saturating_add(1);
+            }
+            _ => self
+                .unsent
+                .push("the session store's writer has stopped".into()),
+        }
+    }
+
     /// Waits for every event handed over to be written or refused, and says
     /// what became of those the shell was never told about.
     pub fn finish(mut self) -> Finished {
@@ -160,19 +191,7 @@ impl Journal for StoreJournal {
     }
 
     fn append(&mut self, event: &Event) {
-        panic_if_the_environment_asks();
-        let handed = Handed {
-            event: event.clone(),
-            at: SystemTime::now(),
-        };
-        match &self.events {
-            Some(events) if events.send(handed).is_ok() => {
-                self.waiting = self.waiting.saturating_add(1);
-            }
-            _ => self
-                .unsent
-                .push("the session store's writer has stopped".into()),
-        }
+        self.append_at(event, SystemTime::now());
     }
 
     fn settled(&mut self) -> Vec<Result<(), JournalError>> {
@@ -276,7 +295,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use niobe_core::session::SessionState;
-    use niobe_tui::app::{App, EntryKind, Repo};
+    use niobe_tui::app::{EntryKind, Repo};
     use niobe_tui::clock::{Clock, LocalMoment, Stamp};
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -662,5 +681,75 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    /// A session killed while a command ran, taken up again two days on and
+    /// then read back once more: the command and the turn it ran in end where
+    /// the record stops, as they did on screen when it was taken up, not at
+    /// the moment it was opened.
+    #[test]
+    fn what_taking_a_record_up_makes_is_kept_where_the_record_stops() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let root = dir.path().to_path_buf();
+        let record_at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_789_000_000);
+        let at = |secs: u64| record_at + Duration::from_secs(secs);
+        let record = [
+            (said("slow"), at(1)),
+            (
+                Event::AssistantDelta {
+                    text: "working".to_owned(),
+                },
+                at(3),
+            ),
+            (
+                Event::ToolCallStart {
+                    id: "op1".into(),
+                    name: niobe_core::event::OPERATOR_SHELL.to_owned(),
+                    input: "sleep 100".to_owned(),
+                    summary: None,
+                    agent: None,
+                },
+                at(5),
+            ),
+        ];
+        let store = repo::open_or_create_store(&root).expect("the store opens");
+        let mut recorder = Recorder::new(store);
+        recorder
+            .record_all_at(record.iter().map(|(event, at)| (event, *at)))
+            .expect("the record is kept");
+        let session = recorder.session().expect("the record opened a session");
+        drop(recorder);
+
+        let clock = Clock::system();
+        let fold = |stored: &[niobe_store::StoredEvent]| {
+            let mut app = App::new(Repo::default());
+            app.extend_at(stored.iter().map(|s| (&s.event, clock.at(s.at))));
+            app.resumed();
+            app.leave();
+            app
+        };
+        let store = repo::open_existing_store(&root)
+            .expect("the store opens")
+            .expect("the store exists");
+        let recorder = Recorder::resume(store, session).expect("the session is free");
+        let mut taken_up = fold(&recorder.events().expect("the session reads"));
+        let mut journal = StoreJournal::open(recorder);
+        journal.keep_taking_up(&mut taken_up);
+        assert_eq!(journal.finish().unsaved, 0);
+
+        let stored = repo::open_existing_store(&root)
+            .expect("the store opens")
+            .expect("the store exists")
+            .events(session)
+            .expect("the session reads");
+        let kept: Vec<SystemTime> = stored[record.len()..].iter().map(|s| s.at).collect();
+        assert_eq!(
+            kept,
+            [at(5), at(5)],
+            "the command's end and the session left"
+        );
+        let again = fold(&stored);
+        assert_eq!(again.worked(), Some(Duration::from_secs(4)));
+        assert_eq!(timeline(&again), timeline(&taken_up));
     }
 }

@@ -2597,11 +2597,19 @@ impl App {
     ///
     /// Taken up again from a record that marks no look, the cut is part of
     /// reading that record back, as what it holds is: the turn stopped
-    /// before the session was opened, and is no news on the first key.
+    /// before the session was opened, and is no news on the first key. The
+    /// process before this one left it where its record stops, so that is
+    /// where it is folded, as [`App::left_at`] says it is to be kept.
     pub fn leave(&mut self) {
-        let taken_up = std::mem::take(&mut self.taken_up) && self.heard && !self.session.left();
+        let taking_up = std::mem::take(&mut self.taken_up);
+        let taken_up = taking_up && self.heard && !self.session.left();
         if taken_up || self.session.turn_running() || !self.session.running_agents().is_empty() {
+            let now = match taking_up {
+                true => std::mem::replace(&mut self.at, self.last_folded_at),
+                false => self.at,
+            };
             self.produce(Event::SessionLeft);
+            self.at = now;
             if self.returned && !self.looked_recorded {
                 self.mark_read_back();
             }
@@ -2639,9 +2647,15 @@ impl App {
             })
             .map(|(id, _)| id.clone())
             .collect();
+        // It stopped where the record stops, which is the last that is known
+        // of it: ended by the clock the shell reads now, the end would leave
+        // a turn the kill cut ruled at that clock, and, kept at it, take the
+        // days the session lay unopened for the command's and the turn's.
+        let now = std::mem::replace(&mut self.at, self.last_folded_at);
         for id in open {
             self.ended_with_the_session(id);
         }
+        self.at = now;
         // What happened after the operator last looked is news on their first
         // key back, the process that ran it having ended while they were
         // away. A record that marks no look was kept before looks were kept,
@@ -2653,6 +2667,17 @@ impl App {
         self.looked_stale = true;
         self.returned = true;
         self.taken_up = true;
+    }
+
+    /// When the record this shell was folded from stops: the time the last
+    /// thing it holds was recorded at, which is where the process before this
+    /// one is known to have got to. `None` where nothing folded was dated.
+    ///
+    /// What [`App::resumed`] and [`App::leave`] make of that record — a
+    /// command it never saw end, the session it left — happened then, not
+    /// when it was read, and is to be kept dated by this.
+    pub fn left_at(&self) -> Option<std::time::SystemTime> {
+        self.last_folded_at.map(Stamp::at)
     }
 
     /// Draws the rule under the turn the fold has just ended, below whatever
@@ -18143,6 +18168,83 @@ mod tests {
         );
         assert!(app.session().in_flight_tools().is_empty());
         assert_eq!(app.session().tools().failed, 0);
+    }
+
+    /// A record of a turn cut by a kill while a command ran: the prompt, a
+    /// reply begun, then the command started — and nothing after it.
+    fn killed_while_a_command_ran() -> Vec<(Event, Stamp)> {
+        vec![
+            (said("slow"), millis(1_000)),
+            (
+                Event::AssistantDelta {
+                    text: "working".to_owned(),
+                },
+                millis(3_000),
+            ),
+            (
+                Event::ToolCallStart {
+                    id: "op1".into(),
+                    name: crate::shell::OPERATOR_SHELL.to_owned(),
+                    input: "sleep 100".to_owned(),
+                    summary: None,
+                    agent: None,
+                },
+                millis(5_000),
+            ),
+        ]
+    }
+
+    /// Taken up again, the command the record never saw end and the turn it
+    /// ran in are ended where the record stops, by the clock the record was
+    /// kept by: what taking it up makes is dated there too, so that the
+    /// session read back again shows them as it showed them then, and the
+    /// days the session lay unopened are neither the command's nor the
+    /// turn's.
+    #[test]
+    fn a_command_cut_by_a_kill_ends_where_the_record_stops_and_reads_back_so() {
+        let record = killed_while_a_command_ran();
+        let mut taken_up = app();
+        taken_up.extend_at(record.iter().map(|(event, at)| (event, *at)));
+        taken_up.resumed();
+        taken_up.leave();
+        let left_at = taken_up.left_at().expect("the record is dated");
+        assert_eq!(left_at, millis(5_000).at());
+        let made = taken_up.take_produced();
+        assert!(
+            matches!(
+                made.as_slice(),
+                [Event::ToolCallEnd { .. }, Event::SessionLeft]
+            ),
+            "{made:?}"
+        );
+        // Opened two days on, the shell's clock has moved past the record.
+        taken_up.tick(Instant::now(), Some(millis(172_800_000)));
+
+        let mut again = app();
+        again.extend_at(
+            record
+                .iter()
+                .map(|(event, at)| (event, *at))
+                .chain(made.iter().map(|event| (event, Stamp::new(left_at, None)))),
+        );
+
+        for app in [&taken_up, &again] {
+            assert_eq!(
+                app.worked(),
+                Some(Duration::from_secs(4)),
+                "the turn ran from its prompt to the command's start"
+            );
+            let took: Vec<Option<Duration>> = app
+                .entries()
+                .iter()
+                .filter_map(|entry| match &entry.kind {
+                    EntryKind::Turn(rule) => Some(rule.took),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(took, [Some(Duration::from_secs(4))]);
+        }
+        assert_eq!(taken_up.entries(), again.entries());
     }
 
     #[test]

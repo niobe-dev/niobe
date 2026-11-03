@@ -738,9 +738,10 @@ fn resume(
     };
     // A command typed after `!` runs whether or not a backend does: it is the
     // operator's, not the agent's.
-    let app = app.runs_commands().remembers();
+    let mut app = app.runs_commands().remembers();
 
     let mut journal = StoreJournal::open(recorder);
+    journal.keep_taking_up(&mut app);
     let mut rules = ConfigRules::at(&root);
     let mut watching = repo::watch(&root);
     let mut commands = commands_for(&root, &mut backend);
@@ -984,9 +985,10 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<Option<
     };
     // A command typed after `!` runs whether or not a backend does: it is the
     // operator's, not the agent's.
-    let app = app.runs_commands().remembers();
+    let mut app = app.runs_commands().remembers();
 
     let mut journal = StoreJournal::open(recorder);
+    journal.keep_taking_up(&mut app);
     let mut rules = ConfigRules::at(&root);
     let mut watching = repo::watch(&root);
     let mut commands = commands_for(&root, &mut backend);
