@@ -126,7 +126,9 @@ reviewers that encode both, for an agent working in this tree.
   `trust.rs` records which config files may put an `env`, `args`, a `settings` file or an
   `auth_refresh` in front of a backend — or say how a profile is billed, choose the default
   profile, allow tool calls without asking, or replace one of the user's — as each file's SHA-256 under the user's own config
-  directory, because a repository's file arrives with the clone; `error.rs` names the file in
+  directory, because a repository's file arrives with the clone — never written past the mebibyte
+  it is read back at, and no config's files given more than a quarter of it, since every repository
+  shares it; `error.rs` names the file in
   every failure, and the line and key of every invalid value; `lib.rs` layers a repository's file over the user's, withholds
   what an untrusted file may not set, and selects the profile a session runs under.
 - **`crates/niobe-store/`** — the session store: every event of every session, append-only, in

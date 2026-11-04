@@ -79,6 +79,37 @@ const RECOVER: &str = "; niobe wrote this file and cannot read it while this lin
      it, so neither a session nor `niobe untrust` can use it: delete the line, and any \
      config it trusted is asked about again";
 
+/// What follows the reason a record too large to read is refused: the way
+/// out, since neither a session nor `niobe untrust` can use it.
+const TOO_LARGE: &str = ", which niobe never writes it past, so neither a session nor `niobe \
+     untrust` can use it: delete the file, and every config it trusted is asked about again";
+
+/// Whether the file at `path` is larger than a record is read at.
+fn too_large(path: &Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|metadata| metadata.len() > crate::read::LIMIT)
+}
+
+/// `text`, the record about to be written to `path`, where it is no larger
+/// than the record is read back at.
+///
+/// Written larger, the record could not be read again, and every session in
+/// a repository with a config, and `niobe untrust` with them, would stop on
+/// it; a config a clone wrote decides how many files it names, so a trust it
+/// asks for is refused before that rather than written.
+fn readable(path: &Path, text: String) -> Result<String, ConfigError> {
+    match u64::try_from(text.len()).unwrap_or(u64::MAX) > crate::read::LIMIT {
+        true => Err(ConfigError::Untrustable {
+            path: path.to_path_buf(),
+            message: format!(
+                "the record would hold more than the {} MiB it is read at, so it was left as it \
+                 was; `niobe untrust` a repository no longer worked in",
+                crate::read::LIMIT / (1024 * 1024)
+            ),
+        }),
+        false => Ok(text),
+    }
+}
+
 /// The SHA-256 of a config file's contents, as lower-case hex.
 ///
 /// Of the text rather than of the parsed config: what the operator reads is
@@ -109,6 +140,15 @@ impl Trusted {
         match crate::read::text(path) {
             Ok(text) => Self::parse(&text, path),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(_) if too_large(path) => Err(ConfigError::Invalid {
+                path: path.to_path_buf(),
+                line: 1,
+                key: None,
+                message: format!(
+                    "it holds more than the {} MiB it is read at{TOO_LARGE}",
+                    crate::read::LIMIT / (1024 * 1024)
+                ),
+            }),
             Err(error) => Err(ConfigError::Read {
                 path: path.to_path_buf(),
                 error,
@@ -221,7 +261,8 @@ impl Trusted {
 
         let mut record = Self::read(&target)?;
         let changed = change(&mut record)?;
-        crate::replace::replace(&target, record.render().as_bytes()).map_err(failed)?;
+        crate::replace::replace(&target, readable(&target, record.render())?.as_bytes())
+            .map_err(failed)?;
         Ok(changed)
     }
 
@@ -237,13 +278,58 @@ impl Trusted {
         };
         let target = crate::replace::resolved(path).map_err(failed)?;
         std::fs::create_dir_all(crate::replace::parent(&target)).map_err(failed)?;
-        crate::replace::replace(&target, self.render().as_bytes()).map_err(failed)
+        crate::replace::replace(&target, readable(&target, self.render())?.as_bytes())
+            .map_err(failed)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A record too large to read back would stop every session and
+    /// `niobe untrust` with them: it is not written, and what was there is
+    /// kept.
+    #[test]
+    fn a_record_that_would_grow_past_what_is_read_back_is_not_written() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let path = dir.path().join("trusted.list");
+        Trusted::update(&path, |record| record.trust(Path::new("/r/a"), "a"))
+            .expect("a small record is written");
+        let before = std::fs::read_to_string(&path).expect("it was just written");
+
+        let grown = Trusted::update(&path, |record| {
+            for n in 0..5_000 {
+                record.trust(Path::new(&format!("/r/{n}/{}", "x".repeat(200))), "b")?;
+            }
+            Ok(())
+        });
+
+        assert!(
+            matches!(grown, Err(ConfigError::Untrustable { .. })),
+            "{grown:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("it is still there"),
+            before
+        );
+        assert!(Trusted::read(&path).is_ok());
+    }
+
+    /// One written larger, by hand or by a niobe before the bound, says how
+    /// to get out of it.
+    #[test]
+    fn a_record_too_large_to_read_says_how_to_get_out_of_it() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let path = dir.path().join("trusted.list");
+        std::fs::write(&path, "#".repeat(1024 * 1024 + 1)).expect("it is writable");
+
+        let error = Trusted::read(&path)
+            .expect_err("it is too large")
+            .to_string();
+
+        assert!(error.contains("delete the file"), "{error}");
+    }
 
     fn file() -> PathBuf {
         PathBuf::from("/repo/.niobe/config.toml")

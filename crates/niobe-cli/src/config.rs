@@ -1771,6 +1771,16 @@ fn trusted(
         }))
 }
 
+/// How much of the trust record one config's files may take, in bytes. The
+/// record is one file for every repository on the machine and is read at a
+/// mebibyte, so no clone, however many files its config names, takes the
+/// room the others are trusted in.
+const SHARE: usize = 256 * 1024;
+
+/// What a line of the record takes besides its path: the digest, the space
+/// between them and the line break.
+const ENTRY: usize = 66;
+
 /// Records `untrusted` in the record at `record` as read by the operator: the
 /// config at the text they were shown, the names of the user's profiles it
 /// replaces, and each file it names that the CLI reads, at the contents shown.
@@ -1795,6 +1805,18 @@ pub fn record_trust(record: &Path, untrusted: &Untrusted) -> Result<(), String> 
                 ));
             }
         }
+    }
+    let share: usize = files
+        .iter()
+        .map(|(file, _)| attached_key(file).as_os_str().len().saturating_add(ENTRY))
+        .fold(0, usize::saturating_add);
+    if share > SHARE {
+        return Err(format!(
+            "{} is not trusted: the files it names would take more than {} KiB of the trust \
+             record, which every repository's trust shares; name fewer of them",
+            path.display(),
+            SHARE / 1024
+        ));
     }
     Trusted::update(record, |trusted| {
         trusted.trust(path, &untrusted.text)?;
@@ -3150,6 +3172,30 @@ mod tests {
             clone.load().untrusted.is_some(),
             "a tracked file is the clone's"
         );
+    }
+
+    /// The trust record is one file for every repository: a config naming
+    /// more files than its share of it would leave others no room to be
+    /// trusted in, and is refused with nothing written.
+    #[test]
+    fn a_config_naming_more_files_than_its_share_of_the_record_is_not_trusted() {
+        let names: Vec<String> = (0..1_200)
+            .map(|n| format!("{n:04}{}", "x".repeat(250)))
+            .collect();
+        let quoted: Vec<String> = names.iter().map(|name| format!("\"{name}\"")).collect();
+        let clone = Cloned::new(&format!(
+            "[profiles.team]\nbackend = \"claude\"\nargs = [{}]\n",
+            quoted.join(", ")
+        ));
+        for name in &names {
+            clone.write(name, "x");
+        }
+        let untrusted = clone.load().untrusted.expect("the config is asked about");
+
+        let refused = record_trust(&clone.record, &untrusted).expect_err("it is too much");
+
+        assert!(refused.contains("KiB of the trust record"), "{refused}");
+        assert!(!clone.record.exists());
     }
 
     /// A directory a variable or an argument names that no CLI loads code
