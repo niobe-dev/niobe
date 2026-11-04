@@ -547,10 +547,12 @@ fn root_of(path: &Path) -> PathBuf {
 /// appears it is a file that was not trusted. A file whose real path is
 /// outside the repository, by `..`, an absolute path or a link, is not read.
 ///
-/// A directory an `args` entry or an `env` value names — a plugin directory,
-/// the CLI's own configuration directory, a directory put on `PATH` — is
-/// covered by everything under it, and so is every file a command in a
-/// settings file the profile names runs: its hooks' scripts, its status
+/// A directory code is loaded from — a plugin directory `--plugin-dir`
+/// names, a directory a variable such as `PATH` or `PYTHONPATH` puts on a
+/// search path — is covered by everything under it; any other directory an
+/// argument or a variable names is one a program works in, whose contents
+/// change as it works, and is not. Every file a command in a settings file
+/// the profile names runs is covered too: its hooks' scripts, its status
 /// line's. A pull can change what either holds without touching the config.
 pub fn attached(config: &Config, root: &Path, home: Option<&OsStr>) -> Vec<Attached> {
     let mut gather = Gather {
@@ -570,9 +572,16 @@ pub fn attached(config: &Config, root: &Path, home: Option<&OsStr>) -> Vec<Attac
         {
             gather.add(root.join(written), name, Named::Settings);
         }
+        let mut after: &str = "";
         for arg in profile.args() {
+            let loads = after == "--plugin-dir" || arg.starts_with("--plugin-dir=");
+            after = arg;
             for candidate in path_candidates(arg) {
-                gather.add(root.join(candidate), name, Named::Argument);
+                let named = match loads {
+                    true => Named::Directory,
+                    false => Named::Argument,
+                };
+                gather.add(root.join(candidate), name, named);
             }
         }
         // A value is read as words and as a list of paths: `NODE_OPTIONS`
@@ -599,7 +608,11 @@ pub fn attached(config: &Config, root: &Path, home: Option<&OsStr>) -> Vec<Attac
                     );
                     continue;
                 }
-                gather.add(path, name, Named::Argument);
+                let named = match LOADS_FROM.contains(&variable.as_str()) {
+                    true => Named::Directory,
+                    false => Named::Argument,
+                };
+                gather.add(path, name, named);
             }
         }
     }
@@ -694,8 +707,12 @@ pub fn attached(config: &Config, root: &Path, home: Option<&OsStr>) -> Vec<Attac
 enum Named {
     /// As its `settings` file.
     Settings,
-    /// In an `args` entry or an `env` value, which may name a directory.
+    /// In an `args` entry or an `env` value, which names a file: a directory
+    /// a word happens to name is one the CLI works in, not code it runs.
     Argument,
+    /// As a directory the CLI loads code from — a plugin directory, a `PATH`
+    /// entry — which is agreed to by everything under it.
+    Directory,
     /// In a command a file it names runs, which names a file: a word of a
     /// command that names a directory is a directory the command works in
     /// or on, a build's output among them, and not code it runs.
@@ -724,6 +741,20 @@ fn is_json(path: &Path) -> bool {
 /// The longest command read for what it runs, in bytes; a config holding a
 /// longer one is not agreed to.
 const LONGEST_COMMAND: usize = 64 * 1024;
+
+/// The variables whose directories a program loads code from, which are
+/// agreed to by everything under them; any other variable's value covers a
+/// file it names, and a directory it names is one a program works in.
+const LOADS_FROM: [&str; 8] = [
+    "PATH",
+    "NODE_PATH",
+    "PYTHONPATH",
+    "PERL5LIB",
+    "RUBYLIB",
+    "LD_LIBRARY_PATH",
+    "DYLD_LIBRARY_PATH",
+    "GEM_PATH",
+];
 
 /// The variables that name the directory a CLI keeps its sign-in and its
 /// state in, as each bridge names them: a repository's profile that points
@@ -861,8 +892,8 @@ impl Gather<'_> {
         // A directory outside the repository is the operator's, and is named
         // in full by the config the operator agrees to, as written.
         let kind = match named {
-            Named::Settings | Named::Command => looked.file,
-            Named::Argument => looked.file || (looked.directory && inside),
+            Named::Settings | Named::Command | Named::Argument => looked.file,
+            Named::Directory => looked.file || (looked.directory && inside),
         };
         // The repository's root named as a directory the CLI loads from is
         // everything a pull changes, and cannot be agreed to as it stands; a
@@ -885,7 +916,7 @@ impl Gather<'_> {
             );
             return None;
         }
-        if root && looked.directory && matches!(named, Named::Argument) {
+        if root && looked.directory && matches!(named, Named::Directory) {
             self.unreadable(
                 path,
                 profile,
@@ -2509,7 +2540,7 @@ mod tests {
     fn a_directory_an_argument_or_a_variable_names_is_trusted_by_everything_under_it() {
         let clone = Cloned::new(
             "[profiles.team]\nbackend = \"claude\"\nargs = [\"--plugin-dir\", \"plug\"]\n\
-             env = { PLUGINS = \"cfgdir\" }\n",
+             env = { PYTHONPATH = \"cfgdir\" }\n",
         );
         for dir in ["plug", "cfgdir"] {
             std::fs::create_dir(clone.dir.path().join(dir))
@@ -2549,7 +2580,7 @@ mod tests {
     #[test]
     fn a_directory_named_under_many_spellings_is_read_once() {
         let spellings: Vec<String> = (0..2000)
-            .map(|n| format!("\"{}plug\"", "x/../".repeat(n % 20 + 1)))
+            .map(|n| format!("\"--plugin-dir={}plug\"", "x/../".repeat(n % 20 + 1)))
             .collect();
         let clone = Cloned::new(&format!(
             "[profiles.team]\nbackend = \"claude\"\nargs = [{}]\n",
@@ -2581,14 +2612,14 @@ mod tests {
         assert!(clone.load().untrusted.is_some());
     }
 
-    /// A config is a mebibyte of whatever its clone wrote: a word repeated a
-    /// hundred thousand times is one path, looked at once, and a config
+    /// A config is a mebibyte of whatever its clone wrote: a word repeated
+    /// fifty thousand times is one path, looked at once, and a config
     /// naming more paths than any profile needs is not one to agree to.
     #[test]
     fn a_config_naming_more_paths_than_a_profile_needs_is_looked_at_once_each_and_not_agreed_to() {
         let repeated = Cloned::new(&format!(
             "[profiles.team]\nbackend = \"claude\"\nargs = [{}]\n",
-            vec!["\"p\""; 100_000].join(", ")
+            vec!["\"--plugin-dir=p\""; 50_000].join(", ")
         ));
         std::fs::create_dir(repeated.dir.path().join("p"))
             .expect("the temporary directory is writable");
@@ -3002,6 +3033,30 @@ mod tests {
         );
         let shown = format!("{:?}", crate::consent::question(&untrusted).grants);
         assert!(!shown.contains("FAKE"), "{shown}");
+    }
+
+    /// A directory a variable or an argument names that no CLI loads code
+    /// from — a build's output, a word that happens to be a directory's name —
+    /// is not agreed to by what it holds, which changes with every build.
+    #[test]
+    fn a_directory_no_cli_loads_code_from_is_not_trusted_by_what_it_holds() {
+        let clone = Cloned::new(
+            "[profiles.team]\nbackend = \"claude\"\n\
+             env = { CARGO_TARGET_DIR = \"target/agent\", NODE_ENV = \"test\" }\n\
+             args = [\"--add-dir\", \"docs\"]\n",
+        );
+        for dir in ["target/agent", "test", "docs"] {
+            std::fs::create_dir_all(clone.dir.path().join(dir))
+                .expect("the temporary directory is writable");
+        }
+        clone.trust();
+        assert!(clone.load().untrusted.is_none(), "trusted as it stands");
+
+        for file in ["target/agent/build.o", "test/a.rs", "docs/b.md"] {
+            clone.write(file, "new");
+        }
+
+        assert!(clone.load().untrusted.is_none());
     }
 
     /// A directory a profile names that leads into the home directory the

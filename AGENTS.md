@@ -353,7 +353,7 @@ reviewers that encode both, for an agent working in this tree.
   read, since what the operator keeps there is theirs and not the clone's, and so is every file
   under the operator's home directory where the repository holds it — and records the answer as `niobe trust` does, for the text
   that was shown. `manifest.rs` is a directory a repository's profile names — a plugin
-  directory an argument hands the CLI or a `PATH` entry a variable names — as the trust record
+  directory `--plugin-dir` hands the CLI or a `PATH` entry a variable names, any other directory an argument or a variable names being one a program works in and not agreed to — as the trust record
   agrees to it: each file under it by its SHA-256 and each link by where it
   really leads — what it reaches hashed where that is in the repository, never read where it is
   not — within one budget for everything a config names, past which it is not agreed to; with the
