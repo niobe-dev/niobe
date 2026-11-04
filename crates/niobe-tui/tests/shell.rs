@@ -1183,6 +1183,65 @@ fn enter_answers_nothing_while_the_top_of_the_question_is_not_drawn() {
     assert!(app.asking().is_some());
 }
 
+/// A call cut to fit its pane is allowed only once a frame has drawn the
+/// whole of it: Enter on "Allow once" would otherwise allow lines the
+/// operator was never shown. Ctrl+T draws it whole, and cut again it is
+/// answered as any other; a refusal needs no reading.
+#[test]
+fn a_call_cut_to_fit_is_not_allowed_until_it_has_been_drawn_whole() {
+    use niobe_tui::app::ASK_QUIET;
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use std::time::Instant;
+
+    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+    let ctrl_t = KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL);
+    let shown = Instant::now();
+    let mut app = session_waiting_on_a_long_command().attached();
+    app.tick(shown, None);
+    let frame = screen(&mut app, 80, 24);
+    assert!(frame.contains("more lines"), "{frame}");
+
+    app.on_key_read(key(KeyCode::Enter), alone(shown + ASK_QUIET * 2));
+    assert!(
+        !answered(&mut app),
+        "a call was allowed with lines of it unseen"
+    );
+    assert!(app.asking().is_some());
+    let frame = screen(&mut app, 80, 24);
+    assert!(
+        frame.contains("part of the call is not on screen"),
+        "{frame}"
+    );
+
+    app.on_key_read(ctrl_t, alone(shown + ASK_QUIET * 4));
+    screen(&mut app, 80, 24);
+    app.on_key_read(ctrl_t, alone(shown + ASK_QUIET * 6));
+    let frame = screen(&mut app, 80, 24);
+    assert!(frame.contains("more lines"), "{frame}");
+
+    app.on_key_read(key(KeyCode::Enter), alone(shown + ASK_QUIET * 8));
+    assert!(answered(&mut app), "a call read whole was not allowed");
+}
+
+/// Refusing a call cut to fit needs no reading of it.
+#[test]
+fn a_call_cut_to_fit_can_be_refused_unread() {
+    use niobe_tui::app::ASK_QUIET;
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use std::time::Instant;
+
+    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+    let shown = Instant::now();
+    let mut app = session_waiting_on_a_long_command().attached();
+    app.tick(shown, None);
+    screen(&mut app, 80, 24);
+
+    app.on_key_read(key(KeyCode::Char('4')), alone(shown + ASK_QUIET * 2));
+    app.on_key_read(key(KeyCode::Enter), alone(shown + ASK_QUIET * 4));
+
+    assert!(answered(&mut app), "a refusal waited on reading the call");
+}
+
 /// A key read on its own, at `at`.
 fn alone(at: std::time::Instant) -> niobe_tui::app::Arrival {
     niobe_tui::app::Arrival { at, alone: true }

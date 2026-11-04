@@ -1297,6 +1297,12 @@ pub struct App {
     /// Whether the last frame drew the top row of the question waiting, which
     /// says who asks and what is asked. `true` until a frame says otherwise.
     question_top_drawn: bool,
+    /// Whether the last frame left lines of the waiting call out to fit the
+    /// pane.
+    question_cut: bool,
+    /// The call whose question a frame last drew with nothing of it left
+    /// out: a question cut to fit is allowed only once it has been.
+    question_seen_whole: Option<ToolCallId>,
     /// Whether the last frame was too small to draw the shell, and so drew
     /// no question at all. `false` until a frame says otherwise.
     too_small: bool,
@@ -1950,6 +1956,11 @@ const TYPING_AFTER_ESC: Duration = Duration::from_millis(350);
 const NOT_ATTACHED: &str = "This session is not attached to a backend, so the prompt above was \
      not sent. `niobe profiles` shows which profiles are defined and which backend each one runs.";
 
+/// What the shell says when a call cut to fit its pane was allowed before
+/// the whole of it had been on screen.
+const CUT_QUESTION_HINT: &str = "Not allowed: part of the call is not on screen. Ctrl+T shows it \
+     whole; read it, then answer";
+
 /// What the bar says when a key reached a prompt whose top is off screen.
 const TOP_OFF_SCREEN_HINT: &str =
     "Not taken as an answer: the top of the question is off screen. Ctrl+T cuts it to fit";
@@ -2076,6 +2087,8 @@ impl App {
             session_area: None,
             jump: None,
             question_top_drawn: true,
+            question_cut: false,
+            question_seen_whole: None,
             too_small: false,
             transcript_drawn: None,
             pressed: None,
@@ -6801,6 +6814,23 @@ impl App {
         self.question_top_drawn = drawn;
     }
 
+    /// Whether the last frame left lines of the waiting call out to fit the
+    /// pane; one that left none out has shown the call whole.
+    pub fn drew_question_cut(&mut self, cut: bool) {
+        self.question_cut = cut;
+        if !cut && let Some(ask) = self.asks.front() {
+            self.question_seen_whole = Some(ask.id.clone());
+        }
+    }
+
+    /// Whether allowing the waiting call would allow lines of it the operator
+    /// was never shown: the question is cut to fit, and no frame has drawn it
+    /// whole.
+    fn allowing_unseen(&self) -> bool {
+        self.question_cut
+            && self.asks.front().map(|ask| &ask.id) != self.question_seen_whole.as_ref()
+    }
+
     /// Whether the last frame was too small to draw the shell, and with it
     /// any question waiting.
     ///
@@ -8995,6 +9025,9 @@ impl App {
             return;
         };
         match code {
+            KeyCode::Enter if self.ask_selected() != Answer::No && self.allowing_unseen() => {
+                self.hint = Some(CUT_QUESTION_HINT.to_owned());
+            }
             KeyCode::Enter => self.answer(self.ask_selected()),
             KeyCode::Down => self.move_selection(true),
             KeyCode::Up => self.move_selection(false),

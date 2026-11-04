@@ -2167,6 +2167,7 @@ fn draw_transcript(
         .map(|ask| question_lines(app, ask, (width, height), theme))
         .unwrap_or_default();
     let framed = question.framed;
+    app.drew_question_cut(question.cut);
     let question = question.lines;
 
     if app.entries().is_empty() && question.is_empty() {
@@ -3333,7 +3334,8 @@ fn empty_transcript(attached: bool, theme: &Theme) -> Vec<Line<'static>> {
 /// its end, so the top of the question — what is asked, and the first
 /// answer, which Enter confirms — would be above the pane. There the
 /// arguments are cut instead, with a row saying how many lines are not shown
-/// and that Ctrl+T shows them, which draws the question whole again.
+/// and that Ctrl+T shows them, which draws the question whole again; the app
+/// is told, and allows such a call only once a frame has drawn it whole.
 fn question_lines(
     app: &App,
     ask: &Ask,
@@ -3349,8 +3351,8 @@ fn question_lines(
     // The frame's top and bottom rows and the blank row under it.
     let framing = 3;
     let fits = app.diffs_open() || body.len() + framing <= height;
-    let body = match fits {
-        true => body.whole(),
+    let (body, cut) = match fits {
+        true => (body.whole(), false),
         false => body.cut(height.saturating_sub(framing - 1), inner, theme),
     };
 
@@ -3383,7 +3385,7 @@ fn question_lines(
     if fits {
         lines.push(Line::from(""));
     }
-    Question { lines, framed }
+    Question { lines, framed, cut }
 }
 
 /// A permission prompt drawn as the transcript's last lines.
@@ -3393,6 +3395,8 @@ struct Question {
     /// The frame's width and its rows from the top border to the bottom one,
     /// which is what casts the shadow; `None` when nothing is asked.
     framed: Option<(u16, usize)>,
+    /// Whether lines of the call were left out to fit the pane.
+    cut: bool,
 }
 
 /// What is inside a question's frame, in the parts a question too tall for
@@ -3433,8 +3437,8 @@ impl QuestionBody {
     /// The body in `rows` rows where it can be: the consequences said again
     /// go first, as each is a copy of something above it, then the call's
     /// last lines, down to its first, which is kept with what is asked and
-    /// every answer.
-    fn cut(mut self, rows: usize, inner: usize, theme: &Theme) -> Vec<Line<'static>> {
+    /// every answer. Also says whether a line of the call was left out.
+    fn cut(mut self, rows: usize, inner: usize, theme: &Theme) -> (Vec<Line<'static>>, bool) {
         let fixed = self.head.len() + self.answers.len() + self.rest.len() + 1;
         let room = rows.saturating_sub(fixed);
         let dropped_consequences = !std::mem::take(&mut self.consequences).is_empty();
@@ -3458,7 +3462,7 @@ impl QuestionBody {
                     .map(|line| Line::from(line).style(Style::new().fg(theme.hot))),
             );
         }
-        self.whole()
+        (self.whole(), hidden > 0)
     }
 }
 
