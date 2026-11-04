@@ -146,7 +146,7 @@ impl Walk<'_> {
         let real = std::fs::canonicalize(dir).map_err(|error| error.to_string())?;
         if self.avoid.iter().any(|avoid| real.starts_with(avoid)) {
             return Err(format!(
-                "{under} is a CLI's own directory, which keeps its sign-in and is not read"
+                "{under} is the operator's own, a CLI's directory or the home directory, and is not read"
             ));
         }
         if depth > DEPTH {
@@ -207,7 +207,7 @@ impl Walk<'_> {
         } else if real.is_file() {
             if self.avoid.iter().any(|avoid| real.starts_with(avoid)) {
                 return Err(format!(
-                    "{shown} leads into a CLI's own directory, which keeps its sign-in and is not read"
+                    "{shown} leads into the operator's own, a CLI's directory or the home directory, and is not read"
                 ));
             }
             self.file(&real, shown)?;

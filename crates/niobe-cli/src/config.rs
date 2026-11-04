@@ -1000,7 +1000,15 @@ impl Gather<'_> {
         let clones = real.as_ref().is_ok_and(|real| self.is_the_clones(real));
         match (real, &self.real_root) {
             (Ok(real), Ok(root)) if clones && real.is_dir() => {
-                match crate::manifest::of(&real, root, &mut self.budget, &self.cli_directories) {
+                // Neither a CLI's own directory nor the home directory the
+                // repository holds is the clone's to walk into.
+                let avoid: Vec<PathBuf> = self
+                    .cli_directories
+                    .iter()
+                    .chain(&self.held_home)
+                    .cloned()
+                    .collect();
+                match crate::manifest::of(&real, root, &mut self.budget, &avoid) {
                     Ok(manifest) => Contents::Directory(manifest),
                     Err(error) => Contents::Unreadable(error),
                 }
@@ -2994,6 +3002,37 @@ mod tests {
         );
         let shown = format!("{:?}", crate::consent::question(&untrusted).grants);
         assert!(!shown.contains("FAKE"), "{shown}");
+    }
+
+    /// A directory a profile names that leads into the home directory the
+    /// repository holds, by a link or by holding it, is not walked into.
+    #[cfg(unix)]
+    #[test]
+    fn a_walk_that_reaches_the_home_directory_the_repository_holds_reads_none_of_it() {
+        let clone = Cloned::new(
+            "[profiles.team]\nbackend = \"claude\"\nargs = [\"--plugin-dir\", \"plug\"]\n",
+        );
+        std::fs::create_dir_all(clone.dir.path().join("me/.aws"))
+            .expect("the temporary directory is writable");
+        clone.write("me/.aws/credentials", "FAKE");
+        std::fs::create_dir(clone.dir.path().join("plug"))
+            .expect("the temporary directory is writable");
+        std::os::unix::fs::symlink("../me", clone.dir.path().join("plug/h"))
+            .expect("the temporary directory is writable");
+        let home = Some(clone.dir.path().join("me").into_os_string());
+
+        let loaded = load_with(None, clone.dir.path(), Some(clone.record.clone()), home)
+            .expect("the config loads");
+        let untrusted = loaded.untrusted.expect("the config is asked about");
+
+        assert!(
+            !untrusted
+                .attached
+                .iter()
+                .any(|file| matches!(file.text, Contents::Directory(_))),
+            "{:?}",
+            untrusted.attached
+        );
     }
 
     /// A file of the CLI's own named outside the repository is not read, as
