@@ -40,16 +40,32 @@ pub(crate) struct Named<'a> {
 /// passed over: beside an agent of kind `explore1`, two `explore` agents are
 /// `explore2` and `explore3`. The tags are worked out afresh from the whole
 /// list, so a second agent of a kind renumbers the first.
+///
+/// Worked out in one pass over the agents rather than one for each of them:
+/// the tags are asked for as every agent is spawned, and a session read back
+/// with sixteen hundred agents took half a minute when each tag looked at
+/// every other agent.
 pub(crate) fn tags(agents: &[Named<'_>]) -> Vec<String> {
     let words: Vec<Vec<String>> = agents.iter().map(|agent| words(base(agent))).collect();
-    let stems: Vec<String> = (0..agents.len())
-        .map(|at| stem(agents, &words, at))
-        .collect();
+    let mut kinds_of: HashMap<&str, HashSet<&str>> = HashMap::new();
+    for (agent, words) in agents.iter().zip(&words) {
+        for word in words {
+            kinds_of
+                .entry(word.as_str())
+                .or_default()
+                .insert(base(agent));
+        }
+    }
+    let stems: Vec<String> = words.iter().map(|words| stem(words, &kinds_of)).collect();
     let cut: Vec<String> = stems
         .iter()
         .map(|stem| text::truncate(stem, TAG_MAX))
         .collect();
-    let alone = |at: usize| cut.iter().filter(|other| **other == cut[at]).count() == 1;
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    for tag in &cut {
+        *counts.entry(tag.as_str()).or_default() += 1;
+    }
+    let alone = |at: usize| counts.get(cut[at].as_str()) == Some(&1);
     let mut taken: HashSet<String> = (0..agents.len())
         .filter(|&at| alone(at))
         .map(|at| cut[at].clone())
@@ -99,22 +115,25 @@ fn words(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// The word agent `at` is tagged with: the first of its words no agent of
-/// another kind shares, or its first word where every one is shared.
+/// The word an agent whose kind's words are `words` is tagged with: the
+/// first of them no agent of another kind shares, or the first where every
+/// one is shared. `kinds_of` holds, for every word, the kinds of the agents
+/// whose words it is among — the agent's own kind always one of them — so a
+/// word is shared where it holds another.
 ///
 /// Agents of the same kind do not count against one another's words — that
 /// would leave two `Explore` agents with no word at all — and are told apart
 /// by number instead.
-fn stem(agents: &[Named<'_>], words: &[Vec<String>], at: usize) -> String {
-    let own = base(&agents[at]);
+fn stem(words: &[String], kinds_of: &HashMap<&str, HashSet<&str>>) -> String {
     let shared = |word: &String| {
-        (0..agents.len())
-            .any(|other| other != at && base(&agents[other]) != own && words[other].contains(word))
+        kinds_of
+            .get(word.as_str())
+            .is_some_and(|kinds| kinds.len() > 1)
     };
-    words[at]
+    words
         .iter()
         .find(|word| !shared(word))
-        .or_else(|| words[at].first())
+        .or_else(|| words.first())
         .cloned()
         .unwrap_or_else(|| NO_WORD.to_owned())
 }
@@ -129,6 +148,36 @@ fn numbered(stem: &str, number: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Tags are asked for as every agent is spawned, so they are worked out
+    /// without each agent looking at every other.
+    #[test]
+    fn thousands_of_agents_are_tagged_at_once() {
+        let kinds: Vec<String> = (0..4000)
+            .map(|n| format!("kind{} shared", n % 50))
+            .collect();
+        let named: Vec<Named<'_>> = kinds
+            .iter()
+            .map(|kind| Named {
+                kind: Some(kind),
+                label: "a task",
+            })
+            .collect();
+        let started = std::time::Instant::now();
+
+        let tags = tags(&named);
+
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(
+            tags.iter().collect::<HashSet<_>>().len(),
+            4000,
+            "no two alike"
+        );
+    }
 
     fn kinds(kinds: &[&str]) -> Vec<String> {
         let named: Vec<Named<'_>> = kinds

@@ -1397,6 +1397,10 @@ pub struct App {
     /// business, so they are kept here rather than widening the shared state —
     /// and the event model, which carries no time — for a pane.
     agents: Vec<SubAgent>,
+    /// [`App::agent_tags`], worked out once for the agents as they stand: a
+    /// tag is asked for with nearly every event a sub-agent sends, and the
+    /// tags change only when an agent is spawned or let go of.
+    agent_tags: std::cell::OnceCell<Vec<String>>,
     /// When each decision in [`SessionState::decisions`] was stated, in the
     /// same order, so a pane reads the two together and cannot pair a
     /// decision with another one's time.
@@ -2094,6 +2098,7 @@ impl App {
             unasked: BTreeMap::new(),
             just_ended: None,
             agents: Vec::new(),
+            agent_tags: std::cell::OnceCell::new(),
             decided_at: Vec::new(),
             composer,
             composer_scrolled: false,
@@ -2539,6 +2544,7 @@ impl App {
         self.agent_entries.clear();
         let running = self.session.running_agents();
         self.agents.retain(|agent| running.contains(&agent.id));
+        self.agent_tags = std::cell::OnceCell::new();
         self.run = None;
         self.reply = None;
         self.compaction = None;
@@ -3353,6 +3359,7 @@ impl App {
                     Some(existing) => *existing = spawned,
                     None => self.agents.push(spawned),
                 }
+                self.agent_tags = std::cell::OnceCell::new();
                 self.rename_agents_entries();
             }
             Event::AgentProgress {
@@ -3460,7 +3467,11 @@ impl App {
     /// see [`Entry::agent`].
     pub(crate) fn sub_agent_tag(&self, id: &AgentId) -> String {
         match self.agents.iter().position(|agent| &agent.id == id) {
-            Some(at) => self.agent_tags().swap_remove(at),
+            Some(at) => self
+                .tags()
+                .get(at)
+                .cloned()
+                .unwrap_or_else(|| id.to_string()),
             None => id.to_string(),
         }
     }
@@ -3482,8 +3493,17 @@ impl App {
     /// Every sub-agent's tag, in the order [`App::agents`] lists them: the
     /// word the transcript's rows and the Activity pane name it by.
     pub fn agent_tags(&self) -> Vec<String> {
-        let named: Vec<crate::tags::Named<'_>> = self.agents.iter().map(SubAgent::named).collect();
-        crate::tags::tags(&named)
+        self.tags().to_vec()
+    }
+
+    /// The tags [`App::agent_tags`] lists, worked out where the agents have
+    /// changed since they last were.
+    fn tags(&self) -> &[String] {
+        self.agent_tags.get_or_init(|| {
+            let named: Vec<crate::tags::Named<'_>> =
+                self.agents.iter().map(SubAgent::named).collect();
+            crate::tags::tags(&named)
+        })
     }
 
     /// Names every sub-agent's entry again, now that the agents are not the
