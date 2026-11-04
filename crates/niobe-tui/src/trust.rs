@@ -65,6 +65,10 @@ pub struct Asking {
     /// When the cursor was last put on trusting, which an Enter gives only
     /// once [`ASK_QUIET`] has passed since.
     trust_chosen: Option<Instant>,
+    /// Whether the last frame drawn showed every row of what the file sets.
+    /// Trust is given only to what the operator was shown, and nothing is
+    /// shown before the first frame.
+    whole: std::cell::Cell<bool>,
 }
 
 /// What one key did to the question.
@@ -80,6 +84,9 @@ pub(crate) enum Reply {
     /// The key was an Enter that came too soon after trusting was chosen to
     /// have been meant as the answer, and answered nothing.
     Hasty,
+    /// The key was an Enter on trusting while not all of what the file sets
+    /// was on screen, and answered nothing.
+    Unseen,
 }
 
 impl Asking {
@@ -94,7 +101,19 @@ impl Asking {
             at: not_now(),
             typing: false,
             trust_chosen: None,
+            whole: std::cell::Cell::new(false),
         }
+    }
+
+    /// Says whether the frame just drawn showed every row of what the file
+    /// sets, which is what trusting it from here agrees to.
+    pub fn shown(&self, whole: bool) {
+        self.whole.set(whole);
+    }
+
+    /// Whether the last frame drawn showed every row of what the file sets.
+    pub fn shown_whole(&self) -> bool {
+        self.whole.get()
     }
 
     /// The answer the cursor is on.
@@ -137,6 +156,11 @@ impl Asking {
             KeyCode::Enter if self.typing => {
                 self.typing = false;
                 return Reply::Typed;
+            }
+            KeyCode::Enter if self.selected() == Answer::Trust && !self.shown_whole() => {
+                self.at = not_now();
+                self.trust_chosen = None;
+                return Reply::Unseen;
             }
             KeyCode::Enter if self.hasty(at) => {
                 self.at = not_now();
@@ -194,10 +218,12 @@ mod tests {
     use std::time::Duration;
 
     fn asking() -> Asking {
-        Asking::new(Question {
+        let asking = Asking::new(Question {
             path: "/r/.niobe/config.toml".to_owned(),
             grants: vec![("permissions".to_owned(), "allow Bash".to_owned())],
-        })
+        });
+        asking.shown(true);
+        asking
     }
 
     /// Keys pressed one after another at the pace of someone typing.
@@ -221,6 +247,29 @@ mod tests {
             self.at += ASK_QUIET;
             asking.on_key(code, self.at)
         }
+    }
+
+    /// Trust agrees to what the operator was shown: while a row is left off
+    /// the screen, or before anything is drawn, Enter on trusting answers
+    /// nothing and the cursor goes back to "not now".
+    #[test]
+    fn trust_is_not_given_while_part_of_what_it_puts_in_force_is_unseen() {
+        let mut asking = asking();
+        asking.shown(false);
+        let mut keys = Keys::new();
+        keys.typed(&mut asking, KeyCode::Up);
+
+        assert_eq!(
+            keys.after_a_pause(&mut asking, KeyCode::Enter),
+            Reply::Unseen
+        );
+        assert_eq!(asking.selected(), Answer::NotNow);
+
+        let fresh = Asking::new(asking.question.clone());
+        assert!(
+            !fresh.shown_whole(),
+            "nothing is shown before the first frame"
+        );
     }
 
     #[test]

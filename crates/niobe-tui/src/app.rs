@@ -1996,6 +1996,12 @@ const TOO_SOON_HINT: &str =
 const TYPED_AT_TRUST_HINT: &str = "Not taken as an answer: typed at the question. Choose with \
      ↑↓ or 1/2, pause, then press Enter";
 
+/// What the trust question says when trusting was chosen while not all of
+/// what the file sets was on screen: nothing was trusted, and where to read it
+/// all.
+const UNSEEN_AT_TRUST_HINT: &str = "Not trusted: not all of what it sets fits here. Run `niobe \
+     trust` in this repository to read it all and answer there, or make the terminal taller";
+
 /// What the trust question says when an Enter came straight after trusting
 /// was chosen, as the one that sends a prompt of `1` does: it answers
 /// nothing, and the cursor is back on "not now".
@@ -4810,6 +4816,7 @@ impl App {
             }
             trust::Reply::Typed => self.hint = Some(TYPED_AT_TRUST_HINT.to_owned()),
             trust::Reply::Hasty => self.hint = Some(HASTY_AT_TRUST_HINT.to_owned()),
+            trust::Reply::Unseen => self.hint = Some(UNSEEN_AT_TRUST_HINT.to_owned()),
             trust::Reply::Moved => {}
         }
     }
@@ -19497,12 +19504,46 @@ mod tests {
     /// A shell asking whether to trust the repository's config, drawn first
     /// by the tick at `shown`.
     fn trusting_at(shown: Instant) -> App {
+        trusting_with_at(
+            vec![("permissions".to_owned(), "allow Bash".to_owned())],
+            shown,
+        )
+    }
+
+    /// A shell asking whether to trust a config that sets `grants`, drawn on
+    /// a 90×30 terminal by the tick at `shown`.
+    fn trusting_with_at(grants: Vec<(String, String)>, shown: Instant) -> App {
         let mut app = app().asking_trust(crate::trust::Question {
             path: "/r/.niobe/config.toml".to_owned(),
-            grants: vec![("permissions".to_owned(), "allow Bash".to_owned())],
+            grants,
         });
         app.tick(shown, None);
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(90, 30))
+            .expect("a test backend never fails to start");
+        terminal
+            .draw(|frame| crate::ui::draw(frame, &mut app))
+            .expect("a test backend never fails to draw");
         app
+    }
+
+    /// Trust agrees to what the operator was shown: a config that sets more
+    /// than the question has room for is not trusted from it, however the
+    /// answer is chosen, and the operator is told where to read it all.
+    #[test]
+    fn a_config_that_sets_more_than_the_question_shows_is_not_trusted_from_it() {
+        let shown = Instant::now();
+        let grants = (0..40)
+            .map(|n| (format!("profile p{n}"), format!("env SECRET_{n}=x")))
+            .collect();
+        let mut app = trusting_with_at(grants, shown);
+
+        read(&mut app, b"\x1b[A", shown + ASK_QUIET * 2);
+        read(&mut app, b"\r", shown + ASK_QUIET * 3);
+
+        assert_eq!(app.trust_answer(), None);
+        assert!(app.trusting().is_some());
+        assert_eq!(app.hint(), Some(UNSEEN_AT_TRUST_HINT));
+        assert!(!app.should_quit());
     }
 
     #[test]

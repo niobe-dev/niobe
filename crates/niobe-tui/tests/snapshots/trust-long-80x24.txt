@@ -11,13 +11,13 @@
 ┃   ┃  permissions  allow Bash(script-3.sh)                                ┃   ┃
 ┃   ┃  permissions  allow Bash(script-4.sh)                                ┃   ┃
 ┃   ┃  permissions  allow Bash(script-5.sh)                                ┃   ┃
-┃   ┃  permissions  allow Bash(script-6.sh)                                ┃   ┃
-┃   ┃  … and 34 more; the file has them all                                ┃   ┃
+┃   ┃  … and 35 more; the file has them all                                ┃   ┃
 ┃   ┃                                                                      ┃   ┃
-┃   ┃  Trusted, it stays in force until the file changes. Without it,      ┃   ┃
-┃   ┃  none of the above is.                                               ┃   ┃
+┃   ┃  Not all of what it sets fits here, so it is not trusted from here:  ┃   ┃
+┃   ┃  run `niobe trust` in this repository to read it all, or make the    ┃   ┃
+┃   ┃  terminal taller.                                                    ┃   ┃
 ┃   ┃                                                                      ┃   ┃
-┃   ┃    1. Yes, trust this config                                         ┃   ┃
+┃   ┃    1. Yes — not until all of it is shown                             ┃   ┃
 ┃ ──┃  › 2. No, open without it                                            ┃── ┃
 ┃  —┃                                                                      ┃ne ┃
 ┗━━━┗━━━━ ↑↓ choose, pause, Enter answer · Esc no · Ctrl+C twice quit ━━━━━┛━━━┛

@@ -175,7 +175,8 @@ reviewers that encode both, for an agent working in this tree.
   the link under a click, `desktop.rs` the trait the loop hands what to copy, what to open and what to edit to,
   `trust.rs` the question a session opens on where the repository's config sets what only a
   trusted file may — `run::ask_trust` asks it on a loop of its own, before any backend is
-  started, because the answer decides what one starts with — `mention.rs` completes an `@` word from the files the CLI listed, `slash.rs` offers the
+  started, because the answer decides what one starts with, and trusts only where the last frame
+  showed every row of what the file sets, sending the operator to `niobe trust` otherwise — `mention.rs` completes an `@` word from the files the CLI listed, `slash.rs` offers the
   backend's own commands and skills where a prompt opens with `/`, and the skills alone where a
   later word does, from the list the backend sent, and finds where a prompt names one, which the
   composer and the transcript draw in the theme's command colour — the transcript is searched

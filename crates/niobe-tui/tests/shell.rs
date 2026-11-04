@@ -2777,6 +2777,9 @@ fn the_trust_question_names_the_file_what_trusting_it_puts_in_force_and_the_answ
     }
 }
 
+/// What does not fit is counted, the answers stay on screen, and trusting is
+/// not offered for what the operator was not shown: they are sent to
+/// `niobe trust`, which prints it all.
 #[test]
 fn a_config_that_sets_more_than_fits_keeps_the_answers_on_screen() {
     let grants = (1..=40)
@@ -2786,8 +2789,12 @@ fn a_config_that_sets_more_than_fits_keeps_the_answers_on_screen() {
 
     let frame = screen(&mut app, 80, 24);
 
-    assert!(frame.contains("1. Yes, trust this config"), "{frame}");
+    assert!(
+        frame.contains("1. Yes — not until all of it is shown"),
+        "{frame}"
+    );
     assert!(frame.contains("2. No, open without it"), "{frame}");
+    assert!(frame.contains("`niobe trust`"), "{frame}");
     assert!(
         frame.contains("more"),
         "the rows left out were not counted:\n{frame}"

@@ -545,6 +545,14 @@ const MENU_KEYS_GAP: usize = 4;
 /// rule or an environment variable and its value on one line.
 const TRUST_COLUMNS: u16 = 84;
 
+/// What the trust question says under the rows where not all of them fit:
+/// trusting agrees to what the operator was shown, so it is not offered.
+const TRUST_CUT: &str = "Not all of what it sets fits here, so it is not trusted from here: run \
+     `niobe trust` in this repository to read it all, or make the terminal taller.";
+
+/// What trusting is called where not all of what the file sets is shown.
+const TRUST_NOT_HERE: &str = "Yes — not until all of it is shown";
+
 /// What the trust question says above the rows of what the file sets.
 const TRUST_SAYS: &str = "It sets what only a config you trust may:";
 
@@ -567,8 +575,10 @@ const TRUST_NAME_COLUMNS: usize = 16;
 ///
 /// The answers are always drawn. A file that sets more than fits keeps the
 /// rows that do and says how many it left out — cutting the answers instead
-/// would ask a question nobody can answer. `hint` is what the shell has to say
-/// about a key it held back, said where the operator is looking.
+/// would ask a question nobody can answer — and is then not trusted from
+/// here, since trusting agrees to what the operator was shown; the question
+/// is told which, for the Enter that follows. `hint` is what the shell has to
+/// say about a key it held back, said where the operator is looking.
 fn draw_trust(
     frame: &mut Frame,
     body: Rect,
@@ -595,21 +605,39 @@ fn draw_trust(
     head.extend(wrapped(TRUST_SAYS, plain));
     head.push(Line::from(""));
 
+    // The room the rows have is worked out before it is known whether they
+    // all fit, so the words under them are given the room of the longer of
+    // what they could say.
+    let said = |whole: bool| -> Vec<Line<'static>> {
+        match (hint, whole) {
+            (Some(hint), _) => wrapped(hint, Style::new().fg(theme.hot).bold()),
+            (None, true) => wrapped(TRUST_UNTIL, plain),
+            (None, false) => wrapped(TRUST_CUT, Style::new().fg(theme.hot).bold()),
+        }
+    };
+    let said_rows = said(true).len().max(said(false).len());
+    let tail_rows = said_rows + trust::Answer::OFFERED.len() + 3;
+
+    // A border above and below, and the row the shadow falls on.
+    let room = usize::from(body.height)
+        .saturating_sub(3)
+        .saturating_sub(head.len() + tail_rows);
+    let (grants, whole) = trust_grants(&asking.question.grants, text_width, room, theme);
+    asking.shown(whole);
+
     let mut tail = vec![Line::from("")];
-    match hint {
-        Some(hint) => tail.extend(wrapped(hint, Style::new().fg(theme.hot).bold())),
-        None => tail.extend(wrapped(TRUST_UNTIL, plain)),
-    }
+    tail.extend(said(whole));
     tail.push(Line::from(""));
     for (i, answer) in trust::Answer::OFFERED.into_iter().enumerate() {
         let on_it = i == asking.at;
         let marker = if on_it { PICK_CURSOR } else { "  " };
+        let label = match (answer, whole) {
+            (trust::Answer::Trust, false) => TRUST_NOT_HERE,
+            _ => answer.label(),
+        };
         let row = format!(
             "{marker}{}",
-            text::pad(
-                &format!("{}. {}", i + 1, answer.label()),
-                text_width.saturating_sub(2)
-            )
+            text::pad(&format!("{}. {label}", i + 1), text_width.saturating_sub(2))
         );
         tail.push(match on_it {
             true => {
@@ -619,12 +647,6 @@ fn draw_trust(
         });
     }
     tail.push(Line::from(""));
-
-    // A border above and below, and the row the shadow falls on.
-    let room = usize::from(body.height)
-        .saturating_sub(3)
-        .saturating_sub(head.len() + tail.len());
-    let grants = trust_grants(&asking.question.grants, text_width, room, theme);
 
     let mut lines = head;
     lines.extend(grants);
@@ -645,13 +667,14 @@ fn draw_trust(
 /// A value is drawn as it was written — every space kept and every control
 /// character shown — since what is asked for is what the operator agrees to.
 /// Rows are kept whole: half a permission rule reads as a different rule.
-/// What is left out is counted on the last line.
+/// What is left out is counted on the last line, and the second of what is
+/// handed back says whether nothing was.
 fn trust_grants(
     grants: &[(String, String)],
     columns: usize,
     room: usize,
     theme: &Theme,
-) -> Vec<Line<'static>> {
+) -> (Vec<Line<'static>>, bool) {
     let name_width = grants
         .iter()
         .map(|(name, _)| text::width(&text::controls_shown(name)))
@@ -684,7 +707,7 @@ fn trust_grants(
         })
         .collect();
     if rows.iter().map(Vec::len).sum::<usize>() <= room {
-        return rows.into_iter().flatten().collect();
+        return (rows.into_iter().flatten().collect(), true);
     }
 
     // The last line the room has goes to the count of what is left out.
@@ -706,7 +729,7 @@ fn trust_grants(
             .style(value_style.italic()),
         );
     }
-    lines
+    (lines, false)
 }
 
 /// Columns a dialog's frame and padding take from its width: a border and two
