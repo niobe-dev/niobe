@@ -387,7 +387,10 @@ pub fn keep_trim_unpublished(root: &Path) -> Result<(), String> {
     let dir = trim_dir(root);
     let in_tree = in_tree(root, &dir, format!("{DIR}/{}", crate::trim::DIR));
     trim_is_not_tracked(root, &in_tree)?;
-    let ours = std::fs::read_to_string(dir.join(".gitignore"))
+    // Read as a config is: the file arrived with the clone, and a link in
+    // its place to `/dev/zero` or a FIFO is never read past a mebibyte or
+    // waited on.
+    let ours = niobe_config::read::text(&dir.join(".gitignore"))
         .is_ok_and(|text| text == crate::trim::IGNORE);
     // The directory itself, and not a name in it: an ignore file in it can
     // take back any name its own rules or one above them ignore, and none can
@@ -2658,6 +2661,24 @@ mod tests {
         trim_writes(&work).expect("the session starts");
 
         assert_eq!(untracked_or_modified(&work), "");
+    }
+
+    /// The ignore file arrived with the clone, and is read to see whether it
+    /// is niobe's: a link to `/dev/zero` read whole never ends.
+    #[cfg(unix)]
+    #[test]
+    fn a_trim_ignore_file_that_is_a_link_to_an_endless_file_is_not_read_whole() {
+        let (_dir, work) = clone_with(&[("trim/.gitignore", "*.txt\n")]);
+        let ignore = work.join(".niobe").join("trim").join(".gitignore");
+        std::fs::remove_file(&ignore).expect("the clone holds the file");
+        std::os::unix::fs::symlink("/dev/zero", &ignore)
+            .expect("the temporary directory is writable");
+        let (sender, received) = std::sync::mpsc::channel();
+        std::thread::spawn(move || sender.send(keep_trim_unpublished(&work)));
+
+        let ended = received.recv_timeout(std::time::Duration::from_secs(20));
+
+        assert!(ended.is_ok(), "reading the ignore file did not end");
     }
 
     #[test]
