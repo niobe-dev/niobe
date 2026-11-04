@@ -6,7 +6,7 @@
 //! link by where it points.
 //!
 //! A config that puts a directory in front of the CLI — `--plugin-dir plug`,
-//! `CLAUDE_CONFIG_DIR = "cfgdir"` — hands it the code and settings in that
+//! a `PATH` entry — hands it the code and settings in that
 //! directory, which a pull can change without touching the config. Trusted
 //! by its name alone, a directory the operator agreed to would run whatever
 //! the next commit put in it. Trusted by this text, any change to it puts the

