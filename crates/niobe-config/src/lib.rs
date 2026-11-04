@@ -954,6 +954,45 @@ backend = "codex"
 args = ["--model", "gpt-4"]
 "#;
 
+    /// A config is read before anyone has trusted it, and a clone writes a
+    /// mebibyte of whatever it likes: tens of thousands of rules are read in
+    /// the time it takes to read them once, not each against every other.
+    #[test]
+    fn a_mebibyte_of_distinct_rules_is_read_in_a_moment() {
+        let rules: Vec<String> = (0..78_000).map(|n| format!("\"Read({n:x})\"")).collect();
+        let text = format!("[permissions]\nallow = [{}]\n", rules.join(","));
+        assert!(text.len() <= 1024 * 1024, "{}", text.len());
+
+        let started = std::time::Instant::now();
+        let config = parsed(&text);
+
+        assert_eq!(config.allowed.rules().len(), 78_000);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    /// A line is found for each profile's settings file, and a mebibyte of
+    /// profiles does not count the lines before each one again.
+    #[test]
+    fn a_mebibyte_of_profiles_is_read_in_a_moment() {
+        let text: String = (0..22_000)
+            .map(|n| format!("[profiles.p{n}]\nbackend=\"claude\"\nsettings=\"a\"\n"))
+            .collect();
+        assert!(text.len() <= 1024 * 1024, "{}", text.len());
+
+        let started = std::time::Instant::now();
+        let _ = parsed(&text);
+
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
     #[test]
     fn a_keys_table_rebinds_the_bars_actions_and_is_laid_over_by_a_later_file() {
         use niobe_core::keys::{Bindable, Chord};

@@ -27,7 +27,7 @@ const BACKENDS: [Backend; 3] = [Backend::Claude, Backend::Codex, Backend::Native
 
 /// Parses the config file at `path`.
 pub(crate) fn config(text: &str, path: &Path) -> Result<Config, ConfigError> {
-    let file = File { text, path };
+    let file = File::new(text, path);
     let root = DeTable::parse(text).map_err(|error| file.syntax(&error))?;
     file.root(root.get_ref())
 }
@@ -38,6 +38,17 @@ type Entry<'t, 'i> = (&'t Spanned<DeString<'i>>, &'t Spanned<DeValue<'i>>);
 struct File<'a> {
     text: &'a str,
     path: &'a Path,
+    /// Where each line break of `text` is, so that a line is found without
+    /// counting the breaks before it again: a config of tens of thousands of
+    /// profiles asks for a line for each.
+    breaks: Vec<usize>,
+}
+
+impl<'a> File<'a> {
+    fn new(text: &'a str, path: &'a Path) -> Self {
+        let breaks = text.match_indices('\n').map(|(at, _)| at).collect();
+        Self { text, path, breaks }
+    }
 }
 
 impl File<'_> {
@@ -240,7 +251,7 @@ impl File<'_> {
                         let text = self.string(item, &at)?;
                         let rule = Rule::parse(text)
                             .map_err(|error| self.invalid(&item.span(), &at, &error.to_string()))?;
-                        allowed.insert(rule);
+                        allowed.add(rule);
                     }
                 }
                 _ => {
@@ -513,11 +524,7 @@ impl File<'_> {
     /// The line, counted from 1, that a span starts on.
     fn line(&self, span: &Range<usize>) -> usize {
         let start = span.start.min(self.text.len());
-        self.text.as_bytes()[..start]
-            .iter()
-            .filter(|&&byte| byte == b'\n')
-            .count()
-            + 1
+        self.breaks.partition_point(|&at| at < start) + 1
     }
 }
 
@@ -633,10 +640,7 @@ mod tests {
 
     #[test]
     fn lines_count_from_one() {
-        let file = File {
-            text: "a\nb\n\nc",
-            path: Path::new("x"),
-        };
+        let file = File::new("a\nb\n\nc", Path::new("x"));
         assert_eq!(file.line(&(0..1)), 1);
         assert_eq!(file.line(&(2..3)), 2);
         assert_eq!(file.line(&(5..6)), 4);

@@ -175,9 +175,9 @@ fn reads_back(written: &str, path: &Path, before: Config, rule: &Rule) -> Result
 }
 
 /// `config`, read from the file at `path`, as it reads with `rule` added to
-/// its `allow` array.
+/// its `allow` array: as a file is read, a rule a broader one covers kept.
 fn with_rule(mut config: Config, rule: &Rule, path: &Path) -> Config {
-    config.allowed.insert(rule.clone());
+    config.allowed.add(rule.clone());
     if !config.allowed.is_empty() {
         config.rules_from = Some(path.to_path_buf());
     }
@@ -188,8 +188,8 @@ fn with_rule(mut config: Config, rule: &Rule, path: &Path) -> Config {
 /// holds `rule` itself.
 ///
 /// Read from the array as written rather than from the parsed allowlist,
-/// which leaves out a rule a broader one before it covers: that rule is in
-/// the file all the same, and writing it again would grow the file on every
+/// which a file nobody trusted adds nothing to: a rule in the file is there
+/// all the same, and writing it again would grow the file on every
 /// "always".
 fn lists(text: &str, rule: &Rule) -> bool {
     let Ok(document) = DeTable::parse(text) else {

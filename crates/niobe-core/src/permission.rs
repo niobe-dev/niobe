@@ -441,6 +441,10 @@ impl std::error::Error for RuleError {}
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Allowlist {
     rules: Vec<Rule>,
+    /// Every rule in `rules`, so that a rule written twice is found without
+    /// reading every rule: a config is a mebibyte of whatever its clone
+    /// wrote, read before anyone has trusted it.
+    held: std::collections::HashSet<Rule>,
 }
 
 impl Allowlist {
@@ -458,17 +462,32 @@ impl Allowlist {
     /// already holds, and one a broader rule already covers, changes nothing:
     /// a config that grew a line for every approval would be a config nobody
     /// could read.
+    ///
+    /// Each rule here is read to find one that covers `rule`, which is right
+    /// for one rule the operator approves and not for every rule of a file.
     pub fn insert(&mut self, rule: Rule) -> bool {
         if self.includes(&rule) {
             return false;
         }
+        self.add(rule)
+    }
+
+    /// Adds a rule as a file lists it, and says whether it added anything:
+    /// only a rule already held is passed over, so that a file of tens of
+    /// thousands of rules is read in the time it takes to read them once. A
+    /// rule a broader one covers is kept, which answers no prompt otherwise.
+    pub fn add(&mut self, rule: Rule) -> bool {
+        if self.held.contains(&rule) {
+            return false;
+        }
+        self.held.insert(rule.clone());
         self.rules.push(rule);
         true
     }
 
     /// Whether a rule already here answers every call `rule` would.
     pub fn includes(&self, rule: &Rule) -> bool {
-        self.rules.iter().any(|held| held.includes(rule))
+        self.held.contains(rule) || self.rules.iter().any(|held| held.includes(rule))
     }
 
     /// Every rule, in the order it was written.
@@ -489,7 +508,7 @@ impl Allowlist {
     #[must_use]
     pub fn merge(mut self, over: Self) -> Self {
         for rule in over.rules {
-            self.insert(rule);
+            self.add(rule);
         }
         self
     }
@@ -499,7 +518,7 @@ impl FromIterator<Rule> for Allowlist {
     fn from_iter<I: IntoIterator<Item = Rule>>(rules: I) -> Self {
         let mut list = Self::new();
         for rule in rules {
-            list.insert(rule);
+            list.add(rule);
         }
         list
     }
