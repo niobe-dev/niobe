@@ -53,6 +53,10 @@ hostile-input triggers (→ Security), cell arithmetic (→ Terminal) or price a
   prompt answers before the operator trusted those bytes? Does a changed file invalidate the record?
 - **Lifecycle**: does every child end with the session? Does every exit path restore the terminal?
   Does anything on the draw path wait on a file, a process or a lock?
+- **Idempotence and writers** (§13.1): does an operation that writes state — a rule, a trust record,
+  a config file, the trim directory, the store — end the same when run twice or after a crash
+  halfway? Does shared mutable state have one writer, enforced by the structure, or do two parts
+  hold it that need not?
 - **Future-proofing**: will the codex bridge and a native backend reuse this, or need a rewrite? Is
   the abstraction at the right altitude — neither premature nor missing?
 

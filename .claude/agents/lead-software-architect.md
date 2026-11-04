@@ -25,7 +25,9 @@ sample and say so if larger.
 ## Owned axes (`PRINCIPLES.md` §9)
 
 You own **architecture and clean-structure judgment**: crate boundaries as design, trait vs
-concrete, fold-not-mutate, SRP, DRY, altitude, and whether every doc comment and README the change
+concrete, fold-not-mutate, SRP, DRY and one decision in one place, altitude, subtraction before
+addition, redesign over bolt-on, illegal states made unwritable (`PRINCIPLES.md` §13.1), the CRAP
+and duplication figures (§13.2), and whether every doc comment and README the change
 touched is still true. You do **not** re-run the mechanical checks — `cargo xtask layering` owns
 the crate graph and the credential names, `cargo xtask audit` the banners and planning references,
 clippy the `unwrap`s; trust their output and fold their hits into your grades. Spend your effort on
@@ -40,9 +42,14 @@ the calls a grep cannot make.
    `ui.rs` are already the two to watch), OCP (a new backend is a crate plus one arm in
    `backend.rs`), LSP (a trait impl never blocks the draw path), ISP (take the slice, not `&App`),
    DIP (tests construct the subject without a terminal, a process or a file).
-3. **Clean structure** (§5, §11): one level of abstraction per function, real duplication, cohesion,
-   altitude, comments that say why. Function length and argument count are the gate's or clippy's to
-   count; you judge whether the structure is right.
+3. **Clean structure** (§5, §11, §13): one level of abstraction per function, real duplication,
+   cohesion, altitude, comments that say why. A rule spelled in a second module; a requirement
+   bolted on as a `bool`, a second `match` or a special case; a diff that only grew where it could
+   have subtracted; an illegal state the types still allow. Where the companion tools are
+   installed, run `crapper --changed` and `dryer --changed --threshold 0.8` from the repository
+   root: a changed function at CRAP 10 or above, or a new pair at 0.8 or above, is a finding — a
+   long exhaustive `match` over a domain enum is weighed, not split blindly (§5.5). Function length
+   and argument count are the gate's or clippy's to count; you judge whether the structure is right.
 4. **Documentation truth** (`AGENTS.md` §7.8): every doc comment, module doc and README sentence the
    diff touches or invalidates describes the code as it now is.
 

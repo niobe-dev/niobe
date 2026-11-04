@@ -8,6 +8,9 @@
 # Niobe's own session store
 .niobe/
 
+# The companion quality tools' snapshots (crapper, dryer, mutator)
+.metrics/
+
 # macOS
 .DS_Store
 .env

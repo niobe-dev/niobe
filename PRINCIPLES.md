@@ -23,6 +23,9 @@ wins.
 Every section ends with a **Self-check**. The reviewers walk them; so do you, before asking for
 review.
 
+§1–§7 describe a finished change; §13 is the order it is made in — make it work, then make it
+right, then practise — and every skill follows it.
+
 ---
 
 ## 1. Architecture: the crate graph is the architecture
@@ -350,11 +353,11 @@ are **not** re-grepped by any agent.
 | Axis                                                                                                                           | Sole owner                   |
 | ------------------------------------------------------------------------------------------------------------------------------ | ---------------------------- |
 | Formatting; `unwrap`/`expect`/`print`/`dbg`/`todo` in code; the crate graph; network and credential names; headers; banners, planning references and unexplained gaps; the version sites; the binary size | **the gate** (`cargo xtask ci`) |
-| Crate boundaries as design, trait-vs-concrete, fold-not-mutate, SRP, DRY, altitude, docs kept true                               | **Lead Software Architect**  |
-| The event vocabulary, what a fold derives, provenance of figures, backend-neutrality of what crosses a seam, the trust model, process and terminal lifecycle as design | **Lead Niobe Architect** |
+| Crate boundaries as design, trait-vs-concrete, fold-not-mutate, SRP, DRY and one decision in one place, altitude, subtract before add, no bolt-on, illegal states unwritable, CRAP and duplication figures (§13), docs kept true | **Lead Software Architect**  |
+| The event vocabulary, what a fold derives, provenance of figures, backend-neutrality of what crosses a seam, the trust model, process and terminal lifecycle as design, idempotent operations and one writer per shared state (§13.1) | **Lead Niobe Architect** |
 | Hostile input (CLI output, transcripts, repo config, paths, clipboard), escape injection, reader limits, the credential line, trust bypass, link/FIFO/size attacks, process leaks, wrapping arithmetic | **Lead Security Engineer** |
 | Ownership and borrows, clone and allocation hygiene, iterator vs loop, draw-path and fold cost, error-handling shape            | **Lead Rust Engineer**       |
-| Coverage, test honesty: hand-derived numbers, snapshot diffs read, error paths, hostile-input tests, test names, timing-test placement | **Lead QA Engineer**      |
+| Coverage, test honesty: hand-derived numbers, snapshot diffs read, error paths, hostile-input tests, test names, timing-test placement, behaviour not implementation, surviving mutants (§13.2) | **Lead QA Engineer**      |
 | Cell widths, wrapping, tab expansion, escape stripping, key and paste protocols, raw mode and restore, frame budget, mouse        | **Lead Terminal Engineer**   |
 | Every figure's trace to a `usage` field or its label, saturation, price dating, plan vs metered, the em dash                     | **Lead Accounting Engineer** |
 | Cross-specialist synthesis, severity adjudication, practical sense, go/no-go                                                     | **CTO**                      |
@@ -402,6 +405,10 @@ Flag on sight:
 | A `Journal`/`Watch`/`History` call on the draw path                 | A locked store or a slow `git` freezes the screen.       | A thread of its own; hand back plain data.                  |
 | A `TODO` with no "what" and "why", or any `FIXME`/`HACK`/`XXX`     | A gap nobody can act on.                                 | Say what is missing and why, or delete it.                  |
 | A comment naming a milestone, task, phase or plan                   | The reader has no plan.                                  | Describe the behaviour and its reason.                      |
+| A test that passes when the code under it returns nothing          | It asserts nothing the user would see.                   | Assert the result the user sees; delete it otherwise (§13.2). |
+| A rule spelled in a second module                                  | Two places decide; the next change updates one.          | Call the one place, or move the rule there (§13.1).         |
+| A new requirement as a `bool` on an old function                   | A bolt-on; the old design now lies about what it does.   | Redesign as if it had been there from the start (§13.1).    |
+| A third fix on a premise two fixes already failed on               | Churn; the premise is what is wrong.                     | Write the premise down, remove the assignment (§13.1).      |
 
 ---
 
@@ -416,8 +423,133 @@ Flag on sight:
   **`niobe-scout`**, **`niobe-bolt`** and **`niobe-sentinel`** each land one proven bug fix, one
   measured performance win or one hardening. **`niobe-hilo`** names one highlight and one lowlight,
   read-only.
+- **§13** orders the work inside every skill: make it work, then make it right — with the
+  companion tools' CRAP, duplication and mutation figures on the changed code where they are
+  installed — then practise. They are advisory, outside the gate, since CI does not install them.
 - **`niobe-reviewer`** is the single reviewer for a Standard-tier change; the `lead-*` agents are
   the Major-tier panel, each owning the axes §9 gives it.
 
 When in doubt, optimize for the next reader. In this repository the next reader is often the
 operator watching the screen, who has to be able to trust every figure on it.
+
+---
+
+## 13. The order of work: make it work, make it right, then practise
+
+§1–§7 say what a finished change looks like. This section says the order a change is made in, so
+that the same standard is reached the cheap way rather than by repair. It is adapted from Robert C.
+Martin's [ub-mode](https://github.com/unclebob/ub-mode) (MIT), read in Niobe's terms. Every change,
+whatever its tier, goes through the three phases in order: **make it work**, **then make it
+right**, **then practise**. The skills follow them step by step; the reviewers grade against them.
+
+### 13.1 Make it work (MUST)
+
+- **One decision lives in one place.** Line arithmetic is `diff.rs`'s, a key's meaning is
+  `keys.rs`'s, a figure's label is the ledger's. **Trigger**: the change writes a rule a second
+  module already holds. **Check**: grep for the rule's other spelling before adding yours; call
+  the one place, or move the rule there.
+- **Ship the smallest edit that solves the problem.** No drive-by refactor, no speculative
+  generality, no option nobody asked for.
+- **Get the data shape right before the logic.** A new fact is a core type first — the `Event`
+  field, the `Option` that says "not reported", the provenance it carries — and only then the
+  translation that makes it and the fold that reads it. A wrong shape costs every later phase.
+- **Do first what helps every later phase.** The recording, the fixture README's `jq` program,
+  the stand-in `claude` script come before the code that reads them, because every test after
+  leans on them.
+- **If a concurrent writer would matter, do not share the state.** The last two rules of this
+  section say how.
+- **Write the failing test before the code, see it fail for the reason you expect, make the
+  smallest change that passes it** (`AGENTS.md` §6). **If an honest test is impractical, do not
+  write a bad one**: say in the report what is unproven and why, rather than a test that asserts
+  the implementation back at itself.
+- **Redesign from first principles; do not bolt on.** A new requirement that arrives as a `bool`
+  on an old function, a second `match` beside the first, or a special case for one backend is a
+  bolt-on. Ask what the design would be had the requirement been there from the start, think it
+  through, and deliver it in pieces, each green.
+- **Subtract before you add.** Take out the dead branch, the duplicate rule, the adapter nobody
+  needs, before putting anything in. A diff that only grows is a smell when the area already had
+  one way to do the job.
+- **Attack the premise.** When two fixes that share one premise fail the same gate, stop. Write the
+  premise in one sentence, name the actors that hold the imbalance — two writers of one file, two
+  readers that disagree about a figure, a bridge and the fold that both decide a turn ended — and
+  remove the assignment that gave the thing to both. **No third fix starts before that sentence is
+  written.**
+- **Aim at the end state you can check.** The acceptance criterion is a test or a measured figure
+  before it is code. A break in the middle — a red test, a stubbed reader — is allowed only when it
+  was planned and can be undone.
+- **Build the lever.** Work that is not obvious at a glance gets a tool, as the headers, the
+  comment sweep, the version sites and the layering check did (`xtask/`). Do one unit by hand, then
+  make the tool reproduce that unit exactly.
+- **Model the domain so illegal states cannot be written.** An absent figure is `None`, never `0`;
+  a provenance is an enum, never a flag; a state machine is an enum of states, not three `bool`s.
+  The names in `AGENTS.md` §1 and the doc comments of `niobe-core` are the glossary: a new domain
+  term is defined there, once, in the change that introduces it. Where the code is already clear
+  and local, leave it.
+- **Check data where it enters; inside, trust it.** Bytes from a CLI are parsed once, in the
+  bridge; a config once, in `parse.rs`; a path once, where it is pasted. The fold and the drawing
+  code take the parsed type and do not check it again. Business logic — the fold, the pricing, the
+  tagging — is a pure function of its inputs.
+- **Do not silence the compiler.** No `#[allow]` without the comment that says why it is right
+  (`AGENTS.md` §7.3), no `as` that can truncate a counter, no `_ =>` that hides a new variant.
+- **Make operations idempotent.** Run twice, or run again after a crash halfway through, the
+  operation ends in the same state: `replace.rs` renames a flushed copy so a crash leaves the old
+  file, and a standing rule the config already lists is not written again (`write.rs`).
+  **Check**: the test runs the operation twice, and where it writes a file, once more after a
+  simulated interruption.
+- **Separate before serializing shared state.** If two parts do not need the same mutable thing,
+  each gets its own. If they do, one writer, enforced by the structure: the journal writes the
+  store from a thread of its own, the rule writer holds a lock on the config's directory. A mutex
+  shared by everyone is the last resort, not the first.
+
+### 13.2 Then make it right (MUST)
+
+- **Fix the root cause** (`AGENTS.md` §6.2). Reproduce it, fix the cause. A guard that only hides
+  the crash — an early `return`, a `.min()`, a caught panic — is not a fix.
+- **Finish one small unit and check it, then start the next** (`AGENTS.md` §7.2).
+- **Test behaviour, not implementation.** The test calls the code the way its user does — the
+  shell through `TestBackend`, the binary through `tests/cli.rs` or the pty, the fold through
+  events — and checks what that user would see. **If the test would still pass when every function
+  under it returned nothing, an empty `Vec` or its default, throw it out.**
+- **Measure the changed code** with the companion tools, run from the repository root on what the
+  change touched (`--changed`). They are checked out side by side outside the repository (mutator
+  reads crapper's checkout beside it), write their snapshots to `.metrics/`, which git ignores,
+  and are not part of the gate: CI does not install them. Where they are installed, the report
+  gives their figures; where they are not, it says so.
+
+  | Tool | Command | Bar for a function the change added or edited |
+  | ---- | ------- | ---------------------------------------------- |
+  | [crapper](https://github.com/unclebob/crapper) | `crapper --changed` | CRAP below 10 — split the function, test it, or both. A long `match` over a domain enum is weighed rather than split blindly: §5.5 wants it exhaustive. |
+  | [dryer](https://github.com/unclebob/dryer) | `dryer --changed --threshold 0.8` | No pair at 0.8 or above that the change made — fold it into the one place (§13.1). |
+  | [mutator](https://github.com/unclebob/mutator) | `mutator --changed` | Every covered mutant killed; an uncovered site covered or deleted as dead code. |
+
+  The coverage crapper and mutator read is `cargo llvm-cov`'s LCOV. A survivor in a figure's path
+  (§8.1) is a major finding (§10): the tests would let that figure change unnoticed.
+- **Refactor under a pin.** Pin what the code does with a test that would catch a change, change
+  the structure, prove the behaviour did not move — the same tests, the same snapshots, unedited.
+
+### 13.3 Then practise (SHOULD)
+
+- **Keep a log.** Every action taken and the reason for it, in order — the test written and why
+  it failed, the premise attacked, the tool run and its figure — reported when the task ends. The
+  skills' final reports carry it.
+- **Guard the context window.** Keep the main thread small: the gate runs in `niobe-test-runner`,
+  a wide search in `niobe-explorer`, and the main thread keeps their summaries, not their output.
+- **Clean up worktrees and scratch.** At the end, find what is safe to remove — a worktree whose
+  branch is merged, a scratch copy of a recording — confirm nothing still in use needs it, then
+  reclaim the disk (`target/` grows fast). A worktree with uncommitted work waits for the
+  maintainer's decision; it is never removed to tidy up.
+- **Commit often, in small ordered commits** (`AGENTS.md` §7.9). Each commit says why, what
+  changed and how it was proven — the test that went from red to green, the gate's counts, the
+  tool's figure — and the commits read in an order where each one builds and passes.
+
+### 13.4 Self-check
+
+- [ ] The rule the change needed lives in one place, and the diff took something out where it could.
+- [ ] The type came before the logic; an absent value is `None`, an illegal state unwritable.
+- [ ] No new requirement rides on a flag argument or a special case beside the old design.
+- [ ] Two failed fixes on one premise were followed by the premise written down, not a third fix.
+- [ ] Every new test would fail if the code under it returned nothing.
+- [ ] Where the companion tools are installed, changed functions are under CRAP 10, no new pair
+      scores 0.8, no covered mutant survives — or the report says why, or that they are absent.
+- [ ] An operation that writes state was run twice in a test and ended the same.
+- [ ] The report carries the log of actions and reasons; worktrees and scratch are cleaned up.

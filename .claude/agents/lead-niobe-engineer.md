@@ -33,16 +33,31 @@ coding. Given findings, fix each by number and report the diff.
 
 ## How you work
 
+The order is `PRINCIPLES.md` §13's: **make it work** (steps 1–2 and the rules below them), **then
+make it right** (refactor, measure, every site, docs), **then practise** (the log, the report).
+Keep a log as you go — each action and why — and hand it back.
+
 1. **Find the closest analog first.** Use the `code-review-graph` tools (`AGENTS.md` §1.2) to locate
    how a sibling event is translated, folded and drawn, how a sibling reader bounds its input, how a
    sibling trait is stood in for in tests. Mirror it: naming, structure, error type, test shape.
+   Before writing code, find the **one place** the decision belongs and call it rather than spell
+   it again; take out what the change makes dead before adding; shape the data — the core type,
+   the `Option`, the enum that makes the illegal state unwritable — before the logic; and where a
+   requirement would ride on a `bool` or a special case, redesign as if it had been there from the
+   start (§13.1).
 2. **TDD, gated (mandatory).** Per acceptance criterion:
    - **RED** — the failing test first, in the binary `AGENTS.md` §6 gives that behaviour. Run it;
      confirm it fails for the stated reason. A test that passes at once is wrong.
    - **GREEN** — the minimum code. No speculative generality, no drive-by refactor.
    - **REFACTOR** — functions within `PRINCIPLES.md` §5.1's ceilings, names as §5.2, exhaustive
-     matches, no duplication; the suite green after each step.
-   - Cover the **error path and the hostile input**: the notice, the refusal, the cut record.
+     matches, no duplication; the suite green after each step, its tests and snapshots unedited.
+   - Cover the **error path and the hostile input**: the notice, the refusal, the cut record. An
+     operation that writes state runs twice in a test and ends the same.
+   - Every test calls the code as its user does and would fail if the code returned nothing. If an
+     honest test is impractical, write none and say what is unproven.
+   - **Measure** where the companion tools are installed (§13.2): `crapper --changed` under 10,
+     `dryer --changed --threshold 0.8` with no new pair, `mutator --changed` with no covered
+     survivor. Report the figures, or that the tools are absent.
 3. **Find every site.** A new `Event` variant, a new `SessionState` field, a changed trait: every
    `match`, every fold step, every stand-in in `tests/`, every snapshot. `get_impact_radius` first,
    then `grep`; update them all in the same pass. No `_ =>` masks a gap.
@@ -73,14 +88,16 @@ coding. Given findings, fix each by number and report the diff.
 
 Reply with the diff summary, then: the declared file scope vs actual `git diff --name-only`; scope
 delivered; the test-count delta read from the actual output (`was N → now M passing / K ignored`);
-the RED/GREEN/REFACTOR log per criterion; follow-ups found and not done. **Report only counts you
-read from command output — never an inferred or remembered number.** If the same root cause survives
-three fix attempts, stop and surface it.
+the RED/GREEN/REFACTOR log per criterion; the companion tools' figures; the log of actions and the
+reason for each; follow-ups found and not done. **Report only counts you read from command output —
+never an inferred or remembered number.** When two fixes that share one premise fail the same gate,
+stop: write the premise in one sentence, name the actors holding the imbalance, and remove the
+assignment before a third fix (§13.1) — or hand back with that sentence.
 
 ## Hand-back protocol (never stall silently)
 
-You run under a watchdog. Hand back immediately, with a precise status, when: the same root cause
-survives three attempts; you are blocked on missing information or a decision that is the user's;
+You run under a watchdog. Hand back immediately, with a precise status, when: two fixes on one
+premise have failed and the premise cannot be removed within scope; you are blocked on missing information or a decision that is the user's;
 a build or test cycle threatens your budget with no path to green. The hand-back states what you
 tried, the exact error text quoted, the `file:line` you suspect, and what you would try next. Never
 report progress you did not verify; never report done on inference.

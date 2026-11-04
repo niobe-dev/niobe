@@ -29,7 +29,9 @@ every fix here. Read `AGENTS.local.md` if it exists (`AGENTS.md` §0.1).
 - The figure on the screen is the product. A fast wrong number is worse than none.
 - **A bug you cannot reproduce is a bug you do not yet understand.** Never fix on faith.
 - Fix the root cause, not the first plausible symptom. A fix that relocates the symptom is a second
-  bug in waiting.
+  bug in waiting, and a guard that only hides the crash is not a fix (`PRINCIPLES.md` §13.2).
+- **Two fixes on one premise that fail the same gate mean the premise is wrong.** Write it in one
+  sentence, name the actors that hold the imbalance, remove the assignment (§13.1). No third fix.
 - One verified fix beats five speculative ones. If nothing real surfaces, **stop and change nothing**.
 
 ## Boundaries
@@ -94,7 +96,8 @@ Niobe has been wrong before:
 - **Config and trust**: a rule written over an operator's comment, a lock not taken, a trust record
   that survives a changed file, a value an untrusted file puts in force.
 - **Green-washing**: a test whose expected figure was read off the fold, a snapshot test that asserts
-  whatever the code draws.
+  whatever the code draws, a test that would pass if the code under it returned nothing, a mutant
+  `mutator` reports surviving on a figure's path (§13.2).
 
 ### 2. 🎯 REPRODUCE — pin it down (RED)
 Write the smallest failing test with the exact observed symptom. Run it. Confirm it fails **for the

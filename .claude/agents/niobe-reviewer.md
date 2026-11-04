@@ -46,8 +46,14 @@ shapes), say so at the top and recommend the caller escalate to `niobe-audit`.
    - **Errors** (§5.4): no new `unwrap()`/`expect()` outside tests; typed errors naming file, line, key.
    - **Clean code** (§5.1–5.3): functions over 80 lines without a reason in the commit; more than
      four arguments; a flag argument; a comment that restates, names a plan or marks a section.
-   - **Tests** (§7): a test for every changed branch and error path; expected numbers derived outside
-     the fold; snapshot diffs read; test names as sentences; a timing test on its own binary.
+   - **Tests** (§7, §13.2): a test for every changed branch and error path; expected numbers derived
+     outside the fold; snapshot diffs read; test names as sentences; a timing test on its own
+     binary; no test that would still pass if the code under it returned nothing.
+   - **The order of work** (§13): each decision in one place; nothing bolted on as a flag or a
+     special case; the diff subtracted where it could; an illegal state unwritable; an operation
+     that writes state idempotent; the commit body says how the change was proven. Where the
+     companion tools are installed, the changed functions' CRAP, the new duplicate pairs and the
+     surviving mutants are reported by the caller — cite them, do not run them.
    - **Docs** (`AGENTS.md` §7.8): every doc comment and README the change touched still true.
    - **Smells** (§11): walk the table; count occurrences in the diff.
 

@@ -39,7 +39,8 @@ A Cargo workspace. The crate graph is the architecture: who may depend on whom i
 
 At the root beside this file: `PRINCIPLES.md` is the binding standard a change is graded against —
 each principle with its trigger, its check and a Niobe example, the change-risk tiers, the review
-ownership matrix and the one severity rubric every reviewer cites (§3.2); `CONTRIBUTING.md` is the
+ownership matrix, the one severity rubric every reviewer cites, and the order a change is made
+in — make it work, then make it right, then practise (§3.2); `CONTRIBUTING.md` is the
 short version for a contributor; `.claude/skills/` and `.claude/agents/` are the workflows and the
 reviewers that encode both, for an agent working in this tree.
 
@@ -575,7 +576,12 @@ cross a boundary, state as a fold, every figure measured or labelled or absent, 
 terminal tool, clean code with its ceilings, hostile input and the terminal, the test traps that are
 Niobe's own — each with a trigger, a check and a self-check — then the **change-risk tiers** (§8
 there) that decide how much review a change earns, the **ownership matrix** (§9) that gives each
-review axis one owner, and the **severity rubric** (§10) every reviewer cites. Read the sections a
+review axis one owner, the **severity rubric** (§10) every reviewer cites, and the **order of
+work** (§13) every skill follows: make it work — one decision in one place, the data shape before
+the logic, the failing test first, subtract before adding, the premise attacked when two fixes on
+it fail — then make it right — root causes, behaviour over implementation, CRAP, duplication and
+mutation figures on the changed code — then practise — a log of actions and reasons, a small
+context, worktrees cleaned up, small commits that say how they were proven. Read the sections a
 change touches before writing code; walk the self-checks before asking for review. Disagree with a
 principle in the commit body, never by silent deviation.
 
@@ -772,7 +778,11 @@ green, and the real mismatch surfaces a round later. Before editing a line to fi
 3. **State the root cause and the evidence** in one sentence before touching code. If more than
    one cause is plausible, disprove the losers.
 4. **Fix at the correct layer**, then prove the repro passes and no sibling test went red. A fix
-   that moves the symptom somewhere else is not done.
+   that moves the symptom somewhere else is not done, and a guard that only hides the crash is
+   not a fix.
+5. **Attack the premise when two fixes fail.** Two fixes that share one premise and fail the same
+   gate mean the premise is wrong: write it in one sentence, name the actors that hold the
+   imbalance, remove the assignment, and only then fix again (`PRINCIPLES.md` §13.1).
 
 ---
 
@@ -800,7 +810,10 @@ green, and the real mismatch surfaces a round later. Before editing a line to fi
    — releasing is its own commit, cut only when the maintainer says so (§8).
    - **Commit messages**: Conventional Commits (`feat:`, `fix:`, `docs:`, `refactor:`, `test:`,
      `chore:`). The subject says what changed; the body explains *why* it is right rather than
-     restating the diff. No planning identifiers (§4).
+     restating the diff, and how it was proven — the test that went red to green, the gate's
+     counts. No planning identifiers (§4).
+   - **Small, ordered commits.** A task that falls into separable units lands as one commit each,
+     in an order where every commit builds and passes the gate on its own.
    - **Do not open pull requests** unless asked.
    - **`git stash` is forbidden.** Stashing a path with no changes creates no entry, so the next
      `git stash pop` pops whatever the maintainer had stashed. Copy files to a scratch directory
@@ -810,6 +823,12 @@ green, and the real mismatch surfaces a round later. Before editing a line to fi
     `reset` or `clean`. Say so explicitly in the dispatch prompt, and after every subagent
     completes check `git status --short` against the expected file set: a *shrinking* diff means
     work was wiped. Only the orchestrating agent commits.
+11. **Make it work, then make it right, then practise** (`PRINCIPLES.md` §13). The phases are in
+    that order for every change. Making it right includes the companion tools — crapper, dryer and
+    mutator, checked out outside the repository and run with `--changed` from its root — where they
+    are installed; their snapshots go to `.metrics/`, which git ignores, and they are not part of
+    the gate. Practising ends the task: the log of what was done and why, worktrees and scratch
+    cleaned up, the commits landed.
 
 ---
 

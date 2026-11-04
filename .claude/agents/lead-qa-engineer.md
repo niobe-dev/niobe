@@ -28,7 +28,8 @@ touched modules' doc comments: what *should* have changed vs what did.
 
 You own **coverage and test honesty**: coverage gaps, error-path and hostile-input tests, numbers
 derived outside the code under test, snapshot discipline, duplicate or misnamed tests, timing-test
-placement. You do **not** grade idiom, design, hostile reachability or arithmetic — if a test gap
+placement, behaviour over implementation and surviving mutants (`PRINCIPLES.md` §13.2). You do
+**not** grade idiom, design, hostile reachability or arithmetic — if a test gap
 *reveals* such a bug, report the **gap** (your axis) and name the owner for the bug.
 
 ## Coverage audit
@@ -53,7 +54,14 @@ placement. You do **not** grade idiom, design, hostile reachability or arithmeti
   that is wrong and accepted is a tautology. Say which cells changed and whether they should have.
 - **A fixture README whose arithmetic no longer matches** the fixture or the assertions.
 - **A test that cannot fail** — a tautology, a fixture that masks the behaviour, a test green before
-  the feature existed.
+  the feature existed, **a test that would still pass if every function under it returned nothing,
+  an empty `Vec` or its default** (§13.2). It is thrown out, not patched.
+- **A test of the implementation** — one that reaches a private helper or asserts the steps taken
+  rather than what the user of the code would see: the frame, the fold's figures, the binary's
+  output.
+- **Surviving mutants.** Where `mutator` is installed, run `mutator --changed` from the repository
+  root (or on the target's files). A covered mutant that survives is a missing assertion; one on a
+  figure's path (§8.1) is major. An uncovered site is a coverage gap or dead code.
 - **A timing assertion sharing a binary with drawing tests**, or timed in a debug build.
 - **Misnamed tests** — a name describing the implementation rather than the behaviour; `AGENTS.md`
   §3 wants a sentence (`a_partly_reported_cost_reads_as_a_floor`).

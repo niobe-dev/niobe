@@ -36,21 +36,26 @@ Print the resolved file list and state the target before fanning out.
 1. **Read `PRINCIPLES.md` §8–§10** and capture the diff so every specialist reviews the same thing.
    Run the mechanical parts of the gate once, now — `cargo fmt --all --check`, `cargo clippy
    --workspace --all-targets -- -D warnings`, `cargo xtask layering`, `cargo xtask headers`,
-   `cargo xtask audit` — and keep their output as the mechanical-findings list. Specialists do
+   `cargo xtask audit` — and keep their output as the mechanical-findings list. Where the companion
+   tools are installed, run `crapper`, `dryer --threshold 0.8` and `mutator` on the target from the
+   repository root (`--changed` for a diff) and keep their figures with it (§13.2). Specialists do
    **not** re-grep what the gate owns (§9).
 2. **Fan out the panel in parallel** (one message, several `Agent` calls, all read-only). Each gets
    the exact target, checks **only its owned axes** (§9), trusts the gate for mechanical findings,
    and returns a ranked list with §10 severities and `file:line`:
    - `lead-software-architect` — crate boundaries as design, trait vs concrete, fold-not-mutate,
-     SRP, DRY, docs kept true.
+     SRP, DRY and one decision in one place, subtraction and bolt-ons, illegal states, the CRAP
+     and duplication figures, docs kept true.
    - `lead-niobe-architect` — the event vocabulary, what the fold derives, provenance as design,
-     backend-neutrality of what crosses a seam, the trust model, lifecycle design.
+     backend-neutrality of what crosses a seam, the trust model, lifecycle design, idempotent
+     operations and one writer per shared state.
    - `lead-security-engineer` — hostile input, escape injection, reader limits, the credential
      line, trust bypass, link/FIFO/size attacks, process leaks, wrapping arithmetic.
    - `lead-rust-engineer` — ownership, clone and allocation hygiene, draw-path and fold cost,
      error-handling shape.
    - `lead-qa-engineer` — coverage and test honesty: hand-derived numbers, snapshot diffs,
-     error-path and hostile-input tests, names, timing-test placement.
+     error-path and hostile-input tests, names, timing-test placement, behaviour over
+     implementation, the mutation survivors.
    - `lead-terminal-engineer` — **only if** the target draws, reads keys or touches the terminal
      (`niobe-tui`, `terminal.rs`, `keys.rs`, `input.rs`, `printable.rs`, the pty tests). Otherwise N/A.
    - `lead-accounting-engineer` — **only if** the target is on a figure's path (`niobe-ledger`,
@@ -70,8 +75,9 @@ Print the resolved file list and state the target before fanning out.
    gate (`cargo xtask ci`, or `niobe-test-runner` for an isolated run) and read the output. Never
    accept a "pre-existing" excuse without re-running that test. Re-run a specialist only if the fix
    changed its owned axis non-mechanically; a rename or an extraction is covered by the gate.
-6. **Loop** 3–5 until no critical or major is open and the gate is green. If one root cause survives
-   three attempts, stop and surface it.
+6. **Loop** 3–5 until no critical or major is open and the gate is green. When two fixes on one
+   premise fail the same gate, write the premise down and remove the assignment before a third
+   (§13.1); if it cannot be found, stop and surface it.
 7. **Land the fixes** (`AGENTS.md` §7.9, within what the maintainer-local instructions allow) and
    issue the **verdict** in the format below.
 

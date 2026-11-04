@@ -42,9 +42,10 @@ do not guess scope.
    the fold derives it, what the figure's provenance is, what the hostile case does. Adjudicate their
    input into a brief.
 4. **Implement (Lead Niobe Engineer, TDD).** Dispatch `lead-niobe-engineer` with the brief **and an
-   explicit file-scope contract**. It works one acceptance criterion at a time through RED → GREEN →
-   REFACTOR, covers the error path and the hostile input, keeps docs true, and reports the diff with
-   its log. Say in the dispatch that it runs **no git write command** (`AGENTS.md` §7.10).
+   explicit file-scope contract**. It follows `PRINCIPLES.md` §13 — makes it work, then makes it
+   right, then practises — one acceptance criterion at a time through RED → GREEN → REFACTOR,
+   covers the error path and the hostile input, keeps docs true, runs the companion tools on the
+   changed code where they are installed, and reports the diff with its log of actions and reasons. Say in the dispatch that it runs **no git write command** (`AGENTS.md` §7.10).
    - **Trust but verify (you, never skipped).** A subagent's "done" is a claim. Run
      `git status --short` and `git diff --name-only`: reject any file outside the contract, and
      treat a *shrinking* diff as a wipe. Re-run the test the change was for and read the result.
@@ -54,13 +55,16 @@ do not guess scope.
    consolidation, the fix loop). Standard → `niobe-reviewer` + `niobe-test-runner`, blockers routed
    back to the engineer. Trivial → the gate only. All findings cite `PRINCIPLES.md` §10.
 6. **Loop tight.** Re-run only what the fix touched: the gate always; a specialist only if its owned
-   axis (§9) changed non-mechanically. Three attempts on one root cause → stop and ask.
+   axis (§9) changed non-mechanically. Two fixes on one premise failing the same gate → stop,
+   write the premise down and remove the assignment that gave it to two actors (§13.1) before a
+   third; if it cannot be found, stop and ask.
 7. **Docs and follow-ups.** Doc comments and READMEs the change made false are fixed in the same
    change (`AGENTS.md` §7.8). Out-of-scope discoveries go where the maintainer-local instructions
    say (§0.1, §7.7), never into the commit message.
 8. **Land it yourself** (`AGENTS.md` §7.9, within what the maintainer-local instructions allow).
-   Stage exactly the files touched, by name; Conventional Commits with a body that says why; no
-   version change; push when asked or when told to. Then `cargo xtask version` and §8.3.
+   Stage exactly the files touched, by name; small ordered Conventional Commits, each with a body
+   that says why, what changed and how it was proven; no version change; push when asked or when
+   told to. Clean up the worktrees and scratch the task used (§13.3). Then `cargo xtask version` and §8.3.
 9. **Final CTO report** (format below).
 
 ## Final report format

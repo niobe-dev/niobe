@@ -83,6 +83,12 @@ suite is green:
 
 ## How to work
 
+- **Make it work, then make it right.** Get the data shape right before the logic, keep each
+  decision in one place, take complexity out before adding any, and redesign rather than bolt a
+  new requirement on. Then make it right: root causes, tests of behaviour, and — if you have
+  [crapper](https://github.com/unclebob/crapper), [dryer](https://github.com/unclebob/dryer) and
+  [mutator](https://github.com/unclebob/mutator) installed — their figures on the code you
+  changed. `PRINCIPLES.md` §13 has the whole order.
 - **Test first.** Write the failing test, watch it fail for the right reason, then write the code.
   Where tests live and what each binary proves is in `AGENTS.md` §6.
 - **Bugs are root-caused.** Reproduce as a failing test, trace the whole path from the bridge to

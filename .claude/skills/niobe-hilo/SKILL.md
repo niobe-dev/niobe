@@ -80,6 +80,12 @@ git log --oneline --since='4 months ago' -- <scope> | grep -i '<family keywords>
 git ls-files 'crates/niobe-tui/tests/snapshots' | wc -l
 ```
 
+Where the companion tools are installed (`PRINCIPLES.md` §13.2), run them over the scope from the
+repository root, read-only but for their `.metrics/` snapshots, which git ignores: `crapper
+--no-coverage <scope>` for the most complex functions, `dryer --threshold 0.8 <scope>` for the
+decisions spelled in two places. A function far past CRAP 10 or a family of near-duplicate pairs
+is a lowlight candidate; a crate where neither turns anything up is a highlight one.
+
 Read the module docs (`//!`) of the ten largest files and whatever the hubs point at. Read
 `xtask/src/main.rs` and the workflows: what the project already gates tells you what it values.
 
