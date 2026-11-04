@@ -69,14 +69,29 @@ pub struct Untrusted {
 pub struct Attached {
     /// Where it is, as the CLI would find it.
     pub path: PathBuf,
-    /// What it holds, or why it cannot be read as text, which leaves it
-    /// untrusted: a file that cannot be shown cannot be agreed to.
-    pub text: Result<String, String>,
+    /// What it holds, as far as Niobe read it.
+    pub text: Contents,
     /// The profiles that name it, in the config's order.
     pub profiles: Vec<String>,
     /// Whether one of them names it as its `settings` file, as opposed to an
     /// argument.
     pub settings: bool,
+}
+
+/// What a file a repository's profile names holds, as far as Niobe read it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Contents {
+    /// Its text: what the operator is shown, and agrees to by its digest.
+    Text(String),
+    /// Why it cannot be read as text, which leaves it untrusted: a file that
+    /// cannot be shown cannot be agreed to.
+    Unreadable(String),
+    /// It is outside the repository, at this real path, so it is the
+    /// operator's own and not read: a path a clone wrote must not make Niobe
+    /// read and show whatever the operator keeps there, a CLI's sign-in among
+    /// it. It is agreed to by where it is, since no pull can change what it
+    /// holds — only, through a link the clone carries, which file it is.
+    Outside(PathBuf),
 }
 
 impl Loaded {
@@ -525,8 +540,19 @@ fn root_of(path: &Path) -> PathBuf {
 /// the entry or after its `=`; an entry that names nothing is a flag or a
 /// value, and covers nothing. A `settings` file that is not there covers
 /// nothing either, and the profile is refused before a backend starts; when it
-/// appears it is a file that was not trusted.
+/// appears it is a file that was not trusted. A file whose real path is
+/// outside the repository, by `..`, an absolute path or a link, is not read.
 pub fn attached(config: &Config, root: &Path, home: Option<&OsStr>) -> Vec<Attached> {
+    let real_root = std::fs::canonicalize(root);
+    let contents = |path: &Path| match (std::fs::canonicalize(path), &real_root) {
+        (Ok(real), Ok(root)) if real.starts_with(root) => match niobe_config::read::text(path) {
+            Ok(text) => Contents::Text(text),
+            Err(error) => Contents::Unreadable(error.to_string()),
+        },
+        (Ok(real), Ok(_)) => Contents::Outside(real),
+        (Err(error), _) => Contents::Unreadable(error.to_string()),
+        (_, Err(error)) => Contents::Unreadable(error.to_string()),
+    };
     let mut files: Vec<Attached> = Vec::new();
     let mut add = |path: PathBuf, profile: &str, settings: bool| {
         if !path.is_file() {
@@ -540,7 +566,7 @@ pub fn attached(config: &Config, root: &Path, home: Option<&OsStr>) -> Vec<Attac
                 }
             }
             None => files.push(Attached {
-                text: niobe_config::read::text(&path).map_err(|error| error.to_string()),
+                text: contents(&path),
                 path,
                 profiles: vec![profile.to_owned()],
                 settings,
@@ -593,8 +619,11 @@ fn trusted(
     Ok(record.trusts(path, text)
         && names_agreed
         && attached.iter().all(|file| match &file.text {
-            Ok(text) => record.trusts(&attached_key(&file.path), text),
-            Err(_) => false,
+            Contents::Text(text) => record.trusts(&attached_key(&file.path), text),
+            Contents::Outside(real) => {
+                record.trusts(&attached_key(&file.path), &real.to_string_lossy())
+            }
+            Contents::Unreadable(_) => false,
         }))
 }
 
@@ -609,8 +638,11 @@ pub fn record_trust(record: &Path, untrusted: &Untrusted) -> Result<(), String> 
     let mut files = Vec::new();
     for file in &untrusted.attached {
         match &file.text {
-            Ok(text) => files.push((&file.path, text)),
-            Err(error) => {
+            Contents::Text(text) => files.push((&file.path, text.clone())),
+            Contents::Outside(real) => {
+                files.push((&file.path, real.to_string_lossy().into_owned()));
+            }
+            Contents::Unreadable(error) => {
                 return Err(format!(
                     "{} is not trusted: {} cannot be read: {error}",
                     path.display(),
@@ -1241,8 +1273,8 @@ mod tests {
         let untrusted = loaded.untrusted.expect("the file is asked about again");
         assert_eq!(untrusted.attached.len(), 1);
         assert_eq!(
-            untrusted.attached[0].text.as_deref(),
-            Ok(r#"{"env":{"ANTHROPIC_BASE_URL":"https://x"}}"#)
+            untrusted.attached[0].text,
+            Contents::Text(r#"{"env":{"ANTHROPIC_BASE_URL":"https://x"}}"#.to_owned())
         );
         assert!(
             loaded
@@ -1314,6 +1346,82 @@ mod tests {
                 .is_some_and(|p| p.env().is_empty()),
             "its environment is not in force"
         );
+    }
+
+    /// A repository's config is written by whoever wrote the clone, so a
+    /// path in it that leaves the repository names one of the operator's own
+    /// files: reading it to show it would put whatever it holds — the CLI's
+    /// sign-in among it — on the screen of a question nobody has answered.
+    #[test]
+    fn a_file_outside_the_repository_that_a_profile_names_is_not_read() {
+        let elsewhere = tempfile::tempdir().expect("a temporary directory can be created");
+        let secret = elsewhere.path().join("secret.json");
+        std::fs::write(&secret, r#"{"token":"SECRET"}"#)
+            .expect("the temporary directory is writable");
+        let clone = Cloned::new(&format!(
+            "[profiles.team]\nbackend = \"claude\"\nsettings = \"{0}\"\n\
+             args = [\"--mcp-config\", \"{0}\", \"--x=linked.json\"]\n",
+            secret.display()
+        ));
+        std::os::unix::fs::symlink(&secret, clone.dir.path().join("linked.json"))
+            .expect("the temporary directory is writable");
+
+        let loaded = clone.load();
+        let untrusted = loaded.untrusted.expect("the config is asked about");
+
+        assert_eq!(untrusted.attached.len(), 2, "{:?}", untrusted.attached);
+        assert!(
+            untrusted
+                .attached
+                .iter()
+                .all(|file| matches!(&file.text, Contents::Outside(real)
+                    if *real == std::fs::canonicalize(&secret).expect("the file was just written"))),
+            "{:?}",
+            untrusted.attached
+        );
+    }
+
+    /// A file the clone cannot write is not one a pull can change, so the
+    /// config that names it is trusted for what it says and stays trusted.
+    #[test]
+    fn a_config_naming_a_file_outside_the_repository_is_trusted_without_reading_it() {
+        let elsewhere = tempfile::tempdir().expect("a temporary directory can be created");
+        let outside = elsewhere.path().join("team.json");
+        std::fs::write(&outside, "{}").expect("the temporary directory is writable");
+        let clone = Cloned::new(&format!(
+            "[profiles.team]\nbackend = \"claude\"\nsettings = \"{}\"\n",
+            outside.display()
+        ));
+        clone.trust();
+        assert!(clone.load().untrusted.is_none(), "trusted as it stands");
+
+        std::fs::write(&outside, r#"{"env":{"A":"1"}}"#)
+            .expect("the temporary directory is writable");
+
+        assert!(clone.load().untrusted.is_none());
+    }
+
+    /// The link is the clone's own, so a pull can turn it to another of the
+    /// operator's files; that is a file nobody agreed to.
+    #[test]
+    fn a_link_the_clone_turns_to_another_file_outside_puts_the_question_back() {
+        let elsewhere = tempfile::tempdir().expect("a temporary directory can be created");
+        for name in ["a.json", "b.json"] {
+            std::fs::write(elsewhere.path().join(name), "{}")
+                .expect("the temporary directory is writable");
+        }
+        let clone = Cloned::new(TEAM);
+        let link = clone.dir.path().join("claude.json");
+        std::os::unix::fs::symlink(elsewhere.path().join("a.json"), &link)
+            .expect("the temporary directory is writable");
+        clone.trust();
+        assert!(clone.load().untrusted.is_none(), "trusted as it stands");
+
+        std::fs::remove_file(&link).expect("the link was just made");
+        std::os::unix::fs::symlink(elsewhere.path().join("b.json"), &link)
+            .expect("the temporary directory is writable");
+
+        assert!(clone.load().untrusted.is_some());
     }
 
     #[test]
