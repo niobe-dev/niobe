@@ -445,6 +445,38 @@ fn alive(pid: &str) -> bool {
         .is_ok_and(|status| status.success())
 }
 
+/// A check is the suite's own script and can start what it likes — a server
+/// its tests talk to, a watcher. Whatever it leaves behind when it ends, or
+/// when its deadline ends it, is the bench's to end, not the machine's to
+/// keep running.
+#[test]
+fn what_a_check_leaves_running_ends_with_it() {
+    let setup = Setup::new(DOES_IT_CLAUDE);
+    let pid_file = setup.dir.path().join("left.pid");
+    setup.task("leaves", "done.txt");
+    std::fs::write(
+        setup.suite().join("leaves").join("check.sh"),
+        format!(
+            "sleep 300 &\necho $! > '{}'\ntest -f done.txt\n",
+            pid_file.display()
+        ),
+    )
+    .expect("the check is written");
+
+    let results = results(&setup.bench(&["--json"]));
+
+    assert_eq!(results["tasks"][0]["passed"], true, "{results:#}");
+    let pid = std::fs::read_to_string(&pid_file).expect("the check wrote what it left running");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while alive(pid.trim()) {
+        assert!(
+            Instant::now() < deadline,
+            "what the check left running outlived it"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 #[test]
 fn a_directory_with_no_task_is_refused() {
     let setup = Setup::new(DOES_IT_CLAUDE);

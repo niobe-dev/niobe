@@ -426,16 +426,28 @@ fn own_group(_command: &mut Command) {}
 
 /// Whether the check at `check` passes in `work`: `sh` runs it there and
 /// exits 0 within its deadline, and no signal stopped the bench meanwhile.
+///
+/// The check runs in a process group of its own, which is ended whole once
+/// it is over, however it ended: what it started in the background — a
+/// server its tests talk to, a watcher — would otherwise outlive the bench,
+/// since a deadline kills only its `sh`.
 fn checks(check: &Path, work: &Path, stopped: Stopped) -> bool {
-    Command::new("sh")
+    let mut command = Command::new("sh");
+    command
         .arg(check)
         .current_dir(work)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::null());
+    own_group(&mut command);
+    command
         .spawn()
         .ok()
-        .map(|mut child| ended_by(&mut child, CHECK_TIMEOUT, stopped))
+        .map(|mut child| {
+            let waited = ended_by(&mut child, CHECK_TIMEOUT, stopped);
+            end_group(&child);
+            waited
+        })
         .is_some_and(|waited| match waited {
             Waited::Exited(status) => status.success() && stopped().is_none(),
             Waited::Deadline | Waited::Stopped => false,
@@ -524,6 +536,21 @@ fn pass_on(child: &Child, signal: Stopping) {
 
 #[cfg(not(unix))]
 fn pass_on(_child: &Child, _signal: Stopping) {}
+
+/// Kills what is left of the process group `child` leads, which it was
+/// started at the head of. A group that is empty is what was wanted.
+#[cfg(unix)]
+fn end_group(child: &Child) {
+    let group = i32::try_from(child.id())
+        .ok()
+        .and_then(rustix::process::Pid::from_raw);
+    if let Some(group) = group {
+        let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+    }
+}
+
+#[cfg(not(unix))]
+fn end_group(_child: &Child) {}
 
 fn drain(pipe: Option<impl Read + Send + 'static>) -> Option<JoinHandle<Vec<u8>>> {
     pipe.map(|mut pipe| {
