@@ -562,6 +562,7 @@ pub fn attached(config: &Config, root: &Path, home: Option<&OsStr>) -> Vec<Attac
         budget: crate::manifest::Budget::default(),
         capped: false,
         cli_directories: cli_directories(home),
+        held_home: held_home(root, home),
     };
     for (name, profile) in config.profiles() {
         if let Some(settings) = profile.settings()
@@ -730,7 +731,13 @@ const LONGEST_COMMAND: usize = 64 * 1024;
 ///
 /// `HOME` and `XDG_CONFIG_HOME` are among them: a CLI keeps its directory
 /// under the home directory where no variable of its own names one.
-const CLI_DIRECTORIES: [&str; 4] = ["CLAUDE_CONFIG_DIR", "CODEX_HOME", "HOME", "XDG_CONFIG_HOME"];
+const CLI_DIRECTORIES: [&str; 5] = [
+    "CLAUDE_CONFIG_DIR",
+    "CODEX_HOME",
+    "ANTHROPIC_CONFIG_DIR",
+    "HOME",
+    "XDG_CONFIG_HOME",
+];
 
 /// The directories the operator's CLIs keep their sign-in and state in, as
 /// Niobe's own environment names them, where they are: none of them is read
@@ -738,13 +745,19 @@ const CLI_DIRECTORIES: [&str; 4] = ["CLAUDE_CONFIG_DIR", "CODEX_HOME", "HOME", "
 /// a repository whose root is the home directory holds them all.
 fn cli_directories(home: Option<&OsStr>) -> Vec<PathBuf> {
     let home = home.filter(|home| !home.is_empty()).map(PathBuf::from);
-    let named = ["CLAUDE_CONFIG_DIR", "CODEX_HOME"]
+    let named = ["CLAUDE_CONFIG_DIR", "CODEX_HOME", "ANTHROPIC_CONFIG_DIR"]
         .into_iter()
         .filter_map(std::env::var_os)
         .filter(|dir| !dir.is_empty())
         .map(PathBuf::from);
     home.iter()
-        .flat_map(|home| [home.join(".claude"), home.join(".codex")])
+        .flat_map(|home| {
+            [
+                home.join(".claude"),
+                home.join(".codex"),
+                home.join(".config").join("anthropic"),
+            ]
+        })
         .chain(named)
         .filter_map(|dir| std::fs::canonicalize(dir).ok())
         .collect()
@@ -777,6 +790,18 @@ struct Gather<'a> {
     capped: bool,
     /// The operator's CLIs' own directories, which nothing here reads.
     cli_directories: Vec<PathBuf>,
+    /// The operator's home directory, where the repository holds it.
+    held_home: Option<PathBuf>,
+}
+
+/// The operator's home directory, by its real path, where the repository at
+/// `root` holds it — a repository of dotfiles, or one above the home
+/// directory. Every file under it is the operator's own, any CLI's sign-in
+/// among them, and none of it is the clone's to hand over or Niobe's to read.
+fn held_home(root: &Path, home: Option<&OsStr>) -> Option<PathBuf> {
+    let home = std::fs::canonicalize(home.filter(|home| !home.is_empty())?).ok()?;
+    let root = std::fs::canonicalize(root).ok()?;
+    home.starts_with(&root).then_some(home)
 }
 
 /// What is at a path a profile names.
@@ -830,7 +855,7 @@ impl Gather<'_> {
             return None;
         };
         let (inside, root) = match (&looked.real, &self.real_root) {
-            (Some(real), Ok(root)) => (real.starts_with(root), real == root),
+            (Some(real), Ok(root)) => (self.is_the_clones(real), real == root),
             (Some(_) | None, Err(_)) | (None, Ok(_)) => (false, self.root == path),
         };
         // A directory outside the repository is the operator's, and is named
@@ -844,7 +869,8 @@ impl Gather<'_> {
         // command's word naming it, as `cd .` does, names no file it runs.
         // A path into, or a directory holding, a CLI's own directory names
         // its sign-in: it is not read, and the config is not agreed to.
-        if let Some(real) = &looked.real
+        if inside
+            && let Some(real) = &looked.real
             && self
                 .cli_directories
                 .iter()
@@ -956,15 +982,30 @@ impl Gather<'_> {
         });
     }
 
+    /// Whether the file whose real path is `real` is the clone's: under the
+    /// repository's root, and not under the operator's home directory where
+    /// the repository holds it.
+    fn is_the_clones(&self, real: &Path) -> bool {
+        self.real_root
+            .as_ref()
+            .is_ok_and(|root| real.starts_with(root))
+            && !self
+                .held_home
+                .as_ref()
+                .is_some_and(|home| real.starts_with(home))
+    }
+
     fn contents(&mut self, path: &Path) -> Contents {
-        match (std::fs::canonicalize(path), &self.real_root) {
-            (Ok(real), Ok(root)) if real.starts_with(root) && real.is_dir() => {
+        let real = std::fs::canonicalize(path);
+        let clones = real.as_ref().is_ok_and(|real| self.is_the_clones(real));
+        match (real, &self.real_root) {
+            (Ok(real), Ok(root)) if clones && real.is_dir() => {
                 match crate::manifest::of(&real, root, &mut self.budget, &self.cli_directories) {
                     Ok(manifest) => Contents::Directory(manifest),
                     Err(error) => Contents::Unreadable(error),
                 }
             }
-            (Ok(real), Ok(root)) if real.starts_with(root) => {
+            (Ok(_), Ok(_)) if clones => {
                 let size = std::fs::metadata(path).map_or(0, |m| m.len());
                 if let Err(error) = self.budget.spend(size) {
                     return Contents::Unreadable(error);
@@ -2915,14 +2956,69 @@ mod tests {
         let untrusted = loaded.untrusted.expect("the config is asked about");
 
         assert!(
-            untrusted
+            !untrusted
                 .attached
                 .iter()
-                .any(|file| matches!(&file.text, Contents::Unreadable(why) if why.contains("own directory"))),
+                .any(|file| matches!(file.text, Contents::Text(_) | Contents::Directory(_))),
             "{:?}",
             untrusted.attached
         );
-        assert!(record_trust(&clone.record, &untrusted).is_err());
+    }
+
+    /// A repository at the home directory holds every file the operator
+    /// keeps there, any CLI's sign-in among them: none of it is the clone's,
+    /// so none of it is read, whatever a profile names.
+    #[test]
+    fn a_repository_holding_the_home_directory_reads_none_of_it() {
+        let clone = Cloned::new(
+            "[profiles.team]\nbackend = \"claude\"\nsettings = \".claude.json\"\n\
+             args = [\"--add-dir\", \".config/anthropic\"]\n",
+        );
+        clone.write(".claude.json", r#"{"primaryApiKey":"FAKEPRIMARY"}"#);
+        std::fs::create_dir_all(clone.dir.path().join(".config/anthropic"))
+            .expect("the temporary directory is writable");
+        clone.write(".config/anthropic/k.json", "FAKEKEY");
+        let home = Some(clone.dir.path().as_os_str().to_owned());
+
+        let loaded = load_with(None, clone.dir.path(), Some(clone.record.clone()), home)
+            .expect("the config loads");
+        let untrusted = loaded.untrusted.expect("the config is asked about");
+
+        assert!(
+            untrusted
+                .attached
+                .iter()
+                .all(|file| matches!(file.text, Contents::Outside(_))),
+            "{:?}",
+            untrusted.attached
+        );
+        let shown = format!("{:?}", crate::consent::question(&untrusted).grants);
+        assert!(!shown.contains("FAKE"), "{shown}");
+    }
+
+    /// A file of the CLI's own named outside the repository is not read, as
+    /// no file outside it is, and the config naming it can be agreed to.
+    #[test]
+    fn a_settings_file_in_the_clis_own_directory_outside_the_repository_can_be_agreed_to() {
+        let home = tempfile::tempdir().expect("a temporary directory can be created");
+        std::fs::create_dir(home.path().join(".claude"))
+            .expect("the temporary directory is writable");
+        std::fs::write(home.path().join(".claude/settings.json"), "{}")
+            .expect("the temporary directory is writable");
+        let clone = Cloned::new(
+            "[profiles.team]\nbackend = \"claude\"\nsettings = \"~/.claude/settings.json\"\n",
+        );
+        let home = Some(home.path().as_os_str().to_owned());
+
+        let loaded = load_with(None, clone.dir.path(), Some(clone.record.clone()), home)
+            .expect("the config loads");
+        let untrusted = loaded.untrusted.expect("the config is asked about");
+
+        assert!(
+            record_trust(&clone.record, &untrusted).is_ok(),
+            "{:?}",
+            untrusted.attached
+        );
     }
 
     /// A program named outside the repository is agreed to by the path the
