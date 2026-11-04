@@ -64,7 +64,7 @@
 //!
 //! [`Event::UserMessage`]: niobe_core::event::Event::UserMessage
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ffi::OsStr;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
@@ -519,7 +519,7 @@ pub fn timed(path: &Path, profile: &str, cwd: &Path) -> Result<Vec<Timed>, Trans
     // Read once, then folded: whether a message is covered by an accounting
     // decides where its tokens are counted from, and the record that says so
     // comes after it.
-    let (read, cut) = records(&text);
+    let (read, cut) = records(&text, RECORDS);
     let accountings = read
         .iter()
         .filter_map(|record| match &record.record {
@@ -527,7 +527,10 @@ pub fn timed(path: &Path, profile: &str, cwd: &Path) -> Result<Vec<Timed>, Trans
             _ => None,
         })
         .collect();
-    let mut sides = side_files(path);
+    let Sides {
+        read: mut sides,
+        left_out,
+    } = side_files(path, LIMIT);
     // One agent has one file. Where two name the same call, the first by name
     // is read and the other is said to have been passed over, with the call:
     // read in turn they would replace each other, and which won would depend
@@ -540,7 +543,7 @@ pub fn timed(path: &Path, profile: &str, cwd: &Path) -> Result<Vec<Timed>, Trans
         }
         same
     });
-    let mut threads = Threads::read(&sides);
+    let mut threads = Threads::read(&sides, RECORDS.saturating_sub(read.len()));
     let last_usage = last_usage(read.iter().chain(threads.records()));
     let agents = sides
         .iter()
@@ -549,7 +552,14 @@ pub fn timed(path: &Path, profile: &str, cwd: &Path) -> Result<Vec<Timed>, Trans
 
     let mut fold = Fold::new(profile, cwd, id.clone(), accountings, agents).counting(last_usage);
     if cut {
-        fold.out.push(cut_short("the transcript"));
+        fold.out.push(cut_short("the transcript's records"));
+    }
+    if left_out > 0 {
+        fold.out.push(translate::warn(format!(
+            "the session's sub-agents' files hold more than {} MiB between them: {left_out} of \
+             them are not read, and what they hold is not counted",
+            LIMIT / (1024 * 1024)
+        )));
     }
     for file in &threads.cut {
         fold.out
@@ -723,9 +733,9 @@ struct Record<'a> {
 /// The CLI writes a record as a line and its line break, so a transcript
 /// whose CLI is still running can end part-way through the next one. A last
 /// line with no break after it that does not read is that record on its way
-/// and is left out; one that reads is whole, and is kept. Past [`RECORDS`]
-/// none is, and the file is said to have been cut.
-fn records(text: &str) -> (Vec<Record<'_>>, bool) {
+/// and is left out; one that reads is whole, and is kept. Past `room`
+/// records none is, and the file is said to have been cut.
+fn records(text: &str, room: usize) -> (Vec<Record<'_>>, bool) {
     #[derive(Deserialize)]
     struct Stamp {
         timestamp: Option<String>,
@@ -734,7 +744,7 @@ fn records(text: &str) -> (Vec<Record<'_>>, bool) {
     let mut lines = text.lines().filter(|line| !line.trim().is_empty());
     let mut records: Vec<Record<'_>> = lines
         .by_ref()
-        .take(RECORDS)
+        .take(room)
         .map(|line| {
             let (record, mended) = match wire::from_line::<Line>(line) {
                 Ok((record, mended)) => (Ok(record), mended),
@@ -757,12 +767,12 @@ fn records(text: &str) -> (Vec<Record<'_>>, bool) {
     (records, cut)
 }
 
-/// The warning that the file `file` holds more than [`RECORDS`] records,
-/// and the rest of it is not read.
+/// The warning that the records in `file` are past the [`RECORDS`] the
+/// session's files are read to, and are not read.
 fn cut_short(file: &str) -> Event {
     translate::warn(format!(
-        "{file} holds more than {RECORDS} records, more than any session writes: what comes \
-         after them is not read, and is not counted"
+        "{file} go past the {RECORDS} records a session's files are read to, more than any \
+         session writes: what comes after them is not read, and is not counted"
     ))
 }
 
@@ -803,17 +813,27 @@ struct Threads<'a> {
     waiting: BTreeMap<String, VecDeque<Record<'a>>>,
     /// The agents whose spawn has been folded, in the order it was.
     spawned: Vec<String>,
-    /// The files held more records than are read, by name.
+    /// The agents whose spawn has been folded and who have a record waiting,
+    /// by the stamp of that record and the order they were spawned in: the
+    /// first is the next to go in. Kept in order as records go in, so the
+    /// next is found without looking at every agent for every record, which
+    /// over thousands of agents was a minute for a few thousand records.
+    fronts: BTreeSet<(Option<String>, usize)>,
+    /// The files whose records went past what was left of [`RECORDS`], by
+    /// name.
     cut: Vec<String>,
 }
 
 impl<'a> Threads<'a> {
-    fn read(sides: &'a [SideFile]) -> Self {
+    /// Every agent's records, as many as fit in `room` between them, in the
+    /// order of `sides`.
+    fn read(sides: &'a [SideFile], mut room: usize) -> Self {
         let mut cut = Vec::new();
         let waiting = sides
             .iter()
             .map(|side| {
-                let (kept, over) = records(&side.text);
+                let (kept, over) = records(&side.text, room);
+                room = room.saturating_sub(kept.len());
                 if over {
                     cut.push(side.file.clone());
                 }
@@ -823,6 +843,7 @@ impl<'a> Threads<'a> {
         Self {
             waiting,
             spawned: Vec::new(),
+            fronts: BTreeSet::new(),
             cut,
         }
     }
@@ -842,9 +863,12 @@ impl<'a> Threads<'a> {
         };
         for block in blocks {
             if let wire::Block::ToolUse { id, .. } = block
-                && self.waiting.contains_key(id)
+                && let Some(waiting) = self.waiting.get(id)
                 && !self.spawned.contains(id)
             {
+                if let Some(front) = waiting.front() {
+                    self.fronts.insert((front.at.clone(), self.spawned.len()));
+                }
                 self.spawned.push(id.clone());
             }
         }
@@ -862,21 +886,24 @@ impl<'a> Threads<'a> {
     /// The earliest waiting record of a spawned agent stamped before `bound`,
     /// and the call that spawned its agent. A record with no stamp goes in as
     /// soon as the one before it has.
+    ///
+    /// The records that may go in are those with no stamp and those stamped
+    /// before `bound`, which are the first of [`Threads::fronts`] in its
+    /// order, so the first of all is one of them or none is.
     fn next_before(&mut self, bound: Option<&str>) -> Option<(String, Record<'a>)> {
-        let call = self
-            .spawned
-            .iter()
-            .filter_map(|call| {
-                let at = self.waiting.get(call)?.front()?.at.as_deref();
-                bound
-                    .is_none_or(|bound| at.is_none_or(|at| at < bound))
-                    .then_some((at, call))
-            })
-            // `min_by_key` keeps the first of equals, which is the agent
-            // spawned first.
-            .min_by_key(|(at, _)| *at)
-            .map(|(_, call)| call.clone())?;
-        let record = self.waiting.get_mut(&call)?.pop_front()?;
+        let (at, spawn) = self.fronts.first()?.clone();
+        if let (Some(bound), Some(at)) = (bound, at.as_deref())
+            && at >= bound
+        {
+            return None;
+        }
+        self.fronts.pop_first();
+        let call = self.spawned.get(spawn)?.clone();
+        let waiting = self.waiting.get_mut(&call)?;
+        let record = waiting.pop_front()?;
+        if let Some(next) = waiting.front() {
+            self.fronts.insert((next.at.clone(), spawn));
+        }
         Some((call, record))
     }
 }
@@ -900,7 +927,12 @@ struct SideFile {
 /// An agent whose files are missing or cannot be read is left out, and shows
 /// what the session's own file says about it and no more: the session's
 /// history does not depend on them.
-fn side_files(path: &Path) -> Vec<SideFile> {
+///
+/// Each file read is held whole, so they are read to `budget` bytes between
+/// them, in the order of their calls, and those past it are left out and
+/// counted: a directory of thousands of files, each under the limit one file
+/// is read to, would otherwise be held at thousands of times that limit.
+fn side_files(path: &Path, budget: u64) -> Sides {
     #[derive(Deserialize)]
     struct Meta {
         #[serde(rename = "toolUseId")]
@@ -909,9 +941,9 @@ fn side_files(path: &Path) -> Vec<SideFile> {
 
     let dir = path.with_extension("").join(SUB_AGENTS);
     let Ok(entries) = std::fs::read_dir(&dir) else {
-        return Vec::new();
+        return Sides::default();
     };
-    let mut sides = Vec::new();
+    let mut named = Vec::new();
     for entry in entries.flatten() {
         let name = entry.file_name();
         let Some(stem) = name.to_str().and_then(|name| name.strip_suffix(META)) else {
@@ -924,20 +956,38 @@ fn side_files(path: &Path) -> Vec<SideFile> {
         else {
             continue;
         };
-        let Ok(text) = read(&dir.join(format!("{stem}.{EXTENSION}"))) else {
-            continue;
-        };
-        sides.push(SideFile {
-            call,
-            file: stem.to_owned(),
-            text,
-        });
+        named.push((call, stem.to_owned()));
     }
     // The directory's own order is the file system's; the call's id, and the
     // file's name where two name the same call, are at least the same on every
     // machine.
-    sides.sort_by(|a, b| (&a.call, &a.file).cmp(&(&b.call, &b.file)));
+    named.sort();
+    let mut sides = Sides::default();
+    let mut held = 0u64;
+    for (at, (call, file)) in named.iter().enumerate() {
+        let Ok(text) = read(&dir.join(format!("{file}.{EXTENSION}"))) else {
+            continue;
+        };
+        held = held.saturating_add(u64::try_from(text.len()).unwrap_or(u64::MAX));
+        if held > budget {
+            sides.left_out = named.len() - at;
+            break;
+        }
+        sides.read.push(SideFile {
+            call: call.clone(),
+            file: file.clone(),
+            text,
+        });
+    }
     sides
+}
+
+/// The sub-agents' files of a session: those read, and how many were left out
+/// for want of room.
+#[derive(Default)]
+struct Sides {
+    read: Vec<SideFile>,
+    left_out: usize,
 }
 
 /// What one sub-agent's transcript says about it beyond its messages: the
@@ -3292,15 +3342,135 @@ mod tests {
         )
         .expect("the temporary directory is writable");
 
-        let found: Vec<(String, String)> = side_files(&session)
+        let found: Vec<(String, String)> = side_files(&session, LIMIT)
+            .read
             .into_iter()
             .map(|side| (side.call, side.text))
             .collect();
         assert_eq!(found, [("toolu_a".to_owned(), answer.to_owned())]);
         assert!(
-            side_files(&dir.path().join("none.jsonl")).is_empty(),
+            side_files(&dir.path().join("none.jsonl"), LIMIT)
+                .read
+                .is_empty(),
             "a session with no sub-agents"
         );
+    }
+
+    /// Writes, for the session at `dir/s.jsonl`, the sub-agent spawned by
+    /// call `call` with its own transcript `text`.
+    fn write_agent(dir: &Path, name: &str, call: &str, text: &str) {
+        let agents = dir.join("s").join(SUB_AGENTS);
+        std::fs::create_dir_all(&agents).expect("the sub-agents' directory is made");
+        std::fs::write(
+            agents.join(format!("{name}{META}")),
+            format!(r#"{{"toolUseId":"{call}"}}"#),
+        )
+        .expect("the temporary directory is writable");
+        std::fs::write(agents.join(format!("{name}.{EXTENSION}")), text)
+            .expect("the temporary directory is writable");
+    }
+
+    /// Every record of every agent is put among the session's at its stamp,
+    /// so finding the next one must not mean looking at every agent: over
+    /// thousands of them that was a minute for a few thousand records.
+    #[test]
+    fn a_session_of_thousands_of_agents_is_read_without_looking_at_each_for_every_record() {
+        const AGENTS: usize = 2000;
+        const EACH: usize = 20;
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let calls: Vec<String> = (0..AGENTS)
+            .map(|n| {
+                format!(
+                    r#"{{"type":"tool_use","id":"toolu_{n}","name":"Agent","input":{{"subagent_type":"quick-lookup","description":"look","prompt":"Look."}}}}"#
+                )
+            })
+            .collect();
+        let session = format!(
+            "{}\n{}\n",
+            format_args!(
+                r#"{{"type":"assistant","timestamp":"2026-09-19T11:00:00.000Z","message":{{"id":"m","model":"claude-opus-5","content":[{}]}}}}"#,
+                calls.join(",")
+            ),
+            prompt("after them all").replace(
+                r#"{"type":"user""#,
+                r#"{"type":"user","timestamp":"2026-09-19T12:00:00.000Z""#
+            )
+        );
+        std::fs::write(dir.path().join("s.jsonl"), session)
+            .expect("the temporary directory is writable");
+        for n in 0..AGENTS {
+            let text: String = (0..EACH)
+                .map(|r| {
+                    format!(
+                        "{{\"type\":\"assistant\",\"timestamp\":\"2026-09-19T11:{:02}:{:02}.000Z\",\"message\":{{\"id\":\"m-{n}-{r}\",\"model\":\"claude-haiku-4-5\",\"content\":[{{\"type\":\"text\",\"text\":\"x\"}}]}}}}\n",
+                        r,
+                        n % 60
+                    )
+                })
+                .collect();
+            write_agent(
+                dir.path(),
+                &format!("agent-{n}"),
+                &format!("toolu_{n}"),
+                &text,
+            );
+        }
+
+        let started = std::time::Instant::now();
+        let events = events(&dir.path().join("s.jsonl"), "max", Path::new("/repo"))
+            .expect("the file is readable");
+
+        // A ceiling set by a loaded machine running a debug build, not by the
+        // code: looking at every agent for every record took over a minute.
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(
+            events.last(),
+            Some(&Event::UserMessage {
+                text: "after them all".to_owned()
+            }),
+            "every agent's records go in before the prompt stamped after them"
+        );
+    }
+
+    /// Each agent's file is read whole and held, so a directory of them is
+    /// read to a budget, and the agents past it are left out and counted.
+    #[test]
+    fn the_agents_files_are_read_to_a_budget_and_the_rest_counted() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        for n in 0..5 {
+            write_agent(
+                dir.path(),
+                &format!("agent-{n}"),
+                &format!("toolu_{n}"),
+                "0123456789",
+            );
+        }
+
+        let sides = side_files(&dir.path().join("s.jsonl"), 25);
+
+        assert_eq!(sides.read.len(), 2);
+        assert_eq!(sides.left_out, 3);
+    }
+
+    /// The records every file holds are read to one budget, not to one each:
+    /// a thousand agents' files of a budget each is a thousand budgets.
+    #[test]
+    fn the_agents_records_are_read_to_what_the_session_left_of_the_budget() {
+        let side = |call: &str, file: &str| SideFile {
+            call: call.to_owned(),
+            file: file.to_owned(),
+            text: "{\"type\":\"mode\"}\n".repeat(3),
+        };
+        let sides = [side("toolu_a", "agent-a"), side("toolu_b", "agent-b")];
+
+        let threads = Threads::read(&sides, 4);
+
+        assert_eq!(threads.records().count(), 4);
+        assert_eq!(threads.cut, ["agent-b"]);
     }
 
     #[test]
@@ -3320,7 +3490,7 @@ mod tests {
         std::fs::write(agents.join(format!("agent-a1.{EXTENSION}")), bytes)
             .expect("the temporary directory is writable");
 
-        let found = side_files(&session);
+        let found = side_files(&session, LIMIT).read;
         let [side] = found.as_slice() else {
             panic!("one agent: {:?}", found.len());
         };
