@@ -731,7 +731,8 @@ pub fn block(root: &Path, recorded: impl Fn(&str) -> bool) -> String {
     serde_json::to_string_pretty(&json(&rows, &facts)).unwrap_or_else(|_| "{}".to_owned())
 }
 
-fn terminal_size() -> Option<(u16, u16)> {
+/// The columns and rows of the terminal standard output is, where it is one.
+pub(crate) fn terminal_size() -> Option<(u16, u16)> {
     let size = rustix::termios::tcgetwinsize(std::io::stdout()).ok()?;
     (size.ws_col > 0 && size.ws_row > 0).then_some((size.ws_col, size.ws_row))
 }

@@ -2167,7 +2167,7 @@ fn draw_transcript(
         .map(|ask| question_lines(app, ask, (width, height), theme))
         .unwrap_or_default();
     let framed = question.framed;
-    app.drew_question_cut(question.cut);
+    let (cut, call) = (question.cut, question.call.clone());
     let question = question.lines;
 
     if app.entries().is_empty() && question.is_empty() {
@@ -2208,6 +2208,9 @@ fn draw_transcript(
     app.drew_transcript(area, above);
     let room = height.saturating_sub(visible.len());
     app.drew_question_top(question.is_empty() || (start..start + height).contains(&above));
+    let shown_from = start.saturating_sub(above);
+    let shown = shown_from..shown_from.saturating_add(room).min(question.len());
+    app.drew_question(cut, width, call, shown);
     visible.extend(
         question
             .into_iter()
@@ -3335,7 +3338,8 @@ fn empty_transcript(attached: bool, theme: &Theme) -> Vec<Line<'static>> {
 /// answer, which Enter confirms — would be above the pane. There the
 /// arguments are cut instead, with a row saying how many lines are not shown
 /// and that Ctrl+T shows them, which draws the question whole again; the app
-/// is told, and allows such a call only once a frame has drawn it whole.
+/// is told which rows of the call each frame had on screen, and allows a call
+/// cut to fit only once every one of them has been.
 fn question_lines(
     app: &App,
     ask: &Ask,
@@ -3351,6 +3355,8 @@ fn question_lines(
     // The frame's top and bottom rows and the blank row under it.
     let framing = 3;
     let fits = app.diffs_open() || body.len() + framing <= height;
+    // The call's rows, counted from the frame's top border.
+    let call = 1 + body.head.len()..1 + body.head.len() + body.call.rows.len();
     let (body, cut) = match fits {
         true => (body.whole(), false),
         false => body.cut(height.saturating_sub(framing - 1), inner, theme),
@@ -3385,7 +3391,12 @@ fn question_lines(
     if fits {
         lines.push(Line::from(""));
     }
-    Question { lines, framed, cut }
+    Question {
+        lines,
+        framed,
+        cut,
+        call,
+    }
 }
 
 /// A permission prompt drawn as the transcript's last lines.
@@ -3397,6 +3408,8 @@ struct Question {
     framed: Option<(u16, usize)>,
     /// Whether lines of the call were left out to fit the pane.
     cut: bool,
+    /// Which of `lines` the call takes where it is drawn whole.
+    call: std::ops::Range<usize>,
 }
 
 /// What is inside a question's frame, in the parts a question too tall for

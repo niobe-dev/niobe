@@ -1183,43 +1183,65 @@ fn enter_answers_nothing_while_the_top_of_the_question_is_not_drawn() {
     assert!(app.asking().is_some());
 }
 
-/// A call cut to fit its pane is allowed only once a frame has drawn the
-/// whole of it: Enter on "Allow once" would otherwise allow lines the
-/// operator was never shown. Ctrl+T draws it whole, and cut again it is
-/// answered as any other; a refusal needs no reading.
+/// A call cut to fit its pane is allowed only once every row of it has been
+/// on screen: Enter on "Allow once" would otherwise allow lines the operator
+/// was never shown. Ctrl+T draws it whole, but taller than the pane only its
+/// end is on screen, so cutting it again straight away has shown nothing of
+/// its middle; scrolled through, it has, and cut again it is answered as any
+/// other.
 #[test]
-fn a_call_cut_to_fit_is_not_allowed_until_it_has_been_drawn_whole() {
+fn a_call_cut_to_fit_is_not_allowed_until_every_row_of_it_has_been_on_screen() {
     use niobe_tui::app::ASK_QUIET;
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use std::time::Instant;
 
     let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
-    let ctrl_t = KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL);
+    let ctrl = |code| KeyEvent::new(code, KeyModifiers::CONTROL);
     let shown = Instant::now();
+    let mut beat = 0;
+    let mut next = || {
+        beat += 2;
+        alone(shown + ASK_QUIET * beat)
+    };
     let mut app = session_waiting_on_a_long_command().attached();
     app.tick(shown, None);
     let frame = screen(&mut app, 80, 24);
     assert!(frame.contains("more lines"), "{frame}");
 
-    app.on_key_read(key(KeyCode::Enter), alone(shown + ASK_QUIET * 2));
+    app.on_key_read(key(KeyCode::Enter), next());
     assert!(
         !answered(&mut app),
         "a call was allowed with lines of it unseen"
     );
-    assert!(app.asking().is_some());
     let frame = screen(&mut app, 80, 24);
     assert!(
-        frame.contains("part of the call is not on screen"),
+        frame.contains("not all of the call has been on screen"),
         "{frame}"
     );
 
-    app.on_key_read(ctrl_t, alone(shown + ASK_QUIET * 4));
+    app.on_key_read(ctrl(KeyCode::Char('t')), next());
     screen(&mut app, 80, 24);
-    app.on_key_read(ctrl_t, alone(shown + ASK_QUIET * 6));
+    app.on_key_read(ctrl(KeyCode::Char('t')), next());
+    screen(&mut app, 80, 24);
+    app.on_key_read(key(KeyCode::Enter), next());
+    assert!(
+        !answered(&mut app),
+        "a call was allowed with only the end of it drawn whole"
+    );
+
+    app.on_key_read(ctrl(KeyCode::Char('t')), next());
+    screen(&mut app, 80, 24);
+    for _ in 0..10 {
+        app.on_key_read(key(KeyCode::PageUp), next());
+        screen(&mut app, 80, 24);
+    }
+    app.on_key_read(ctrl(KeyCode::End), next());
+    screen(&mut app, 80, 24);
+    app.on_key_read(ctrl(KeyCode::Char('t')), next());
     let frame = screen(&mut app, 80, 24);
     assert!(frame.contains("more lines"), "{frame}");
 
-    app.on_key_read(key(KeyCode::Enter), alone(shown + ASK_QUIET * 8));
+    app.on_key_read(key(KeyCode::Enter), next());
     assert!(answered(&mut app), "a call read whole was not allowed");
 }
 

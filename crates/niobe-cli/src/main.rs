@@ -1682,10 +1682,11 @@ fn trust(yes: bool) -> Result<(), String> {
     for line in &listing {
         say!("{line}");
     }
-    if !yes && !consent::readable(&listing) {
+    let screen = doctor::terminal_size().unwrap_or(consent::SMALLEST_TERMINAL);
+    if !yes && !consent::readable(&listing, screen) {
         return Err(format!(
             "{} is not trusted: what it puts in force is longer than a terminal shows at once, \
-             so not all of it would be read before the question; read the file itself, and \
+             so not all of it would be on screen with the question; read the file itself, and \
              `niobe trust --yes` trusts it as it stands",
             path.display()
         ));

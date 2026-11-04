@@ -302,25 +302,25 @@ pub fn listing(untrusted: &Untrusted) -> Vec<String> {
         .collect()
 }
 
-/// The most rows, at [`READ_COLUMNS`] a row, a listing may take and still be
-/// asked about on the terminal: about what a terminal shows at once and
-/// keeps above it. A listing longer than that has rows the operator has
-/// scrolled past, or that scrolled out of the terminal's memory, by the time
-/// the question is asked.
-const READ_ROWS: usize = 200;
+/// The terminal a listing is measured against where the real one cannot be
+/// read: the smallest a terminal opens at.
+pub const SMALLEST_TERMINAL: (u16, u16) = (80, 24);
 
-/// The width a listing is measured at: the narrowest terminal it is read on.
-const READ_COLUMNS: usize = 80;
-
-/// Whether `listing`, as [`listing`] makes it, is short enough to be read
-/// whole before the question under it: no more than [`READ_ROWS`] rows at
-/// [`READ_COLUMNS`] a row, each line counted by the cells it takes.
-pub fn readable(listing: &[String]) -> bool {
+/// Whether `listing`, as [`listing`] makes it, is on screen whole, with the
+/// question under it, on a terminal of `columns` and `rows`: each line
+/// counted by the rows its cells wrap to, and the question one row more.
+///
+/// Rows above the screen are in the terminal's scrollback, or were, and an
+/// answer given under a listing taller than the screen is given with what
+/// it began with out of sight — where a config chooses what to put first.
+pub fn readable(listing: &[String], (columns, rows): (u16, u16)) -> bool {
+    let columns = usize::from(columns).max(1);
+    let room = usize::from(rows).saturating_sub(1);
     listing
         .iter()
-        .map(|line| niobe_tui::width(line).div_ceil(READ_COLUMNS).max(1))
-        .try_fold(0usize, |rows, more| {
-            Some(rows.saturating_add(more)).filter(|rows| *rows <= READ_ROWS)
+        .map(|line| niobe_tui::width(line).div_ceil(columns).max(1))
+        .try_fold(0usize, |taken, more| {
+            Some(taken.saturating_add(more)).filter(|taken| *taken <= room)
         })
         .is_some()
 }
@@ -612,17 +612,29 @@ backend = "claude"
         let short = untrusted_text(
             "[profiles.a]\nbackend = \"claude\"\nargs = [\"--permission-mode\", \"plan\"]\n",
         );
-        assert!(readable(&listing(&short)));
+        assert!(readable(&listing(&short), SMALLEST_TERMINAL));
 
         let long = untrusted_text(&format!(
             "[profiles.a]\nbackend = \"claude\"\nargs = [\"--permission-mode\", \"plan\"]\n\
              [profiles.b]\nbackend = \"claude\"\nenv = {{ JUNK = \"{}\" }}\n",
-            "x".repeat(READ_ROWS * READ_COLUMNS)
+            "x".repeat(80 * 24)
         ));
-        assert!(!readable(&listing(&long)));
+        assert!(!readable(&listing(&long), SMALLEST_TERMINAL));
+    }
 
-        let many: Vec<String> = (0..=READ_ROWS).map(|n| format!("row {n}")).collect();
-        assert!(!readable(&many));
+    /// Short rows a config adds below the one it wants unread push that row
+    /// above the screen as surely as one long value does: the listing is
+    /// measured against the screen, rows and question together.
+    #[test]
+    fn a_listing_is_readable_only_where_all_of_it_and_the_question_are_on_screen() {
+        let rows = |n: usize| -> Vec<String> { (0..n).map(|n| format!("row {n}")).collect() };
+
+        assert!(readable(&rows(23), (80, 24)));
+        assert!(!readable(&rows(24), (80, 24)));
+        assert!(readable(&rows(39), (100, 40)));
+        assert!(!readable(&rows(40), (100, 40)));
+        assert!(!readable(&["x".repeat(81)], (80, 2)));
+        assert!(readable(&["x".repeat(80)], (80, 2)));
     }
 
     #[test]

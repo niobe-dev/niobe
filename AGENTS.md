@@ -220,8 +220,8 @@ reviewers that encode both, for an agent working in this tree.
   group that Ctrl+O folds, edits to the agent's own notes as one `updated memory` row whose
   lines Ctrl+T shows, and — where `a` is pressed in a side pane — each turn's sub-agent rows
   grouped under a heading per agent — `arguments.rs` lays out a permission question's arguments one key to a row, with
-  the JSON as sent behind Ctrl+T — a question cut to fit its pane allowed only once a frame has
-  drawn it whole — `proposed.rs` draws what a question's call would do where the
+  the JSON as sent behind Ctrl+T — a question cut to fit its pane allowed only once every row of
+  the call, drawn whole, has been on screen — `proposed.rs` draws what a question's call would do where the
   backend read it — an edit as the lines it removes and adds, wrapped and cut where a transcript
   diff is, a file written as the lines it will hold and whether what it held is lost, a command
   once, a plan whole as its markdown — or as written, where that markdown would draw
@@ -347,8 +347,8 @@ reviewers that encode both, for an agent working in this tree.
   the shell under the selected profile, with the session store as its journal — written by
   `journal.rs` on a thread of its own, so a store another process holds locked never holds the
   screen up, and every event it could not keep is reported — and the repository's config as the place a standing answer is kept, and where `niobe trust` shows what a repository's config would put in force, values included,
-  and, once the operator agrees — on the terminal, asked only where the listing is no longer than a
-  terminal shows at once, or with `--yes` — records that it may start a
+  and, once the operator agrees — on the terminal, asked only where the listing and the question fit on
+  the terminal's screen at once, or with `--yes` — records that it may start a
   backend with what it names. `commands.rs` runs the
   operator's `!` commands, off the draw path, each in a session of its own so that nothing it runs can write on the terminal the shell draws on, and stops one when the operator asks — killing it if it will not end — and every one when the session ends, killing what has not ended half a second later; a command is over when its `sh` is, and what it put in the background is still stopped with the session — all but a process that left the command's process group with `setsid`, which nothing is told of and which is left running. `images.rs` fetches the images the operator attaches, off the draw path: the clipboard through `osascript` on macOS and, on Linux, `wl-paste` where `WAYLAND_DISPLAY` is set or `xclip` where `DISPLAY` is, each with no terminal and a deadline, a pasted path relative to the session's directory, and an image too large to send shrunk with `sips` on macOS before it is refused. `memory.rs` reads the selected profile's backend's memory files for the Memory view, through `backend.rs`, on a thread of its own, so a slow lookup never holds a frame. `history.rs` reads the repository's earlier sessions on a thread of its own — the store's prompts and sessions, and the `claude` CLI's own sessions there that no Niobe session carried on and no program started over the CLI's SDK protocol — and the binary opens the session the history dialog chose, as `--resume` would, once the shell that chose it has closed. `alerts.rs` names the notification the terminal shows from `TERM_PROGRAM` and `TERM` — none inside tmux, or on a terminal it does not know — and lays the config's `[notify]` switches over it. `themes.rs` reads the user's own `themes/*.toml` — a base theme and the colours laid over it,
   refused at their key and line, with a pairing drawn on its own colour or text under 3 to 1 — and
