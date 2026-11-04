@@ -607,10 +607,24 @@ const ONE_LINE_BYTES: usize = 4 * 1024 * 1024;
 #[test]
 #[cfg_attr(debug_assertions, ignore = "a frame is timed in an optimised build")]
 fn a_question_for_a_one_line_write_redraws_inside_the_write_budget() {
+    one_line_write_inside_the_budget(&"var a=1;".repeat(ONE_LINE_BYTES / 8));
+}
+
+/// The same line with one control character at its end, which a question
+/// shows rather than drops: what is shown is found a character at a time,
+/// and over four megabytes a walk by grapheme took a second a frame.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "a frame is timed in an optimised build")]
+fn a_question_for_a_one_line_write_holding_a_control_redraws_inside_the_write_budget() {
+    one_line_write_inside_the_budget(&format!("{}\x1b", "var a=1;".repeat(ONE_LINE_BYTES / 8)));
+}
+
+/// Asks about a write of `content`, which is one very long line, and times
+/// its question cut and under Ctrl+T.
+fn one_line_write_inside_the_budget(content: &str) {
     let _alone = ALONE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let content: String = "var a=1;".repeat(ONE_LINE_BYTES / 8);
     let path = "dist/bundle.min.js";
     let mut app = running_session();
     app.apply(&Event::PermissionRequest {
@@ -621,7 +635,7 @@ fn a_question_for_a_one_line_write_redraws_inside_the_write_budget() {
         proposal: Some(niobe_core::Proposal::new(
             niobe_core::Action::Write {
                 path: path.to_owned(),
-                content: content.clone(),
+                content: content.to_owned(),
                 existed: Some(false),
             },
             ["file_path", "content"],

@@ -14,6 +14,8 @@
 
 use std::borrow::Cow;
 
+use niobe_tui::controls_shown;
+
 /// `text` with every character that would act on the terminal rather than show
 /// replaced by one that shows where it was: a C0 control by its Control
 /// Pictures glyph (`␛` for an escape, `␇` for a bell), DEL by `␡`, and a C1
@@ -32,11 +34,26 @@ pub fn printable(text: &str) -> Cow<'_, str> {
 /// For a value the operator is asked to agree to: a value that breaks the line
 /// it is printed on can print lines of its own under it, which read as rows of
 /// the listing or as niobe's own words.
+///
+/// So is every character that draws as nothing yet carries text, as the
+/// shell's own question shows it: a value spelled in tags after the words it
+/// shows would be agreed to unread, and the CLI is handed all of it.
 pub fn on_one_line(text: &str) -> Cow<'_, str> {
-    if !text.chars().any(|c| matches!(c, '\n' | '\t') || acts(c)) {
-        return Cow::Borrowed(text);
+    // What the shell's own question shows, which the listing must agree
+    // with, and the direction marks the shell takes out of every frame.
+    let shown = controls_shown(text);
+    if !shown.contains(is_direction_mark) {
+        return shown;
     }
-    Cow::Owned(text.chars().map(picture).collect())
+    Cow::Owned(
+        shown
+            .chars()
+            .map(|c| match is_direction_mark(c) {
+                true => '\u{fffd}',
+                false => c,
+            })
+            .collect(),
+    )
 }
 
 /// `value` as compact JSON in which every character that would act on the
@@ -114,6 +131,15 @@ mod tests {
         assert_eq!(printable("x\u{1b}]0;PWNED\u{7}"), "x␛]0;PWNED␇");
         assert_eq!(printable("m\u{1b}[2J"), "m␛[2J");
         assert_eq!(printable("a\rb\u{7f}"), "a␍b␡");
+    }
+
+    #[test]
+    fn a_value_on_one_line_shows_where_it_holds_text_that_draws_as_nothing() {
+        assert_eq!(
+            on_one_line("be careful\u{e0020}\u{e0072}\u{200b}"),
+            "be careful\u{fffd}\u{fffd}\u{fffd}"
+        );
+        assert_eq!(on_one_line("a\u{200d}b"), "a\u{fffd}b");
     }
 
     #[test]

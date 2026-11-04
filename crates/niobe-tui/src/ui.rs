@@ -654,7 +654,7 @@ fn trust_grants(
 ) -> Vec<Line<'static>> {
     let name_width = grants
         .iter()
-        .map(|(name, _)| text::width(name))
+        .map(|(name, _)| text::width(&text::controls_shown(name)))
         .max()
         .unwrap_or(0)
         .min(TRUST_NAME_COLUMNS);
@@ -669,8 +669,10 @@ fn trust_grants(
                 .into_iter()
                 .enumerate()
                 .map(|(i, part)| {
+                    // A profile's name is any key the file wrote, and is
+                    // agreed to with the rest of the row.
                     let name = match i {
-                        0 => text::truncate(name, name_width),
+                        0 => text::truncate(&text::controls_shown(name), name_width),
                         _ => String::new(),
                     };
                     Line::from(vec![

@@ -221,7 +221,7 @@ reviewers that encode both, for an agent working in this tree.
   backend read it — an edit as the lines it removes and adds, wrapped and cut where a transcript
   diff is, a file written as the lines it will hold and whether what it held is lost, a command
   once, a plan whole as its markdown — or as written, where that markdown would draw
-  some of its words as nothing — with no standing answer offered and its refusal named
+  some of its words as nothing or the plan holds a control or text that draws as nothing — with no standing answer offered and its refusal named
   "keep planning" — and the arguments that reading does not cover by key, `tags.rs` names each sub-agent by one short word of the kind of agent
   it was asked to be, numbered where two would read alike, `turns.rs` draws the rule under a
   finished turn with what that turn did and spent — its sub-agents and calls, its tokens, how far

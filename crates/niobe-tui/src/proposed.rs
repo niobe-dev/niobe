@@ -137,8 +137,15 @@ impl Proposed {
             // asked about with no text is said to have none, rather than left
             // a question with nothing above its answers. One whose markdown
             // would draw some of its words as nothing is drawn as written,
-            // since the agent carries out every word of it.
-            match (plan.trim().is_empty(), markdown::hides_text(plan)) {
+            // since the agent carries out every word of it — and so is one
+            // holding a control or text that draws as nothing, which
+            // markdown would drop unseen and the text layer shows.
+            let hidden = markdown::hides_text(plan)
+                || matches!(
+                    text::controls_shown_in_rows(plan),
+                    std::borrow::Cow::Owned(_)
+                );
+            match (plan.trim().is_empty(), hidden) {
                 (true, _) => rows.extend(
                     text::wrap(NO_PLAN, width)
                         .into_iter()

