@@ -87,10 +87,10 @@ impl Alerts {
 }
 
 /// `text` without the characters that would act on the terminal rather than
-/// show, or end an `OSC 777` field early.
+/// show, end an `OSC 777` field early, or turn the text after them around.
 fn printable(text: &str) -> String {
     text.chars()
-        .filter(|c| !c.is_control() && *c != ';')
+        .filter(|&c| !c.is_control() && c != ';' && !crate::ui::is_direction_mark(c))
         .collect()
 }
 
@@ -147,6 +147,25 @@ mod tests {
         assert_eq!(
             osc777.sequence(Alert::NeedsYou, "\x1b"),
             "\x1b]777;notify;niobe;waiting on you\x07"
+        );
+    }
+
+    /// A directory named with a right-to-left override would turn the rest
+    /// of the notification around, so it reads as something else.
+    #[test]
+    fn a_repository_name_cannot_turn_the_notification_around() {
+        let osc9 = Alerts {
+            bell: false,
+            notification: Some(Notification::Osc9),
+        };
+
+        assert_eq!(
+            osc9.sequence(Alert::NeedsYou, "shop\u{202e}\u{2067}"),
+            Alerts {
+                bell: false,
+                notification: Some(Notification::Osc9),
+            }
+            .sequence(Alert::NeedsYou, "shop")
         );
     }
 }
