@@ -88,7 +88,11 @@ fn schedule(
         .map(|(event, at)| {
             if let (Some(before), Some(now)) = (last, at) {
                 let gap = now.duration_since(before).unwrap_or_default();
-                due = due.saturating_add(gap.div_f64(speed).min(LONGEST_GAP));
+                // A gap divided by a speed close enough to zero is longer
+                // than a duration holds, and `div_f64` panics on it.
+                let waited = Duration::try_from_secs_f64(gap.as_secs_f64() / speed)
+                    .map_or(LONGEST_GAP, |waited| waited.min(LONGEST_GAP));
+                due = due.saturating_add(waited);
             }
             last = last.max(at);
             (event, due)
@@ -129,6 +133,20 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// A speed as slow as a float can be makes a gap longer than a duration
+    /// can hold, which is the longest gap a replay waits, not a panic.
+    #[test]
+    fn a_speed_slow_enough_to_overflow_a_gap_waits_the_longest_gap() {
+        let speed = Speed::parse("1e-300").expect("a positive, finite speed");
+
+        let due: Vec<Duration> = schedule(vec![(said("a"), at(0)), (said("b"), at(2))], speed)
+            .into_iter()
+            .map(|(_, due)| due)
+            .collect();
+
+        assert_eq!(due, [Duration::ZERO, LONGEST_GAP]);
     }
 
     #[test]
