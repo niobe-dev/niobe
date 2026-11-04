@@ -2068,6 +2068,40 @@ fn trusting_from_a_pipe_without_yes_shows_what_the_file_sets_and_records_nothing
     assert!(stdout(&setup.run(&["profiles"])).contains("not trusted"));
 }
 
+/// A listing longer than a terminal shows at once has scrolled what it
+/// begins with away by the time the question under it is asked, so it is not
+/// asked: the file is read, and `--yes` trusts it.
+#[test]
+fn a_listing_too_long_to_read_before_the_question_is_not_asked_about() {
+    let setup = Configured::new(
+        USER_CONFIG,
+        &format!(
+            "[profiles.a]\nbackend = \"claude\"\nargs = [\"--permission-mode\", \"plan\"]\n\
+             [profiles.b]\nbackend = \"claude\"\nenv = {{ JUNK = \"{}\" }}\n",
+            "x".repeat(500_000)
+        ),
+    );
+
+    let output = setup.run(&["trust"]);
+
+    assert!(!output.status.success());
+    let said = stderr(&output);
+    assert!(
+        said.contains("longer than a terminal shows at once"),
+        "{said}"
+    );
+    assert!(said.contains("niobe trust --yes"), "{said}");
+    assert!(
+        !setup
+            .user
+            .path()
+            .join("niobe")
+            .join("trusted.list")
+            .exists(),
+        "nothing was recorded"
+    );
+}
+
 /// The question whether to trust a repository's config is asked on a
 /// terminal only: a piped run has no one to answer it, and trusts nothing.
 #[test]

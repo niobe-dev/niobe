@@ -1669,16 +1669,26 @@ fn consented(root: &Path, asked: &Asked) -> Result<Option<config::Loaded>, Strin
 /// uses.
 ///
 /// `yes` is the operator agreeing on the command line. Without it they are
-/// asked on the terminal, and where standard input is not one nothing is
-/// recorded: a trust nobody was shown the values of is the one the question
+/// asked on the terminal — only where the listing is short enough to have
+/// been read whole above the question — and where standard input is not one
+/// nothing is recorded: a trust nobody was shown the values of is the one the question
 /// in the shell exists to prevent. What is recorded is the text the listing
 /// was made from, so a file changed while the question waited is not trusted
 /// unread.
 fn trust(yes: bool) -> Result<(), String> {
     let (path, text) = repo_config()?;
     let untrusted = config::as_written(&path, text)?;
-    for line in consent::listing(&untrusted) {
+    let listing = consent::listing(&untrusted);
+    for line in &listing {
         say!("{line}");
+    }
+    if !yes && !consent::readable(&listing) {
+        return Err(format!(
+            "{} is not trusted: what it puts in force is longer than a terminal shows at once, \
+             so not all of it would be read before the question; read the file itself, and \
+             `niobe trust --yes` trusts it as it stands",
+            path.display()
+        ));
     }
     if !yes && !agreed(&path)? {
         say!("{} is not trusted; nothing was recorded", path.display());

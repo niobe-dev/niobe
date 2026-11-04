@@ -302,6 +302,29 @@ pub fn listing(untrusted: &Untrusted) -> Vec<String> {
         .collect()
 }
 
+/// The most rows, at [`READ_COLUMNS`] a row, a listing may take and still be
+/// asked about on the terminal: about what a terminal shows at once and
+/// keeps above it. A listing longer than that has rows the operator has
+/// scrolled past, or that scrolled out of the terminal's memory, by the time
+/// the question is asked.
+const READ_ROWS: usize = 200;
+
+/// The width a listing is measured at: the narrowest terminal it is read on.
+const READ_COLUMNS: usize = 80;
+
+/// Whether `listing`, as [`listing`] makes it, is short enough to be read
+/// whole before the question under it: no more than [`READ_ROWS`] rows at
+/// [`READ_COLUMNS`] a row, each line counted by the cells it takes.
+pub fn readable(listing: &[String]) -> bool {
+    listing
+        .iter()
+        .map(|line| niobe_tui::width(line).div_ceil(READ_COLUMNS).max(1))
+        .try_fold(0usize, |rows, more| {
+            Some(rows.saturating_add(more)).filter(|rows| *rows <= READ_ROWS)
+        })
+        .is_some()
+}
+
 /// One row, its name and value each on one line with every control in it
 /// shown, so that neither can print lines of its own under it.
 fn row(name: &str, value: String) -> (String, String) {
@@ -580,6 +603,26 @@ backend = "claude"
             question(&untrusted).grants,
             [("p".to_owned(), "env A=\"1, B=2\", C=\"\"".to_owned())]
         );
+    }
+
+    /// A value long enough to scroll the rows above it off the terminal
+    /// makes the listing one the operator cannot read before the question.
+    #[test]
+    fn a_listing_longer_than_a_terminal_shows_is_not_readable_before_the_question() {
+        let short = untrusted_text(
+            "[profiles.a]\nbackend = \"claude\"\nargs = [\"--permission-mode\", \"plan\"]\n",
+        );
+        assert!(readable(&listing(&short)));
+
+        let long = untrusted_text(&format!(
+            "[profiles.a]\nbackend = \"claude\"\nargs = [\"--permission-mode\", \"plan\"]\n\
+             [profiles.b]\nbackend = \"claude\"\nenv = {{ JUNK = \"{}\" }}\n",
+            "x".repeat(READ_ROWS * READ_COLUMNS)
+        ));
+        assert!(!readable(&listing(&long)));
+
+        let many: Vec<String> = (0..=READ_ROWS).map(|n| format!("row {n}")).collect();
+        assert!(!readable(&many));
     }
 
     #[test]
