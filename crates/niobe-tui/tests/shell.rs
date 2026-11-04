@@ -1245,6 +1245,50 @@ fn a_call_cut_to_fit_is_not_allowed_until_every_row_of_it_has_been_on_screen() {
     assert!(answered(&mut app), "a call read whole was not allowed");
 }
 
+/// A call whose arguments the layout cuts at their rows — "… N more lines"
+/// — fits its pane and still leaves lines out: it is allowed only once
+/// Ctrl+T has had every row of the arguments as sent on screen.
+#[test]
+fn a_call_whose_arguments_are_cut_at_their_rows_is_not_allowed_unread() {
+    use niobe_tui::app::ASK_QUIET;
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use std::time::Instant;
+
+    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+    let ctrl_t = KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL);
+    let mut app = running_session();
+    let sql = format!("SELECT 1;{}\nDROP TABLE users;", "\n-- pad".repeat(20));
+    app.apply(&Event::PermissionRequest {
+        id: "toolu_query".into(),
+        tool: "mcp__db__query".to_owned(),
+        input: serde_json::json!({ "database": "analytics", "sql": sql }).to_string(),
+        proposal: None,
+        target: None,
+        reason: None,
+        agent: None,
+    });
+    let mut app = app.attached();
+    let shown = Instant::now();
+    app.tick(shown, None);
+    let frame = screen(&mut app, 100, 40);
+    assert!(frame.contains("more lines"), "{frame}");
+    assert!(!frame.contains("DROP TABLE"), "{frame}");
+
+    app.on_key_read(key(KeyCode::Enter), alone(shown + ASK_QUIET * 2));
+    assert!(
+        !answered(&mut app),
+        "a call was allowed with lines of it unseen"
+    );
+
+    app.on_key_read(ctrl_t, alone(shown + ASK_QUIET * 4));
+    let frame = screen(&mut app, 100, 40);
+    assert!(frame.contains("DROP TABLE"), "{frame}");
+    app.on_key_read(ctrl_t, alone(shown + ASK_QUIET * 6));
+    screen(&mut app, 100, 40);
+    app.on_key_read(key(KeyCode::Enter), alone(shown + ASK_QUIET * 8));
+    assert!(answered(&mut app), "a call read whole was not allowed");
+}
+
 /// Refusing a call cut to fit needs no reading of it.
 #[test]
 fn a_call_cut_to_fit_can_be_refused_unread() {

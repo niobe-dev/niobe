@@ -220,8 +220,9 @@ reviewers that encode both, for an agent working in this tree.
   group that Ctrl+O folds, edits to the agent's own notes as one `updated memory` row whose
   lines Ctrl+T shows, and — where `a` is pressed in a side pane — each turn's sub-agent rows
   grouped under a heading per agent — `arguments.rs` lays out a permission question's arguments one key to a row, with
-  the JSON as sent behind Ctrl+T — a question cut to fit its pane allowed only once every row of
-  the call, drawn whole, has been on screen — `proposed.rs` draws what a question's call would do where the
+  the JSON as sent behind Ctrl+T — a question cut to fit its pane, or drawn with lines its layout
+  leaves out, allowed only once every row of the call, drawn whole, has been on screen clear of the
+  way back down — `proposed.rs` draws what a question's call would do where the
   backend read it — an edit as the lines it removes and adds, wrapped and cut where a transcript
   diff is, a file written as the lines it will hold and whether what it held is lost, a command
   once, a plan whole as its markdown — or as written, where that markdown would draw

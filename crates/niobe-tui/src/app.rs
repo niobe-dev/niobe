@@ -6940,7 +6940,9 @@ impl App {
     fn scroll_focused(&mut self, how: Scroll) {
         match self.focus() {
             Focus::Session => {
-                let page = self.viewport_lines.max(1);
+                // A page keeps one row of the last, as a pager does: the
+                // last row is where the way back down is drawn over.
+                let page = self.viewport_lines.saturating_sub(1).max(1);
                 match how {
                     Scroll::PageUp => self.scroll_up(page),
                     Scroll::PageDown => self.scroll_down(page),
@@ -11646,10 +11648,11 @@ mod tests {
         );
         assert_eq!(app.pane_scroll(Pane::Activity), 0);
 
-        // And with the keyboard back, the transcript pages as it always has.
+        // And with the keyboard back, the transcript pages as it always has,
+        // keeping one row of the last page.
         app.on_key(key(KeyCode::Esc));
         app.on_key(key(KeyCode::PageUp));
-        assert_eq!(app.scroll(), 60);
+        assert_eq!(app.scroll(), 61);
         assert_eq!(app.pane_scroll(Pane::Changes), 0);
     }
 
@@ -14675,9 +14678,10 @@ mod tests {
         app.apply(&prompt(Some("rm -rf build")));
         assert!(!app.follows_tail(), "the question yanked the view");
 
-        // Scrolling still reads the work that led to the question.
+        // Scrolling still reads the work that led to the question, a page
+        // keeping one row of the last.
         app.on_key(key(KeyCode::PageUp));
-        assert_eq!(app.scroll(), 30);
+        assert_eq!(app.scroll(), 31);
 
         app.on_key(key(KeyCode::Enter));
         assert!(app.follows_tail());

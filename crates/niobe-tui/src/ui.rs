@@ -2208,8 +2208,12 @@ fn draw_transcript(
     app.drew_transcript(area, above);
     let room = height.saturating_sub(visible.len());
     app.drew_question_top(question.is_empty() || (start..start + height).contains(&above));
-    let shown_from = start.saturating_sub(above);
-    let shown = shown_from..shown_from.saturating_add(room).min(question.len());
+    let shown = question_on_screen(
+        (start, height),
+        (above, question.len()),
+        visible.len(),
+        app.follows_tail(),
+    );
     app.drew_question(cut, width, call, shown);
     visible.extend(
         question
@@ -3326,6 +3330,28 @@ fn empty_transcript(attached: bool, theme: &Theme) -> Vec<Line<'static>> {
     ]
 }
 
+/// Which rows of a question of `rows` rows, starting `above` rows into the
+/// transcript, a pane of `height` rows scrolled to `start` has clear on
+/// screen, under the `transcript` rows of what came before it.
+///
+/// Scrolled back — the view not following the newest line — the way back
+/// down is drawn over the pane's last row, so whatever of the question is
+/// there is not counted as read.
+fn question_on_screen(
+    (start, height): (usize, usize),
+    (above, rows): (usize, usize),
+    transcript: usize,
+    following: bool,
+) -> std::ops::Range<usize> {
+    let room = height.saturating_sub(transcript);
+    let from = start.saturating_sub(above);
+    let mut shown = from..from.saturating_add(room).min(rows);
+    if !following && transcript + shown.len() >= height {
+        shown.end = shown.end.saturating_sub(1).max(shown.start);
+    }
+    shown
+}
+
 /// A permission prompt as the transcript's last entry: framed, indented under
 /// the gutter, with the question's labels on its top border, its numbered
 /// answers, and the keys that work in whatever state it is in.
@@ -3357,9 +3383,15 @@ fn question_lines(
     let fits = app.diffs_open() || body.len() + framing <= height;
     // The call's rows, counted from the frame's top border.
     let call = 1 + body.head.len()..1 + body.head.len() + body.call.rows.len();
+    // A call drawn with rows that stand for lines left out — an argument cut
+    // at its rows, a diff at twenty — is cut as surely as one cut to fit.
+    let elided = !app.diffs_open() && !body.call.markers.is_empty();
     let (body, cut) = match fits {
-        true => (body.whole(), false),
-        false => body.cut(height.saturating_sub(framing - 1), inner, theme),
+        true => (body.whole(), elided),
+        false => {
+            let (lines, cut) = body.cut(height.saturating_sub(framing - 1), inner, theme);
+            (lines, cut || elided)
+        }
     };
 
     let mut lines = vec![question_top(app, ask, outer, theme)];
@@ -3581,9 +3613,8 @@ fn question_call(app: &App, ask: &Ask, inner: usize, theme: &Theme) -> crate::pr
     }
     let Some(target) = &ask.target else {
         return match open {
-            false => crate::arguments::lines(&ask.input, inner, theme)
-                .filter(|rows| !rows.is_empty())
-                .map_or_else(|| Call::of(bold_rows(&ask.input, inner, theme)), Call::of),
+            false => by_key(&ask.input, inner, theme)
+                .unwrap_or_else(|| Call::of(bold_rows(&ask.input, inner, theme))),
             true => Call::of(bold_rows(&ask.input, inner, theme)),
         };
     };
@@ -3623,6 +3654,22 @@ fn question_call(app: &App, ask: &Ask, inner: usize, theme: &Theme) -> crate::pr
         rows: call,
         markers,
     }
+}
+
+/// A call's arguments by key, `inner` columns wide, with the rows that say
+/// how many lines the layout left out marked as such, or `None` where the
+/// input is not a JSON object with a field to draw.
+fn by_key(input: &str, inner: usize, theme: &Theme) -> Option<crate::proposed::Call> {
+    let fields = crate::arguments::fields_without(input, |_, _| false)?;
+    let (rows, hidden, marker_rows) = crate::arguments::rows(&fields, inner, theme);
+    if rows.is_empty() {
+        return None;
+    }
+    let markers = match hidden {
+        0 => Vec::new(),
+        _ => vec![(rows.len().saturating_sub(marker_rows), marker_rows, hidden)],
+    };
+    Some(crate::proposed::Call { rows, markers })
 }
 
 /// The most rows of the arguments as sent that are drawn behind Ctrl+T: they
@@ -6639,6 +6686,19 @@ pub(crate) fn compact(n: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Scrolled back, the pane's last row is under the way back down, and a
+    /// row of the question there is not read; following the newest line,
+    /// nothing is drawn over it.
+    #[test]
+    fn a_question_row_under_the_way_down_is_not_counted_as_on_screen() {
+        assert_eq!(question_on_screen((10, 18), (0, 100), 0, false), 10..27);
+        assert_eq!(question_on_screen((10, 18), (0, 100), 0, true), 10..28);
+        assert_eq!(question_on_screen((0, 18), (5, 100), 5, false), 0..12);
+        assert_eq!(question_on_screen((0, 18), (5, 4), 5, false), 0..4);
+        // Ending above the pane's last row, nothing of it is under the way down.
+        assert_eq!(question_on_screen((95, 18), (0, 100), 0, false), 95..100);
+    }
     use niobe_core::event::UsageWindows;
 
     #[test]

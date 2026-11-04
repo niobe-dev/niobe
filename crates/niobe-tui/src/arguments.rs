@@ -38,23 +38,6 @@ const STRING_ROWS: usize = 3;
 /// How far a nested key is indented under the key it belongs to.
 const INDENT: usize = 2;
 
-/// `input`'s arguments, one key to a row, `width` cells wide; `None` where it
-/// is not a JSON object, which is then shown as it is.
-pub(crate) fn lines(input: &str, width: usize, theme: &Theme) -> Option<Vec<Line<'static>>> {
-    lines_except(input, width, theme, |_| false)
-}
-
-/// [`lines`], leaving out the keys `shown` says are already drawn elsewhere.
-pub(crate) fn lines_except(
-    input: &str,
-    width: usize,
-    theme: &Theme,
-    shown: impl Fn(&str) -> bool,
-) -> Option<Vec<Line<'static>>> {
-    let fields = fields_without(input, |key, _| shown(key))?;
-    Some(rows(&fields, width, theme).0)
-}
-
 /// `input`'s arguments but for the fields `shown` says are drawn elsewhere,
 /// or `None` where it is not a JSON object.
 ///
@@ -79,21 +62,48 @@ pub(crate) fn rows(
     width: usize,
     theme: &Theme,
 ) -> (Vec<Line<'static>>, usize, usize) {
-    let mut rows = Vec::new();
-    object(fields, 0, width, theme, &mut rows);
+    let mut laid = Laid::default();
+    object(fields, 0, width, theme, &mut laid);
+    let Laid { mut rows, cut } = laid;
+    // A string cut at its own rows leaves lines out as surely as the layout
+    // cut at its rows does, and is counted with what is left out: a caller
+    // marks the call as cut where anything is, though no row of its own says
+    // how many lines a string held back but the string's.
     if rows.len() <= ROWS + 1 {
-        return (rows, 0, 0);
+        return (rows, cut, 0);
     }
-    let hidden = rows.len() - ROWS;
+    let over = rows.len() - ROWS;
     rows.truncate(ROWS);
-    let said = format!("… {hidden} more lines · Ctrl+T shows the arguments as sent");
+    let said = format!("… {over} more lines · Ctrl+T shows the arguments as sent");
     rows.extend(
         text::wrap(&said, width.max(1))
             .into_iter()
             .map(|line| Line::from(Span::styled(line, Style::new().fg(theme.hot)))),
     );
     let marker_rows = rows.len() - ROWS;
-    (rows, hidden, marker_rows)
+    (rows, over.saturating_add(cut), marker_rows)
+}
+
+/// The rows laid out so far, and how many lines of the strings among them
+/// were cut at [`STRING_ROWS`] and counted rather than drawn.
+#[derive(Default)]
+pub(crate) struct Laid {
+    rows: Vec<Line<'static>>,
+    cut: usize,
+}
+
+impl std::ops::Deref for Laid {
+    type Target = Vec<Line<'static>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.rows
+    }
+}
+
+impl std::ops::DerefMut for Laid {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.rows
+    }
 }
 
 /// Where a key is drawn among its siblings, and whether it recedes.
@@ -140,7 +150,7 @@ fn object(
     indent: usize,
     width: usize,
     theme: &Theme,
-    rows: &mut Vec<Line<'static>>,
+    rows: &mut Laid,
 ) {
     let mut keys: Vec<(&String, &Value)> = fields.iter().collect();
     keys.sort_by_key(|(key, value)| Rank::of(key, value));
@@ -150,14 +160,7 @@ fn object(
 }
 
 /// One key and what it holds.
-fn field(
-    key: &str,
-    value: &Value,
-    indent: usize,
-    width: usize,
-    theme: &Theme,
-    rows: &mut Vec<Line<'static>>,
-) {
+fn field(key: &str, value: &Value, indent: usize, width: usize, theme: &Theme, rows: &mut Laid) {
     let dim = Rank::of(key, value) == Rank::Detail;
     match value {
         // Quoted as JSON, since nothing else would show it: a bare `key:` is
@@ -194,13 +197,7 @@ fn field(
 /// A list's items under its key: an object's keys where the list holds one
 /// item, each item numbered where it holds more, and a plain value after a
 /// dash.
-fn list(
-    items: &[Value],
-    indent: usize,
-    width: usize,
-    theme: &Theme,
-    rows: &mut Vec<Line<'static>>,
-) {
+fn list(items: &[Value], indent: usize, width: usize, theme: &Theme, rows: &mut Laid) {
     let numbered = items.len() > 1;
     for (at, item) in items.iter().enumerate() {
         match item {
@@ -256,7 +253,7 @@ fn pair(
     width: usize,
     dim: bool,
     theme: &Theme,
-    rows: &mut Vec<Line<'static>>,
+    rows: &mut Laid,
 ) {
     let head = format!("{}:", text::controls_shown(key));
     let lead = " ".repeat(indent);
@@ -287,7 +284,7 @@ fn pair(
 
 /// A string's own lines, each wrapped, at most [`STRING_ROWS`] rows of them
 /// and then how many rows are left.
-fn string(said: &str, indent: usize, width: usize, theme: &Theme, rows: &mut Vec<Line<'static>>) {
+fn string(said: &str, indent: usize, width: usize, theme: &Theme, rows: &mut Laid) {
     let room = width.saturating_sub(indent).max(1);
     let wrapped = text::wrap_keeping_spaces(&text::controls_shown_in_rows(said.trim_end()), room);
     let lead = " ".repeat(indent);
@@ -303,6 +300,7 @@ fn string(said: &str, indent: usize, width: usize, theme: &Theme, rows: &mut Vec
     }
     let hidden = wrapped.len() - shown;
     if hidden > 0 {
+        rows.cut = rows.cut.saturating_add(hidden);
         rows.push(Line::from(vec![
             Span::raw(lead),
             Span::styled(
@@ -314,7 +312,7 @@ fn string(said: &str, indent: usize, width: usize, theme: &Theme, rows: &mut Vec
 }
 
 /// One plain row, wrapped under itself.
-fn line(said: &str, indent: usize, width: usize, theme: &Theme, rows: &mut Vec<Line<'static>>) {
+fn line(said: &str, indent: usize, width: usize, theme: &Theme, rows: &mut Laid) {
     let room = width.saturating_sub(indent).max(1);
     let lead = " ".repeat(indent);
     for wrapped in text::wrap_keeping_spaces(said, room) {
@@ -328,6 +326,13 @@ fn line(said: &str, indent: usize, width: usize, theme: &Theme, rows: &mut Vec<L
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `input`'s arguments, one key to a row, `width` cells wide; `None`
+    /// where it is not a JSON object.
+    fn lines(input: &str, width: usize, theme: &Theme) -> Option<Vec<Line<'static>>> {
+        let fields = fields_without(input, |_, _| false)?;
+        Some(rows(&fields, width, theme).0)
+    }
     use crate::theme::CYBER;
 
     fn drawn(input: &str, width: usize) -> Vec<String> {
