@@ -90,13 +90,7 @@ fn grants(config: &Config, replaces: &[String], attached: &[Attached]) -> Vec<(S
             .iter()
             .filter(|a| !a.settings && a.profiles.contains(name))
         {
-            let outside = match &file.text {
-                Contents::Outside(real) => {
-                    format!(", outside the repository at {}, not read", real.display())
-                }
-                Contents::Text(_) | Contents::Unreadable(_) => String::new(),
-            };
-            rows.push(row(name, format!("file {}{outside}", file.path.display())));
+            rows.push(row(name, named_file(file)));
         }
         if let Some(command) = profile.auth_refresh() {
             rows.push(row(name, format!("auth_refresh {command}")));
@@ -106,6 +100,26 @@ fn grants(config: &Config, replaces: &[String], attached: &[Attached]) -> Vec<(S
         }
     }
     rows
+}
+
+/// The row for a file or directory a profile names other than as its
+/// settings: where it is, and what of it is agreed to.
+fn named_file(file: &Attached) -> String {
+    let path = file.path.display();
+    match &file.text {
+        Contents::Outside(real) => {
+            format!(
+                "file {path}, outside the repository at {}, not read",
+                real.display()
+            )
+        }
+        Contents::Directory(manifest) => match manifest.files {
+            1 => format!("directory {path}, as the file under it is now"),
+            files => format!("directory {path}, as the {files} files under it are now"),
+        },
+        Contents::Unreadable(error) => format!("file {path} cannot be read: {error}"),
+        Contents::Text(_) => format!("file {path}"),
+    }
 }
 
 /// The rows for a settings file: the environment it sets with its values, a
@@ -125,6 +139,12 @@ fn settings_rows(profile: &str, file: &Attached) -> Vec<(String, String)> {
                     "settings file is outside the repository, at {}, and is not read",
                     real.display()
                 ),
+            )];
+        }
+        Contents::Directory(_) => {
+            return vec![row(
+                profile,
+                "settings file is a directory, which the CLI cannot start under".to_owned(),
             )];
         }
         Contents::Unreadable(error) => {

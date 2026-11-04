@@ -28,6 +28,7 @@ mod headless;
 mod history;
 mod images;
 mod journal;
+mod manifest;
 mod memory;
 mod overview;
 mod playback;

@@ -351,7 +351,17 @@ reviewers that encode both, for an agent working in this tree.
   directory only, never a repository's. `desktop.rs` copies what the operator selected with `pbcopy`, or `wl-copy` where `WAYLAND_DISPLAY` is set and `xclip` or `xsel` where `DISPLAY` is, and opens a clicked link with `open` or `xdg-open`, each with no terminal, in a process group of its own and not waited on; a memory file the operator asks to edit goes to `$VISUAL` or `$EDITOR` — or `open -t` on macOS and `vi` elsewhere — on the terminal the shell lends it, waited on — the binary stopping whenever the editor stops, so that a Ctrl+Z in it is a stop the operator's job-control shell sees and an `fg` continues — and never to `open` or `xdg-open`, which run a `.command` or `.desktop` file rather than show it. `reaper.rs` is a `sh` in a process group of its own, told every group the session starts — the CLI's and each `!` command's — which ends them when the pipe the session holds to it closes, a `!` command's own `sh` killed outright first, as a quit kills it, so that a line whose `sh` traps SIGTERM runs no further step, so a session killed outright leaves nothing in them running; the CLI's group is let go of once it is seen empty, as each command's is. `consent.rs` builds that trust question, and the rows `niobe trust` prints, from the file as written, values included, since
   the operator is deciding on them — a file a profile names outside the repository is named where it really is and never
   read, since what the operator keeps there is theirs and not the clone's — and records the answer as `niobe trust` does, for the text
-  that was shown. `backend.rs` is the only module
+  that was shown. `manifest.rs` is a directory a repository's profile names — a plugin
+  directory an argument hands the CLI, its configuration directory or a `PATH` entry a variable
+  names — as the trust record agrees to it: each file under it by its SHA-256 and each link by where it
+  really leads — what it reaches hashed where that is in the repository, never read where it is
+  not — within one budget for everything a config names, past which it is not agreed to; with the
+  files the commands of every JSON file a profile names or such a directory holds run — a settings
+  file's hooks, an MCP config's servers, a plugin's hooks, read from the keys the CLI runs and no
+  others — and the directories their globs list, a pull that changes any of them puts the trust
+  question back; a file the CLI reads commands from there that cannot be read, or the repository's
+  root itself named as such a directory, leaves the config untrusted. A file such a script reads or
+  runs in turn is not covered. `backend.rs` is the only module
   that names a bridge, so it is also where the `claude` CLI's own sessions are found and read in,
   and where the words a terse conversation, and one asked for its decisions, append to the
   CLI's system prompt are written.

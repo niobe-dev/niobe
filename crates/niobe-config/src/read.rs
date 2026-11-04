@@ -40,6 +40,49 @@ pub fn bytes(path: &Path) -> io::Result<Vec<u8>> {
     bounded(path, "")
 }
 
+/// The SHA-256 of the file at `path`, in lowercase hex, read a block at a
+/// time on the terms [`text`] reads a file — only a regular file, without
+/// waiting on it — and only where it holds no more than `limit` bytes.
+///
+/// For a file a trusted config names that need not be text or small, such as
+/// one under a directory of plugins: what is agreed to is what it holds, and
+/// it is never held whole.
+pub fn digest(path: &Path, limit: u64) -> io::Result<String> {
+    use sha2::{Digest as _, Sha256};
+    use std::fmt::Write as _;
+
+    let file = open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "not a regular file",
+        ));
+    }
+    let mut hasher = Sha256::new();
+    let mut reader = file.take(limit.saturating_add(1));
+    let mut block = [0u8; 64 * 1024];
+    let mut read = 0u64;
+    loop {
+        let n = reader.read(&mut block)?;
+        if n == 0 {
+            break;
+        }
+        read = read.saturating_add(u64::try_from(n).unwrap_or(u64::MAX));
+        hasher.update(block.get(..n).unwrap_or_default());
+    }
+    if read > limit {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("larger than {limit} bytes"),
+        ));
+    }
+    let mut hex = String::with_capacity(64);
+    for byte in hasher.finalize() {
+        let _ = write!(hex, "{byte:02x}");
+    }
+    Ok(hex)
+}
+
 /// The file's bytes, or an error that says why not; `too_large` ends the
 /// message for a file past [`LIMIT`].
 fn bounded(path: &Path, too_large: &str) -> io::Result<Vec<u8>> {
@@ -100,6 +143,44 @@ mod tests {
             .recv_timeout(FAST)
             .expect("the read returns without waiting on the file")
             .expect_err("the file is refused")
+    }
+
+    #[test]
+    fn a_files_digest_is_the_sha256_of_what_it_holds_up_to_the_limit() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let path = dir.path().join("plugin.js");
+        std::fs::write(&path, "abc").expect("the file is written");
+
+        // The SHA-256 of `abc`, from FIPS 180-2's own example.
+        assert_eq!(
+            digest(&path, 3).expect("it reads"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(
+            digest(&path, 2).expect_err("past the limit").to_string(),
+            "larger than 2 bytes"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_has_no_digest_and_is_not_waited_on() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let path = dir.path().join("plugin.js");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .expect("mkfifo runs");
+        assert!(made.success(), "the FIFO is made");
+        let (sender, received) = std::sync::mpsc::channel();
+        std::thread::spawn(move || sender.send(digest(&path, LIMIT)));
+
+        let refused = received
+            .recv_timeout(FAST)
+            .expect("the read returns without waiting on the file")
+            .expect_err("the file is refused");
+
+        assert_eq!(refused.to_string(), "not a regular file");
     }
 
     #[test]
