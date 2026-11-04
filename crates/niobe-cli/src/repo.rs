@@ -1319,23 +1319,71 @@ fn git(root: &Path, args: &[&str]) -> Result<String, String> {
 
 /// What git in `root` ignores and does not track, as `ls-files -z` lists it —
 /// each a path from `root`, a directory ignored whole ending in `/` — or
-/// nothing where `root` is not in a work tree or git cannot say.
+/// nothing where `root` is not in a work tree or git cannot say in time.
 ///
 /// No pull delivers such a file: a pull changes what is tracked, and a file
 /// that is tracked is not listed, whatever an ignore file says of it.
-pub(crate) fn ignored_untracked(root: &Path) -> Option<String> {
-    git(
-        root,
-        &[
+///
+/// Asked before anyone has trusted the repository, of a `.git` the tree may
+/// have brought with it, which can name a FIFO as an ignore file or a config
+/// include: past [`LISTING_DEADLINE`] git is killed and nothing is listed,
+/// so every file is walked, which is the direction that cannot hide one.
+pub(crate) fn ignored_untracked(root: &Path) -> Option<Vec<u8>> {
+    listed_within(root, LISTING_DEADLINE)
+}
+
+/// How long git may take to list what it ignores before trust is decided
+/// without its answer.
+const LISTING_DEADLINE: Duration = Duration::from_secs(5);
+
+/// The most of a listing read: past it, git's answer is not used.
+const LISTING_BYTES: u64 = 64 * 1024 * 1024;
+
+fn listed_within(root: &Path, deadline: Duration) -> Option<Vec<u8>> {
+    use std::io::Read as _;
+
+    // `reading` and not `guarded`: `ls-files --others` reads no file's
+    // content, so no filter runs, and asking for the filters is a second git
+    // that a FIFO in the config would hold up as well.
+    let mut child = reading(root)
+        .args([
             "ls-files",
             "-z",
             "--others",
             "--ignored",
             "--exclude-standard",
             "--directory",
-        ],
-    )
-    .ok()
+        ])
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let stdout = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut listing = Vec::new();
+        stdout
+            .take(LISTING_BYTES + 1)
+            .read_to_end(&mut listing)
+            .ok()
+            .map(|_| listing)
+    });
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if started.elapsed() < deadline => {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            _ => break None,
+        }
+    };
+    let Some(status) = status else {
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = reader.join();
+        return None;
+    };
+    let listing = reader.join().ok()??;
+    (status.success() && listing.len() as u64 <= LISTING_BYTES).then_some(listing)
 }
 
 /// Runs one `git` command in `root` as [`git`] does, with `input` on its
@@ -1496,6 +1544,60 @@ fn failed(args: &[&str], stderr: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A repository git made, with `.gitignore` ignoring `ignored/`.
+    fn ignoring() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("a temporary directory can be made");
+        let status = Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(dir.path())
+            .status()
+            .expect("git runs");
+        assert!(status.success());
+        std::fs::write(dir.path().join(".gitignore"), "ignored/\n").expect("it is writable");
+        std::fs::create_dir(dir.path().join("ignored")).expect("it is writable");
+        std::fs::write(dir.path().join("ignored/built"), "x").expect("it is writable");
+        dir
+    }
+
+    #[test]
+    fn what_git_ignores_and_does_not_track_is_listed() {
+        let repo = ignoring();
+
+        let listing = ignored_untracked(repo.path()).expect("git answers");
+
+        assert_eq!(listing, b"ignored/\0");
+    }
+
+    /// A `.git` the tree brought can name a FIFO as an ignore file, which
+    /// git would wait on for ever, before anyone has trusted the tree.
+    #[test]
+    fn a_git_held_up_by_its_config_lists_nothing_once_its_time_is_up() {
+        let repo = ignoring();
+        let fifo = repo.path().join("excludes");
+        let made = Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("mkfifo runs");
+        assert!(made.success());
+        let status = Command::new("git")
+            .args(["config", "core.excludesFile"])
+            .arg(&fifo)
+            .current_dir(repo.path())
+            .status()
+            .expect("git runs");
+        assert!(status.success());
+
+        let started = Instant::now();
+        let listing = listed_within(repo.path(), Duration::from_millis(300));
+
+        assert_eq!(listing, None);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
+    }
 
     /// The header `git status --porcelain=v2 --branch` prints on a branch that
     /// is three commits ahead of its upstream and one behind.

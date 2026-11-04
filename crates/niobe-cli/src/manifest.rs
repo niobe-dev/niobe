@@ -25,7 +25,12 @@
 //! no pull delivers it, and it is what a build, an interpreter's cache or the
 //! operator's own run writes, so agreeing to it would put the question back
 //! whenever the project was built and leave a build's output, past what a
-//! config may name, a directory nobody could agree to.
+//! config may name, a directory nobody could agree to. That rests on git
+//! being how the tree changes: a tree copied over by something that keeps no
+//! index — an archive, a sync — or one whose `.git` came with it rather than
+//! from `git clone` can hold under an ignored path what git never tracked,
+//! and that is left out too. A git that does not answer in time lists
+//! nothing, and then everything is walked.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -100,12 +105,20 @@ impl Ignored {
     /// The paths `listing` names — `git ls-files -z --others --ignored
     /// --directory` run at `root`, the repository's real root — as paths
     /// under it.
-    pub fn listed(root: &Path, listing: &str) -> Self {
+    ///
+    /// Read as bytes: a name that is not UTF-8, made lossy, would read as
+    /// another name, and hide a tracked file that has it.
+    pub fn listed(root: &Path, listing: &[u8]) -> Self {
+        use std::os::unix::ffi::OsStrExt as _;
+
         Self(
             listing
-                .split('\0')
+                .split(|byte| *byte == 0)
                 .filter(|entry| !entry.is_empty())
-                .map(|entry| root.join(entry.trim_end_matches('/')))
+                .map(|entry| {
+                    let entry = entry.strip_suffix(b"/").unwrap_or(entry);
+                    root.join(std::ffi::OsStr::from_bytes(entry))
+                })
                 .collect(),
         )
     }
@@ -487,7 +500,7 @@ mod tests {
         }
         write(&plug.join("built.so"), "built");
         let root = std::fs::canonicalize(repo.path()).expect("it was just made");
-        let ignored = Ignored::listed(&root, "plug/__pycache__/\0plug/built.so\0");
+        let ignored = Ignored::listed(&root, b"plug/__pycache__/\0plug/built.so\0");
         let manifest = || {
             of(&plug, repo.path(), &mut Budget::default(), &[], &ignored)
                 .expect("what is left is within the budget")
@@ -501,6 +514,16 @@ mod tests {
 
         write(&plug.join("a.py"), "two");
         assert_ne!(manifest(), before);
+    }
+
+    #[test]
+    fn a_name_git_lists_that_is_not_utf8_hides_no_other_name() {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let root = Path::new("/r");
+        let ignored = Ignored::listed(root, b"plug/\xff\0");
+        assert!(ignored.holds(&root.join(std::ffi::OsStr::from_bytes(b"plug/\xff"))));
+        assert!(!ignored.holds(&root.join("plug/\u{FFFD}")));
     }
 
     #[test]

@@ -359,7 +359,8 @@ reviewers that encode both, for an agent working in this tree.
   agrees to it: each file under it by its SHA-256 and each link by where it
   really leads — what it reaches hashed where that is in the repository, never read where it is
   not — leaving out what git ignores and does not track, which no pull delivers, as `git ls-files`
-  lists it once with nothing the repository configures run, within one budget for everything a
+  lists it once with nothing the repository configures run and five seconds to answer, past which
+  nothing is left out, within one budget for everything a
   config names, past which it is not agreed to; with the
   files the commands of every JSON file a profile names or such a directory holds run — a settings
   file's hooks, an MCP config's servers, a plugin's hooks, read from the keys the CLI runs and no
