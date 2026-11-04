@@ -1308,12 +1308,28 @@ pub(crate) fn without_lone_surrogates(line: &str) -> Option<String> {
     Some(mended)
 }
 
+/// How many JSON values a line read from a file may hold.
+///
+/// A value read takes tens of bytes however few the line spent on it, so a
+/// line of `[0,0,0,…]` read whole takes fifty times its length; the CLI's
+/// directory holds whatever was put there, and its files are read to
+/// hundreds of megabytes. A record the CLI writes holds a few hundred values:
+/// the largest of every transcript on the machine this was written on, 4
+/// November 2026, held fewer than 25,000, counted as [`values_past`] counts.
+pub(crate) const VALUES: usize = 250_000;
+
 /// `line` read as a `T`, and whether it read only once each half of a
 /// surrogate pair it holds alone was written as U+FFFD: see
-/// [`without_lone_surrogates`]. The error is the one `line` gave as written.
+/// [`without_lone_surrogates`]. The error is the one `line` gave as written,
+/// or that it holds more than [`VALUES`] values, which it is not read past.
 pub(crate) fn from_line<T: serde::de::DeserializeOwned>(
     line: &str,
 ) -> Result<(T, bool), serde_json::Error> {
+    if values_past(line, VALUES) {
+        return Err(<serde_json::Error as serde::de::Error>::custom(format!(
+            "it holds more than {VALUES} values, more than any record the CLI writes"
+        )));
+    }
     match serde_json::from_str(line) {
         Ok(read) => Ok((read, false)),
         Err(error) => match without_lone_surrogates(line)
@@ -1325,9 +1341,47 @@ pub(crate) fn from_line<T: serde::de::DeserializeOwned>(
     }
 }
 
+/// Whether the JSON `line` holds more than `most` values, counted as the
+/// commas, colons and opening brackets outside its strings — at least one
+/// for every value but the first — without reading it.
+fn values_past(line: &str, most: usize) -> bool {
+    let mut count = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for byte in line.bytes() {
+        match (in_string, escaped, byte) {
+            (true, true, _) => escaped = false,
+            (true, false, b'\\') => escaped = true,
+            (true, false, b'"') | (false, _, b'"') => in_string = !in_string,
+            (false, _, b',' | b':' | b'[' | b'{') => {
+                count = count.saturating_add(1);
+                if count > most {
+                    return true;
+                }
+            }
+            (true, false, _) | (false, _, _) => {}
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_line_of_more_values_than_any_record_holds_is_not_read() {
+        let past = format!("{{\"a\":[{}0]}}", "0,".repeat(VALUES));
+        let within = format!("{{\"a\":[{}0]}}", "0,".repeat(VALUES - 3));
+
+        let refused = from_line::<serde_json::Value>(&past).expect_err("too many values");
+
+        assert!(refused.to_string().contains("more than"), "{refused}");
+        assert!(from_line::<serde_json::Value>(&within).is_ok());
+        // Commas, colons and brackets in a string are text, not values.
+        let quoted = format!("{{\"a\":\"{}\"}}", ",:[{\\\"".repeat(VALUES));
+        assert!(from_line::<serde_json::Value>(&quoted).is_ok());
+    }
 
     fn usage(json: &str) -> Usage {
         serde_json::from_str(json).expect("the usage is written as the CLI writes it")

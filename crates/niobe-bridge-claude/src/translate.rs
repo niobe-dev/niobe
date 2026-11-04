@@ -304,12 +304,49 @@ struct Call {
     target: Option<String>,
     /// The call in one line, for the transcript.
     summary: Option<String>,
-    /// The arguments as the CLI sent them. The rendered `input` is for a
-    /// human; counting what an edit changed needs the fields themselves.
-    arguments: serde_json::Value,
+    /// How the arguments were written out as `input`, which is how they are
+    /// read back when the call ends: counting what an edit changed needs the
+    /// fields themselves. They are not held read, because a call is held
+    /// until its result and arguments of many small values held read take a
+    /// hundred times their text; a transcript of calls that never ended held
+    /// gigabytes so.
+    written: Written,
     /// The sub-agent that made the call, or `None` for the session's own: a
     /// prompt about the call is that agent's.
     agent: Option<AgentId>,
+}
+
+/// How a call's arguments were written out as its `input` by [`render`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Written {
+    /// They were a string, written as its text.
+    Text,
+    /// There were none.
+    Nothing,
+    /// Anything else, written as JSON.
+    Json,
+}
+
+impl Written {
+    fn of(input: &serde_json::Value) -> Self {
+        match input {
+            serde_json::Value::String(_) => Self::Text,
+            serde_json::Value::Null => Self::Nothing,
+            serde_json::Value::Bool(_)
+            | serde_json::Value::Number(_)
+            | serde_json::Value::Array(_)
+            | serde_json::Value::Object(_) => Self::Json,
+        }
+    }
+
+    /// The arguments written out as `input`, read back.
+    fn read(self, input: &str) -> serde_json::Value {
+        match self {
+            Self::Text => serde_json::Value::String(input.to_owned()),
+            Self::Nothing => serde_json::Value::Null,
+            Self::Json => serde_json::from_str(input).unwrap_or(serde_json::Value::Null),
+        }
+    }
 }
 
 /// The CLI's answer to a model change Niobe asked for.
@@ -2086,7 +2123,7 @@ impl Translator {
                             input: rendered.clone(),
                             target: rule_target(&name, &input),
                             summary: summary.clone(),
-                            arguments: input.clone(),
+                            written: Written::of(&input),
                             agent: agent.clone(),
                         },
                     );
@@ -2190,7 +2227,8 @@ impl Translator {
                     if let Some(agent) = call.agent {
                         self.ended_agents.insert(tool_use_id.clone(), agent);
                     }
-                    (call.name, call.input, call.summary, call.arguments)
+                    let arguments = call.written.read(&call.input);
+                    (call.name, call.input, call.summary, arguments)
                 }
                 None => {
                     out.push(warn(format!(
@@ -4986,6 +5024,21 @@ mod tests {
     use niobe_core::test_run::TestCounts;
 
     use super::*;
+
+    /// A call is held until its result, and its arguments with it, so they
+    /// are held as written and read back when it ends, the same as they
+    /// came.
+    #[test]
+    fn a_calls_arguments_are_read_back_from_how_they_were_written() {
+        for input in [
+            serde_json::json!({ "file_path": "a.rs", "edits": [{ "old_string": "a" }], "n": 1.5 }),
+            serde_json::json!("ls -la"),
+            serde_json::Value::Null,
+            serde_json::json!([1, 2, 3]),
+        ] {
+            assert_eq!(Written::of(&input).read(&render(&input)), input);
+        }
+    }
 
     #[test]
     fn whether_a_model_runs_auto_is_what_the_cli_said_and_unknown_where_it_marked_none() {

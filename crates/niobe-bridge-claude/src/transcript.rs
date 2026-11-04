@@ -509,6 +509,25 @@ pub fn events(path: &Path, profile: &str, cwd: &Path) -> Result<Vec<Event>, Tran
 /// is still folded, exactly as on the live stream: a transcript written by a
 /// newer CLI than this build knows must not take the history with it.
 pub fn timed(path: &Path, profile: &str, cwd: &Path) -> Result<Vec<Timed>, TranscriptError> {
+    timed_within(path, profile, cwd, EVENTS)
+}
+
+/// How many events a transcript is read to, the rest left out with a
+/// warning. Every event is held, and a record can make several: a file of
+/// a million of the shortest calls made millions, and gigabytes. The
+/// longest session on the machine this was written on, 4 November 2026,
+/// made 24,602 from 81 MiB, so a session of the 256 MiB a file is read to
+/// would make some 80,000. The count is checked between records, and one
+/// record within [`wire::VALUES`] makes a few tens of thousands at most.
+const EVENTS: usize = 200_000;
+
+/// [`timed`], read to `most` events.
+fn timed_within(
+    path: &Path,
+    profile: &str,
+    cwd: &Path,
+    most: usize,
+) -> Result<Vec<Timed>, TranscriptError> {
     let text = read(path)?;
     let id = path
         .file_stem()
@@ -520,17 +539,33 @@ pub fn timed(path: &Path, profile: &str, cwd: &Path) -> Result<Vec<Timed>, Trans
     // decides where its tokens are counted from, and the record that says so
     // comes after it.
     let (read, cut) = records(&text, RECORDS);
-    let accountings = read
-        .iter()
-        .filter_map(|record| match &record.record {
-            Ok(Line::CostState(accounting)) => Some(accounting.started()),
-            _ => None,
-        })
-        .collect();
+    let mut accountings = VecDeque::new();
+    let mut titled = false;
+    let mut first_prompt = None;
+    // Each record is glanced at for its type, and read whole only where the
+    // fold must know what it says before it folds anything: reading every
+    // record whole once more cost seconds over a file of large ones.
+    for record in &read {
+        let Ok((glance, _)) = wire::from_line::<Glance>(record.line) else {
+            continue;
+        };
+        match glance.kind.as_deref() {
+            Some("cost-state") => {
+                if let Ok(Line::CostState(accounting)) = record.parse().record {
+                    accountings.push_back(accounting.started());
+                }
+            }
+            Some("ai-title") => titled |= matches!(record.parse().record, Ok(Line::AiTitle(_))),
+            Some("user") if first_prompt.is_none() => {
+                first_prompt = record.parse().record.ok().as_ref().and_then(prompt);
+            }
+            Some(_) | None => {}
+        }
+    }
     let Sides {
         read: mut sides,
         left_out,
-    } = side_files(path, LIMIT);
+    } = side_files(path, LIMIT, SIDE_FILES);
     // One agent has one file. Where two name the same call, the first by name
     // is read and the other is said to have been passed over, with the call:
     // read in turn they would replace each other, and which won would depend
@@ -551,13 +586,15 @@ pub fn timed(path: &Path, profile: &str, cwd: &Path) -> Result<Vec<Timed>, Trans
         .collect();
 
     let mut fold = Fold::new(profile, cwd, id.clone(), accountings, agents).counting(last_usage);
+    fold.most = most;
     if cut {
         fold.out.push(cut_short("the transcript's records"));
     }
     if left_out > 0 {
         fold.out.push(translate::warn(format!(
-            "the session's sub-agents' files hold more than {} MiB between them: {left_out} of \
-             them are not read, and what they hold is not counted",
+            "the session has more sub-agents' files than are read — more than {SIDE_FILES}, or \
+             more than {} MiB between them: {left_out} of them are not read, and what they hold \
+             is not counted",
             LIMIT / (1024 * 1024)
         )));
     }
@@ -574,14 +611,7 @@ pub fn timed(path: &Path, profile: &str, cwd: &Path) -> Result<Vec<Timed>, Trans
     // A session the CLI never titled is captioned by what the operator first
     // asked. Said here rather than left to the first message, because the
     // first message in a transcript may be one the CLI wrote itself.
-    let titled = read
-        .iter()
-        .any(|record| matches!(record.record, Ok(Line::AiTitle(_))));
-    if !titled
-        && let Some(title) = read
-            .iter()
-            .find_map(|record| record.record.as_ref().ok().and_then(prompt))
-    {
+    if !titled && let Some(title) = first_prompt {
         fold.out.push(Event::Titled { title });
     }
     // Before anything is folded: what was recorded by a release nobody has
@@ -595,6 +625,9 @@ pub fn timed(path: &Path, profile: &str, cwd: &Path) -> Result<Vec<Timed>, Trans
     }
     let next_stamps = next_stamps(&read);
     for (record, next_stamp) in read.into_iter().zip(next_stamps) {
+        if fold.full() {
+            break;
+        }
         // The session's own file is kept in the order the CLI wrote it, which
         // is not always the order of its stamps: an agent's records go in
         // before the first of the session's that was stamped after them.
@@ -607,13 +640,20 @@ pub fn timed(path: &Path, profile: &str, cwd: &Path) -> Result<Vec<Timed>, Trans
         // left while a background agent was still writing. Those go in ahead
         // of it, or the accounting would be settled before them and each of
         // their responses counted again on top of it.
-        if matches!(record.record, Ok(Line::CostState(_))) {
+        let parsed = record.parse();
+        if matches!(parsed.record, Ok(Line::CostState(_))) {
             threads.fold_before(next_stamp.as_deref(), &mut fold);
         }
-        threads.spawned_in(&record.record);
-        fold.record(record, None);
+        threads.spawned_in(&parsed.record);
+        fold.record(&record, parsed, None);
     }
     threads.fold_before(None, &mut fold);
+    if fold.full() {
+        fold.out.push(translate::warn(format!(
+            "the transcript makes more than {most} entries, more than any session does: what \
+             comes after them is not read, and is not counted"
+        )));
+    }
     let mut timed = fold.timed();
     name_the_conversation(&mut timed, profile, id);
     Ok(timed)
@@ -722,6 +762,29 @@ struct Record<'a> {
     /// 143,141 stamps in the sessions that ran sub-agents, and in their
     /// agents' files, were written that way.
     at: Option<String>,
+}
+
+impl Record<'_> {
+    /// The record read, which is done as it is needed and not held: a line's
+    /// JSON read into values takes many times the line, and a transcript held
+    /// read whole took fifty times its size where its lines held many small
+    /// values.
+    fn parse(&self) -> Parsed {
+        match wire::from_line::<Line>(self.line) {
+            Ok((record, mended)) => Parsed {
+                record: Ok(record),
+                mended,
+            },
+            Err(error) => Parsed {
+                record: Err(error),
+                mended: false,
+            },
+        }
+    }
+}
+
+/// One record of a transcript, read.
+struct Parsed {
     record: Result<Line, serde_json::Error>,
     /// Whether the record read only once each half of a surrogate pair it
     /// held alone was read as U+FFFD, which is said where it is folded.
@@ -745,23 +808,20 @@ fn records(text: &str, room: usize) -> (Vec<Record<'_>>, bool) {
     let mut records: Vec<Record<'_>> = lines
         .by_ref()
         .take(room)
-        .map(|line| {
-            let (record, mended) = match wire::from_line::<Line>(line) {
-                Ok((record, mended)) => (Ok(record), mended),
-                Err(error) => (Err(error), false),
-            };
-            Record {
-                line,
-                at: wire::from_line::<Stamp>(line)
-                    .ok()
-                    .and_then(|(stamp, _)| stamp.timestamp),
-                record,
-                mended,
-            }
+        .map(|line| Record {
+            line,
+            at: wire::from_line::<Stamp>(line)
+                .ok()
+                .and_then(|(stamp, _)| stamp.timestamp),
         })
         .collect();
     let cut = lines.next().is_some();
-    if !cut && !text.ends_with('\n') && records.last().is_some_and(|last| last.record.is_err()) {
+    if !cut
+        && !text.ends_with('\n')
+        && records
+            .last()
+            .is_some_and(|last| wire::from_line::<Line>(last.line).is_err())
+    {
         records.pop();
     }
     (records, cut)
@@ -789,13 +849,52 @@ fn cut_short(file: &str) -> Event {
 fn last_usage<'a>(records: impl Iterator<Item = &'a Record<'a>>) -> BTreeMap<String, wire::Usage> {
     let mut last = BTreeMap::new();
     for record in records {
-        if let Ok(Line::Assistant(assistant)) = &record.record
-            && let (Some(id), Some(usage)) = (&assistant.message.id, &assistant.message.usage)
+        if let Ok((glance, _)) = wire::from_line::<Glance>(record.line)
+            && glance.kind.as_deref() == Some("assistant")
+            && let Some(GlancedMessage {
+                id: Some(id),
+                usage: Some(usage),
+            }) = glance.message
         {
-            last.insert(id.clone(), usage.clone());
+            last.insert(id, usage);
         }
     }
     last
+}
+
+/// What a record is, and the id and usage of the response it carries where
+/// it is one, read without reading the rest of it: a line's other fields are
+/// passed over unread.
+#[derive(Deserialize)]
+struct Glance {
+    #[serde(rename = "type")]
+    kind: Option<String>,
+    #[serde(default, deserialize_with = "glanced")]
+    message: Option<GlancedMessage>,
+}
+
+#[derive(Deserialize)]
+struct GlancedMessage {
+    id: Option<String>,
+    usage: Option<wire::Usage>,
+}
+
+/// A record's `message` where it is an object; nothing where it is anything
+/// else, which says no response.
+fn glanced<'de, D>(deserializer: D) -> Result<Option<GlancedMessage>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Either {
+        Message(GlancedMessage),
+        Other(serde::de::IgnoredAny),
+    }
+    Ok(match Either::deserialize(deserializer)? {
+        Either::Message(message) => Some(message),
+        Either::Other(_) => None,
+    })
 }
 
 /// Every sub-agent's own records, each waiting for its place among the
@@ -813,6 +912,9 @@ struct Threads<'a> {
     waiting: BTreeMap<String, VecDeque<Record<'a>>>,
     /// The agents whose spawn has been folded, in the order it was.
     spawned: Vec<String>,
+    /// The same agents, to look one up in: a record can name thousands of
+    /// calls, and a list searched for each made it quadratic.
+    spawned_ids: BTreeSet<String>,
     /// The agents whose spawn has been folded and who have a record waiting,
     /// by the stamp of that record and the order they were spawned in: the
     /// first is the next to go in. Kept in order as records go in, so the
@@ -843,6 +945,7 @@ impl<'a> Threads<'a> {
         Self {
             waiting,
             spawned: Vec::new(),
+            spawned_ids: BTreeSet::new(),
             fronts: BTreeSet::new(),
             cut,
         }
@@ -864,7 +967,7 @@ impl<'a> Threads<'a> {
         for block in blocks {
             if let wire::Block::ToolUse { id, .. } = block
                 && let Some(waiting) = self.waiting.get(id)
-                && !self.spawned.contains(id)
+                && self.spawned_ids.insert(id.clone())
             {
                 if let Some(front) = waiting.front() {
                     self.fronts.insert((front.at.clone(), self.spawned.len()));
@@ -878,8 +981,12 @@ impl<'a> Threads<'a> {
     /// where there is no bound, earliest first.
     fn fold_before(&mut self, bound: Option<&str>, fold: &mut Fold) {
         while let Some((call, record)) = self.next_before(bound) {
-            self.spawned_in(&record.record);
-            fold.record(record, Some(&call));
+            if fold.full() {
+                return;
+            }
+            let parsed = record.parse();
+            self.spawned_in(&parsed.record);
+            fold.record(&record, parsed, Some(&call));
         }
     }
 
@@ -932,7 +1039,7 @@ struct SideFile {
 /// them, in the order of their calls, and those past it are left out and
 /// counted: a directory of thousands of files, each under the limit one file
 /// is read to, would otherwise be held at thousands of times that limit.
-fn side_files(path: &Path, budget: u64) -> Sides {
+fn side_files(path: &Path, budget: u64, most: usize) -> Sides {
     #[derive(Deserialize)]
     struct Meta {
         #[serde(rename = "toolUseId")]
@@ -943,20 +1050,27 @@ fn side_files(path: &Path, budget: u64) -> Sides {
     let Ok(entries) = std::fs::read_dir(&dir) else {
         return Sides::default();
     };
+    let mut stems: Vec<String> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            name.to_str()
+                .and_then(|name| name.strip_suffix(META))
+                .map(str::to_owned)
+        })
+        .collect();
+    stems.sort();
+    let over = stems.len().saturating_sub(most);
+    stems.truncate(most);
     let mut named = Vec::new();
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let Some(stem) = name.to_str().and_then(|name| name.strip_suffix(META)) else {
-            continue;
-        };
-        let Some(call) = read(&entry.path())
-            .ok()
+    for stem in stems {
+        let Some(call) = description(&dir.join(format!("{stem}{META}")))
             .and_then(|text| wire::from_line::<Meta>(&text).ok())
             .and_then(|(meta, _)| meta.tool_use_id)
         else {
             continue;
         };
-        named.push((call, stem.to_owned()));
+        named.push((call, stem));
     }
     // The directory's own order is the file system's; the call's id, and the
     // file's name where two name the same call, are at least the same on every
@@ -979,7 +1093,33 @@ fn side_files(path: &Path, budget: u64) -> Sides {
             text,
         });
     }
+    sides.left_out = sides.left_out.saturating_add(over);
     sides
+}
+
+/// How many sub-agents' files of one session are read. The machine this was
+/// written on held 455 agents' files across every session, 25 September
+/// 2026; each description is opened and read, so a directory of a million
+/// is not.
+const SIDE_FILES: usize = 10_000;
+
+/// How much of a sub-agent's description is read: it is a line naming the
+/// agent's kind and the call that spawned it, a few hundred bytes.
+const DESCRIPTION: u64 = 64 * 1024;
+
+/// The text of the description at `path`, where it is a regular file no
+/// longer than [`DESCRIPTION`].
+fn description(path: &Path) -> Option<String> {
+    let mut bytes = Vec::new();
+    open(path)
+        .ok()?
+        .take(DESCRIPTION.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > DESCRIPTION {
+        return None;
+    }
+    String::from_utf8(bytes).ok()
 }
 
 /// The sub-agents' files of a session: those read, and how many were left out
@@ -1171,6 +1311,8 @@ struct Fold {
     /// [`UNREAD_LISTED`] each is counted here and named in one warning at the
     /// end rather than listed.
     unread: usize,
+    /// How many events the transcript is read to.
+    most: usize,
 }
 
 /// How many records a transcript lists as not read whole, each with its own
@@ -1212,7 +1354,13 @@ impl Fold {
             command: None,
             asked_compaction: None,
             unread: 0,
+            most: EVENTS,
         }
+    }
+
+    /// Whether the fold holds as many events as the transcript is read to.
+    fn full(&self) -> bool {
+        self.out.len() >= self.most
     }
 
     /// The same fold, counting each API response by the usage its last
@@ -1249,14 +1397,14 @@ impl Fold {
     ///
     /// A record that read only once a half of a surrogate pair in it was read
     /// as U+FFFD is said to have, with the warning the live stream gives.
-    fn record(&mut self, record: Record<'_>, agent: Option<&str>) {
+    fn record(&mut self, record: &Record<'_>, parsed: Parsed, agent: Option<&str>) {
         let start = self.out.len();
-        if record.mended {
+        if parsed.mended {
             self.unread_record(|| translate::warn(translate::HALF_A_CHARACTER.to_owned()));
         }
         let at = record.at.as_deref().and_then(stamp::parse);
         self.at = at;
-        self.fold_record(record.line, record.record, agent);
+        self.fold_record(record.line, parsed.record, agent);
         self.times.resize(start, None);
         self.times.resize(self.out.len(), at);
     }
@@ -3107,13 +3255,12 @@ mod tests {
             agents,
         );
         for line in lines {
-            let record = Record {
-                line,
-                at: None,
+            let record = Record { line, at: None };
+            let parsed = Parsed {
                 record: serde_json::from_str::<Line>(line),
                 mended: false,
             };
-            fold.record(record, None);
+            fold.record(&record, parsed, None);
         }
         fold.out
     }
@@ -3342,14 +3489,14 @@ mod tests {
         )
         .expect("the temporary directory is writable");
 
-        let found: Vec<(String, String)> = side_files(&session, LIMIT)
+        let found: Vec<(String, String)> = side_files(&session, LIMIT, SIDE_FILES)
             .read
             .into_iter()
             .map(|side| (side.call, side.text))
             .collect();
         assert_eq!(found, [("toolu_a".to_owned(), answer.to_owned())]);
         assert!(
-            side_files(&dir.path().join("none.jsonl"), LIMIT)
+            side_files(&dir.path().join("none.jsonl"), LIMIT, SIDE_FILES)
                 .read
                 .is_empty(),
             "a session with no sub-agents"
@@ -3450,10 +3597,40 @@ mod tests {
             );
         }
 
-        let sides = side_files(&dir.path().join("s.jsonl"), 25);
+        let sides = side_files(&dir.path().join("s.jsonl"), 25, SIDE_FILES);
 
         assert_eq!(sides.read.len(), 2);
         assert_eq!(sides.left_out, 3);
+    }
+
+    /// A description is a line of JSON naming a call; one past a few
+    /// kilobytes is not one the CLI wrote, and thousands of them are read
+    /// only so far, so a directory of them cannot hold the read up.
+    #[test]
+    fn the_agents_descriptions_are_read_only_so_far_and_only_so_many() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        for n in 0..3 {
+            write_agent(dir.path(), &format!("agent-{n}"), &format!("toolu_{n}"), "");
+        }
+        let agents = dir.path().join("s").join(SUB_AGENTS);
+        std::fs::write(
+            agents.join(format!("agent-big{META}")),
+            format!(
+                r#"{{"toolUseId":"toolu_big","x":"{}"}}"#,
+                "x".repeat(128 * 1024)
+            ),
+        )
+        .expect("the temporary directory is writable");
+        std::fs::write(agents.join(format!("agent-big.{EXTENSION}")), "")
+            .expect("the temporary directory is writable");
+
+        let all = side_files(&dir.path().join("s.jsonl"), LIMIT, SIDE_FILES);
+        let few = side_files(&dir.path().join("s.jsonl"), LIMIT, 2);
+
+        let calls: Vec<&str> = all.read.iter().map(|side| side.call.as_str()).collect();
+        assert_eq!(calls, ["toolu_0", "toolu_1", "toolu_2"]);
+        assert_eq!(few.read.len(), 2);
+        assert_eq!(few.left_out, 2);
     }
 
     /// The records every file holds are read to one budget, not to one each:
@@ -3490,7 +3667,7 @@ mod tests {
         std::fs::write(agents.join(format!("agent-a1.{EXTENSION}")), bytes)
             .expect("the temporary directory is writable");
 
-        let found = side_files(&session, LIMIT).read;
+        let found = side_files(&session, LIMIT, SIDE_FILES).read;
         let [side] = found.as_slice() else {
             panic!("one agent: {:?}", found.len());
         };
@@ -3933,6 +4110,29 @@ mod tests {
                 Event::Error { message, .. } if message.contains(&RECORDS.to_string()))),
             "{:?}",
             events.last()
+        );
+    }
+
+    #[test]
+    fn a_transcript_that_makes_more_entries_than_any_session_is_read_to_the_limit_and_says_so() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let path = dir.path().join("s-1.jsonl");
+        let text: String = (0..50)
+            .map(|n| format!("{}\n", prompt(&format!("p{n}"))))
+            .collect();
+        std::fs::write(&path, text).expect("the temporary directory is writable");
+
+        let events: Vec<Event> = timed_within(&path, "max", Path::new("/repo"), 10)
+            .expect("the file is readable")
+            .into_iter()
+            .map(|timed| timed.event)
+            .collect();
+
+        assert!(events.len() < 20, "{}", events.len());
+        assert!(
+            events.iter().any(|event| matches!(event,
+                Event::Error { message, .. } if message.contains("more than 10 entries"))),
+            "{events:?}"
         );
     }
 

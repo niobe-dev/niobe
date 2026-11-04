@@ -314,7 +314,10 @@ reviewers that encode both, for an agent working in this tree.
   earlier session again — and a record the CLI was cut off writing, even inside a character,
   is left out while the rest still reads, and only a regular file of at most 256 MiB is read,
   so a FIFO or a vast file in the CLI's directory is refused rather than waited on or held in
-  memory; a sub-agent's
+  memory — and no more than a million records, the session's and its sub-agents' together, the
+  sub-agents' files read to 256 MiB between them, and past twenty records it cannot read whole
+  the rest only counted, so a directory of junk is held at a bound rather than many times its
+  size; a sub-agent's
   own messages — its calls, its edits, its model and its tokens — are read from the file the CLI
   keeps for that agent beside the session's and folded in where the CLI's timestamps put them,
   and its answer from the same file; a shell command the CLI ran in the
