@@ -97,6 +97,15 @@ const EXTENSION: &str = "jsonl";
 /// more than its history is worth.
 const LIMIT: u64 = 256 * 1024 * 1024;
 
+/// How many records of one file are read, the rest left out with a warning.
+///
+/// Every record is held while the file is read, and the CLI's directory holds
+/// whatever was put there: under [`LIMIT`] alone, a file of the shortest
+/// lines a record can be is sixteen million of them. The longest session on
+/// the machine this was written on, 4 November 2026, held 43,811 records in
+/// 469 MB, so a session that reaches this has never been written.
+const RECORDS: usize = 1_000_000;
+
 /// What the CLI wraps a turn it wrote itself in, rather than one the operator
 /// typed: a slash command as the CLI expanded it, and the output of one; a
 /// command the operator ran in the CLI's own `!` mode, and what it printed.
@@ -510,7 +519,7 @@ pub fn timed(path: &Path, profile: &str, cwd: &Path) -> Result<Vec<Timed>, Trans
     // Read once, then folded: whether a message is covered by an accounting
     // decides where its tokens are counted from, and the record that says so
     // comes after it.
-    let read = records(&text);
+    let (read, cut) = records(&text);
     let accountings = read
         .iter()
         .filter_map(|record| match &record.record {
@@ -539,6 +548,13 @@ pub fn timed(path: &Path, profile: &str, cwd: &Path) -> Result<Vec<Timed>, Trans
         .collect();
 
     let mut fold = Fold::new(profile, cwd, id.clone(), accountings, agents).counting(last_usage);
+    if cut {
+        fold.out.push(cut_short("the transcript"));
+    }
+    for file in &threads.cut {
+        fold.out
+            .push(cut_short(&format!("the sub-agent records in `{file}`")));
+    }
     for (call, file) in passed_over {
         fold.out.push(translate::warn(format!(
             "two files of sub-agent records name the call `{call}`: `{file}` is not read, and \
@@ -654,7 +670,10 @@ fn read(path: &Path) -> Result<String, TranscriptError> {
             path: path.to_path_buf(),
             error,
         })?;
-    Ok(String::from_utf8_lossy(&bytes).into_owned())
+    // The text is kept as read where it is UTF-8, as it almost always is,
+    // rather than copied: a copy is the whole file again.
+    Ok(String::from_utf8(bytes)
+        .unwrap_or_else(|error| String::from_utf8_lossy(error.as_bytes()).into_owned()))
 }
 
 /// The file at `path`, opened to be read no further than [`LIMIT`], where it
@@ -704,16 +723,18 @@ struct Record<'a> {
 /// The CLI writes a record as a line and its line break, so a transcript
 /// whose CLI is still running can end part-way through the next one. A last
 /// line with no break after it that does not read is that record on its way
-/// and is left out; one that reads is whole, and is kept.
-fn records(text: &str) -> Vec<Record<'_>> {
+/// and is left out; one that reads is whole, and is kept. Past [`RECORDS`]
+/// none is, and the file is said to have been cut.
+fn records(text: &str) -> (Vec<Record<'_>>, bool) {
     #[derive(Deserialize)]
     struct Stamp {
         timestamp: Option<String>,
     }
 
-    let mut records: Vec<Record<'_>> = text
-        .lines()
-        .filter(|line| !line.trim().is_empty())
+    let mut lines = text.lines().filter(|line| !line.trim().is_empty());
+    let mut records: Vec<Record<'_>> = lines
+        .by_ref()
+        .take(RECORDS)
         .map(|line| {
             let (record, mended) = match wire::from_line::<Line>(line) {
                 Ok((record, mended)) => (Ok(record), mended),
@@ -729,10 +750,20 @@ fn records(text: &str) -> Vec<Record<'_>> {
             }
         })
         .collect();
-    if !text.ends_with('\n') && records.last().is_some_and(|last| last.record.is_err()) {
+    let cut = lines.next().is_some();
+    if !cut && !text.ends_with('\n') && records.last().is_some_and(|last| last.record.is_err()) {
         records.pop();
     }
-    records
+    (records, cut)
+}
+
+/// The warning that the file `file` holds more than [`RECORDS`] records,
+/// and the rest of it is not read.
+fn cut_short(file: &str) -> Event {
+    translate::warn(format!(
+        "{file} holds more than {RECORDS} records, more than any session writes: what comes \
+         after them is not read, and is not counted"
+    ))
 }
 
 /// The usage of the last record the CLI wrote of each API response, by its
@@ -748,8 +779,8 @@ fn records(text: &str) -> Vec<Record<'_>> {
 fn last_usage<'a>(records: impl Iterator<Item = &'a Record<'a>>) -> BTreeMap<String, wire::Usage> {
     let mut last = BTreeMap::new();
     for record in records {
-        if let Ok(Line::Assistant(Assistant { message, .. })) = &record.record
-            && let (Some(id), Some(usage)) = (&message.id, &message.usage)
+        if let Ok(Line::Assistant(assistant)) = &record.record
+            && let (Some(id), Some(usage)) = (&assistant.message.id, &assistant.message.usage)
         {
             last.insert(id.clone(), usage.clone());
         }
@@ -772,16 +803,27 @@ struct Threads<'a> {
     waiting: BTreeMap<String, VecDeque<Record<'a>>>,
     /// The agents whose spawn has been folded, in the order it was.
     spawned: Vec<String>,
+    /// The files held more records than are read, by name.
+    cut: Vec<String>,
 }
 
 impl<'a> Threads<'a> {
     fn read(sides: &'a [SideFile]) -> Self {
+        let mut cut = Vec::new();
+        let waiting = sides
+            .iter()
+            .map(|side| {
+                let (kept, over) = records(&side.text);
+                if over {
+                    cut.push(side.file.clone());
+                }
+                (side.call.clone(), kept.into())
+            })
+            .collect();
         Self {
-            waiting: sides
-                .iter()
-                .map(|side| (side.call.clone(), records(&side.text).into()))
-                .collect(),
+            waiting,
             spawned: Vec::new(),
+            cut,
         }
     }
 
@@ -792,10 +834,10 @@ impl<'a> Threads<'a> {
 
     /// Notes each agent whose spawning call `record` makes.
     fn spawned_in(&mut self, record: &Result<Line, serde_json::Error>) {
-        let Ok(Line::Assistant(Assistant { message, .. })) = record else {
+        let Ok(Line::Assistant(assistant)) = record else {
             return;
         };
-        let Some(wire::Content::Blocks(blocks)) = &message.content else {
+        let Some(wire::Content::Blocks(blocks)) = &assistant.message.content else {
             return;
         };
         for block in blocks {
@@ -908,11 +950,10 @@ fn side_files(path: &Path) -> Vec<SideFile> {
 fn recorded_agent(text: &str) -> RecordedAgent {
     let mut agent = RecordedAgent::default();
     for line in text.lines() {
-        let Ok((Line::Assistant(Assistant { message, .. }), _)) = wire::from_line::<Line>(line)
-        else {
+        let Ok((Line::Assistant(assistant), _)) = wire::from_line::<Line>(line) else {
             continue;
         };
-        let Some(wire::Content::Blocks(blocks)) = message.content else {
+        let Some(wire::Content::Blocks(blocks)) = assistant.message.content else {
             continue;
         };
         if blocks
@@ -1076,7 +1117,18 @@ struct Fold {
     /// command's turn rather than of the turn before it. Anything else the
     /// session records first puts it down where it stands.
     asked_compaction: Option<Event>,
+    /// How many records were warned about as not read whole; past
+    /// [`UNREAD_LISTED`] each is counted here and named in one warning at the
+    /// end rather than listed.
+    unread: usize,
 }
+
+/// How many records a transcript lists as not read whole, each with its own
+/// warning, before it counts the rest. A file in the CLI's directory is
+/// whatever was put there, and a warning a line is an entry and its words
+/// held for every line: a few megabytes of lines nobody can read would take
+/// gigabytes, for a list nobody reads past its first screen.
+const UNREAD_LISTED: usize = 20;
 
 impl Fold {
     fn new(
@@ -1109,6 +1161,7 @@ impl Fold {
             compacted: false,
             command: None,
             asked_compaction: None,
+            unread: 0,
         }
     }
 
@@ -1123,6 +1176,15 @@ impl Fold {
     fn timed(mut self) -> Vec<Timed> {
         self.put_down_compaction();
         self.flush_command();
+        if let Some(more) = self
+            .unread
+            .checked_sub(UNREAD_LISTED)
+            .filter(|more| *more > 0)
+        {
+            self.out.push(translate::warn(format!(
+                "{more} more records this version of Niobe could not read whole are not listed"
+            )));
+        }
         self.times.resize(self.out.len(), None);
         self.out
             .into_iter()
@@ -1140,8 +1202,7 @@ impl Fold {
     fn record(&mut self, record: Record<'_>, agent: Option<&str>) {
         let start = self.out.len();
         if record.mended {
-            self.out
-                .push(translate::warn(translate::HALF_A_CHARACTER.to_owned()));
+            self.unread_record(|| translate::warn(translate::HALF_A_CHARACTER.to_owned()));
         }
         let at = record.at.as_deref().and_then(stamp::parse);
         self.at = at;
@@ -1160,24 +1221,37 @@ impl Fold {
             self.put_down_compaction();
         }
         match record {
-            Ok(Line::Assistant(record)) => self.assistant(record, agent),
-            Ok(Line::User(record)) => self.user(record, agent),
-            Ok(Line::CostState(record)) => self.cost(record),
+            Ok(Line::Assistant(record)) => self.assistant(*record, agent),
+            Ok(Line::User(record)) => self.user(*record, agent),
+            Ok(Line::CostState(record)) => self.cost(*record),
             Ok(Line::PermissionMode(record)) => self.mode(record),
             Ok(Line::AiTitle(record)) => self.title(record),
             Ok(Line::Attachment(record)) => self.attachment(record, agent),
-            Ok(Line::System(record)) => self.system(record),
+            Ok(Line::System(record)) => self.system(*record),
             Ok(Line::Aside) => {}
-            Ok(Line::Unknown) => self.out.push(translate::unread(format!(
-                "the transcript holds a record of type `{}`, which this version of Niobe does \
-                 not know how to read. It was not counted.",
-                translate::kind_of(line)
-            ))),
-            Err(error) => self.out.push(translate::warn(format!(
-                "the transcript holds a `{}` record this version of Niobe could not read, so it \
-                 was not counted: {error}",
-                translate::kind_of(line)
-            ))),
+            Ok(Line::Unknown) => self.unread_record(|| {
+                translate::unread(format!(
+                    "the transcript holds a record of type `{}`, which this version of Niobe \
+                     does not know how to read. It was not counted.",
+                    translate::kind_of(line)
+                ))
+            }),
+            Err(error) => self.unread_record(|| {
+                translate::warn(format!(
+                    "the transcript holds a `{}` record this version of Niobe could not read, \
+                     so it was not counted: {error}",
+                    translate::kind_of(line)
+                ))
+            }),
+        }
+    }
+
+    /// Says that a record was not read whole with the event `warning` makes,
+    /// where fewer than [`UNREAD_LISTED`] have been; counts it otherwise.
+    fn unread_record(&mut self, warning: impl FnOnce() -> Event) {
+        self.unread = self.unread.saturating_add(1);
+        if self.unread <= UNREAD_LISTED {
+            self.out.push(warning());
         }
     }
 
@@ -1883,13 +1957,17 @@ fn said(content: &wire::Content) -> Option<String> {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
 enum Line {
+    // The records with the most to say are boxed, so that every record held
+    // while a transcript is read is a few words long whatever it is: held
+    // inline, each of the shortest lines a record can be took the size of the
+    // largest, three hundred bytes for sixteen.
     #[serde(rename = "assistant")]
-    Assistant(Assistant),
+    Assistant(Box<Assistant>),
     #[serde(rename = "user")]
-    User(User),
+    User(Box<User>),
     /// What the session cost, written when the CLI leaves.
     #[serde(rename = "cost-state")]
-    CostState(CostState),
+    CostState(Box<CostState>),
     /// How the session was gating tool calls.
     #[serde(rename = "permission-mode")]
     PermissionMode(PermissionMode),
@@ -1905,7 +1983,7 @@ enum Line {
     /// request, a refusal, a banner, a command's output and a scheduled
     /// prompt firing are read, and the rest passed over (`Fold::system`).
     #[serde(rename = "system")]
-    System(SystemRecord),
+    System(Box<SystemRecord>),
     /// Records that say nothing about what the session did, changed or cost:
     /// the name the CLI gives a sub-agent's session (`agent-name`) and the
     /// colour it draws one in (`agent-color`), the prompt it offers to repeat
@@ -3618,6 +3696,86 @@ mod tests {
             &Event::UserMessage {
                 text: "still folded".to_owned()
             }
+        );
+    }
+
+    /// A file in the CLI's directory is whatever was put there, and a warning
+    /// a line is an entry, its words and a record held while the file is
+    /// read: a few megabytes of lines nobody can read would take gigabytes. A
+    /// few are listed, which is all anyone reads, and the rest counted.
+    #[test]
+    fn a_transcript_of_records_nobody_can_read_lists_a_few_and_counts_the_rest() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let path = dir.path().join("s-1.jsonl");
+        let mut text = String::new();
+        for _ in 0..1000 {
+            text.push_str("{\"type\":\"user\"}\n{\"type\":\"teleport\"}\n");
+        }
+        text.push_str(&prompt("still folded"));
+        text.push('\n');
+        std::fs::write(&path, text).expect("the temporary directory is writable");
+
+        let events = events(&path, "max", Path::new("/repo")).expect("the file is readable");
+
+        let warned: Vec<&str> = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Notice { message } | Event::Error { message, .. } => Some(message.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(warned.len(), UNREAD_LISTED + 1, "{warned:#?}");
+        assert!(
+            warned
+                .last()
+                .is_some_and(|last| last.contains(&(2000 - UNREAD_LISTED).to_string())),
+            "{warned:#?}"
+        );
+        assert!(events.contains(&Event::UserMessage {
+            text: "still folded".to_owned()
+        }));
+    }
+
+    #[test]
+    fn a_transcript_holding_more_records_than_any_session_writes_is_read_to_the_limit_and_says_so()
+    {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let path = dir.path().join("s-1.jsonl");
+        let text = format!(
+            "{}{}\n{}\n",
+            "{\"type\":\"mode\"}\n".repeat(RECORDS - 1),
+            prompt("at the limit"),
+            prompt("past the limit")
+        );
+        std::fs::write(&path, text).expect("the temporary directory is writable");
+
+        let events = events(&path, "max", Path::new("/repo")).expect("the file is readable");
+
+        let said = |text: &str| {
+            events.contains(&Event::UserMessage {
+                text: text.to_owned(),
+            })
+        };
+        assert!(said("at the limit"));
+        assert!(!said("past the limit"));
+        assert!(
+            events.iter().any(|event| matches!(event,
+                Event::Error { message, .. } if message.contains(&RECORDS.to_string()))),
+            "{:?}",
+            events.last()
+        );
+    }
+
+    /// Every line of a transcript is held as a record while it is read, so a
+    /// file of the shortest lines a record can be is held at this many times
+    /// its size: a line of a variant's whole struct, held inline, made a
+    /// sixteen-byte line hold three hundred and fifty.
+    #[test]
+    fn a_record_held_while_a_transcript_is_read_is_a_few_words_long() {
+        assert!(
+            std::mem::size_of::<Record<'_>>() <= 96,
+            "{}",
+            std::mem::size_of::<Record<'_>>()
         );
     }
 
