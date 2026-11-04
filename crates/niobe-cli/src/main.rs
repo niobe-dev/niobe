@@ -912,12 +912,14 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<Option<
     // piped look at a transcript that records no time shows none rather
     // than the moment it was read.
     let clock = niobe_tui::clock::Clock::system();
-    for ((event, _), at) in events.iter().zip(&times) {
-        match at {
-            Some(at) => app.apply_at(event, clock.at(*at)),
-            None => app.apply(event),
+    app.reading_back(|app| {
+        for ((event, _), at) in events.iter().zip(&times) {
+            match at {
+                Some(at) => app.apply_at(event, clock.at(*at)),
+                None => app.apply(event),
+            }
         }
-    }
+    });
     // Read back from the CLI's record as a resumed session is from the
     // store's: what it holds was there to read before it was opened, so it
     // is no news on the catch-up sheet, and any windows it holds are dated.

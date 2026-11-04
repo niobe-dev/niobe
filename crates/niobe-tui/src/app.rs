@@ -1401,6 +1401,10 @@ pub struct App {
     /// tag is asked for with nearly every event a sub-agent sends, and the
     /// tags change only when an agent is spawned or let go of.
     agent_tags: std::cell::OnceCell<Vec<String>>,
+    /// Whether a recorded stream is being read back whole, during which a
+    /// sub-agent's rows are named once at the end rather than all again at
+    /// each spawn: a session of thousands of agents took minutes.
+    reading_back: bool,
     /// When each decision in [`SessionState::decisions`] was stated, in the
     /// same order, so a pane reads the two together and cannot pair a
     /// decision with another one's time.
@@ -2099,6 +2103,7 @@ impl App {
             just_ended: None,
             agents: Vec::new(),
             agent_tags: std::cell::OnceCell::new(),
+            reading_back: false,
             decided_at: Vec::new(),
             composer,
             composer_scrolled: false,
@@ -3360,7 +3365,9 @@ impl App {
                     None => self.agents.push(spawned),
                 }
                 self.agent_tags = std::cell::OnceCell::new();
-                self.rename_agents_entries();
+                if !self.reading_back {
+                    self.rename_agents_entries();
+                }
             }
             Event::AgentProgress {
                 id,
@@ -3407,16 +3414,31 @@ impl App {
     /// in — which, before the event loop has run, is no clock at all. A log
     /// that recorded no times folds in through here and shows none.
     pub fn extend<'a>(&mut self, events: impl IntoIterator<Item = &'a Event>) {
-        for event in events {
-            self.apply(event);
-        }
+        self.reading_back(|app| {
+            for event in events {
+                app.apply(event);
+            }
+        });
     }
 
     /// Folds a whole recorded stream in, each event at the moment it was
     /// recorded at.
     pub fn extend_at<'a>(&mut self, events: impl IntoIterator<Item = (&'a Event, Stamp)>) {
-        for (event, at) in events {
-            self.apply_at(event, at);
+        self.reading_back(|app| {
+            for (event, at) in events {
+                app.apply_at(event, at);
+            }
+        });
+    }
+
+    /// Folds in, through `fold`, a recorded stream read back whole, naming
+    /// each sub-agent's rows once it is in rather than again at each spawn.
+    pub fn reading_back(&mut self, fold: impl FnOnce(&mut Self)) {
+        let was = std::mem::replace(&mut self.reading_back, true);
+        fold(self);
+        self.reading_back = was;
+        if !was {
+            self.rename_agents_entries();
         }
     }
 
@@ -3466,6 +3488,10 @@ impl App {
     /// What sub-agent `id` is called on a row it shares with what it did:
     /// see [`Entry::agent`].
     pub(crate) fn sub_agent_tag(&self, id: &AgentId) -> String {
+        // Read back whole, every row is named once at the end.
+        if self.reading_back {
+            return id.to_string();
+        }
         match self.agents.iter().position(|agent| &agent.id == id) {
             Some(at) => self
                 .tags()
@@ -10930,6 +10956,51 @@ pub fn human_bytes(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A session read back with thousands of sub-agents is folded without
+    /// naming every agent's rows again at every spawn, and each row still
+    /// carries its agent's tag once it is read.
+    #[test]
+    fn a_session_of_thousands_of_sub_agents_reads_back_at_once_with_their_tags() {
+        let mut events = Vec::new();
+        for n in 0..6400 {
+            let id = niobe_core::event::AgentId::new(format!("toolu_{n}"));
+            events.push(Event::AgentSpawn {
+                id: id.clone(),
+                parent: None,
+                kind: Some(format!("kind{}", n % 3)),
+                label: "look".to_owned(),
+            });
+            events.push(Event::AssistantMessage {
+                text: format!("found {n}"),
+                agent: Some(id),
+            });
+        }
+        let mut app = App::new(Repo::default());
+        let started = std::time::Instant::now();
+
+        app.extend(&events);
+
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "{:?}",
+            started.elapsed()
+        );
+        let tags = app.agent_tags();
+        let named: Vec<&str> = app
+            .entries
+            .iter()
+            .filter_map(|entry| entry.agent.as_deref())
+            .collect();
+        assert_eq!(named.len(), 6400);
+        assert!(
+            named
+                .iter()
+                .all(|tag| tags.iter().any(|known| known == tag)),
+            "{:?}",
+            named.first()
+        );
+    }
     use crate::clock::LocalMoment;
     use niobe_core::Billing;
     use niobe_core::event::{Backend, SessionMeta, Usage, UsageWindows};

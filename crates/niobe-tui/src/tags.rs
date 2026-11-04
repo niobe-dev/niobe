@@ -47,13 +47,15 @@ pub(crate) struct Named<'a> {
 /// every other agent.
 pub(crate) fn tags(agents: &[Named<'_>]) -> Vec<String> {
     let words: Vec<Vec<String>> = agents.iter().map(|agent| words(base(agent))).collect();
-    let mut kinds_of: HashMap<&str, HashSet<&str>> = HashMap::new();
+    // Each kind by a number, so a word's kinds are counted without hashing
+    // a kind once for every word it has.
+    let mut kind_ids: HashMap<&str, usize> = HashMap::new();
+    let mut kinds_of: HashMap<&str, HashSet<usize>> = HashMap::new();
     for (agent, words) in agents.iter().zip(&words) {
+        let next = kind_ids.len();
+        let kind = *kind_ids.entry(base(agent)).or_insert(next);
         for word in words {
-            kinds_of
-                .entry(word.as_str())
-                .or_default()
-                .insert(base(agent));
+            kinds_of.entry(word.as_str()).or_default().insert(kind);
         }
     }
     let stems: Vec<String> = words.iter().map(|words| stem(words, &kinds_of)).collect();
@@ -107,13 +109,19 @@ fn base<'a>(agent: &Named<'a>) -> &'a str {
     agent.kind.unwrap_or(agent.label)
 }
 
-/// The words of `text`, lower-cased: runs of letters and digits.
+/// The words of `text`, lower-cased: runs of letters and digits, the first
+/// [`WORDS`] of them, since a tag is a word a dozen cells long and a kind is
+/// whatever the agent was told it was.
 fn words(text: &str) -> Vec<String> {
     text.split(|c: char| !c.is_alphanumeric())
         .filter(|word| !word.is_empty())
+        .take(WORDS)
         .map(str::to_lowercase)
         .collect()
 }
+
+/// How many of a kind's words a tag may be taken from.
+const WORDS: usize = 32;
 
 /// The word an agent whose kind's words are `words` is tagged with: the
 /// first of them no agent of another kind shares, or the first where every
@@ -124,7 +132,7 @@ fn words(text: &str) -> Vec<String> {
 /// Agents of the same kind do not count against one another's words — that
 /// would leave two `Explore` agents with no word at all — and are told apart
 /// by number instead.
-fn stem(words: &[String], kinds_of: &HashMap<&str, HashSet<&str>>) -> String {
+fn stem(words: &[String], kinds_of: &HashMap<&str, HashSet<usize>>) -> String {
     let shared = |word: &String| {
         kinds_of
             .get(word.as_str())
@@ -148,6 +156,27 @@ fn numbered(stem: &str, number: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A kind of tens of thousands of words is tagged by its first ones, not
+    /// by hashing the whole of it once for every word.
+    #[test]
+    fn an_agent_of_a_kind_of_many_words_is_tagged_at_once() {
+        let kind = "a ".repeat(40_000);
+        let named = [Named {
+            kind: Some(&kind),
+            label: "a task",
+        }];
+        let started = std::time::Instant::now();
+
+        let tags = tags(&named);
+
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(500),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(tags, ["a"]);
+    }
 
     /// Tags are asked for as every agent is spawned, so they are worked out
     /// without each agent looking at every other.
