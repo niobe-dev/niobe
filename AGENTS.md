@@ -353,10 +353,14 @@ reviewers that encode both, for an agent working in this tree.
   read, since what the operator keeps there is theirs and not the clone's, and so is every file
   under the operator's home directory where the repository holds it — and records the answer as `niobe trust` does, for the text
   that was shown. `manifest.rs` is a directory a repository's profile names — a plugin
-  directory `--plugin-dir` hands the CLI or a `PATH` entry a variable names, any other directory an argument or a variable names being one a program works in and not agreed to — as the trust record
+  directory `--plugin-dir` hands the CLI or a directory any variable names but the few that only
+  name where a program writes or the mode it runs in (`CARGO_TARGET_DIR`, `TMPDIR`, `NODE_ENV`, …),
+  any other directory an argument names being one a program works in and not agreed to — as the trust record
   agrees to it: each file under it by its SHA-256 and each link by where it
   really leads — what it reaches hashed where that is in the repository, never read where it is
-  not — within one budget for everything a config names, past which it is not agreed to; with the
+  not — leaving out what git ignores and does not track, which no pull delivers, as `git ls-files`
+  lists it once with nothing the repository configures run, within one budget for everything a
+  config names, past which it is not agreed to; with the
   files the commands of every JSON file a profile names or such a directory holds run — a settings
   file's hooks, an MCP config's servers, a plugin's hooks, read from the keys the CLI runs and no
   others — and the directories their globs list, a pull that changes any of them puts the trust

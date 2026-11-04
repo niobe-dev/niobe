@@ -547,13 +547,15 @@ fn root_of(path: &Path) -> PathBuf {
 /// appears it is a file that was not trusted. A file whose real path is
 /// outside the repository, by `..`, an absolute path or a link, is not read.
 ///
-/// A directory code is loaded from — a plugin directory `--plugin-dir`
-/// names, a directory a variable such as `PATH` or `PYTHONPATH` puts on a
-/// search path — is covered by everything under it; any other directory an
-/// argument or a variable names is one a program works in, whose contents
-/// change as it works, and is not. Every file a command in a settings file
-/// the profile names runs is covered too: its hooks' scripts, its status
-/// line's. A pull can change what either holds without touching the config.
+/// A directory code may be loaded from — a plugin directory `--plugin-dir`
+/// names, a directory any variable names but the few in [`WORKS_IN`] — is
+/// covered by everything under it that git does not ignore without tracking;
+/// a directory any other argument names, or one of those variables, is one a
+/// program works in, whose contents change as it works, and is not. Asking
+/// git what it ignores runs `git ls-files` once, the first time a directory
+/// is walked, with nothing the repository configures run. Every file a
+/// command in a settings file the profile names runs is covered too: its
+/// hooks' scripts, its status line's. A pull can change what either holds without touching the config.
 pub fn attached(config: &Config, root: &Path, home: Option<&OsStr>) -> Vec<Attached> {
     let mut gather = Gather {
         root,
@@ -565,6 +567,7 @@ pub fn attached(config: &Config, root: &Path, home: Option<&OsStr>) -> Vec<Attac
         capped: false,
         cli_directories: cli_directories(home),
         held_home: held_home(root, home),
+        ignored: None,
     };
     for (name, profile) in config.profiles() {
         if let Some(settings) = profile.settings()
@@ -608,9 +611,9 @@ pub fn attached(config: &Config, root: &Path, home: Option<&OsStr>) -> Vec<Attac
                     );
                     continue;
                 }
-                let named = match LOADS_FROM.contains(&variable.as_str()) {
-                    true => Named::Directory,
-                    false => Named::Argument,
+                let named = match WORKS_IN.contains(&variable.as_str()) {
+                    true => Named::Argument,
+                    false => Named::Directory,
                 };
                 gather.add(path, name, named);
             }
@@ -742,18 +745,28 @@ fn is_json(path: &Path) -> bool {
 /// longer one is not agreed to.
 const LONGEST_COMMAND: usize = 64 * 1024;
 
-/// The variables whose directories a program loads code from, which are
-/// agreed to by everything under them; any other variable's value covers a
-/// file it names, and a directory it names is one a program works in.
-const LOADS_FROM: [&str; 8] = [
-    "PATH",
-    "NODE_PATH",
-    "PYTHONPATH",
-    "PERL5LIB",
-    "RUBYLIB",
-    "LD_LIBRARY_PATH",
-    "DYLD_LIBRARY_PATH",
-    "GEM_PATH",
+/// The variables that name where a program writes or the mode it runs in,
+/// never where it loads code from: a directory one of them names is one a
+/// program works in, whose contents change as it works, and only a file it
+/// names is agreed to. A directory any other variable names is agreed to by
+/// everything under it, since a program can load code from a directory any
+/// variable names — `CLAUDE_CODE_PLUGIN_DIRS`, `PYTHONPATH`, `GIT_EXEC_PATH`
+/// — and the config chooses the variable. A name is here for what the
+/// programs that read it do with it, which no config can change; a pattern
+/// such as `*_CACHE_DIR` is not, since a cache a build reads back is code.
+const WORKS_IN: [&str; 12] = [
+    "TMPDIR",
+    "TMP",
+    "TEMP",
+    "TEMPDIR",
+    "CARGO_TARGET_DIR",
+    "NODE_ENV",
+    "RAILS_ENV",
+    "RACK_ENV",
+    "APP_ENV",
+    "MIX_ENV",
+    "FLASK_ENV",
+    "ENVIRONMENT",
 ];
 
 /// The variables that name the directory a CLI keeps its sign-in and its
@@ -823,6 +836,9 @@ struct Gather<'a> {
     cli_directories: Vec<PathBuf>,
     /// The operator's home directory, where the repository holds it.
     held_home: Option<PathBuf>,
+    /// What git ignores and does not track, asked of git the first time a
+    /// directory is walked and not again.
+    ignored: Option<crate::manifest::Ignored>,
 }
 
 /// The operator's home directory, by its real path, where the repository at
@@ -1039,7 +1055,12 @@ impl Gather<'_> {
                     .chain(&self.held_home)
                     .cloned()
                     .collect();
-                match crate::manifest::of(&real, root, &mut self.budget, &avoid) {
+                let ignored = self.ignored.get_or_insert_with(|| {
+                    crate::repo::ignored_untracked(root)
+                        .map(|listing| crate::manifest::Ignored::listed(root, &listing))
+                        .unwrap_or_default()
+                });
+                match crate::manifest::of(&real, root, &mut self.budget, &avoid, ignored) {
                     Ok(manifest) => Contents::Directory(manifest),
                     Err(error) => Contents::Unreadable(error),
                 }
@@ -3033,6 +3054,102 @@ mod tests {
         );
         let shown = format!("{:?}", crate::consent::question(&untrusted).grants);
         assert!(!shown.contains("FAKE"), "{shown}");
+    }
+
+    /// A directory any variable names but those that only ever name where a
+    /// program works is agreed to by everything under it: the CLI's own
+    /// plugin directories are named by a variable, and the config chooses
+    /// which.
+    #[test]
+    fn a_directory_a_variable_names_is_trusted_by_everything_under_it_whatever_the_variable() {
+        for variable in [
+            "CLAUDE_CODE_PLUGIN_DIRS",
+            "CLAUDE_CODE_PLUGIN_SEED_DIR",
+            "GIT_EXEC_PATH",
+        ] {
+            let clone = Cloned::new(&format!(
+                "[profiles.team]\nbackend = \"claude\"\nenv = {{ {variable} = \"plug\" }}\n"
+            ));
+            std::fs::create_dir_all(clone.dir.path().join("plug/hooks"))
+                .expect("the temporary directory is writable");
+            clone.write("plug/hooks/hooks.json", "{}");
+            clone.trust();
+            assert!(
+                clone.load().untrusted.is_none(),
+                "{variable}: trusted as it stands"
+            );
+
+            clone.write("plug/hooks/hooks.json", r#"{"hooks": {}}"#);
+
+            assert!(clone.load().untrusted.is_some(), "{variable}");
+        }
+    }
+
+    /// Runs `git` in `dir` for a test, which needs it to have worked.
+    fn git_in(dir: &Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .current_dir(dir)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("git runs");
+        assert!(status.success(), "git {args:?}");
+    }
+
+    /// What a build or an interpreter writes where git ignores it is not the
+    /// clone's: no pull delivers it, so it neither puts the question back nor
+    /// counts against what a config may name. What git tracks under an
+    /// ignored path is still agreed to by what it holds.
+    #[test]
+    fn what_git_ignores_and_does_not_track_under_a_named_directory_is_not_agreed_to() {
+        let clone = Cloned::new(
+            "[profiles.team]\nbackend = \"claude\"\n\
+             env = { PYTHONPATH = \"src\", PATH = \"target/debug\" }\n",
+        );
+        let dir = clone.dir.path();
+        for sub in ["src/__pycache__", "target/debug/deps"] {
+            std::fs::create_dir_all(dir.join(sub)).expect("the temporary directory is writable");
+        }
+        clone.write(".gitignore", "__pycache__/\n/target/\n");
+        clone.write("src/a.py", "one()");
+        clone.write("src/__pycache__/tracked.pyc", "planted");
+        git_in(dir, &["init", "-q"]);
+        git_in(
+            dir,
+            &[
+                "add",
+                "-f",
+                ".gitignore",
+                "src/a.py",
+                "src/__pycache__/tracked.pyc",
+            ],
+        );
+        clone.trust();
+        assert!(clone.load().untrusted.is_none(), "trusted as it stands");
+
+        clone.write("src/__pycache__/a.cpython-313.pyc", "built");
+        for n in 0..10_001 {
+            clone.write(&format!("target/debug/deps/lib{n}.rlib"), "built");
+        }
+        assert!(
+            clone.load().untrusted.is_none(),
+            "a build and a cache are not the clone's"
+        );
+
+        clone.write("src/__pycache__/tracked.pyc", "changed");
+        assert!(
+            clone.load().untrusted.is_some(),
+            "a tracked file is the clone's"
+        );
     }
 
     /// A directory a variable or an argument names that no CLI loads code

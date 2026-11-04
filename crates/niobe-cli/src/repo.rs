@@ -1317,6 +1317,27 @@ fn git(root: &Path, args: &[&str]) -> Result<String, String> {
     printed(args, &output)
 }
 
+/// What git in `root` ignores and does not track, as `ls-files -z` lists it —
+/// each a path from `root`, a directory ignored whole ending in `/` — or
+/// nothing where `root` is not in a work tree or git cannot say.
+///
+/// No pull delivers such a file: a pull changes what is tracked, and a file
+/// that is tracked is not listed, whatever an ignore file says of it.
+pub(crate) fn ignored_untracked(root: &Path) -> Option<String> {
+    git(
+        root,
+        &[
+            "ls-files",
+            "-z",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "--directory",
+        ],
+    )
+    .ok()
+}
+
 /// Runs one `git` command in `root` as [`git`] does, with `input` on its
 /// standard input, written on a thread of its own so that a git that answers
 /// as it reads is never left waiting on a full pipe for a reader that is still
