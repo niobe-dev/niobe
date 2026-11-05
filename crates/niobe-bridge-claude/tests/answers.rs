@@ -350,3 +350,86 @@ fn a_session_asks_the_cli_what_it_offers_before_it_sends_a_turn() {
         "{first}"
     );
 }
+
+/// Two prompts the CLI names the same call in, waiting at once: each answer
+/// reaches the request it was given for. Waited on by one id, the second took
+/// the first one's place, and allowing a read of `notes.txt` allowed the
+/// command `rm -rf ~` in its stead.
+#[test]
+fn prompts_naming_one_call_are_each_answered_to_their_own_request() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().expect("a temporary directory can be created");
+    let answers = dir.path().join("answers");
+    let read = r#"{"type":"control_request","request_id":"r1","request":{"subtype":"can_use_tool","tool_name":"Read","input":{"file_path":"notes.txt"},"tool_use_id":"T"}}"#;
+    let command = r#"{"type":"control_request","request_id":"r2","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"rm -rf ~"},"tool_use_id":"T"}}"#;
+    let script = dir.path().join("claude");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nread -r first\nread -r turn\nprintf '%s\\n' '{read}' '{command}'\n\
+             read -r one\nprintf '%s\\n' \"$one\" > '{a}'\nread -r two\n\
+             printf '%s\\n' \"$two\" >> '{a}'\nsleep 5\n",
+            a = answers.display()
+        ),
+    )
+    .expect("the temporary directory is writable");
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+        .expect("the stand-in can be made executable");
+    let mut options = Options::new(dir.path(), "max");
+    options.binary = script;
+    options.ask_over_stdio = true;
+    let mut session = spawn_written(&options);
+    session.send("go", &[]).expect("the turn is written");
+
+    let started = Instant::now();
+    let mut asked = Vec::new();
+    while asked.len() < 2 && started.elapsed() < START + PATIENCE {
+        for event in session.drain() {
+            if let Event::PermissionRequest { id, tool, .. } = event {
+                asked.push((id, tool));
+            }
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let [(read_id, read_tool), (command_id, command_tool)] = asked.as_slice() else {
+        panic!("two prompts were asked: {asked:?}");
+    };
+    assert_eq!(
+        (read_tool.as_str(), command_tool.as_str()),
+        ("Read", "Bash")
+    );
+    assert_ne!(read_id, command_id);
+
+    session
+        .answer(read_id, PermissionDecision::Allow, None)
+        .expect("the read is waited on");
+    session
+        .answer(command_id, PermissionDecision::Deny, None)
+        .expect("the command is waited on");
+
+    let started = Instant::now();
+    let written = loop {
+        let written = std::fs::read_to_string(&answers).unwrap_or_default();
+        if written.lines().count() >= 2 || started.elapsed() > PATIENCE {
+            break written;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let lines: Vec<serde_json::Value> = written
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("each answer is JSON"))
+        .collect();
+    let answered = |request: &str| {
+        lines
+            .iter()
+            .find(|line| line["response"]["request_id"] == request)
+            .map(|line| line["response"]["response"]["behavior"].clone())
+    };
+    assert_eq!(
+        answered("r1"),
+        Some(serde_json::json!("allow")),
+        "{written}"
+    );
+    assert_eq!(answered("r2"), Some(serde_json::json!("deny")), "{written}");
+}

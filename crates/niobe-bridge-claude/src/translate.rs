@@ -2770,6 +2770,20 @@ impl Translator {
         out.push(Event::PermissionWithdrawn { id });
     }
 
+    /// The id a prompt for the call `call_id` is waited on and answered by:
+    /// the call's own, unless another prompt still open is waited on by it,
+    /// and then one its request makes unique to it. A backend names a call,
+    /// and may name two the same: waited on by one id, the second prompt
+    /// took the first one's place, and the answer the operator gave the
+    /// first was written to the second.
+    fn unanswered_id(&self, call_id: String, request_id: Option<&str>) -> String {
+        let open = |id: &str| self.open_requests.values().any(|open| open.as_str() == id);
+        match (open(&call_id), request_id) {
+            (true, Some(request_id)) => format!("{call_id}#{request_id}"),
+            _ => call_id,
+        }
+    }
+
     /// Records a prompt the CLI is waiting on, and asks the session it.
     ///
     /// A request with no `request_id` is reported as a prompt and never
@@ -2798,8 +2812,15 @@ impl Translator {
             .tool_calls
             .get(&call_id)
             .and_then(|call| call.agent.clone());
-        let id = ToolCallId::new(call_id);
-        if let Some(request_id) = request.request_id {
+        let id = ToolCallId::new(self.unanswered_id(call_id, request.request_id.as_deref()));
+        // A request that cannot be told from one still open — its request
+        // named twice — is shown and never answered: an answer to it could
+        // reach the other.
+        let request_id = request.request_id.filter(|request_id| {
+            !self.open_requests.contains_key(request_id)
+                && !self.open_requests.values().any(|open| open == &id)
+        });
+        if let Some(request_id) = request_id {
             self.open_requests.insert(request_id.clone(), id.clone());
             self.asked.push(Asked {
                 id: id.clone(),
@@ -7044,6 +7065,70 @@ mod tests {
                 (ids[1].clone(), "c2".to_owned())
             ]
         );
+    }
+
+    /// A backend may name two calls the same while both are asked about: the
+    /// second is waited on by an id of its own, so the answer given to each
+    /// is written to its own request and never to the other's.
+    #[test]
+    fn prompts_for_calls_named_the_same_are_told_apart_by_their_requests() {
+        let mut translator = translator();
+
+        let mut ids = Vec::new();
+        for (request, tool, input) in [
+            ("r1", "Read", r#"{"file_path":"notes.txt"}"#),
+            ("r2", "Bash", r#"{"command":"rm -rf ~"}"#),
+        ] {
+            let events = translator.line(&format!(
+                r#"{{"type":"control_request","request_id":"{request}","request":{{"subtype":"can_use_tool","tool_name":"{tool}","input":{input},"tool_use_id":"T"}}}}"#
+            ));
+            let [Event::PermissionRequest { id, .. }] = events.as_slice() else {
+                panic!("one prompt: {events:?}");
+            };
+            ids.push(id.clone());
+        }
+
+        assert_eq!(ids[0].as_str(), "T", "the first keeps its call's id");
+        assert_ne!(ids[0], ids[1]);
+        let asked: Vec<_> = translator
+            .take_asked()
+            .into_iter()
+            .map(|ask| (ask.id, ask.request_id, ask.input))
+            .collect();
+        assert_eq!(
+            asked,
+            [
+                (
+                    ids[0].clone(),
+                    "r1".to_owned(),
+                    serde_json::json!({ "file_path": "notes.txt" })
+                ),
+                (
+                    ids[1].clone(),
+                    "r2".to_owned(),
+                    serde_json::json!({ "command": "rm -rf ~" })
+                ),
+            ]
+        );
+    }
+
+    /// A request named twice cannot be told from the one still open, so it
+    /// is shown and not waited on: an answer to it could reach the other.
+    #[test]
+    fn a_request_named_twice_is_not_waited_on_a_second_time() {
+        let mut translator = translator();
+        for (call, tool) in [("T1", "Read"), ("T2", "Bash")] {
+            translator.line(&format!(
+                r#"{{"type":"control_request","request_id":"r1","request":{{"subtype":"can_use_tool","tool_name":"{tool}","input":{{}},"tool_use_id":"{call}"}}}}"#
+            ));
+        }
+
+        let asked: Vec<_> = translator
+            .take_asked()
+            .into_iter()
+            .map(|ask| ask.request_id)
+            .collect();
+        assert_eq!(asked, ["r1"]);
     }
 
     /// A standing rule is written about a command, and a call that also asks

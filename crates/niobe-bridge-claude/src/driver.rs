@@ -859,8 +859,12 @@ impl Session {
                     answered.extend(translator.take_model_answers());
                 }
                 if let Ok(mut waiting) = asked.lock() {
+                    // Never in place of a prompt still waited on: the answer
+                    // the operator gives the one on screen would reach this.
                     for ask in translator.take_asked() {
-                        waiting.insert(ask.id.as_str().to_owned(), (ask.request_id, ask.input));
+                        waiting
+                            .entry(ask.id.as_str().to_owned())
+                            .or_insert((ask.request_id, ask.input));
                     }
                     for id in translator.take_withdrawn() {
                         waiting.remove(id.as_str());
