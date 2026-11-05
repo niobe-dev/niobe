@@ -1303,6 +1303,10 @@ pub struct App {
     /// Which rows of the waiting call, drawn whole, frames have had on
     /// screen: a question cut to fit is allowed only once every one has.
     question_seen: Option<SeenRows>,
+    /// What the waiting question's head and call were laid out as, and for
+    /// which call, width, Ctrl+T and theme: laid out again with every tick,
+    /// a call holding megabytes held up every frame.
+    question_laid: std::cell::RefCell<Option<QuestionLaid>>,
     /// Whether the last frame was too small to draw the shell, and so drew
     /// no question at all. `false` until a frame says otherwise.
     too_small: bool,
@@ -1956,6 +1960,29 @@ const TYPING_AFTER_ESC: Duration = Duration::from_millis(350);
 const NOT_ATTACHED: &str = "This session is not attached to a backend, so the prompt above was \
      not sent. `niobe profiles` shows which profiles are defined and which backend each one runs.";
 
+/// What a waiting question's head, call and answers were laid out as, for
+/// the call, width, Ctrl+T, theme and answers in `key`.
+#[derive(Debug, Clone)]
+pub(crate) struct QuestionLaid {
+    key: (Option<ToolCallId>, usize, bool, &'static str, Vec<Answer>),
+    /// What is asked, and why.
+    pub(crate) head: Vec<ratatui::text::Line<'static>>,
+    /// What would run.
+    pub(crate) call: crate::proposed::Call,
+    /// Each answer offered, what it is called and what choosing it does.
+    pub(crate) words: Vec<(Answer, String, String)>,
+    /// Any consequence too long for its column, said whole.
+    pub(crate) consequences: Vec<ratatui::text::Line<'static>>,
+}
+
+/// What [`App::with_question_laid`] lays a question out into.
+pub(crate) type QuestionParts = (
+    Vec<ratatui::text::Line<'static>>,
+    crate::proposed::Call,
+    Vec<(Answer, String, String)>,
+    Vec<ratatui::text::Line<'static>>,
+);
+
 /// Which rows of a call, drawn whole `width` columns wide, have been on
 /// screen.
 #[derive(Debug, Clone)]
@@ -2100,6 +2127,7 @@ impl App {
             question_top_drawn: true,
             question_cut: false,
             question_seen: None,
+            question_laid: std::cell::RefCell::new(None),
             too_small: false,
             transcript_drawn: None,
             pressed: None,
@@ -6874,6 +6902,44 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Hands `with` the waiting question's head, call, answers and
+    /// consequences, `inner` columns wide, with Ctrl+T `open` or not, in the
+    /// theme named `theme`: laid out by `lay` the first time they are asked
+    /// for that way, and kept until they are asked for another way, other
+    /// answers or another call. A call holding megabytes was laid out again,
+    /// and its rule copied whole, with every tick.
+    pub(crate) fn with_question_laid<R>(
+        &self,
+        (inner, open, theme): (usize, bool, &'static str),
+        lay: impl FnOnce() -> QuestionParts,
+        with: impl FnOnce(&QuestionLaid) -> R,
+    ) -> R {
+        let key = (
+            self.asks.front().map(|ask| ask.id.clone()),
+            inner,
+            open,
+            theme,
+            self.ask_options(),
+        );
+        let mut laid = self.question_laid.borrow_mut();
+        let kept = match laid.take() {
+            Some(kept) if kept.key == key => kept,
+            _ => {
+                let (head, call, words, consequences) = lay();
+                QuestionLaid {
+                    key,
+                    head,
+                    call,
+                    words,
+                    consequences,
+                }
+            }
+        };
+        let drawn = with(&kept);
+        *laid = Some(kept);
+        drawn
     }
 
     /// Whether allowing the waiting call would allow lines of it the operator

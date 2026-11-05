@@ -3385,7 +3385,9 @@ fn question_lines(
     let call = 1 + body.head.len()..1 + body.head.len() + body.call.rows.len();
     // A call drawn with rows that stand for lines left out — an argument cut
     // at its rows, a diff at twenty — is cut as surely as one cut to fit.
-    let elided = !app.diffs_open() && !body.call.markers.is_empty();
+    let elided = (!app.diffs_open() && !body.call.markers.is_empty())
+        || body.call.capped
+        || ask.tool.chars().nth(TOOL_NAME_CHARS).is_some();
     let (body, cut) = match fits {
         true => (body.whole(), elided),
         false => {
@@ -3517,32 +3519,62 @@ impl QuestionBody {
 fn question_body(app: &App, ask: &Ask, inner: usize, theme: &Theme) -> QuestionBody {
     let plain = Style::new().fg(theme.fg);
 
-    let mut head = question_head(&tool_label(&ask.tool), inner, plain);
-    head.extend(question_reason(ask, inner, theme));
-    let call = question_call(app, ask, inner, theme);
-    let mut answers = vec![Line::from("")];
     let focus = app.ask_focus();
     let selected = app.ask_selected();
-    let mut cut = Vec::new();
-    for (at, answer) in app.ask_options().into_iter().enumerate() {
-        let lit = focus == AskFocus::Choosing && answer == selected;
-        let (label, hint) = option_words(answer, ask, app.diffs_open());
-        let (row, whole) = option_row(at + 1, (label, hint.clone()), lit, inner, theme);
-        answers.push(row);
-        if !whole {
-            cut.push((at + 1, hint));
+    let lay = || {
+        let (tool, more) = capped(&ask.tool, TOOL_NAME_CHARS);
+        let label = match more {
+            0 => tool_label(tool),
+            more => format!("{}… ({more} more characters)", tool_label(tool)),
+        };
+        let mut head = question_head(&label, inner, plain);
+        head.extend(question_reason(ask, inner, theme));
+        let words: Vec<(Answer, String, String)> = app
+            .ask_options()
+            .into_iter()
+            .map(|answer| {
+                let (label, hint) = option_words(answer, ask, app.diffs_open());
+                (answer, label, hint)
+            })
+            .collect();
+        // A consequence cut off at the edge of its column is said again
+        // whole: a standing answer is a rule the operator keeps, and keeping
+        // one nobody could read to its end is agreeing to something unread.
+        let mut consequences = Vec::new();
+        for (at, (_, label, hint)) in words.iter().enumerate() {
+            let (_, whole) = option_row(at + 1, (label, hint), false, inner, theme);
+            if !whole {
+                if consequences.is_empty() {
+                    consequences.push(Line::from(""));
+                }
+                consequences.extend(consequence_rows(
+                    &format!("{}. {hint}", at + 1),
+                    inner,
+                    theme,
+                ));
+            }
         }
-    }
-    // A consequence cut off at the edge of its column is said again whole: a
-    // standing answer is a rule the operator keeps, and keeping one nobody
-    // could read to its end is agreeing to something unread.
-    let mut consequences = Vec::new();
-    if !cut.is_empty() {
-        consequences.push(Line::from(""));
-        for (number, hint) in cut {
-            consequences.extend(consequence_rows(&format!("{number}. {hint}"), inner, theme));
-        }
-    }
+        (
+            head,
+            question_call(app, ask, inner, theme),
+            words,
+            consequences,
+        )
+    };
+    let (head, call, answers, consequences) =
+        app.with_question_laid((inner, app.diffs_open(), theme.name), lay, |laid| {
+            let mut answers = vec![Line::from("")];
+            for (at, (answer, label, hint)) in laid.words.iter().enumerate() {
+                let lit = focus == AskFocus::Choosing && *answer == selected;
+                answers.push(option_row(at + 1, (label, hint), lit, inner, theme).0);
+            }
+            (
+                laid.head.clone(),
+                laid.call.clone(),
+                answers,
+                laid.consequences.clone(),
+            )
+        });
     let mut rest = Vec::new();
     if focus == AskFocus::Writing {
         rest.push(Line::from(""));
@@ -3606,22 +3638,34 @@ fn question_call(app: &App, ask: &Ask, inner: usize, theme: &Theme) -> crate::pr
         .and_then(|proposed| proposed.call(&ask.input, inner, open, theme));
     if let Some(mut call) = proposed {
         if open {
+            let (sent, capped) = sent_rows(&ask.input, inner, theme);
             call.rows.push(Line::from(""));
-            call.rows.extend(sent_rows(&ask.input, inner, theme));
+            call.rows.extend(sent);
+            call.capped |= capped;
         }
         return call;
     }
     let Some(target) = &ask.target else {
+        let whole = |input: &str| {
+            let (rows, capped) = bold_rows(input, inner, theme);
+            Call {
+                capped,
+                ..Call::of(rows)
+            }
+        };
         return match open {
-            false => by_key(&ask.input, inner, theme)
-                .unwrap_or_else(|| Call::of(bold_rows(&ask.input, inner, theme))),
-            true => Call::of(bold_rows(&ask.input, inner, theme)),
+            false => by_key(&ask.input, inner, theme).unwrap_or_else(|| whole(&ask.input)),
+            true => whole(&ask.input),
         };
     };
-    let mut call = bold_rows(target, inner, theme);
+    let (mut call, mut capped) = bold_rows(target, inner, theme);
     let mut markers = Vec::new();
     let under = match open {
-        true => sent_rows(&ask.input, inner, theme),
+        true => {
+            let (sent, cut) = sent_rows(&ask.input, inner, theme);
+            capped |= cut;
+            sent
+        }
         false => {
             // The key that holds the target is the target, drawn above: said
             // again by key it would be the same text under another name, and
@@ -3642,7 +3686,11 @@ fn question_call(app: &App, ask: &Ask, inner: usize, theme: &Theme) -> crate::pr
                     }
                     laid
                 }
-                None => sent_rows(&ask.input, inner, theme),
+                None => {
+                    let (sent, cut) = sent_rows(&ask.input, inner, theme);
+                    capped |= cut;
+                    sent
+                }
             }
         }
     };
@@ -3653,6 +3701,7 @@ fn question_call(app: &App, ask: &Ask, inner: usize, theme: &Theme) -> crate::pr
     Call {
         rows: call,
         markers,
+        capped,
     }
 }
 
@@ -3669,7 +3718,11 @@ fn by_key(input: &str, inner: usize, theme: &Theme) -> Option<crate::proposed::C
         0 => Vec::new(),
         _ => vec![(rows.len().saturating_sub(marker_rows), marker_rows, hidden)],
     };
-    Some(crate::proposed::Call { rows, markers })
+    Some(crate::proposed::Call {
+        rows,
+        markers,
+        capped: false,
+    })
 }
 
 /// The most rows of the arguments as sent that are drawn behind Ctrl+T: they
@@ -3678,8 +3731,8 @@ const SENT_ROWS: usize = 2_000;
 
 /// The arguments as the backend sent them, `inner` columns wide, character for
 /// character, and — past [`SENT_ROWS`] rows of them — how many characters are
-/// not drawn.
-fn sent_rows(input: &str, inner: usize, theme: &Theme) -> Vec<Line<'static>> {
+/// not drawn, and whether any are not.
+fn sent_rows(input: &str, inner: usize, theme: &Theme) -> (Vec<Line<'static>>, bool) {
     let dim = Style::new().fg(theme.dim);
     let room = inner.max(1).saturating_mul(SENT_ROWS);
     let cut = input.char_indices().nth(room).map(|(at, _)| at);
@@ -3695,15 +3748,28 @@ fn sent_rows(input: &str, inner: usize, theme: &Theme) -> Vec<Line<'static>> {
                 .style(Style::new().fg(theme.hot)),
         );
     }
-    rows
+    (rows, cut.is_some())
 }
 
-/// `said` wrapped to `inner` columns exactly as written, in bold.
-fn bold_rows(said: &str, inner: usize, theme: &Theme) -> Vec<Line<'static>> {
-    text::wrap_exact(said, inner)
+/// `said` wrapped to `inner` columns exactly as written, in bold — past
+/// [`SENT_ROWS`] rows of it, how many characters are not drawn — and whether
+/// any are not.
+fn bold_rows(said: &str, inner: usize, theme: &Theme) -> (Vec<Line<'static>>, bool) {
+    let room = inner.max(1).saturating_mul(SENT_ROWS);
+    let cut = said.char_indices().nth(room).map(|(at, _)| at);
+    let shown = &said[..cut.unwrap_or(said.len())];
+    let mut rows: Vec<Line<'static>> = text::wrap_exact(shown, inner)
         .into_iter()
         .map(|wrapped| Line::from(wrapped).style(Style::new().fg(theme.fg).bold()))
-        .collect()
+        .collect();
+    if let Some(cut) = cut {
+        let rest = said[cut..].chars().count();
+        rows.push(
+            Line::from(format!("… {rest} more characters are not drawn"))
+                .style(Style::new().fg(theme.hot)),
+        );
+    }
+    (rows, cut.is_some())
 }
 
 /// Why the backend asked, where it said, wrapped to `inner` columns under
@@ -3713,10 +3779,32 @@ fn question_reason(ask: &Ask, inner: usize, theme: &Theme) -> Vec<Line<'static>>
     let Some(reason) = ask.reason.as_deref().filter(|said| !said.trim().is_empty()) else {
         return Vec::new();
     };
+    // Why the CLI asked says nothing of what would run, and is drawn whole
+    // above the call: past a few screens of it the rest is counted instead.
+    let (reason, more) = capped(reason, REASON_CHARS);
+    let reason = match more {
+        0 => reason.to_owned(),
+        more => format!("{reason}… ({more} more characters)"),
+    };
     text::wrap_exact(&format!("{BECAUSE}{reason}"), inner)
         .into_iter()
         .map(|row| Line::from(row).style(Style::new().fg(theme.fg).italic()))
         .collect()
+}
+
+/// The most characters of a question's reason drawn.
+const REASON_CHARS: usize = 4_096;
+
+/// The most characters of a tool's name drawn: no tool is named in more,
+/// and one that is cannot be read whole, so it is not allowed from here.
+pub(crate) const TOOL_NAME_CHARS: usize = 256;
+
+/// `said` up to its first `most` characters, and how many characters follow.
+fn capped(said: &str, most: usize) -> (&str, usize) {
+    match said.char_indices().nth(most) {
+        Some((at, _)) => (&said[..at], said[at..].chars().count()),
+        None => (said, 0),
+    }
 }
 
 /// `to run <tool>` wrapped to `inner` columns, the tool's name in bold on
@@ -3780,14 +3868,14 @@ const HINT_BYTES: usize = 4 * 1024;
 /// what makes it legible without colour.
 fn option_row(
     number: usize,
-    (label, hint): (String, String),
+    (label, hint): (&str, &str),
     lit: bool,
     width: usize,
     theme: &Theme,
 ) -> (Line<'static>, bool) {
     let lead = format!("{} {number}. ", if lit { "▶" } else { " " });
     let rest = width.saturating_sub(text::width(&lead));
-    let label = text::truncate(&label, rest);
+    let label = text::truncate(label, rest);
     let hint_room = rest.saturating_sub(text::width(&label) + 2);
     // A hint holding a control character is drawn with each shown by its
     // glyph, and a tab or a line break turned into a space or a `↵`, which is
@@ -6729,7 +6817,7 @@ mod tests {
         let hint = format!("niobe saves Bash({})", "x".repeat(HINT_BYTES * 2));
         let (row, whole) = option_row(
             3,
-            ("Always allow this target".to_owned(), hint),
+            ("Always allow this target", &hint),
             false,
             60,
             &crate::theme::CLASSIC,

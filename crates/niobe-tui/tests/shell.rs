@@ -1289,6 +1289,71 @@ fn a_call_whose_arguments_are_cut_at_their_rows_is_not_allowed_unread() {
     assert!(answered(&mut app), "a call read whole was not allowed");
 }
 
+/// A call larger than the question draws even under Ctrl+T — a tool named in
+/// thousands of characters, a target of hundreds of thousands — can never be
+/// read whole, so it is not allowed however it is read; it can be refused.
+#[test]
+fn a_call_too_large_to_draw_whole_can_only_be_refused() {
+    use niobe_tui::app::ASK_QUIET;
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use std::time::Instant;
+
+    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+    let held = |code, modifiers| KeyEvent::new(code, modifiers);
+    let long_tool = format!("mcp__{}", "x".repeat(2_000));
+    let huge_target = "y".repeat(400_000);
+    for (tool, target) in [
+        (long_tool.as_str(), "a"),
+        ("mcp__fs__read", huge_target.as_str()),
+    ] {
+        let mut app = running_session();
+        app.apply(&Event::PermissionRequest {
+            id: "toolu_large".into(),
+            tool: tool.to_owned(),
+            input: serde_json::json!({ "path": target }).to_string(),
+            proposal: None,
+            target: Some(target.to_owned()),
+            reason: None,
+            agent: None,
+        });
+        let mut app = app.attached();
+        let shown = Instant::now();
+        let mut beat = 0;
+        let mut next = || {
+            beat += 2;
+            alone(shown + ASK_QUIET * beat)
+        };
+        app.tick(shown, None);
+        screen(&mut app, 80, 24);
+
+        app.on_key_read(held(KeyCode::Char('t'), KeyModifiers::CONTROL), next());
+        screen(&mut app, 80, 24);
+        app.on_key_read(held(KeyCode::Home, KeyModifiers::CONTROL), next());
+        screen(&mut app, 80, 24);
+        for _ in 0..2_400 {
+            app.on_key_read(key(KeyCode::PageDown), next());
+            screen(&mut app, 80, 24);
+            if app.follows_tail() {
+                break;
+            }
+        }
+        app.on_key_read(held(KeyCode::Char('t'), KeyModifiers::CONTROL), next());
+        screen(&mut app, 80, 24);
+        app.on_key_read(key(KeyCode::Enter), next());
+        assert!(
+            !answered(&mut app),
+            "{tool:.20}: a call never drawn whole was allowed"
+        );
+
+        app.on_key_read(key(KeyCode::Char('4')), next());
+        app.on_key_read(key(KeyCode::Enter), next());
+        assert!(
+            answered(&mut app),
+            "{tool:.20}: a call too large to read could not be refused"
+        );
+    }
+}
+
 /// Refusing a call cut to fit needs no reading of it.
 #[test]
 fn a_call_cut_to_fit_can_be_refused_unread() {

@@ -665,6 +665,157 @@ fn one_line_write_inside_the_budget(content: &str) {
     );
 }
 
+/// How long one value of [`a_question_holding_a_huge_value_redraws_inside_the_write_budget`]
+/// is: far more than any model writes into one call, which only a CLI that
+/// is not the official one would send, and which must still not hold the
+/// shell up a frame at a time.
+const HUGE_VALUE_BYTES: usize = 24 * 1024 * 1024;
+
+/// How long laying a question out may take where it first draws, or after a
+/// key that changes how it is laid out: once, not with every tick, but the
+/// key the operator pressed waits on it.
+const LAYOUT_BUDGET: Duration = Duration::from_millis(250);
+
+/// A permission question is drawn with every tick while it waits, and every
+/// part of it — the tool's name, the reason, the target, the arguments by
+/// key or as one string, a command, an edit — may hold a value of any size
+/// the stream carried. The frame has to cost the rows it shows.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "a frame is timed in an optimised build")]
+fn a_question_holding_a_huge_value_redraws_inside_the_write_budget() {
+    let _alone = ALONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let huge = "word ".repeat(HUGE_VALUE_BYTES / 5);
+    let lines = "-- pad\n".repeat(HUGE_VALUE_BYTES / 8);
+    let asks: Vec<(&str, Event)> = vec![
+        (
+            "an argument by key",
+            ask(
+                "mcp__db__query",
+                serde_json::json!({ "sql": huge }),
+                None,
+                None,
+                None,
+            ),
+        ),
+        (
+            "an argument of many lines",
+            ask(
+                "mcp__db__query",
+                serde_json::json!({ "sql": lines }),
+                None,
+                None,
+                None,
+            ),
+        ),
+        (
+            "the reason",
+            ask(
+                "mcp__db__query",
+                serde_json::json!({ "sql": "SELECT 1" }),
+                None,
+                Some(&huge),
+                None,
+            ),
+        ),
+        (
+            "the tool's name",
+            ask(
+                &format!("mcp__{huge}"),
+                serde_json::json!({ "q": 1 }),
+                None,
+                None,
+                None,
+            ),
+        ),
+        (
+            "the target",
+            ask(
+                "mcp__fs__read",
+                serde_json::json!({ "path": huge }),
+                Some(&huge),
+                None,
+                None,
+            ),
+        ),
+        (
+            "a command",
+            ask(
+                "Bash",
+                serde_json::json!({ "command": huge }),
+                Some(&huge),
+                None,
+                Some(niobe_core::Proposal::new(
+                    niobe_core::Action::Command {
+                        command: huge.clone(),
+                    },
+                    ["command"],
+                )),
+            ),
+        ),
+        (
+            "an edit",
+            ask(
+                "Edit",
+                serde_json::json!({ "file_path": "a.rs", "old_string": "x", "new_string": huge }),
+                Some("a.rs"),
+                None,
+                Some(niobe_core::Proposal::new(
+                    niobe_core::Action::Replace {
+                        path: "a.rs".to_owned(),
+                        old: "x".to_owned(),
+                        new: huge.clone(),
+                        every: false,
+                    },
+                    ["file_path", "old_string", "new_string"],
+                )),
+            ),
+        ),
+    ];
+    for (what, event) in asks {
+        let mut app = running_session();
+        app.apply(&event);
+        for view in ["cut", "under Ctrl+T"] {
+            let laid = Instant::now();
+            let _ = screen(&mut app, 120, 40);
+            let first = laid.elapsed();
+            let frame = median_frame(&mut app, &[(120, 40)]);
+            assert!(
+                frame <= WRITE_BUDGET,
+                "the median frame of a question with a huge value in {what}, {view}, took \
+                 {frame:?}, over {WRITE_BUDGET:?}"
+            );
+            assert!(
+                first <= LAYOUT_BUDGET,
+                "laying out a question with a huge value in {what}, {view}, took {first:?}, \
+                 over {LAYOUT_BUDGET:?}"
+            );
+            app.on_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
+        }
+    }
+}
+
+/// A permission request for `tool` with `input`, and the target, reason and
+/// proposal given.
+fn ask(
+    tool: &str,
+    input: serde_json::Value,
+    target: Option<&str>,
+    reason: Option<&str>,
+    proposal: Option<niobe_core::Proposal>,
+) -> Event {
+    Event::PermissionRequest {
+        id: "huge".into(),
+        tool: tool.to_owned(),
+        input: input.to_string(),
+        target: target.map(str::to_owned),
+        proposal,
+        reason: reason.map(str::to_owned),
+        agent: None,
+    }
+}
+
 /// A permission question for a command that writes a file of
 /// [`WRITTEN_LINES`] lines through a heredoc is drawn with every tick while it
 /// waits, and the file is in the command it draws: the frame has to cost the

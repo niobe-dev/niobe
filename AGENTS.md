@@ -712,7 +712,9 @@ Where tests live:
     against 16 ms, and keys read together against a linear ratio — and a
     100,000-line file written from scratch, applied and drawn against 50 ms, and the question for a
     one-line write of four megabytes, and for a command carrying the 100,000 lines in a heredoc,
-    drawn against 50 ms — and a key in the
+    drawn against 50 ms — and a question holding 24 MB in its tool's name, its reason, its target,
+    an argument, a command or an edit, redrawn against 50 ms and laid out, cut and under Ctrl+T,
+    against 250 ms — and a key in the
     history dialog over 20,000 remembered prompts, landed and drawn against 16 ms — and a
     megabyte prompt under the history dialog's cursor drawn against 16 ms — and a mebibyte memory
     file opened and paged in the Memory view against 16 ms — and the transcript of

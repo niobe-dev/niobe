@@ -48,6 +48,10 @@ pub(crate) struct Call {
     /// how many rows it takes and how many lines it stands for: a marker is
     /// not itself a line of the call.
     pub markers: Vec<(usize, usize, usize)>,
+    /// Whether this view leaves part of the call undrawn however it is
+    /// opened: what is laid out is bounded, so a call past the bound is never
+    /// on screen whole.
+    pub capped: bool,
 }
 
 impl Call {
@@ -56,6 +60,7 @@ impl Call {
         Self {
             rows,
             markers: Vec::new(),
+            capped: false,
         }
     }
 
@@ -167,7 +172,11 @@ impl Proposed {
                 (false, false) => rows.extend(markdown::render(plan, width, theme)),
             }
             self.others_under(input, width, theme, &mut rows, &mut markers);
-            return Some(Call { rows, markers });
+            return Some(Call {
+                rows,
+                markers,
+                capped: false,
+            });
         }
         let (subject, said) = match (self.proposal.action(), &self.lines) {
             (Action::Replace { path, every, .. }, Some(_)) => (
@@ -211,7 +220,11 @@ impl Proposed {
             rows.extend(change);
         }
         self.others_under(input, width, theme, &mut rows, &mut markers);
-        Some(Call { rows, markers })
+        Some(Call {
+            rows,
+            markers,
+            capped: false,
+        })
     }
 
     /// The first rows of `subject` — a command, or a file's path — wrapped

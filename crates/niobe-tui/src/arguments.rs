@@ -64,23 +64,27 @@ pub(crate) fn rows(
 ) -> (Vec<Line<'static>>, usize, usize) {
     let mut laid = Laid::default();
     object(fields, 0, width, theme, &mut laid);
-    let Laid { mut rows, cut } = laid;
+    let Laid {
+        mut rows,
+        cut,
+        unlaid,
+    } = laid;
     // A string cut at its own rows leaves lines out as surely as the layout
     // cut at its rows does, and is counted with what is left out: a caller
     // marks the call as cut where anything is, though no row of its own says
     // how many lines a string held back but the string's.
-    if rows.len() <= ROWS + 1 {
+    if rows.len() <= ROWS + 1 && unlaid == 0 {
         return (rows, cut, 0);
     }
-    let over = rows.len() - ROWS;
+    let over = rows.len().saturating_sub(ROWS).saturating_add(unlaid);
     rows.truncate(ROWS);
     let said = format!("… {over} more lines · Ctrl+T shows the arguments as sent");
-    rows.extend(
-        text::wrap(&said, width.max(1))
-            .into_iter()
-            .map(|line| Line::from(Span::styled(line, Style::new().fg(theme.hot)))),
-    );
-    let marker_rows = rows.len() - ROWS;
+    let marker: Vec<Line<'static>> = text::wrap(&said, width.max(1))
+        .into_iter()
+        .map(|line| Line::from(Span::styled(line, Style::new().fg(theme.hot))))
+        .collect();
+    let marker_rows = marker.len();
+    rows.extend(marker);
     (rows, over.saturating_add(cut), marker_rows)
 }
 
@@ -90,6 +94,9 @@ pub(crate) fn rows(
 pub(crate) struct Laid {
     rows: Vec<Line<'static>>,
     cut: usize,
+    /// How many rows a value past what the layout could show would have
+    /// taken, which were never laid out.
+    unlaid: usize,
 }
 
 impl std::ops::Deref for Laid {
@@ -258,6 +265,8 @@ fn pair(
     let head = format!("{}:", text::controls_shown(key));
     let lead = " ".repeat(indent);
     let room = width.saturating_sub(indent).max(1);
+    let (value, beyond) = within_layout(value, room);
+    rows.unlaid = rows.unlaid.saturating_add(beyond);
     let said = match value.is_empty() {
         true => head.clone(),
         false => format!("{head} {}", text::controls_shown_in_rows(value)),
@@ -286,19 +295,33 @@ fn pair(
 /// and then how many rows are left.
 fn string(said: &str, indent: usize, width: usize, theme: &Theme, rows: &mut Laid) {
     let room = width.saturating_sub(indent).max(1);
-    let wrapped = text::wrap_keeping_spaces(&text::controls_shown_in_rows(said.trim_end()), room);
-    let lead = " ".repeat(indent);
-    let shown = match wrapped.len() > STRING_ROWS + 1 {
-        true => STRING_ROWS,
-        false => wrapped.len(),
+    let said = said.trim_end();
+    // No more of the string is wrapped than its rows could show, and the
+    // rows the rest would take are counted from its lines: a value of
+    // megabytes was wrapped whole to keep three rows of it.
+    let (laid, rest) = match said
+        .char_indices()
+        .nth(room.saturating_mul(STRING_ROWS + 2))
+    {
+        Some((at, _)) => said.split_at(at),
+        None => (said, ""),
     };
+    let mut wrapped = text::wrap_keeping_spaces(&text::controls_shown_in_rows(laid), room);
+    let beyond = rows_of(rest, room);
+    let total = wrapped.len().saturating_add(beyond);
+    let lead = " ".repeat(indent);
+    let shown = match total > STRING_ROWS + 1 {
+        true => STRING_ROWS,
+        false => total,
+    };
+    wrapped.truncate(shown);
     for part in wrapped.iter().take(shown) {
         rows.push(Line::from(vec![
             Span::raw(lead.clone()),
             Span::styled(part.clone(), Style::new().fg(theme.fg)),
         ]));
     }
-    let hidden = wrapped.len() - shown;
+    let hidden = total - shown;
     if hidden > 0 {
         rows.cut = rows.cut.saturating_add(hidden);
         rows.push(Line::from(vec![
@@ -311,9 +334,32 @@ fn string(said: &str, indent: usize, width: usize, theme: &Theme, rows: &mut Lai
     }
 }
 
+/// As much of `said` as the layout could show at `room` columns, and about
+/// how many rows the rest would have taken: the layout keeps [`ROWS`] rows,
+/// and a value of megabytes was wrapped whole to keep them.
+fn within_layout(said: &str, room: usize) -> (&str, usize) {
+    match said.char_indices().nth(room.saturating_mul(ROWS + 2)) {
+        Some((at, _)) => (&said[..at], rows_of(&said[at..], room)),
+        None => (said, 0),
+    }
+}
+
+/// About how many rows `rest` of a string wraps to at `room` columns,
+/// counted by its lines and their characters rather than laid out.
+fn rows_of(rest: &str, room: usize) -> usize {
+    if rest.is_empty() {
+        return 0;
+    }
+    rest.split('\n')
+        .map(|line| line.chars().count().div_ceil(room).max(1))
+        .fold(0, usize::saturating_add)
+}
+
 /// One plain row, wrapped under itself.
 fn line(said: &str, indent: usize, width: usize, theme: &Theme, rows: &mut Laid) {
     let room = width.saturating_sub(indent).max(1);
+    let (said, beyond) = within_layout(said, room);
+    rows.unlaid = rows.unlaid.saturating_add(beyond);
     let lead = " ".repeat(indent);
     for wrapped in text::wrap_keeping_spaces(said, room) {
         rows.push(Line::from(vec![
