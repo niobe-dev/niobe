@@ -10259,6 +10259,7 @@ mod tests {
     fn a_plan_is_approved_or_planned_further_in_those_words() {
         let ask = Ask {
             id: "t1".into(),
+            serial: 1,
             tool: "ExitPlanMode".to_owned(),
             input: r#"{"plan":"1. Guard it."}"#.to_owned(),
             target: None,

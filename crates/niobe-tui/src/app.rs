@@ -333,6 +333,11 @@ const SEVEN_DAYS: u64 = 7 * 86_400;
 pub struct Ask {
     /// The call being gated, which the answer is addressed by.
     pub id: ToolCallId,
+    /// Which question this is of those asked this session, counted from one.
+    /// What is kept about a question — how it was laid out, which of its rows
+    /// were read — is kept by this and never by `id`: the backend names a
+    /// call, and may name a later one the same.
+    pub serial: u64,
     /// Tool name, as the backend spells it.
     pub tool: String,
     /// The whole of the arguments, as the backend rendered them.
@@ -1303,6 +1308,9 @@ pub struct App {
     /// Which rows of the waiting call, drawn whole, frames have had on
     /// screen: a question cut to fit is allowed only once every one has.
     question_seen: Option<SeenRows>,
+    /// How many questions have been asked this session, which numbers the
+    /// next.
+    asked: u64,
     /// What the waiting question's head and call were laid out as, and for
     /// which call, width, Ctrl+T and theme: laid out again with every tick,
     /// a call holding megabytes held up every frame.
@@ -1964,7 +1972,7 @@ const NOT_ATTACHED: &str = "This session is not attached to a backend, so the pr
 /// the call, width, Ctrl+T, theme and answers in `key`.
 #[derive(Debug, Clone)]
 pub(crate) struct QuestionLaid {
-    key: (Option<ToolCallId>, usize, bool, &'static str, Vec<Answer>),
+    key: (Option<u64>, usize, bool, &'static str, Vec<Answer>),
     /// What is asked, and why.
     pub(crate) head: Vec<ratatui::text::Line<'static>>,
     /// What would run.
@@ -1987,7 +1995,8 @@ pub(crate) type QuestionParts = (
 /// screen.
 #[derive(Debug, Clone)]
 struct SeenRows {
-    id: ToolCallId,
+    /// The question's [`Ask::serial`].
+    serial: u64,
     width: usize,
     rows: Vec<bool>,
     /// How many of `rows` have not been.
@@ -2127,6 +2136,7 @@ impl App {
             question_top_drawn: true,
             question_cut: false,
             question_seen: None,
+            asked: 0,
             question_laid: std::cell::RefCell::new(None),
             too_small: false,
             transcript_drawn: None,
@@ -3274,8 +3284,10 @@ impl App {
                 if let Some(call) = self.call_mut(id) {
                     call.asked = true;
                 }
+                self.asked = self.asked.saturating_add(1);
                 self.asks.push_back(Ask {
                     id: id.clone(),
+                    serial: self.asked,
                     tool: tool.clone(),
                     input: input.clone(),
                     target: target.clone(),
@@ -6882,11 +6894,11 @@ impl App {
         }
         let rows = call.len();
         let same = self.question_seen.as_ref().is_some_and(|seen| {
-            seen.id == ask.id && seen.width == width && seen.rows.len() == rows
+            seen.serial == ask.serial && seen.width == width && seen.rows.len() == rows
         });
         if !same {
             self.question_seen = Some(SeenRows {
-                id: ask.id.clone(),
+                serial: ask.serial,
                 width,
                 rows: vec![false; rows],
                 unseen: rows,
@@ -6917,7 +6929,7 @@ impl App {
         with: impl FnOnce(&QuestionLaid) -> R,
     ) -> R {
         let key = (
-            self.asks.front().map(|ask| ask.id.clone()),
+            self.asks.front().map(|ask| ask.serial),
             inner,
             open,
             theme,
@@ -6947,7 +6959,7 @@ impl App {
     /// call drawn whole has been on screen.
     fn allowing_unseen(&self) -> bool {
         let read = match (self.asks.front(), self.question_seen.as_ref()) {
-            (Some(ask), Some(seen)) => seen.id == ask.id && seen.unseen == 0,
+            (Some(ask), Some(seen)) => seen.serial == ask.serial && seen.unseen == 0,
             _ => false,
         };
         self.question_cut && !read

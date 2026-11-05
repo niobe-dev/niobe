@@ -1354,6 +1354,64 @@ fn a_call_too_large_to_draw_whole_can_only_be_refused() {
     }
 }
 
+/// A backend names a call by an id it chooses, and may give a later call
+/// the same one: the question for that call is drawn as that call, never as
+/// the one before it, so the answer chosen is for what it says.
+#[test]
+fn a_call_that_reuses_an_earlier_calls_id_is_asked_about_as_itself() {
+    use niobe_tui::app::ASK_QUIET;
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use std::time::Instant;
+
+    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+    let asking = |tool: &str, target: &str| Event::PermissionRequest {
+        id: "t1".into(),
+        tool: tool.to_owned(),
+        input: serde_json::json!({ "target": target }).to_string(),
+        proposal: None,
+        target: Some(target.to_owned()),
+        reason: None,
+        agent: None,
+    };
+
+    // One after the other: the first answered, then the second asked.
+    let mut app = running_session().attached();
+    let shown = Instant::now();
+    app.apply(&asking("mcp__fs__read", "notes.txt"));
+    app.tick(shown, None);
+    let frame = screen(&mut app, 100, 30);
+    assert!(frame.contains("notes.txt"), "{frame}");
+    app.on_key_read(key(KeyCode::Enter), alone(shown + ASK_QUIET * 2));
+    assert!(answered(&mut app));
+    app.apply(&asking("Bash", "rm -rf ~"));
+    let frame = screen(&mut app, 100, 30);
+    assert!(
+        frame.contains("rm -rf ~"),
+        "the second call is not what is asked:\n{frame}"
+    );
+    assert!(
+        !frame.contains("notes.txt"),
+        "the first call is drawn for the second:\n{frame}"
+    );
+
+    // Both waiting at once: the second is drawn as itself once it is first.
+    let mut app = running_session().attached();
+    app.apply(&asking("mcp__fs__read", "notes.txt"));
+    app.apply(&asking("Bash", "rm -rf ~"));
+    app.tick(shown, None);
+    screen(&mut app, 100, 30);
+    app.on_key_read(key(KeyCode::Enter), alone(shown + ASK_QUIET * 2));
+    let frame = screen(&mut app, 100, 30);
+    assert!(
+        frame.contains("rm -rf ~"),
+        "the second call is not what is asked:\n{frame}"
+    );
+    assert!(
+        !frame.contains("notes.txt"),
+        "the first call is drawn for the second:\n{frame}"
+    );
+}
+
 /// Refusing a call cut to fit needs no reading of it.
 #[test]
 fn a_call_cut_to_fit_can_be_refused_unread() {
