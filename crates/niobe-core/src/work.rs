@@ -187,6 +187,45 @@ fn of_tool(tool: &str) -> Option<Reading> {
     })
 }
 
+/// What a call to a tool that is not a shell did, in the words a line that
+/// sums up several calls counts it in: read three files, searched for two
+/// patterns, edited one.
+///
+/// Finer than [`Work`], which puts reading a file and searching for a
+/// pattern under one kind: a person reading what the agent did tells them
+/// apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Deed {
+    /// Read a file.
+    Read,
+    /// Searched the code for a pattern or a file name.
+    Searched,
+    /// Listed a directory.
+    Listed,
+    /// Changed or wrote a file.
+    Edited,
+    /// Fetched a page from the web.
+    Fetched,
+    /// Searched the web.
+    SearchedWeb,
+}
+
+/// What a call to `tool` did, by the tool's name, where it is one of the
+/// tools [`Deed`] names. `None` for a shell, whose command says what it did,
+/// and for every tool a count of its calls says nothing more useful about
+/// than its name.
+pub fn deed(tool: &str) -> Option<Deed> {
+    match tool {
+        "Read" | "NotebookRead" => Some(Deed::Read),
+        "Grep" | "Glob" => Some(Deed::Searched),
+        "LS" => Some(Deed::Listed),
+        "Edit" | "MultiEdit" | "Write" | "NotebookEdit" => Some(Deed::Edited),
+        "WebFetch" => Some(Deed::Fetched),
+        "WebSearch" => Some(Deed::SearchedWeb),
+        _ => None,
+    }
+}
+
 /// An MCP tool's server and tool, as a person reads them.
 ///
 /// An MCP tool arrives as `mcp__<server>__<tool>`, and the server as the
@@ -821,6 +860,54 @@ mod tests {
 
     fn named(names: &[&str]) -> Vec<String> {
         names.iter().map(|name| (*name).to_owned()).collect()
+    }
+
+    #[test]
+    fn a_tool_that_reads_searches_lists_edits_or_goes_to_the_web_says_which() {
+        let cases: &[(&str, Option<Deed>)] = &[
+            ("Read", Some(Deed::Read)),
+            ("NotebookRead", Some(Deed::Read)),
+            ("Grep", Some(Deed::Searched)),
+            ("Glob", Some(Deed::Searched)),
+            ("LS", Some(Deed::Listed)),
+            ("Edit", Some(Deed::Edited)),
+            ("MultiEdit", Some(Deed::Edited)),
+            ("Write", Some(Deed::Edited)),
+            ("NotebookEdit", Some(Deed::Edited)),
+            ("WebFetch", Some(Deed::Fetched)),
+            ("WebSearch", Some(Deed::SearchedWeb)),
+            ("Bash", None),
+            ("Agent", None),
+            ("TodoWrite", None),
+            ("mcp__claude_ai_Notion__notion-search", None),
+            ("read", None),
+        ];
+        for (tool, deed) in cases {
+            assert_eq!(super::deed(tool), *deed, "{tool}");
+        }
+    }
+
+    #[test]
+    fn every_deed_is_work_of_the_kind_its_tool_is_put_under() {
+        for tool in [
+            "Read",
+            "Grep",
+            "Glob",
+            "LS",
+            "Edit",
+            "Write",
+            "WebFetch",
+            "WebSearch",
+        ] {
+            let work = of_call(tool, None, None, "").work;
+            let deed = super::deed(tool).expect("each of these tools does a deed");
+            let expected = match deed {
+                Deed::Read | Deed::Searched | Deed::Listed => Work::Exploring,
+                Deed::Edited => Work::Editing,
+                Deed::Fetched | Deed::SearchedWeb => Work::Web,
+            };
+            assert_eq!(work, expected, "{tool}");
+        }
     }
 
     /// Commands as agents wrote them in this repository's own sessions.
