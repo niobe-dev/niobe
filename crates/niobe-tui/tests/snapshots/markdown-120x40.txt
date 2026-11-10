@@ -1,24 +1,24 @@
  Niobe  Session  Context  Model  View  Help                            opus-5  claude · default  ○ not attached  13:41
  ┏━ > add etag support to the catalog fetcher so we stop re-downloading… ━━━┓ ┌──────────────── Usage ────────────────┐
- ┃                                                                          ┃ │ 5h         62% ▓▓▓░░ resets 16:40     │
- ┃ ◆ claude                                                                 ┃ │ 7d         18% ▓░░░░ resets Tue 15:00 │
- ┃   Rewriting the 304 test around the cached body.                         ┃ │ ───────────────────────────────────── │
- ┃                                                                          ┃ │ opus-5    100% ▓▓▓▓▓▓▓▓▓▓▓▓   49k     │
- ┃ ◆ claude                                                                 ┃ │ cache hit  86% ▓▓▓▓▓▓▓▓▓▓░░   40k     │
- ┃   The notebook that demonstrates the fetcher needs the new call shape.   ┃ │ ───────────────────────────────────── │
+ ┃ ◆ Caching the etag beside the body so a 304 can be answered from the     ┃ │ 5h         62% ▓▓▓░░ resets 16:40     │
+ ┃   LRU.                                                                   ┃ │ 7d         18% ▓░░░░ resets Tue 15:00 │
+ ┃                                                                          ┃ │ ───────────────────────────────────── │
+ ┃   Edited 1 file +6 −2                                                    ┃ │ opus-5    100% ▓▓▓▓▓▓▓▓▓▓▓▓   49k     │
+ ┃                                                                          ┃ │ cache hit  86% ▓▓▓▓▓▓▓▓▓▓░░   40k     │
+ ┃ ◆ Rewriting the 304 test around the cached body.                         ┃ │ ───────────────────────────────────── │
  ┃                                                                          ┃ │ context    13% ▓░░░░░░░░░░ 25k / 200k │
- ┃ ✗ Bash           npm test                                  exit 1 · 0.4s ┃ └───────────────────────────────────────┘
- ┃   └ 1 failing: fetch returns the cached body on a 304                    ┃ ┌─────────────── Changes ───────────────┐
- ┃                                                                          ┃ │ ⎇ main ↑3                             █
- ┃ ◆ claude                                                                 ┃ │ ▾ Working tree  23 files  +≥977 −≥259 █
- ┃   Etags cached in the LRU; 304s short-circuit. One test still red — the  ┃ │   .                                   █
- ┃   304 path asserts a body that is no longer sent.                        ┃ │     CHANGELOG.md                +0 −0 █
- ┃                                                                          ┃ │   catalog/                            █
- ┃ > you                                                                    ┃ │     fetch.ts                 +149 −12 █
- ┃   What changed?                                                          ┃ │     etag.ts                   +88 −41 │
- ┃                                                                          ┃ │     cache/lru.ts               +31 −9 │
- ┃ ◆ claude                                                                 █ │     cache/index.ts             +12 −0 │
- ┃   What changed                                                           █ │   docs/                               │
+ ┃ ◆ The notebook that demonstrates the fetcher needs the new call shape.   ┃ └───────────────────────────────────────┘
+ ┃                                                                          █ ┌─────────────── Changes ───────────────┐
+ ┃ ✗ Bash           npm test                                  exit 1 · 0.4s █ │ ⎇ main ↑3                             █
+ ┃   └ 1 failing: fetch returns the cached body on a 304                    █ │ ▾ Working tree  23 files  +≥977 −≥259 █
+ ┃                                                                          █ │   .                                   █
+ ┃ ◆ Etags cached in the LRU; 304s short-circuit. One test still red — the  █ │     CHANGELOG.md                +0 −0 █
+ ┃   304 path asserts a body that is no longer sent.                        █ │   catalog/                            █
+ ┃                                                                          █ │     fetch.ts                 +149 −12 █
+ ┃ > you                                                                    █ │     etag.ts                   +88 −41 │
+ ┃   What changed?                                                          █ │     cache/lru.ts               +31 −9 │
+ ┃                                                                          █ │     cache/index.ts             +12 −0 │
+ ┃ ◆ What changed                                                           █ │   docs/                               │
  ┃                                                                          █ │     caching.md                +64 −22 │
  ┃   How it works: the fetcher keeps the etag beside the body, so a 304 is  █ │     adr/0004-etags.md          +34 −1 │
  ┃   answered from the LRU without reading the body again.                  █ │     diagrams/cache.png            — — │

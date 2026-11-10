@@ -1,21 +1,21 @@
  Niobe  Session  Context  Model  View  Help           opus-5  claude · default
 ┏━ > add etag support to the catalog fetcher so we stop re-downloading… ━━━━━━━┓
 ┃   ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ History ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓   ┃
-┃   ┃   Prompts   Sessions                                       4 listed  ┃   ┃
+┃ ✗ ┃   Prompts   Sessions                                       4 listed  ┃ed ┃
 ┃   ┃  filter ▏type to filter                                              ┃   ┃
 ┃   ┃                                                                      ┃   ┃
-┃   ┃    1m  this session     add etag support to the catalog fetcher so…  ┃   ┃
-┃ ◆ ┃    1h  #12              and a test for the 304 path                  ┃   ┃
-┃   ┃    1h  #12              add etag support to the static handler ⏎…    ┃   ┃
-┃   ┃    3d  #11              why does the resume test hang?               ┃   ┃
-┃ ◆ ┃                                                                      ┃   ┃
-┃   ┃                                                                      ┃   ┃
-┃   ┃                                                                      ┃   ┃
-┃ ✗ ┃                                                                      ┃4s █
-┃   ┃  ──────────────────────────────────────────────────────────────────  ┃   █
+┃ ◆ ┃    1m  this session     add etag support to the catalog fetcher so…  ┃   ┃
+┃   ┃    1h  #12              and a test for the 304 path                  ┃   █
+┃   ┃    1h  #12              add etag support to the static handler ⏎…    ┃   █
+┃   ┃    3d  #11              why does the resume test hang?               ┃   █
+┃ ◆ ┃                                                                      ┃   █
+┃   ┃                                                                      ┃   █
+┃ ◆ ┃                                                                      ┃   █
+┃   ┃                                                                      ┃   █
+┃ ✗ ┃  ──────────────────────────────────────────────────────────────────  ┃4s █
 ┃   ┃  add etag support to the static handler                              ┃   █
-┃ ◆ ┃  keep the weak form for gzip                                         ┃   █
-┃   ┃                                                                      ┃4  █
+┃   ┃  keep the weak form for gzip                                         ┃   █
+┃ ◆ ┃                                                                      ┃4  █
 ┃   ┃                                                                      ┃   █
 ┃   ┃                                                                      ┃   █
 ┃ ──┃                                                                      ┃── ┃

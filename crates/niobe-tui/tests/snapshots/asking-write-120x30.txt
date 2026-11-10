@@ -1,7 +1,7 @@
  Niobe  Session  Context  Model  View  Help                            opus-5  claude · default  ○ not attached  13:41
  ┏━ > add etag support to the catalog fetcher so we stop re-downloading… ━━━┓ ┌──────────────── Usage ────────────────┐
- ┃ ◆ claude                                                                 ┃ │ 5h         62% ▓▓▓░░ resets 16:40     │
- ┃   Etags cached in the LRU; 304s short-circuit. One test still red — the  ┃ │ 7d         18% ▓░░░░ resets Tue 15:00 │
+ ┃                                                                          ┃ │ 5h         62% ▓▓▓░░ resets 16:40     │
+ ┃ ◆ Etags cached in the LRU; 304s short-circuit. One test still red — the  ┃ │ 7d         18% ▓░░░░ resets Tue 15:00 │
  ┃   304 path asserts a body that is no longer sent.                        ┃ │ ───────────────────────────────────── │
  ┃                                                                          ┃ │ opus-5    100% ▓▓▓▓▓▓▓▓▓▓▓▓   49k     │
  ┃   ┌─ ? claude asks ───────────────────────────────────── blocks turn 1 ┐ ┃ │ cache hit  86% ▓▓▓▓▓▓▓▓▓▓░░   40k     │
@@ -11,11 +11,11 @@
  ┃   │                                                                    │ ┃ ┌─────────────── Changes ───────────────┐
  ┃   │ + # Caching                                                        │ ┃ │ ⎇ main ↑3                             █
  ┃   │ +                                                                  │ ┃ │ ▾ Working tree  23 files  +≥977 −≥259 █
- ┃   │ + Responses are kept with their etag.                              │ ┃ │   .                                   █
- ┃   │                                                                    │ ┃ │     CHANGELOG.md                +0 −0 │
- ┃   │ ▶ 1. Allow once                                     this call only │ ┃ │   catalog/                            │
- ┃   │   2. Always allow Write                          niobe saves Write │ ┃ │     fetch.ts                 +149 −12 │
- ┃   │   3. Always allow this target  niobe saves Write(/repo/docs/cachi… │ ┃ │     etag.ts                   +88 −41 │
+ ┃   │ + Responses are kept with their etag.                              │ █ │   .                                   █
+ ┃   │                                                                    │ █ │     CHANGELOG.md                +0 −0 │
+ ┃   │ ▶ 1. Allow once                                     this call only │ █ │   catalog/                            │
+ ┃   │   2. Always allow Write                          niobe saves Write │ █ │     fetch.ts                 +149 −12 │
+ ┃   │   3. Always allow this target  niobe saves Write(/repo/docs/cachi… │ █ │     etag.ts                   +88 −41 │
  ┃   │   4. Deny                                    the call does not run │ █ │     cache/lru.ts               +31 −9 │
  ┃   │                                                                    │ █ │     cache/index.ts             +12 −0 │
  ┃   │ 3. niobe saves Write(/repo/docs/caching.md)                        │ █ └───────────────────────────────────────┘

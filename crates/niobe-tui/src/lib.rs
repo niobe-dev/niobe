@@ -61,6 +61,7 @@ pub mod shell;
 mod slash;
 pub mod snapshots;
 mod spike;
+mod summary;
 mod tags;
 pub mod terminal;
 mod text;

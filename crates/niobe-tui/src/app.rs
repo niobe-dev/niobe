@@ -1377,9 +1377,9 @@ pub struct App {
     /// The row of the last compaction, while the request after it has not
     /// yet said how much the conversation holds now.
     compaction: Option<usize>,
-    /// Whether a run of calls is drawn as its group row alone, rather than
-    /// with a row for each call under it.
-    calls_folded: bool,
+    /// Whether the transcript draws every tool call a row of its own, rather
+    /// than the session's calls that need no reading a line a run.
+    calls_full: bool,
     /// Whether the sub-agents' rows are drawn together under each agent
     /// rather than interleaved as they happened.
     by_agent: bool,
@@ -2159,7 +2159,7 @@ impl App {
             run: None,
             reply: None,
             compaction: None,
-            calls_folded: false,
+            calls_full: false,
             by_agent: false,
             only_agent: None,
             notable_only: false,
@@ -3694,20 +3694,23 @@ impl App {
         }
     }
 
-    /// Whether a run of calls is drawn as its group row alone.
-    pub fn calls_folded(&self) -> bool {
-        self.calls_folded
+    /// Whether the transcript draws every tool call a row of its own: see
+    /// [`App::show_every_call`].
+    pub fn calls_full(&self) -> bool {
+        self.calls_full
     }
 
-    /// Folds every run of calls to its group row, or opens them all again.
+    /// Draws every tool call a row of its own, with its diff, its test run
+    /// and the sub-agents' words and calls, or again the session's calls
+    /// that need no reading a line a run, the transcript's default.
     ///
-    /// One switch for the whole transcript rather than one per group: the
-    /// transcript has no cursor to say which group a key is meant for, and
-    /// a key that folded whichever group happened to be on screen would fold
-    /// one the operator was not looking at.
-    pub fn fold_calls(&mut self) {
+    /// One switch for the whole transcript rather than one per run: the
+    /// transcript has no cursor to say which run a key is meant for, and a
+    /// key that opened whichever run happened to be on screen would open one
+    /// the operator was not looking at.
+    pub fn show_every_call(&mut self) {
         self.hold_view();
-        self.calls_folded = !self.calls_folded;
+        self.calls_full = !self.calls_full;
     }
 
     /// Whether the sub-agents' rows are drawn under each agent: see
@@ -3858,7 +3861,7 @@ impl App {
 
     /// Opens every cut diff to all its rows, or cuts them all again.
     ///
-    /// One switch for the whole transcript, as [`App::fold_calls`] is and
+    /// One switch for the whole transcript, as [`App::show_every_call`] is and
     /// for its reason: nothing says which diff a key would be meant for.
     pub fn open_diffs(&mut self) {
         self.hold_view();
@@ -5044,11 +5047,14 @@ impl App {
             self.by_agent,
             self.notable_only,
             only.as_deref(),
+            !self.calls_full,
         )
         .into_iter()
         .filter_map(|slot| match slot {
             crate::ui::Slot::Entry(at) => self.entries.get(at),
-            crate::ui::Slot::Heading { .. } | crate::ui::Slot::Hidden { .. } => None,
+            crate::ui::Slot::Heading { .. }
+            | crate::ui::Slot::Hidden { .. }
+            | crate::ui::Slot::Summary { .. } => None,
         })
         .collect()
     }
@@ -5945,7 +5951,10 @@ impl App {
                 "in the Activity pane, count tools by name or by kind of work".to_owned(),
             ),
             ("Ctrl+End", "back to the newest line".to_owned()),
-            ("Ctrl+O", "fold runs of tool calls".to_owned()),
+            (
+                "Ctrl+O",
+                "every tool call, or a line a run of them".to_owned(),
+            ),
             ("Ctrl+T", "open every cut diff and whole command".to_owned()),
             ("Ctrl+V", "attach the image on the clipboard".to_owned()),
             ("drag", "copy what it covers".to_owned()),
@@ -7748,7 +7757,7 @@ impl App {
     /// view was when the search opened, and on the first one where none is
     /// above it: the transcript is read upwards from where the operator was.
     /// After that the match stepped to stays the same match while lines
-    /// above it come and go — a run of calls folded, a diff opened — and
+    /// above it come and go — the calls summed up, a diff opened — and
     /// only where it is no longer drawn at all does the one with its number
     /// take its place.
     pub(crate) fn found(&mut self, changed: bool) {
@@ -8299,7 +8308,7 @@ impl App {
         let first = *covered.start();
         let mut lines: Vec<String> = self
             .drawn
-            .plain_lines_from(first)
+            .copied_lines_from(first)
             .take(covered.count())
             .collect();
         // Each line is asked for once, in order, so it is handed over rather
@@ -8922,7 +8931,7 @@ impl App {
                 }
             }
             (KeyCode::Enter, _) => self.submit(),
-            (KeyCode::Char('o'), KeyModifiers::CONTROL) => self.fold_calls(),
+            (KeyCode::Char('o'), KeyModifiers::CONTROL) => self.show_every_call(),
             (KeyCode::Char('t'), KeyModifiers::CONTROL) => self.open_diffs(),
             // A terminal's own paste hands over text, and an image on the
             // clipboard is none: this is the one way to reach it.
@@ -11072,6 +11081,12 @@ pub fn tool_label(name: &str) -> String {
         false => tool,
     };
     format!("{server}·{tool}")
+}
+
+/// The MCP server a call's head names, where [`tool_label`] made it from an
+/// MCP tool's name: `Notion` of `Notion·search`.
+pub(crate) fn label_server(head: &str) -> Option<&str> {
+    head.split_once('·').map(|(server, _)| server)
 }
 
 /// The programs a call of the agent's ran, where it ran a shell command, as
@@ -19006,16 +19021,16 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_o_folds_every_run_of_calls_and_opens_them_again() {
+    fn ctrl_o_shows_every_call_and_sums_them_up_again() {
         let mut app = app();
-        assert!(!app.calls_folded(), "a run starts open");
+        assert!(!app.calls_full(), "the calls start summed up");
 
         app.on_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
-        assert!(app.calls_folded());
+        assert!(app.calls_full());
         assert_eq!(app.composed(), "", "the key reached the composer");
 
         app.on_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
-        assert!(!app.calls_folded());
+        assert!(!app.calls_full());
     }
 
     fn ctrl_t(app: &mut App) {
@@ -21754,7 +21769,7 @@ mod tests {
             crate::select::Selection::new(at(lines - 3, 0), at(lines + 5, 80)),
         ] {
             let drawn = &app.drawn;
-            let each = selection.text(|line| drawn.plain_line(line));
+            let each = selection.text(|line| drawn.copied_lines_from(line).next());
             assert!(!each.is_empty(), "{selection:?} covers something");
 
             assert_eq!(app.selected_text(selection), each, "{selection:?}");

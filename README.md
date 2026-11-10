@@ -10,8 +10,8 @@ did, decided and touched, what it is doing now and what it cost, on screen while
 Every cost figure is either one the backend reported or labelled as an estimate; where there
 is no figure, the screen shows an em dash.
 
-![Niobe in the cyber theme: a diff in the transcript, a failed test run, the Usage pane, the
-working tree and the sub-agents at work](crates/niobe-tui/tests/snapshots/cyber-120x30.svg)
+![Niobe in the cyber theme: the agent's replies with its calls summed up between them, a
+failed test run, the Usage pane, the working tree and the sub-agents at work](crates/niobe-tui/tests/snapshots/cyber-120x30.svg)
 
 The same session in the other themes — `classic`, `neo` and `modern`, chosen with `--theme`:
 

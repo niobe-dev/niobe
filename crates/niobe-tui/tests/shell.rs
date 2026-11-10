@@ -203,6 +203,12 @@ fn every_theme_draws_the_calls_dimmer_than_the_reply_and_the_prompt_apart() {
             let fg = |style: Option<ratatui::style::Style>| style.and_then(|style| style.fg);
             let name = palette.name;
             assert_eq!(
+                fg(style_at(&mut app, 200, 60, "Read 3 files")),
+                Some(palette.dim),
+                "{name} at {depth:?}: the line a run of calls is summed up on"
+            );
+            app.show_every_call();
+            assert_eq!(
                 fg(style_at(&mut app, 200, 60, "Reading catalog/fetch.ts")),
                 Some(palette.fg),
                 "{name} at {depth:?}: the reply"
@@ -479,7 +485,9 @@ fn a_turn_total_beyond_its_messages_is_a_notice_with_its_detail_and_a_labelled_r
 /// own tag rather than as the session's.
 #[test]
 fn whose_each_row_is_shows_where_two_agents_calls_interleave() {
-    let frame = screen(&mut session_with_two_agents_at_work(), 120, 30);
+    let mut app = session_with_two_agents_at_work();
+    app.show_every_call();
+    let frame = screen(&mut app, 120, 30);
     for row in [
         "deep1 catalog/fetch.py",
         "deep2 catalog/cache.py",
@@ -489,6 +497,20 @@ fn whose_each_row_is_shows_where_two_agents_calls_interleave() {
         assert!(frame.contains(row), "{row} is not on screen:\n{frame}");
     }
     assert_snapshot("agents-120x30", &frame);
+}
+
+/// Summed up, the transcript leaves what each sub-agent said and called to
+/// the view narrowed to it: the session's hand-off is the agent's row, and
+/// the session's own words are what is read.
+#[test]
+fn summed_up_the_sub_agents_work_is_left_to_their_hand_off_rows() {
+    let frame = screen(&mut session_with_two_agents_at_work(), 120, 30);
+    assert!(frame.contains("▾ Agent ×2"), "{frame}");
+    assert!(frame.contains("Both reviewers are working."), "{frame}");
+    for row in ["↳ deep1", "↳ deep2", "deep1 catalog/fetch.py"] {
+        assert!(!frame.contains(row), "{row} is on screen:\n{frame}");
+    }
+    assert_snapshot("agents-summed-120x30", &frame);
 }
 
 /// Grouped by agent from the Activity pane, each agent's rows read top to
@@ -678,6 +700,7 @@ fn a_denied_command_of_several_lines_keeps_its_lines_apart_on_its_row() {
 #[test]
 fn a_shell_calls_row_names_its_programs_and_ctrl_t_draws_its_whole_command() {
     let mut app = running_session();
+    app.show_every_call();
     let closed = screen(&mut app, 120, 30);
     assert!(closed.contains("✗ Bash           npm test "), "{closed}");
     assert!(!closed.contains("npm test -- fetch"), "{closed}");
@@ -691,6 +714,7 @@ fn a_shell_calls_row_names_its_programs_and_ctrl_t_draws_its_whole_command() {
 #[test]
 fn a_diff_cut_at_twenty_rows_opens_in_place_and_cuts_again() {
     let mut app = session_with_a_long_write();
+    app.show_every_call();
 
     let cut = screen(&mut app, 120, 40);
     assert!(cut.contains("… 10 more rows · Ctrl+T shows them"), "{cut}");
@@ -765,21 +789,22 @@ fn opening_or_cutting_the_diffs_while_scrolled_back_keeps_the_lines_being_read()
 }
 
 #[test]
-fn folding_the_calls_while_scrolled_back_keeps_the_lines_being_read() {
+fn showing_every_call_while_scrolled_back_keeps_the_lines_being_read() {
     let mut app = long_write_under_a_long_reply();
     screen(&mut app, 120, 40);
     app.scroll_up(20);
     let before = screen(&mut app, 120, 40);
     let top = first_row_with(&before, "reply line").expect("the reply is in view");
 
-    app.fold_calls();
-    let folded = screen(&mut app, 120, 40);
-    assert_eq!(first_row_with(&folded, "reply line"), Some(top), "{folded}");
+    app.show_every_call();
+    let full = screen(&mut app, 120, 40);
+    assert_eq!(first_row_with(&full, "reply line"), Some(top), "{full}");
 }
 
 #[test]
 fn a_line_cut_away_leaves_the_view_on_the_nearest_line_above_it_still_drawn() {
     let mut app = long_write_under_a_long_reply();
+    app.show_every_call();
     app.open_diffs();
     screen(&mut app, 120, 40);
     app.scroll_to_head();
@@ -900,7 +925,7 @@ fn toggling_at_the_tail_still_follows_the_tail() {
     let mut app = long_write_under_a_long_reply();
     screen(&mut app, 120, 40);
     app.open_diffs();
-    app.fold_calls();
+    app.show_every_call();
     let frame = screen(&mut app, 120, 40);
     assert!(app.follows_tail());
     assert!(frame.contains("reply line 60"), "{frame}");
@@ -1827,6 +1852,7 @@ fn edits_to_the_agents_own_notes_are_one_row_naming_them_and_ctrl_t_shows_the_di
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     let mut app = session_that_updated_its_memory();
+    app.show_every_call();
     let frame = screen(&mut app, 120, 30);
     let rows: Vec<&str> = frame.lines().filter(|row| row.contains("memory")).collect();
     assert_eq!(rows.len(), 1, "{frame}");
@@ -3948,6 +3974,7 @@ fn a_test_run_is_drawn_under_its_call_with_a_bar_of_its_counts() {
         }],
     );
     let mut app = session_with_test_records(&[run]);
+    app.show_every_call();
     let frame = screen(&mut app, 200, 60);
 
     assert_snapshot("tests-200x60", &frame);
@@ -5027,26 +5054,35 @@ fn a_reply_too_long_for_the_bar_wraps_in_it_rather_than_being_cut() {
     assert!(!said.contains("Ask for a change"), "{frame}");
 }
 
-/// A run of calls to one tool is one group: its row carries the run's summed
-/// figures, and Ctrl+O folds every group to that row and opens them again.
+/// The session's calls between two things it said are one line saying what
+/// they did; Ctrl+O draws every call a row, a run of calls to one tool a
+/// group whose row carries the run's summed figures, and sums them up again.
 #[test]
-fn a_run_of_calls_folds_to_its_group_row_and_opens_again() {
+fn a_run_of_calls_is_one_line_until_ctrl_o_draws_every_call() {
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     let mut app = running_session();
-    let open = screen(&mut app, 200, 60);
-    assert!(open.contains("▾ Read ×3"), "{open}");
-    assert!(open.contains("15.3 kB · 2.0s"), "the run's sums: {open}");
-    assert!(open.contains("├ catalog/fetch.ts"), "{open}");
+    let summed = screen(&mut app, 200, 60);
+    assert!(
+        summed.contains("Read 3 files, used Notion 2 times"),
+        "{summed}"
+    );
+    assert!(!summed.contains("Read ×3"), "{summed}");
+    assert!(!summed.contains("├ catalog/fetch.ts"), "{summed}");
+    assert!(
+        summed.contains("✗ Bash"),
+        "a failure keeps its row: {summed}"
+    );
 
     app.on_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
-    let folded = screen(&mut app, 200, 60);
-    assert!(folded.contains("▸ Read ×3"), "{folded}");
-    assert!(folded.contains("15.3 kB · 2.0s"), "{folded}");
-    assert!(!folded.contains("├ catalog/fetch.ts"), "{folded}");
+    let every = screen(&mut app, 200, 60);
+    assert!(every.contains("▾ Read ×3"), "{every}");
+    assert!(every.contains("15.3 kB · 2.0s"), "the run's sums: {every}");
+    assert!(every.contains("├ catalog/fetch.ts"), "{every}");
+    assert!(!every.contains("Read 3 files"), "{every}");
 
     app.on_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
-    assert_eq!(screen(&mut app, 200, 60), open);
+    assert_eq!(screen(&mut app, 200, 60), summed);
 }
 
 /// On a pane too narrow for everything, what the call does gives way and
@@ -5372,14 +5408,15 @@ fn a_query_found_nowhere_says_so() {
     assert_eq!(screen(&mut app, 120, 30), tail);
 }
 
-/// Folding the runs of calls takes the matches inside them off the
+/// Summing up the calls takes the matches inside their rows off the
 /// transcript, above the one stepped to; the one stepped to is the same text
 /// after it, not whichever match now has its number.
 #[test]
-fn folding_the_calls_above_the_current_match_keeps_the_same_match_current() {
+fn summing_up_the_calls_above_the_current_match_keeps_the_same_match_current() {
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     let mut app = running_session();
+    app.show_every_call();
     for text in ["look in fetch.ts first", "look in fetch.ts second"] {
         app.apply(&Event::AssistantMessage {
             text: text.to_owned(),

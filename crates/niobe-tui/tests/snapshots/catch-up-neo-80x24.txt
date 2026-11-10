@@ -1,21 +1,21 @@
  Niobe  Session  Context  Model  View  Help           opus-5  claude · default
 ╔═ > add etag support to the catalog fetcher so we stop re-downloading… ═══════╗
-║   115     cache.set(url, {                                                   ║
-║   116 +     etag: res.headers.get("ETag"),                                   ║
-║   117       body,                                                            ║
-║   └ allowed by you                                                           ║
 ║                                                                              ║
-║ ◆ ╔═══════════════════════ Since you last looked ════════════════════════╗   ║
-║   ║                                                                      ║   ║
-║   ║  3 files changed:                                                    ║   ║
-║ ◆ ║    catalog/fetch.ts  +6 −2                                           ║   ║
-║   ║    catalog/etag.test.ts  +24 —                                       ║   ║
-║   ║    docs/notebooks/catalog.ipynb  — —                                 ║   ║
-║ ✗ ║  sub-agents: 3 started, 2 finished                                   ║4s █
-║   ║  1 question asked                                                    ║   █
+║ ✗ Notion·update… {}                                                   failed ║
+║   └ 404 object_not_found — the page is not shared with the integration       ║
+║                                                                              ║
+║ ◆ Caching the etag beside the body so a 304 can be answered from the LRU.    ║
+║   ╔═══════════════════════ Since you last looked ════════════════════════╗   █
+║   ║                                                                      ║   █
+║   ║  3 files changed:                                                    ║   █
+║ ◆ ║    catalog/fetch.ts  +6 −2                                           ║   █
+║   ║    catalog/etag.test.ts  +24 —                                       ║   █
+║ ◆ ║    docs/notebooks/catalog.ipynb  — —                                 ║   █
+║   ║  sub-agents: 3 started, 2 finished                                   ║   █
+║ ✗ ║  1 question asked                                                    ║4s █
 ║   ║  now: thinking                                                       ║   █
-║ ◆ ║                                                                      ║   █
-║   ╚═════════════════════════════ Esc close ══════════════════════════════╝4  █
+║   ║                                                                      ║   █
+║ ◆ ╚═════════════════════════════ Esc close ══════════════════════════════╝4  █
 ║   path asserts a body that is no longer sent.                                █
 ║                                                                              █
 ║ ──────────────────────────────────────────────────────────────────────────── ║

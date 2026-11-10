@@ -1,18 +1,18 @@
  Niobe  Session  Context  Model  View  Help           opus-5  claude · default
 ┏━ > add etag support to the catalog fetcher so we stop re-downloading… ━━━━━━━┓
+┃   └ 1 failing: fetch returns the cached body on a 304                        ┃
 ┃                                                                              ┃
-┃ ◆ claude                                                                     ┃
-┃   Etags cached in the LRU; 304s short-circuit. One test still red — the 304  ┃
+┃ ◆ Etags cached in the LRU; 304s short-circuit. One test still red — the 304  ┃
 ┃   path asserts a body that is no longer sent.                                ┃
 ┃                                                                              ┃
 ┃   ┌─ ? claude asks ─────────────────────────────────────── blocks turn 1 ┐   ┃
 ┃   │ to run Read                                                          │   ┃
 ┃   │ /repo/notes.txt                                                      │   ┃
 ┃   │                                                                      │   ┃
-┃   │ ▶ 1. Allow once                                       this call only │   ┃
-┃   │   2. Always allow Read                              niobe saves Read │   ┃
-┃   │   3. Always allow this target      niobe saves Read(/repo/notes.txt) │   ┃
-┃   │   4. Deny                                      the call does not run │   ┃
+┃   │ ▶ 1. Allow once                                       this call only │   █
+┃   │   2. Always allow Read                              niobe saves Read │   █
+┃   │   3. Always allow this target      niobe saves Read(/repo/notes.txt) │   █
+┃   │   4. Deny                                      the call does not run │   █
 ┃   │                                                                      │   █
 ┃   │ ↑↓ move · 1-4 jump · Enter confirm · Tab type your own               │   █
 ┃   │ Esc decide later                                                     │   █

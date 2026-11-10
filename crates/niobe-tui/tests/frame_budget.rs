@@ -395,6 +395,7 @@ fn a_long_session_of_diffs_redraws_inside_a_frame_budget() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut app = session_of_diffs();
+    app.show_every_call();
     let _ = screen(&mut app, 200, 60);
 
     let median = median_frame(&mut app, &[(200, 60)]);
@@ -416,6 +417,7 @@ fn a_long_session_of_opened_diffs_redraws_inside_a_frame_budget() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut app = session_of_diffs();
+    app.show_every_call();
     app.open_diffs();
     let _ = screen(&mut app, 200, 60);
 
@@ -428,8 +430,33 @@ fn a_long_session_of_opened_diffs_redraws_inside_a_frame_budget() {
     );
 }
 
+/// The same session as the transcript draws it by default, its edits summed
+/// up on one line: the line is said again from every edit on each frame, so
+/// it costs what the run holds, and must still fit in a frame.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "a frame is timed in an optimised build")]
+fn a_long_session_of_edits_summed_up_redraws_inside_a_frame_budget() {
+    let _alone = ALONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut app = session_of_diffs();
+    let frame = screen(&mut app, 200, 60);
+    assert!(
+        frame.contains(&format!("Edited {LONG_SESSION_DIFFS} files")),
+        "{frame}"
+    );
+
+    let median = median_frame(&mut app, &[(200, 60)]);
+
+    assert!(
+        median <= FRAME_BUDGET,
+        "the median frame of {LONG_SESSION_DIFFS} edits summed up at 200x60 took {median:?}, \
+         over the {FRAME_BUDGET:?} budget"
+    );
+}
+
 /// A running session with [`LONG_SESSION_DIFFS`] edits in it, each drawn
-/// under its call as the lines it changed.
+/// under its call as the lines it changed where every call is drawn.
 fn session_of_diffs() -> App {
     let mut app = running_session();
     for n in 0..LONG_SESSION_DIFFS {
@@ -518,6 +545,7 @@ fn a_hundred_thousand_line_write_lands_and_draws_inside_the_write_budget() {
     let mut times: Vec<Duration> = (0..WRITES)
         .map(|_| {
             let mut app = running_session();
+            app.show_every_call();
             let _ = screen(&mut app, 200, 60);
             let write = write_of(&written);
             let started = Instant::now();
@@ -874,6 +902,7 @@ fn a_resize_redraws_a_hundred_thousand_line_write_inside_a_frame_budget() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut app = running_session();
+    app.show_every_call();
     for event in &write_of(&written_file()) {
         app.apply(event);
     }

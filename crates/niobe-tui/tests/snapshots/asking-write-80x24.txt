@@ -10,9 +10,9 @@
 ┃   │ + Responses are kept with their etag.                                │   ┃
 ┃   │ … the rule is cut above · Ctrl+T shows it whole                      │   ┃
 ┃   │                                                                      │   ┃
-┃   │ ▶ 1. Allow once                                       this call only │   ┃
-┃   │   2. Always allow Write                            niobe saves Write │   ┃
-┃   │   3. Always allow this target  niobe saves Write(/repo/docs/caching… │   ┃
+┃   │ ▶ 1. Allow once                                       this call only │   █
+┃   │   2. Always allow Write                            niobe saves Write │   █
+┃   │   3. Always allow this target  niobe saves Write(/repo/docs/caching… │   █
 ┃   │   4. Deny                                      the call does not run │   █
 ┃   │                                                                      │   █
 ┃   │ ↑↓ move · 1-4 jump · Enter confirm · Tab type your own               │   █

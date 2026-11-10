@@ -12,10 +12,10 @@
  ┃   │ print(1)'                                             │ ┃ │ ⎇ main ↑3                      █
  ┃   │                                                       │ ┃ │ ▾ Working tree  +≥977 −≥259    █
  ┃   │ ▶ 1. Allow once                        this call only │ ┃ │   .                            █
- ┃   │   2. Always allow Bash               niobe saves Bash │ ┃ │     CHANGELOG.md         +0 −0 │
- ┃   │   3. Always allow this target  niobe saves Bash(grep… │ ┃ │   catalog/                     │
- ┃   │   4. Deny                       the call does not run │ ┃ │     fetch.ts          +149 −12 │
- ┃   │                                                       │ ┃ │     etag.ts            +88 −41 │
+ ┃   │   2. Always allow Bash               niobe saves Bash │ █ │     CHANGELOG.md         +0 −0 │
+ ┃   │   3. Always allow this target  niobe saves Bash(grep… │ █ │   catalog/                     │
+ ┃   │   4. Deny                       the call does not run │ █ │     fetch.ts          +149 −12 │
+ ┃   │                                                       │ █ │     etag.ts            +88 −41 │
  ┃   │ 3. niobe saves Bash(grep -rn "cache" . ; python3 -c ' │ █ │     cache/lru.ts        +31 −9 │
  ┃   │ # x                                                   │ █ │     cache/index.ts      +12 −0 │
  ┃   │ print(1)')                                            │ █ └────────────────────────────────┘

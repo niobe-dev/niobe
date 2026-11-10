@@ -1,21 +1,21 @@
  Niobe  Session  Context  Model  View  Help           opus-5  claude · default
 ╔═ > add etag support to the catalog fetcher so we stop re-downloading… ═══════╗
-║   115     cache.set(url, {                                                   ║
-║   116 +     etag: res.headers.get("ETag"),                                   ║
-║   117       body,                                                            ║
-║   └ allowed by you                                                           ║
-║   ╔═════════════════════════════ Tool calls ═════════════════════════════╗   ║
-║ ◆ ║                                                                      ║   ║
-║   ║    Read                   catalog/fetch.ts · 7.2 kB                  ║   ║
-║   ║    Read                   catalog/cache.ts · 3.1 kB                  ║   ║
-║ ◆ ║    Read                   tests/fetch.test.ts · 4.9 kB               ║   ║
-║   ║    Notion·search          {} · 1.1 kB                                ║   ║
-║   ║    Notion·fetch           {} · 2.5 kB                                ║   ║
-║ ✗ ║    Notion·update-page     {} · 96 B                                  ║4s █
-║   ║    Edit                   catalog/fetch.ts · 640 B                   ║   █
+║                                                                              ║
+║ ✗ Notion·update… {}                                                   failed ║
+║   └ 404 object_not_found — the page is not shared with the integration       ║
+║                                                                              ║
+║ ◆ ╔═════════════════════════════ Tool calls ═════════════════════════════╗   ║
+║   ║                                                                      ║   █
+║   ║    Read                   catalog/fetch.ts · 7.2 kB                  ║   █
+║   ║    Read                   catalog/cache.ts · 3.1 kB                  ║   █
+║ ◆ ║    Read                   tests/fetch.test.ts · 4.9 kB               ║   █
+║   ║    Notion·search          {} · 1.1 kB                                ║   █
+║ ◆ ║    Notion·fetch           {} · 2.5 kB                                ║   █
+║   ║    Notion·update-page     {} · 96 B                                  ║   █
+║ ✗ ║    Edit                   catalog/fetch.ts · 640 B                   ║4s █
 ║   ║  › Bash                   npm test -- fetch · 2.0 kB                 ║   █
-║ ◆ ║                                                                      ║   █
-║   ║  ↑↓ choose · Enter read · Esc close                                  ║4  █
+║   ║                                                                      ║   █
+║ ◆ ║  ↑↓ choose · Enter read · Esc close                                  ║4  █
 ║   ╚════════════════════════════ oldest first ════════════════════════════╝   █
 ║                                                                              █
 ║ ──────────────────────────────────────────────────────────────────────────── ║

@@ -419,6 +419,7 @@ fn searched(output: &str) -> App {
 #[test]
 fn a_click_on_a_calls_row_opens_the_call_whole() {
     let mut app = searched("catalog/fetch.ts:41: etag");
+    app.show_every_call();
     let frame = screen(&mut app, WIDTH, HEIGHT);
 
     click(&mut app, cell_of(&frame, "⚙ Grep"));
@@ -479,6 +480,7 @@ fn a_click_on_a_call_that_ended_after_it_was_cut_short_opens_that_call() {
     app.apply(&grep);
     app.apply(&grepped);
     app.apply(&built);
+    app.show_every_call();
     let frame = screen(&mut app, WIDTH, 60);
 
     click(&mut app, cell_of(&frame, "⚙ Bash"));
@@ -490,6 +492,7 @@ fn a_click_on_a_call_that_ended_after_it_was_cut_short_opens_that_call() {
 #[test]
 fn a_drag_across_a_calls_row_selects_it_and_opens_nothing() {
     let mut app = searched("catalog/fetch.ts:41: etag");
+    app.show_every_call();
     let frame = screen(&mut app, WIDTH, HEIGHT);
     let (column, row) = cell_of(&frame, "⚙ Grep");
 
@@ -505,6 +508,7 @@ fn a_drag_across_a_calls_row_selects_it_and_opens_nothing() {
 #[test]
 fn a_click_on_a_run_of_calls_opens_the_list_on_the_runs_first() {
     let mut app = running_session();
+    app.show_every_call();
     let frame = screen(&mut app, WIDTH, 60);
     // The session's reads are one run; its own row names no one call.
     click(&mut app, cell_of(&frame, "Read ×3"));
@@ -525,6 +529,7 @@ fn a_click_on_a_calls_row_in_an_open_run_opens_that_call() {
         ("└ tests/fetch.test.ts", "tests/fetch.test.ts"),
     ] {
         let mut app = running_session();
+        app.show_every_call();
         let frame = screen(&mut app, WIDTH, 60);
 
         click(&mut app, cell_of(&frame, row));
@@ -611,11 +616,10 @@ fn a_click_on_a_sub_agents_call_in_an_open_run_opens_it_with_the_rows_grouped_by
 }
 
 #[test]
-fn a_click_on_a_folded_run_opens_the_list_on_the_runs_first() {
+fn a_click_on_the_line_summing_up_a_run_opens_the_list_on_the_runs_first() {
     let mut app = running_session();
-    app.fold_calls();
     let frame = screen(&mut app, WIDTH, 60);
-    click(&mut app, cell_of(&frame, "Read ×3"));
+    click(&mut app, cell_of(&frame, "Read 3 files"));
 
     let picker = app.picking().expect("the click opened the list of calls");
     assert_eq!(
@@ -843,6 +847,7 @@ fn a_click_on_a_link_a_calls_row_cut_short_opens_the_call_and_not_the_part_drawn
     };
     app.apply(&start);
     app.apply(&end);
+    app.show_every_call();
     let frame = screen(&mut app, WIDTH, 60);
     assert!(!frame.contains("/end"), "the row is cut short: {frame}");
 

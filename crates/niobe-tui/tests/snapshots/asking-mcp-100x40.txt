@@ -1,10 +1,10 @@
  Niobe  Session  Context  Model  View  Help        opus-5  claude · default  ○ not attached  13:41
  ┏━ > add etag support to the catalog fetcher so we stop… ━━━━━┓ ┌──────────── Usage ─────────────┐
- ┃ ✗ Bash           npm test                     exit 1 · 0.4s ┃ │ 5h       62%  resets 16:40     │
- ┃   └ 1 failing: fetch returns the cached body on a 304       ┃ │ 7d       18%  resets Tue 15:00 │
- ┃                                                             ┃ │ ────────────────────────────── │
- ┃ ◆ claude                                                    ┃ │ opus-5  100% ▓▓▓▓▓▓▓▓▓▓▓   49k │
- ┃   Etags cached in the LRU; 304s short-circuit. One test     ┃ │ cache …  86% ▓▓▓▓▓▓▓▓▓░░   40k │
+ ┃                                                             ┃ │ 5h       62%  resets 16:40     │
+ ┃ ✗ Bash           npm test                     exit 1 · 0.4s ┃ │ 7d       18%  resets Tue 15:00 │
+ ┃   └ 1 failing: fetch returns the cached body on a 304       ┃ │ ────────────────────────────── │
+ ┃                                                             ┃ │ opus-5  100% ▓▓▓▓▓▓▓▓▓▓▓   49k │
+ ┃ ◆ Etags cached in the LRU; 304s short-circuit. One test     ┃ │ cache …  86% ▓▓▓▓▓▓▓▓▓░░   40k │
  ┃   still red — the 304 path asserts a body that is no longer ┃ │ ────────────────────────────── │
  ┃   sent.                                                     ┃ │ context  13% ▓░░░░░ 25k / 200k │
  ┃                                                             ┃ └────────────────────────────────┘
@@ -13,12 +13,12 @@
  ┃   │ pages: 1 item                                         │ ┃ │ ▾ Working tree  +≥977 −≥259    █
  ┃   │   content:                                            │ ┃ │   .                            █
  ┃   │     **Severity:** High                                │ ┃ │     CHANGELOG.md         +0 −0 █
- ┃   │     ## Report                                         │ ┃ │   catalog/                     █
- ┃   │     The fetcher downloads every manifest again.       │ ┃ │     fetch.ts          +149 −12 █
- ┃   │     … 5 more lines                                    │ ┃ │     etag.ts            +88 −41 │
- ┃   │   properties:                                         │ ┃ │     cache/lru.ts        +31 −9 │
- ┃   │     Name: Etag support                                │ ┃ │     cache/index.ts      +12 −0 │
- ┃   │     Priority: High                                    │ ┃ │   docs/                        │
+ ┃   │     ## Report                                         │ █ │   catalog/                     █
+ ┃   │     The fetcher downloads every manifest again.       │ █ │     fetch.ts          +149 −12 █
+ ┃   │     … 5 more lines                                    │ █ │     etag.ts            +88 −41 │
+ ┃   │   properties:                                         │ █ │     cache/lru.ts        +31 −9 │
+ ┃   │     Name: Etag support                                │ █ │     cache/index.ts      +12 −0 │
+ ┃   │     Priority: High                                    │ █ │   docs/                        │
  ┃   │     Status: Not started                               │ █ │     caching.md         +64 −22 │
  ┃   │     date:Due:start: 2026-10-04                        │ █ │     adr/0004-etags.md   +34 −1 │
  ┃   │     date:Due:is_datetime: 0                           │ █ │     diagrams/cache.png     — — │

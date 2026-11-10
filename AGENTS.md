@@ -208,7 +208,12 @@ reviewers that encode both, for an agent working in this tree.
   from their markdown and wraps the styled text itself, so the transcript's line count stays
   exact, `hunks.rs` draws a file change under the call that made it as the lines that changed,
   cut at twenty rows until Ctrl+T opens every cut diff in place,
-  `calls.rs` draws a tool call as a row of a table — its name, the tag of the sub-agent that made
+  `summary.rs` sums up the session's calls between two things it said as one dim line of what
+  they did — `Read 3 files, edited 1 file +6 −2, ran 2 shell commands, 41 tests passed` — and
+  leaves a row only to a call that failed or was refused, one a question waits on, one the
+  operator ran and a hand-off to a sub-agent, whose own words and calls are left to the view
+  narrowed to it; Ctrl+O draws every call, and the session's replies carry the agent's glyph
+  and no head line naming it. `calls.rs` draws a tool call, in that full view, as a row of a table — its name, the tag of the sub-agent that made
   it where one did, each in a column as wide as the transcript's widest, what it does, and on the
   right what it cost, by what the backend reported and the shell's own clock — the whole row dim
   but for a failure, so the agents' words in the body colour are what the eye finds, and a shell
@@ -217,7 +222,7 @@ reviewers that encode both, for an agent working in this tree.
   what a test run reported under the call that ran it, beside a bar of its counts — and while it
   runs, how long it has run against the last whole run of the same command — a sub-agent's words as a reply under a head
   that names the agent, rows with nothing under them on consecutive lines, a run of calls to one tool as one
-  group that Ctrl+O folds, edits to the agent's own notes as one `updated memory` row whose
+  group, edits to the agent's own notes as one `updated memory` row whose
   lines Ctrl+T shows, and — where `a` is pressed in a side pane — each turn's sub-agent rows
   grouped under a heading per agent — `arguments.rs` lays out a permission question's arguments one key to a row, with
   the JSON as sent behind Ctrl+T — a question cut to fit its pane, or drawn with lines its layout

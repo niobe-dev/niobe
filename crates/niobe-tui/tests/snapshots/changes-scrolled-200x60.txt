@@ -3,49 +3,49 @@
  ┃ > you                                                                                                                        ┃ │ 5h         62% ▓▓▓▓▓▓▓░░░░░ resets 16:40                          │
  ┃   add etag support to the catalog fetcher so we stop re-downloading unchanged manifests                                      ┃ │ 7d         18% ▓▓░░░░░░░░░░ resets Tue 15:00                      │
  ┃                                                                                                                              ┃ │ ───────────────────────────────────────────────────────────────── │
- ┃ ◆ claude                                                                                                                     ┃ │ opus-5    100% ▓▓▓▓▓▓▓▓▓▓▓▓   49k                                 │
- ┃   Reading catalog/fetch.ts and its callers first. Two call sites, one test file.                                             ┃ │ cache hit  86% ▓▓▓▓▓▓▓▓▓▓░░   40k                                 │
- ┃                                                                                                                              ┃ │ ───────────────────────────────────────────────────────────────── │
- ┃ ▾ Read ×3        catalog/fetch.ts, catalog/cache.ts, tests/fetch.test.ts                                      15.3 kB · 2.0s ┃ │ context    13% ▓▓░░░░░░░░░░ 25k / 200k                            │
- ┃   ├ catalog/fetch.ts                                                                                           7.2 kB · 1.2s ┃ └───────────────────────────────────────────────────────────────────┘
- ┃   ├ catalog/cache.ts                                                                                           3.1 kB · 1.2s ┃ ┌───────────────────────────── Changes ─────────────────────────────┐
- ┃   └ tests/fetch.test.ts                                                                                        4.9 kB · 1.2s ┃ │     etag.ts                                               +88 −41 │
- ┃ ⚙ Notion·search  {}                                                                                                   1.1 kB ┃ │     cache/lru.ts                                           +31 −9 │
- ┃ ⚙ Notion·fetch   {}                                                                                                   2.5 kB ┃ │     cache/index.ts                                         +12 −0 │
- ┃ ✗ Notion·update… {}                                                                                                   failed ┃ │   docs/                                                           │
- ┃   └ 404 object_not_found — the page is not shared with the integration                                                       ┃ │     caching.md                                            +64 −22 █
- ┃                                                                                                                              ┃ │     adr/0004-etags.md                                      +34 −1 █
- ┃ ◆ claude                                                                                                                     ┃ │     diagrams/cache.png                                        — — █
- ┃   Caching the etag beside the body so a 304 can be answered from the LRU.                                                    ┃ │   server/                                                         █
+ ┃ ◆ Reading catalog/fetch.ts and its callers first. Two call sites, one test file.                                             ┃ │ opus-5    100% ▓▓▓▓▓▓▓▓▓▓▓▓   49k                                 │
+ ┃                                                                                                                              ┃ │ cache hit  86% ▓▓▓▓▓▓▓▓▓▓░░   40k                                 │
+ ┃   Read 3 files, used Notion 2 times                                                                                          ┃ │ ───────────────────────────────────────────────────────────────── │
+ ┃                                                                                                                              ┃ │ context    13% ▓▓░░░░░░░░░░ 25k / 200k                            │
+ ┃ ✗ Notion·update… {}                                                                                                   failed ┃ └───────────────────────────────────────────────────────────────────┘
+ ┃   └ 404 object_not_found — the page is not shared with the integration                                                       ┃ ┌───────────────────────────── Changes ─────────────────────────────┐
+ ┃                                                                                                                              ┃ │     etag.ts                                               +88 −41 │
+ ┃ ◆ Caching the etag beside the body so a 304 can be answered from the LRU.                                                    ┃ │     cache/lru.ts                                           +31 −9 │
+ ┃                                                                                                                              ┃ │     cache/index.ts                                         +12 −0 │
+ ┃   Edited 1 file +6 −2                                                                                                        ┃ │   docs/                                                           │
+ ┃                                                                                                                              ┃ │     caching.md                                            +64 −22 █
+ ┃ ◆ Rewriting the 304 test around the cached body.                                                                             ┃ │     adr/0004-etags.md                                      +34 −1 █
+ ┃                                                                                                                              ┃ │     diagrams/cache.png                                        — — █
+ ┃ ◆ The notebook that demonstrates the fetcher needs the new call shape.                                                       ┃ │   server/                                                         █
  ┃                                                                                                                              ┃ │     handlers/manifest.ts                                   +97 −4 █
- ┃ ⚙ Edit           catalog/fetch.ts                                                                               +6 −2 · 0.4s ┃ │     handlers/health.ts                                     +3 −19 █
- ┃    41     const cached = cache.get(url);                                                                                     ┃ │     middleware/etag.ts                                    +41 −37 █
- ┃    42     const headers = new Headers(init.headers);                                                                         ┃ │     index.ts                                                +8 −6 █
- ┃    43 -   if (cached) headers.set("If-None-Match", cached.etag);                                                             ┃ │   tests/                                                          █
- ┃    44 -   const res = await fetch(url, init);                                                                                ┃ │     etag.test.ts                                          +122 −8 █
- ┃    43 +   if (cached?.etag) {                                                                                                ┃ │     fetch.test.ts                                         +76 −14 █
- ┃    44 +     headers.set("If-None-Match", cached.etag);                                                                       ┃ │     helpers.ts                                              +5 −2 █
- ┃    45 +   }                                                                                                                  ┃ │     …ecorded_catalog_2026-09-18_manifest_not_modified.json +97 −0 █
- ┃    46 +   const res = await fetch(url, { ...init, headers });                                                                ┃ │     …tures/manifest.json => tests/fixtures/manifest.v2.json +6 −3 █
- ┃    47 +   if (res.status === 304 && cached) return cached.body;                                                              ┃ │   web/                                                            █
- ┃    48     return res;                                                                                                        ┃ │     components/Catalog.tsx                                +54 −31 █
- ┃       …                                                                                                                      ┃ │     components/Manifest.tsx                                +18 −7 █
- ┃   115     cache.set(url, {                                                                                                   ┃ │     hooks/useCatalog.ts                                   +27 −18 █
- ┃   116 +     etag: res.headers.get("ETag"),                                                                                   ┃ │     styles/catalog.css                                     +14 −9 █
- ┃   117       body,                                                                                                            ┃ │   scripts/                                                        █
- ┃   └ allowed by you                                                                                                           ┃ │     seed.ts                                                +22 −5 █
+ ┃ ✗ Bash           npm test                                                                                      exit 1 · 0.4s ┃ │     handlers/health.ts                                     +3 −19 █
+ ┃   └ 1 failing: fetch returns the cached body on a 304                                                                        ┃ │     middleware/etag.ts                                    +41 −37 █
+ ┃                                                                                                                              ┃ │     index.ts                                                +8 −6 █
+ ┃ ◆ Etags cached in the LRU; 304s short-circuit. One test still red — the 304 path asserts a body that is no longer sent.      ┃ │   tests/                                                          █
+ ┃                                                                                                                              ┃ │     etag.test.ts                                          +122 −8 █
+ ┃                                                                                                                              ┃ │     fetch.test.ts                                         +76 −14 █
+ ┃                                                                                                                              ┃ │     helpers.ts                                              +5 −2 █
+ ┃                                                                                                                              ┃ │     …ecorded_catalog_2026-09-18_manifest_not_modified.json +97 −0 █
+ ┃                                                                                                                              ┃ │     …tures/manifest.json => tests/fixtures/manifest.v2.json +6 −3 █
+ ┃                                                                                                                              ┃ │   web/                                                            █
+ ┃                                                                                                                              ┃ │     components/Catalog.tsx                                +54 −31 █
+ ┃                                                                                                                              ┃ │     components/Manifest.tsx                                +18 −7 █
+ ┃                                                                                                                              ┃ │     hooks/useCatalog.ts                                   +27 −18 █
+ ┃                                                                                                                              ┃ │     styles/catalog.css                                     +14 −9 █
+ ┃                                                                                                                              ┃ │   scripts/                                                        █
+ ┃                                                                                                                              ┃ │     seed.ts                                                +22 −5 █
  ┃                                                                                                                              ┃ │     verify.ts                                              +9 −11 █
- ┃ ◆ claude                                                                                                                     ┃ └───────────────────────────────────────────────────────────────────┘
- ┃   Rewriting the 304 test around the cached body.                                                                             ┃ ┌──────────────────────────── Activity ─────────────────────────────┐
+ ┃                                                                                                                              ┃ └───────────────────────────────────────────────────────────────────┘
+ ┃                                                                                                                              ┃ ┌──────────────────────────── Activity ─────────────────────────────┐
  ┃                                                                                                                              ┃ │ ▾ Sub-agents  1 running · 3 spawned · 1 failed                    │
- ┃ ◆ claude                                                                                                                     ┃ │ ◆ test Cover tests/fetch.test.ts                    sonnet 1m 42s │
- ┃   The notebook that demonstrates the fetcher needs the new call shape.                                                       ┃ │   └ Reading tests/stream.rs                                       │
+ ┃                                                                                                                              ┃ │ ◆ test Cover tests/fetch.test.ts                    sonnet 1m 42s │
+ ┃                                                                                                                              ┃ │   └ Reading tests/stream.rs                                       │
  ┃                                                                                                                              ┃ │ ▾ Decisions, as the agent says  0                                 │
- ┃ ✗ Bash           npm test                                                                                      exit 1 · 0.4s ┃ │   none stated yet                                                 │
- ┃   └ 1 failing: fetch returns the cached body on a 304                                                                        ┃ │ ▾ Tools  8 calls ✗ 2 · 0 denied · 21.6 kB out                     │
+ ┃                                                                                                                              ┃ │   none stated yet                                                 │
+ ┃                                                                                                                              ┃ │ ▾ Tools  8 calls ✗ 2 · 0 denied · 21.6 kB out                     │
  ┃                                                                                                                              ┃ │   Exploring code   3 ▓▓▓▓▓▓▓▓▓▓▓▓                                 │
- ┃ ◆ claude                                                                                                                     ┃ │     Read 3                                                        │
- ┃   Etags cached in the LRU; 304s short-circuit. One test still red — the 304 path asserts a body that is no longer sent.      ┃ │   Notion           3 ▓▓▓▓▓▓▓▓▓▓▓▓ ✗ 1                             │
+ ┃                                                                                                                              ┃ │     Read 3                                                        │
+ ┃                                                                                                                              ┃ │   Notion           3 ▓▓▓▓▓▓▓▓▓▓▓▓ ✗ 1                             │
  ┃                                                                                                                              ┃ │     fetch 1 · search 1 · update-page 1                            │
  ┃                                                                                                                              ┃ │   Editing files    1 ▓▓▓▓                                         │
  ┃                                                                                                                              ┃ │     Edit 1                                                        │

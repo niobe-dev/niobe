@@ -12,10 +12,10 @@
  ┃   │ +     if cached and cached.etag:                                   │ ┃ │ ⎇ main ↑3                             █
  ┃   │ +         headers["If-None-Match"] = cached.etag                   │ ┃ │ ▾ Working tree  23 files  +≥977 −≥259 █
  ┃   │ +     response = get(url, headers=headers)                         │ ┃ │   .                                   █
- ┃   │                                                                    │ ┃ │     CHANGELOG.md                +0 −0 │
- ┃   │ ▶ 1. Allow once                                     this call only │ ┃ │   catalog/                            │
- ┃   │   2. Always allow Edit                            niobe saves Edit │ ┃ │     fetch.ts                 +149 −12 │
- ┃   │   3. Always allow this target  niobe saves Edit(/repo/catalog/fet… │ ┃ │     etag.ts                   +88 −41 │
+ ┃   │                                                                    │ █ │     CHANGELOG.md                +0 −0 │
+ ┃   │ ▶ 1. Allow once                                     this call only │ █ │   catalog/                            │
+ ┃   │   2. Always allow Edit                            niobe saves Edit │ █ │     fetch.ts                 +149 −12 │
+ ┃   │   3. Always allow this target  niobe saves Edit(/repo/catalog/fet… │ █ │     etag.ts                   +88 −41 │
  ┃   │   4. Deny                                    the call does not run │ █ │     cache/lru.ts               +31 −9 │
  ┃   │                                                                    │ █ │     cache/index.ts             +12 −0 │
  ┃   │ 3. niobe saves Edit(/repo/catalog/fetch.py)                        │ █ └───────────────────────────────────────┘

@@ -9,53 +9,47 @@
   i  Rgb(255, 43, 214) on Rgb(10, 15, 12), reversed
   j  Rgb(28, 122, 63) on Rgb(10, 15, 12)
   k  Rgb(255, 43, 214) on Rgb(10, 15, 12), bold
-  l  Rgb(57, 255, 122) on Rgb(15, 46, 26)
-  m  Rgb(57, 255, 122) on Rgb(15, 46, 26), bold
-  n  Rgb(230, 233, 255) on Rgb(15, 46, 26)
-  o  Rgb(107, 154, 124) on Rgb(10, 15, 12)
-  p  Rgb(255, 210, 63) on Rgb(10, 15, 12), bold
-  q  Rgb(255, 210, 63) on Rgb(10, 15, 12)
-  r  Rgb(230, 233, 255) on Rgb(10, 15, 12), bold
-  s  Rgb(107, 154, 124) on Rgb(8, 12, 10)
-  t  Rgb(107, 154, 124) on Rgb(8, 12, 10), bold
-  u  Rgb(230, 233, 255) on Rgb(8, 12, 10)
-  v  Rgb(57, 255, 122) on Rgb(10, 15, 12), bold
-  w  Rgb(185, 193, 255) on Rgb(10, 15, 12)
-  x  Rgb(255, 77, 109) on Rgb(10, 15, 12)
-  y  Rgb(255, 77, 109) on Rgb(10, 15, 12), bold
-  z  Rgb(10, 15, 12) on Rgb(57, 255, 122), bold
-  A  Rgb(10, 15, 12) on Rgb(57, 255, 122)
-  B  Rgb(57, 255, 122) on Rgb(13, 11, 22), bold
-  C  Rgb(7, 6, 13) on Rgb(255, 43, 214), dim
-  D  Rgb(7, 6, 13) on Rgb(255, 43, 214)
+  l  Rgb(107, 154, 124) on Rgb(10, 15, 12)
+  m  Rgb(255, 210, 63) on Rgb(10, 15, 12), bold
+  n  Rgb(255, 210, 63) on Rgb(10, 15, 12)
+  o  Rgb(57, 255, 122) on Rgb(10, 15, 12), bold
+  p  Rgb(230, 233, 255) on Rgb(10, 15, 12), bold
+  q  Rgb(255, 77, 109) on Rgb(10, 15, 12), bold
+  r  Rgb(255, 77, 109) on Rgb(10, 15, 12)
+  s  Rgb(185, 193, 255) on Rgb(10, 15, 12)
+  t  Rgb(10, 15, 12) on Rgb(57, 255, 122), bold
+  u  Rgb(10, 15, 12) on Rgb(57, 255, 122)
+  v  Rgb(57, 255, 122) on Rgb(13, 11, 22), bold
+  w  Rgb(7, 6, 13) on Rgb(255, 43, 214), dim
+  x  Rgb(7, 6, 13) on Rgb(255, 43, 214)
 
 abaaaaaabaaaaaaaabaaaaaaaabaaaaaabaaaaabaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaccccccaaddddddddddddddddaaeeeeeeeeeeeeeeaadddddaa
 fgghhhiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiggggfjjjjjjjjjjjjjjjjjkkkkkkkjjjjjjjjjjjjjjjjjf
-fgfffllllmnllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllfgfjfooooooooooppppfqqqooooooooooooooofffffjf
-fgfffllllmnllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllfgfjfoooooooooorrrrffooooooooooooooooooooofjf
-fgfffllllmnllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllfgfjfjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjfjf
-fgfffllllmnllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllfgfjfoooooooooorrrrfffffffffffffoooooofffffjf
-fgfffsssstuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuufgfjfoooooooooovvvvfggggggggggoooooooofffffjf
-fgfffuuuussssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssfgfjfjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjfjf
-fgfffsssstuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuufgfjfoooooooooorrrrffooooooooooooooooooooofjf
-fgfffllllmnllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllfgfjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjf
-fgfffsssstuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuufgfjjjjjjjjjjjjjjjjkkkkkkkkkjjjjjjjjjjjjjjjjf
-fgfffoooooooooooooooofffffffffffffffffffffffffffffffffffffffffffffffffffffffgfjfwwwwwwooofffffffffffffffffffffffffffffgf
-fgffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffgfjfkkkkkkkkkkkkkkffffffffffffgggggfxxxxxfgf
-fgfvvvvvvvvfffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffgfjfooofffffffffffffffffffffffffffffffffffgf
-fgffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffgfjfffffffffffffffffffffffffffffffffggfxxfjf
-fgffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffgfjfooooooooooffffffffffffffffffffffffffffjf
-fgfvvvvvvvvfffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffgfjffffffffffffffffffffffffffffffggggfxxxfjf
-fgffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffgfjfffffffffffffffffffffffffffffffgggfxxxfjf
-fgffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffgfjffffffffffffffffffffffffffffffffgggfxxfjf
-fgfyyxxxxxxxxxxxxxxfooooooooffffffffffffffffffffffffffffffffffxxxxxxooooooofgfjffffffffffffffffffffffffffffffffgggfxxfjf
-fgfffoofffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffgfjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjf
-fgffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffgfjjjjjjjjjjjjjjjkkkkkkkkkkjjjjjjjjjjjjjjjjf
-fgfvvvvvvvvfffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffgfjfkkkkkkkkkkkkfffffffffffoooooooooooffffgf
-fgffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffgfjfvvggggfffffffffffffffffooooooogggggggfgf
-fgffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffgfjfooooooooooooooooooooooooooofffffffffffgf
+fgffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffgfjfllllllllllmmmmfnnnlllllllllllllllfffffjf
+fgfoofffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffgfjfllllllllllppppfflllllllllllllllllllllfjf
+fgffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffgfjfjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjfjf
+fgffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffgfjfllllllllllppppfffffffffffffllllllfffffjf
+fgffflllllllllllllllllllllllllllllllllffffffffffffffffffffffffffffffffffffffgfjflllllllllloooofggggggggggllllllllfffffjf
+fgffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffgfjfjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjfjf
+fgfqqrrrrrrrrrrrrrrfllfffffffffffffffffffffffffffffffffffffffffffffffrrrrrrfgfjfllllllllllppppfflllllllllllllllllllllfjf
+fgfffllfffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffgfjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjf
+fgffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffgfjjjjjjjjjjjjjjjjkkkkkkkkkjjjjjjjjjjjjjjjjf
+fgfoofffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffgfjfsssssslllfffffffffffffffffffffffffffffgf
+fgffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffgfjfkkkkkkkkkkkkkkffffffffffffgggggfrrrrrfgf
+fgffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffgfjflllfffffffffffffffffffffffffffffffffffgf
+fgffflllllllllllllllllllffffffffffffffffffffffffffffffffffffffffffffffffffffgfjfffffffffffffffffffffffffffffffffggfrrfjf
+fgffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffgfjfllllllllllffffffffffffffffffffffffffffjf
+fgfoofffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffgfjffffffffffffffffffffffffffffffggggfrrrfjf
+fgffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffgfjfffffffffffffffffffffffffffffffgggfrrrfjf
+fgfoofffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffgfjffffffffffffffffffffffffffffffffgggfrrfjf
+fgffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffgfjffffffffffffffffffffffffffffffffgggfrrfjf
+fgfqqrrrrrrrrrrrrrrfllllllllffffffffffffffffffffffffffffffffffrrrrrrlllllllfgfjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjf
+fgfffllfffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffgfjjjjjjjjjjjjjjjkkkkkkkkkkjjjjjjjjjjjjjjjjf
+fgffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffgfjfkkkkkkkkkkkkffffffffffflllllllllllffffgf
+fgfoofffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffgfjfooggggffffffffffffffffflllllllgggggggfgf
+fgffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffgfjflllllllllllllllllllllllllllfffffffffffgf
 fgffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffgfjfkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkffffffffjf
-fgfjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjfgfjfooooooooooooooooofffffffffffffffffffffjf
-fgfzzzzzvvvAoooooooooooooooooooooooooooooooooooooooffffffffffoooooooooooooofgfjfkkkkkkkffffffffffxxxooooooooooofffffffjf
+fgfjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjfgfjflllllllllllllllllfffffffffffffffffffffjf
+fgftttttoooulllllllllllllllllllllllllllllllllllllllffffffffffllllllllllllllfgfjfkkkkkkkffffffffffrrrlllllllllllfffffffjf
 fggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggfjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjf
-BBBCCCCaBDDDDDDDDaBCCCCCCCCCCCaBCCCCCCCCCaBCCCCCCCCCaBDDDDDDDDaBCCCCCCCCCCaBDDDDDDDaBDDDDDDDDDDaBDDDDDDDDDDDDaBDDDDDDDDa
+vvvwwwwavxxxxxxxxavwwwwwwwwwwwavwwwwwwwwwavwwwwwwwwwavxxxxxxxxavwwwwwwwwwwavxxxxxxxavxxxxxxxxxxavxxxxxxxxxxxxavxxxxxxxxa

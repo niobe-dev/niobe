@@ -2350,7 +2350,8 @@ IN THE SHELL:
     t                      In the Activity pane, count tools by name or by
                            kind of work
     Ctrl+End               Back to the newest line of the transcript
-    Ctrl+O                 Fold each run of calls to one tool into one row
+    Ctrl+O                 Draw every tool call a row of its own, or again
+                           the calls between two replies as one line
     Ctrl+T                 Open every diff cut at twenty rows, show the whole
                            command under a shell call's row, and a call's
                            arguments as they were sent

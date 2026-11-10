@@ -1,9 +1,9 @@
  Niobe  Session  Context  Model  View  Help                                                             ○ not attached
  ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━ Session ─ niobe ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓ ┌──────────────── Usage ────────────────┐
- ┃ ◆ agent                                                                  ┃ │ no tokens reported yet                │
- ┃   Noting the sweep's numbering for next time.                            ┃ │ session — · billing not known         │
- ┃                                                                          ┃ └───────────────────────────────────────┘
- ┃ ◆ Edit ×2 updated memory · sweeps.md, MEMORY.md                    +2 −2 ┃ ┌─────────────── Changes ───────────────┐
+ ┃ ◆ Noting the sweep's numbering for next time.                            ┃ │ no tokens reported yet                │
+ ┃                                                                          ┃ │ session — · billing not known         │
+ ┃ ◆ Edit ×2 updated memory · sweeps.md, MEMORY.md                    +2 −2 ┃ └───────────────────────────────────────┘
+ ┃                                                                          ┃ ┌─────────────── Changes ───────────────┐
  ┃                                                                          ┃ │ ⎇ main                                │
  ┃                                                                          ┃ │ ▾ Working tree  —                     │
  ┃                                                                          ┃ │   not read yet                        │

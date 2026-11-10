@@ -38,8 +38,11 @@
 //!
 //! A run of calls to the same tool is one group: a row with the run's summed
 //! figures and the span of time it ran — calls a backend ran side by side
-//! overlap, and are not counted twice — and a row for each call under it
-//! unless the operator has folded the runs away.
+//! overlap, and are not counted twice — and a row for each call under it.
+//!
+//! These rows are the transcript's full view, which Ctrl+O switches to: by
+//! default the session's calls that went as they should are counted on one
+//! line a run instead, see [`crate::summary`].
 
 use std::time::{Duration, SystemTime};
 
@@ -59,8 +62,9 @@ use niobe_core::test_run::FailedTests;
 /// columns every row is drawn in: what holds for the whole transcript.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub(crate) struct Detail {
-    /// Every run of calls is drawn as its group row alone.
-    pub(crate) folded: bool,
+    /// The session's calls that need no reading are summed up a line a run,
+    /// rather than drawn a row each: see [`crate::summary`].
+    pub(crate) compact: bool,
     /// Every diff is drawn whole rather than cut at
     /// [`crate::hunks::MAX_ROWS`].
     pub(crate) diffs_open: bool,
@@ -92,8 +96,10 @@ pub(crate) struct Columns {
 }
 
 impl Columns {
-    /// The columns `entries` need.
-    pub(crate) fn of(entries: &[Entry]) -> Self {
+    /// The columns `entries` need: those the transcript draws, since a
+    /// row it leaves out is no reason to push the others' columns over.
+    pub(crate) fn of<'a>(entries: impl IntoIterator<Item = &'a Entry>) -> Self {
+        let entries: Vec<&Entry> = entries.into_iter().collect();
         let name = entries
             .iter()
             .filter(|entry| !entry.calls.is_empty())
@@ -277,8 +283,7 @@ fn doing(call: &Call, detail: Detail) -> String {
     }
 }
 
-/// A run of calls: the group's row, then the calls under it unless the runs
-/// are folded.
+/// A run of calls: the group's row, then the calls under it.
 fn group(
     entry: &Entry,
     calls: &[Call],
@@ -287,10 +292,7 @@ fn group(
     colour: Color,
     theme: &Theme,
 ) -> Vec<Line<'static>> {
-    let glyph = match detail.folded {
-        true => "▸",
-        false => "▾",
-    };
+    let glyph = "▾";
     let what = calls
         .iter()
         .map(|call| doing(call, detail))
@@ -309,10 +311,6 @@ fn group(
         colour,
         theme,
     )];
-    if detail.folded {
-        return lines;
-    }
-
     for (at, call) in calls.iter().enumerate() {
         let last = at + 1 == calls.len();
         lines.extend(member(call, last, width, detail, theme));
@@ -352,7 +350,7 @@ pub(crate) fn call_on_row(
     match entry.calls.as_slice() {
         [] => None,
         [_] => Some(0),
-        calls if detail.folded || (!detail.diffs_open && all_memory(calls)) => None,
+        calls if !detail.diffs_open && all_memory(calls) => None,
         calls => {
             // The run's own row is row 0, and its calls' rows follow.
             let mut next = 1usize;
@@ -1281,9 +1279,9 @@ mod tests {
     }
 
     /// The first entry of `app` as the transcript draws it, one string a row.
-    fn drawn(app: &App, folded: bool) -> Vec<String> {
+    fn drawn(app: &App) -> Vec<String> {
         let detail = Detail {
-            folded,
+            compact: false,
             diffs_open: false,
             columns: Columns::of(app.entries()),
             grouped: false,
@@ -1327,7 +1325,7 @@ mod tests {
             }
             app.apply(&ended);
 
-            let rows = drawn(&app, false);
+            let rows = drawn(&app);
             assert_eq!(
                 rows[0].ends_with("exit 0 · rule"),
                 marked,
@@ -1343,7 +1341,7 @@ mod tests {
         app.apply(&start("t1", "Read"));
         app.apply(&end("t1", "Read", ToolOutcome::Failed, None));
 
-        let rows = drawn(&app, false);
+        let rows = drawn(&app);
         assert!(rows[0].starts_with("✗ Read"), "{rows:?}");
         assert!(rows[0].ends_with("failed"), "{rows:?}");
         assert_eq!(
@@ -1370,7 +1368,7 @@ mod tests {
             Some("The user doesn't want to proceed with this tool use."),
         ));
 
-        let rows = drawn(&app, false);
+        let rows = drawn(&app);
         assert_eq!(app.entries().len(), 1, "{:?}", app.entries());
         assert!(rows[0].ends_with("denied"), "{rows:?}");
         assert_eq!(
@@ -1412,7 +1410,7 @@ mod tests {
             Some("The operator denied this call in Niobe."),
         ));
 
-        let rows = drawn(&app, false);
+        let rows = drawn(&app);
         assert_eq!(rows[1].trim(), "└ The operator denied this call in Niobe.");
     }
 
@@ -1427,7 +1425,7 @@ mod tests {
             Some("\nFile does not exist.\nsecond line"),
         ));
 
-        assert_eq!(drawn(&app, false)[1].trim(), "└ File does not exist.");
+        assert_eq!(drawn(&app)[1].trim(), "└ File does not exist.");
     }
 
     #[test]
@@ -1439,7 +1437,7 @@ mod tests {
         // The second end came with no clock behind it.
         app.apply(&end("t2", "Read", ToolOutcome::Failed, Some("gone")));
 
-        let rows = drawn(&app, false);
+        let rows = drawn(&app);
         assert!(rows[0].starts_with("▾ Read ×2"), "{rows:?}");
         assert!(rows[0].ends_with("2.0 kB · 1 failed · ≥1.5s"), "{rows:?}");
         assert!(rows[1].ends_with("1.0 kB · 1.5s"), "{rows:?}");
@@ -1449,7 +1447,6 @@ mod tests {
             "└ gone",
             "the failed call's reason hangs under it"
         );
-        assert_eq!(drawn(&app, true).len(), 2, "folded, the group row alone");
     }
 
     /// Calls the backend ran side by side — sub-agents, reads — overlap on
@@ -1465,7 +1462,7 @@ mod tests {
         for id in ["t1", "t2", "t3"] {
             app.apply_at(&end(id, "Agent", ToolOutcome::Ok, None), at(10_000));
         }
-        let rows = drawn(&app, false);
+        let rows = drawn(&app);
         assert!(rows[0].ends_with("3.0 kB · 10s"), "{rows:?}");
 
         // Overlapping in part, the span runs from the first start to the
@@ -1477,7 +1474,7 @@ mod tests {
         app.apply_at(&end("t2", "Read", ToolOutcome::Ok, None), at(15_000));
         app.apply_at(&start("t3", "Read"), at(20_000));
         app.apply_at(&end("t3", "Read", ToolOutcome::Ok, None), at(22_500));
-        let rows = drawn(&app, false);
+        let rows = drawn(&app);
         assert!(rows[0].ends_with("3.0 kB · 17s"), "{rows:?}");
     }
 
@@ -1516,7 +1513,7 @@ mod tests {
             });
         }
 
-        let rows = drawn(&app, false);
+        let rows = drawn(&app);
         let said = rows.join("\n");
         assert!(rows[0].starts_with("▾ Edit ×2"), "{said}");
         assert!(
@@ -1594,7 +1591,7 @@ mod tests {
             });
         }
 
-        let said = drawn(&app, false).join("\n");
+        let said = drawn(&app).join("\n");
         assert!(said.contains("updated memory · notes.md"), "{said}");
         assert!(!said.contains("notes.md, notes.md"), "{said}");
     }
@@ -1614,7 +1611,7 @@ mod tests {
             });
         }
 
-        let rows = drawn(&app, false);
+        let rows = drawn(&app);
         assert!(rows[0].ends_with("+8 −≥3"), "{rows:?}");
         assert!(rows[1].ends_with("+4 —"), "{rows:?}");
         assert!(rows[2].ends_with("+4 −3"), "{rows:?}");
@@ -1645,7 +1642,7 @@ mod tests {
         spawn(&mut app, "toolu_a", "quick-lookup: Summarize");
         app.apply(&start_by("t1", "Read", "toolu_a"));
 
-        let rows = drawn(&app, false);
+        let rows = drawn(&app);
         assert!(
             rows[0].starts_with("⠋ Read quick catalog/t1.py "),
             "{rows:?}"
@@ -1782,20 +1779,18 @@ mod tests {
     #[test]
     fn a_run_of_calls_to_a_long_named_tool_keeps_its_count_when_the_name_is_cut() {
         for name in ["mcp__github__search_issues", "NotebookEdit"] {
-            for folded in [false, true] {
-                let mut app = app();
-                for id in ["t1", "t2", "t3"] {
-                    app.apply(&start(id, name));
-                    app.apply(&end(id, name, ToolOutcome::Ok, None));
-                }
-                let rows = drawn(&app, folded);
-                let column: String = rows[0].chars().skip(2).take(NAME_MOST).collect();
-                assert!(column.ends_with(" ×3"), "{name}: {rows:?}");
-                assert!(
-                    text::width(&column) <= NAME_MOST && column.contains('…'),
-                    "{name}: the name gave way: {rows:?}"
-                );
+            let mut app = app();
+            for id in ["t1", "t2", "t3"] {
+                app.apply(&start(id, name));
+                app.apply(&end(id, name, ToolOutcome::Ok, None));
             }
+            let rows = drawn(&app);
+            let column: String = rows[0].chars().skip(2).take(NAME_MOST).collect();
+            assert!(column.ends_with(" ×3"), "{name}: {rows:?}");
+            assert!(
+                text::width(&column) <= NAME_MOST && column.contains('…'),
+                "{name}: the name gave way: {rows:?}"
+            );
         }
     }
 
@@ -1882,7 +1877,7 @@ mod tests {
         let mut app = app();
         shell_call(&mut app, LONG_COMMAND);
 
-        let rows = drawn(&app, false);
+        let rows = drawn(&app);
         assert_eq!(
             rows.iter().filter(|row| !row.is_empty()).count(),
             1,
@@ -1939,7 +1934,7 @@ mod tests {
             summary: None,
             agent: None,
         });
-        let rows = drawn(&app, false);
+        let rows = drawn(&app);
         assert!(rows[0].contains("cargo fmt --all"), "{rows:?}");
     }
 
@@ -2023,7 +2018,7 @@ mod tests {
         let mut app = app();
         app.apply(&start("t1", "Bash"));
 
-        assert!(drawn(&app, false)[0].ends_with("running"));
+        assert!(drawn(&app)[0].ends_with("running"));
     }
 
     #[test]
@@ -2035,7 +2030,7 @@ mod tests {
         let mut alone = app();
         alone.apply(&start("t1", "Bash"));
         alone.apply(&fatal);
-        let rows = drawn(&alone, false);
+        let rows = drawn(&alone);
         assert!(rows[0].ends_with("cut short"), "{rows:?}");
 
         let mut run = app();
@@ -2043,7 +2038,7 @@ mod tests {
         run.apply(&end("t1", "Read", ToolOutcome::Ok, None));
         run.apply(&start("t2", "Read"));
         run.apply(&fatal);
-        let rows = drawn(&run, true);
+        let rows = drawn(&run);
         assert!(!rows[0].contains("running"), "{rows:?}");
         assert!(rows[0].contains("1 cut short"), "{rows:?}");
         assert!(!rows[0].contains("failed"), "{rows:?}");
@@ -2055,7 +2050,7 @@ mod tests {
         app.apply(&start("t1", "Bash"));
         app.apply(&Event::TurnEnded);
 
-        let rows = drawn(&app, false);
+        let rows = drawn(&app);
         assert!(rows[0].ends_with("cut short"), "{rows:?}");
     }
 
@@ -2067,7 +2062,7 @@ mod tests {
         app.apply(&start("t2", "Bash"));
         app.apply(&end("t2", "Bash", ToolOutcome::Denied, None));
 
-        let rows = drawn(&app, true);
+        let rows = drawn(&app);
         assert!(rows[0].ends_with("2.0 kB · 1 denied"), "{rows:?}");
         assert!(!rows[0].contains("failed"), "{rows:?}");
     }
@@ -2092,7 +2087,7 @@ mod tests {
         app.apply_at(&end("t2", "Bash", ToolOutcome::Denied, None), at(61_700));
 
         assert_eq!(app.entries()[0].calls[1].took, None);
-        let rows = drawn(&app, true);
+        let rows = drawn(&app);
         assert!(rows[0].ends_with(" · 1 denied · 1.5s"), "{rows:?}");
     }
 
@@ -2103,14 +2098,14 @@ mod tests {
             refused.apply(&start(id, "Bash"));
             refused.apply(&end(id, "Bash", ToolOutcome::Denied, None));
         }
-        assert!(drawn(&refused, true)[0].ends_with("denied ×2"));
+        assert!(drawn(&refused)[0].ends_with("denied ×2"));
 
         let mut mixed = app();
         mixed.apply(&start("t1", "Bash"));
         mixed.apply(&end("t1", "Bash", ToolOutcome::Failed, Some("gone")));
         mixed.apply(&start("t2", "Bash"));
         mixed.apply(&end("t2", "Bash", ToolOutcome::Denied, None));
-        assert!(drawn(&mixed, true)[0].ends_with("1 failed · 1 denied"));
+        assert!(drawn(&mixed)[0].ends_with("1 failed · 1 denied"));
     }
 
     /// A `cargo test` call that ended with `status`, and the run it reported.
@@ -2167,7 +2162,7 @@ mod tests {
         let mut app = app();
         tested(&mut app, 0, counts(637, 0, 2), false);
 
-        let rows = drawn(&app, false);
+        let rows = drawn(&app);
         assert!(rows[0].starts_with("⚙ Bash"), "{rows:?}");
         assert_eq!(
             rows[1].trim(),
@@ -2202,7 +2197,7 @@ mod tests {
         let mut app = app();
         tested(&mut app, 0, None, false);
 
-        let rows = drawn(&app, false);
+        let rows = drawn(&app);
         assert_eq!(rows[1].trim(), "└ test result not read");
         assert!(
             !rows[1].chars().any(|c| c.is_ascii_digit()),
@@ -2215,10 +2210,7 @@ mod tests {
         let mut app = app();
         tested(&mut app, 101, None, true);
 
-        assert_eq!(
-            drawn(&app, false)[1].trim(),
-            "└ tests failed · counts not read"
-        );
+        assert_eq!(drawn(&app)[1].trim(), "└ tests failed · counts not read");
     }
 
     #[test]
@@ -2226,7 +2218,7 @@ mod tests {
         let mut app = app();
         tested(&mut app, 101, None, false);
 
-        assert_eq!(drawn(&app, false)[1].trim(), "└ Exit code 101");
+        assert_eq!(drawn(&app)[1].trim(), "└ Exit code 101");
     }
 
     #[test]
@@ -2303,7 +2295,7 @@ mod tests {
         );
 
         assert_eq!(
-            drawn(&app, false)[1].trim(),
+            drawn(&app)[1].trim(),
             "└ ━━━━━━━━━━  3 passed · 1 failed · tests::wrong in --lib · 1 ignored"
         );
         let line =
@@ -2320,7 +2312,7 @@ mod tests {
         tested_naming(&mut app, 101, counts(4, 3, 0), true, failures);
 
         assert_eq!(
-            drawn(&app, false)[1].trim(),
+            drawn(&app)[1].trim(),
             "└ ━━━━━━━━━━━━━━━━━━━━  4 passed · 3 failed · tests::wrong +2 in 2 binaries"
         );
     }
@@ -2331,7 +2323,7 @@ mod tests {
         let mut app = app();
         tested_naming(&mut app, 0, None, true, named("--lib", &["tests::wrong"]));
 
-        let rows = drawn(&app, false);
+        let rows = drawn(&app);
         assert_eq!(
             rows[1].trim(),
             "└ tests failed · tests::wrong in --lib · counts not read"
@@ -2410,7 +2402,7 @@ mod tests {
             command: None,
             untrimmed: None,
         });
-        drawn(&app, false)
+        drawn(&app)
     }
 
     #[test]

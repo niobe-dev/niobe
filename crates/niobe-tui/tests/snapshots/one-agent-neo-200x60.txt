@@ -3,7 +3,7 @@
  ║ ↳ deep2  deep-reasoner: Review cache.py                                                                                      ║ │ 5h         62% ▓▓▓▓▓▓▓░░░░░ resets 16:40                          │
  ║   Let me check how eviction is triggered.                                                                                    ║ │ 7d         18% ▓▓░░░░░░░░░░ resets Tue 15:00                      │
  ║                                                                                                                              ║ │ ───────────────────────────────────────────────────────────────── │
- ║ ⚙ Read           deep2 catalog/cache.py                                                                               2.8 kB ║ │ opus-5    100% ▓▓▓▓▓▓▓▓▓▓▓▓   49k                                 │
+ ║ ⚙ Read deep2 catalog/cache.py                                                                                         2.8 kB ║ │ opus-5    100% ▓▓▓▓▓▓▓▓▓▓▓▓   49k                                 │
  ║                                                                                                                              ║ │ cache hit  86% ▓▓▓▓▓▓▓▓▓▓░░   40k                                 │
  ║                                                                                                                              ║ │ ───────────────────────────────────────────────────────────────── │
  ║                                                                                                                              ║ │ context    13% ▓▓░░░░░░░░░░ 25k / 200k                            │

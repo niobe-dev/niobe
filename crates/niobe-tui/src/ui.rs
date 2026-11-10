@@ -2388,8 +2388,16 @@ struct Drawn {
     entry: usize,
     heading: bool,
     /// Whether this is the row that counts a run of routine entries left
-    /// out, rather than an entry drawn.
+    /// out, or the line that sums up a run of calls, rather than an entry
+    /// drawn.
     hidden: bool,
+    /// Whether this is the line that sums up a run of calls, `entry` its
+    /// first: a click on it opens the list of calls on that one.
+    summed: bool,
+    /// Whether the first line carries the reply's glyph in its gutter,
+    /// which is a mark rather than part of what the agent said: a copy
+    /// reads it as the blank gutter it stands in.
+    marked: bool,
     lines: Vec<Line<'static>>,
     /// Where [`DrawnEntries::searched`] is in `lines`, counted from their
     /// first, once they have been searched. Kept with the lines, so a search
@@ -2419,6 +2427,15 @@ pub(crate) enum Slot {
         first: usize,
         count: usize,
     },
+    /// A run of the session's own calls drawn as the one line that says
+    /// what they did: the first and the last entry of the run. Every entry
+    /// between them [`crate::summary::summed`] is true of is in the run;
+    /// the others between them are sub-agents' entries, which the line
+    /// leaves out.
+    Summary {
+        first: usize,
+        last: usize,
+    },
 }
 
 impl DrawnEntries {
@@ -2439,26 +2456,33 @@ impl DrawnEntries {
         theme: &Theme,
     ) {
         let headings = arranged.headings.filter(|_| arranged.only.is_none());
+        let order = order(
+            entries,
+            headings.is_some(),
+            detail.notable_only,
+            arranged.only,
+            detail.compact,
+        );
+        let drawn = order.iter().filter_map(|slot| match *slot {
+            Slot::Entry(at) => entries.get(at),
+            Slot::Heading { .. } | Slot::Hidden { .. } | Slot::Summary { .. } => None,
+        });
         let detail = Detail {
-            columns: crate::calls::Columns::of(entries),
+            columns: crate::calls::Columns::of(drawn),
             grouped: headings.is_some(),
             ..detail
         };
         self.width = Some(width);
         self.detail = detail;
         let named = commands_key(commands);
-        let order = order(
-            entries,
-            headings.is_some(),
-            detail.notable_only,
-            arranged.only,
-        );
         self.moved |= self.drawn.len() > order.len();
         self.drawn.truncate(order.len());
         for (at, slot) in order.iter().enumerate() {
             let next_is_row = match order.get(at + 1) {
                 Some(Slot::Entry(next)) => entries.get(*next).is_some_and(is_row),
-                Some(Slot::Heading { .. } | Slot::Hidden { .. }) | None => false,
+                Some(Slot::Heading { .. } | Slot::Hidden { .. } | Slot::Summary { .. }) | None => {
+                    false
+                }
             };
             let (key, entry, heading) = match *slot {
                 Slot::Entry(index) => {
@@ -2478,8 +2502,20 @@ impl DrawnEntries {
                     )
                 }
                 Slot::Hidden { first, count } => (hidden_key(count, width, theme), first, false),
+                Slot::Summary { first, last } => (
+                    summary_key(&summary_of(entries, first, last), width, theme),
+                    first,
+                    false,
+                ),
             };
-            let counted = matches!(slot, Slot::Hidden { .. });
+            let counted = matches!(slot, Slot::Hidden { .. } | Slot::Summary { .. });
+            let summed = matches!(slot, Slot::Summary { .. });
+            let marked = match *slot {
+                Slot::Entry(index) => entries
+                    .get(index)
+                    .is_some_and(|entry| entry.kind == EntryKind::Agent && entry.calls.is_empty()),
+                Slot::Heading { .. } | Slot::Hidden { .. } | Slot::Summary { .. } => false,
+            };
             let draw = || match *slot {
                 Slot::Entry(index) => {
                     let Some(entry) = entries.get(index) else {
@@ -2501,6 +2537,9 @@ impl DrawnEntries {
                     )]
                 }
                 Slot::Hidden { count, .. } => hidden(count, width, theme),
+                Slot::Summary { first, last } => {
+                    crate::summary::lines(&summary_of(entries, first, last), width, theme)
+                }
             };
             // The lines kept at a place are reused only for the entry they
             // were drawn from. The key holds a finished entry's text by its
@@ -2513,6 +2552,8 @@ impl DrawnEntries {
                     if drawn.key == key && drawn.entry == entry && drawn.heading == heading =>
                 {
                     drawn.hidden = counted;
+                    drawn.summed = summed;
+                    drawn.marked = marked;
                 }
                 Some(drawn) => {
                     self.moved = true;
@@ -2521,6 +2562,8 @@ impl DrawnEntries {
                         entry,
                         heading,
                         hidden: counted,
+                        summed,
+                        marked,
                         lines: draw(),
                         found: None,
                         read: None,
@@ -2533,6 +2576,8 @@ impl DrawnEntries {
                         entry,
                         heading,
                         hidden: counted,
+                        summed,
+                        marked,
                         lines: draw(),
                         found: None,
                         read: None,
@@ -2667,7 +2712,7 @@ impl DrawnEntries {
 
     /// Where `anchor` is in the transcript as drawn now: the same line of the
     /// same entry, and where that line is gone — a diff cut again, a run of
-    /// calls folded — the nearest line above it that is still drawn, so the
+    /// calls summed up — the nearest line above it that is still drawn, so the
     /// view stops on what led up to the line rather than past it. Where the
     /// pane's width changed, the line its first word is wrapped on to now. A
     /// heading no longer drawn — the rows were ungrouped — is found as the
@@ -2701,7 +2746,9 @@ impl DrawnEntries {
     /// The entry drawn on line `line` of the whole transcript, where an entry
     /// is drawn there whole rather than a heading over agents' rows or the
     /// count of entries left out, and which of its calls the line belongs to
-    /// where it belongs to one: see [`crate::calls::call_on_row`].
+    /// where it belongs to one: see [`crate::calls::call_on_row`]. On a line
+    /// that sums up a run of calls, the run's first entry and no call, as on
+    /// a run's own row: the line stands for every call of the run.
     pub(crate) fn call_at(
         &self,
         line: usize,
@@ -2713,6 +2760,9 @@ impl DrawnEntries {
         for drawn in &self.drawn {
             let offset = line.checked_sub(first)?;
             if offset < drawn.lines.len() {
+                if drawn.summed {
+                    return Some((drawn.entry, None));
+                }
                 if drawn.heading || drawn.hidden {
                     return None;
                 }
@@ -2749,6 +2799,29 @@ impl DrawnEntries {
             .flat_map(|drawn| &drawn.lines)
             .skip(start)
             .map(crate::select::shown)
+    }
+
+    /// [`DrawnEntries::plain_lines_from`] as a copy of them reads: the
+    /// glyph in a reply's gutter read as the blank it stands in, so that the
+    /// gutter the reply's lines share is taken off them all.
+    pub(crate) fn copied_lines_from(&self, start: usize) -> impl Iterator<Item = String> + '_ {
+        self.drawn
+            .iter()
+            .flat_map(|drawn| {
+                drawn
+                    .lines
+                    .iter()
+                    .enumerate()
+                    .map(move |(at, line)| (drawn.marked && at == 0, line))
+            })
+            .skip(start)
+            .map(|(marked, line)| {
+                let shown = crate::select::shown(line);
+                match marked {
+                    true => unmarked(shown),
+                    false => shown,
+                }
+            })
     }
 
     /// The link at `point` of the transcript as drawn `width` cells wide, if
@@ -2891,11 +2964,17 @@ pub(crate) struct Arrangement<'a> {
 /// refused it. The session's own entries and the turn's boundaries stay
 /// where they were. Where `notable_only`, the routine entries are left out,
 /// see [`notable`].
+///
+/// Where `compact`, and the rows are neither grouped nor narrowed to one
+/// agent — both of which the operator asks for to read the agents' work
+/// row by row — the session's own calls are summed up a line a run, and
+/// the sub-agents' entries are left to their own view: see [`compacted`].
 pub(crate) fn order(
     entries: &[Entry],
     grouped: bool,
     notable_only: bool,
     only: Option<&str>,
+    compact: bool,
 ) -> Vec<Slot> {
     let order = match only {
         Some(tag) => (0..entries.len())
@@ -2904,10 +2983,77 @@ pub(crate) fn order(
             .collect(),
         None => by_agent(entries, grouped),
     };
+    let order = match compact && !grouped && only.is_none() {
+        true => compacted(entries, order),
+        false => order,
+    };
     match notable_only {
         true => notable(entries, order, grouped && only.is_none()),
         false => order,
     }
+}
+
+/// `order` with each run of the session's calls that
+/// [`crate::summary::summed`] is true of as one [`Slot::Summary`], and
+/// without the sub-agents' entries — their words, their calls — but for
+/// those [`asks_to_be_read`] is true of.
+///
+/// What a sub-agent did is not the session's to say: its words are its
+/// conversation with the session, which the session's own reply reads for
+/// the operator, and its hand-off stays a row of its own. A run goes on
+/// across the sub-agents' entries it leaves out, since agents working side
+/// by side interleave with the session's calls without interrupting them.
+fn compacted(entries: &[Entry], order: Vec<Slot>) -> Vec<Slot> {
+    let mut shown: Vec<Slot> = Vec::with_capacity(order.len());
+    for slot in order {
+        let Slot::Entry(at) = slot else {
+            shown.push(slot);
+            continue;
+        };
+        let Some(entry) = entries.get(at) else {
+            continue;
+        };
+        if entry.agent.is_some() && !asks_to_be_read(entry) {
+            continue;
+        }
+        match (crate::summary::summed(entry), shown.last_mut()) {
+            (true, Some(Slot::Summary { last, .. })) => *last = at,
+            (true, _) => shown.push(Slot::Summary {
+                first: at,
+                last: at,
+            }),
+            (false, _) => shown.push(slot),
+        }
+    }
+    shown
+}
+
+/// Whether a sub-agent's entry stays a row where the transcript sums the
+/// calls up: one that needs the operator, and a failure — a call refused or
+/// one that failed, which the agent's hand-off does not say went wrong.
+fn asks_to_be_read(entry: &Entry) -> bool {
+    entry.kind == EntryKind::Failure
+        || entry.attention >= Attention::NeedsYou
+        || entry.calls.iter().any(crate::app::Call::failed)
+}
+
+/// What the run of calls from `first` to `last` did, as its summary line
+/// says it.
+fn summary_of(entries: &[Entry], first: usize, last: usize) -> String {
+    let run = entries
+        .get(first..=last)
+        .unwrap_or_default()
+        .iter()
+        .filter(|entry| crate::summary::summed(entry));
+    crate::summary::sentence(run)
+}
+
+/// What a summary line is drawn from, as one number.
+fn summary_key(sentence: &str, width: usize, theme: &Theme) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    (sentence, width, theme).hash(&mut hasher);
+    hasher.finish()
 }
 
 /// `order` without its routine entries, each run of them one
@@ -2927,7 +3073,7 @@ fn notable(entries: &[Entry], order: Vec<Slot>, grouped: bool) -> Vec<Slot> {
             Slot::Entry(at) => entries
                 .get(at)
                 .is_some_and(|entry| entry.attention < Attention::Notable),
-            Slot::Heading { .. } | Slot::Hidden { .. } => false,
+            Slot::Heading { .. } | Slot::Hidden { .. } | Slot::Summary { .. } => false,
         };
         match (routine, slot, shown.last_mut()) {
             (true, Slot::Entry(at), Some(Slot::Hidden { first, count }))
@@ -3166,7 +3312,6 @@ fn drawn_from(entry: &Entry, width: usize, detail: Detail, theme: &Theme, named:
         false => body.len().hash(&mut hasher),
     }
     width.hash(&mut hasher);
-    detail.folded.hash(&mut hasher);
     detail.columns.hash(&mut hasher);
     detail.grouped.hash(&mut hasher);
     if holds_a_cut_diff(entry) || holds_a_hidden_diff(entry) || ran_a_command(entry) {
@@ -3233,7 +3378,7 @@ fn holds_a_cut_diff(entry: &Entry) -> bool {
 /// The switches the transcript is drawn under, as the operator last set them.
 fn transcript_detail(app: &App) -> Detail {
     Detail {
-        folded: app.calls_folded(),
+        compact: !app.calls_full(),
         diffs_open: app.diffs_open(),
         // Worked out from the entries where they are drawn.
         columns: crate::calls::Columns::default(),
@@ -4068,6 +4213,9 @@ fn entry_lines(
     }
     let colour = entry.kind.colour(theme);
     let body_width = width.saturating_sub(GUTTER);
+    if entry.kind == EntryKind::Agent {
+        return reply_lines(entry, body_width, theme, commands);
+    }
 
     let mut head = vec![
         Span::styled(
@@ -4112,6 +4260,62 @@ fn entry_lines(
                 Line::from(spans)
             }),
     );
+    lines.push(Line::from(""));
+    lines
+}
+
+/// `line`, the first of a reply, with the glyph in its gutter read as the
+/// blank cells it stands in.
+fn unmarked(line: String) -> String {
+    let mark = format!("{} ", EntryKind::Agent.glyph());
+    match line.strip_prefix(&mark) {
+        Some(said) => format!("{}{said}", " ".repeat(text::width(&mark))),
+        None => line,
+    }
+}
+
+/// The session's own reply: its words, with the agent's glyph in the gutter
+/// of their first line and no head line naming it. The session has one
+/// agent, and its words are most of what the transcript is read for, so a
+/// line a reply saying whose it is would be read over and over to no end;
+/// the glyph and the colour tell it from the operator's words and the
+/// sub-agents', which keep their heads. What became of the reply — cut off
+/// where the session stopped — is said dim under it.
+fn reply_lines(
+    entry: &Entry,
+    width: usize,
+    theme: &Theme,
+    commands: &[SlashCommand],
+) -> Vec<Line<'static>> {
+    let glyph = Span::styled(
+        format!("{} ", entry.kind.glyph()),
+        Style::new().fg(entry.kind.colour(theme)).bold(),
+    );
+    let gutter = || Span::raw(" ".repeat(GUTTER));
+    let mut body = body_lines(entry, width, theme, commands).into_iter();
+    let first = match body.next() {
+        Some(line) => {
+            let mut spans = vec![glyph];
+            spans.extend(line.spans);
+            Line::from(spans)
+        }
+        None => Line::from(glyph),
+    };
+    let mut lines = vec![first];
+    lines.extend(body.map(|line| {
+        let mut spans = vec![gutter()];
+        spans.extend(line.spans);
+        Line::from(spans)
+    }));
+    if !entry.meta.is_empty() {
+        lines.push(Line::from(vec![
+            gutter(),
+            Span::styled(
+                text::truncate(&entry.meta, width),
+                Style::new().fg(theme.dim),
+            ),
+        ]));
+    }
     lines.push(Line::from(""));
     lines
 }
@@ -9455,8 +9659,9 @@ mod tests {
             .iter()
             .position(|row| row.contains("wrote after"))
             .expect("the reply is drawn");
+        assert!(rows[diff_ends].starts_with("◆ "), "{rows:?}");
         assert_eq!(
-            rows[diff_ends - 2],
+            rows[diff_ends - 1],
             "",
             "a diff keeps its blank line: {rows:?}"
         );
@@ -9464,6 +9669,77 @@ mod tests {
 
     /// Notable only, each run of routine entries is one row saying how many
     /// it left out, where they were; what is notable is drawn as it was.
+    #[test]
+    fn summed_up_each_run_of_the_sessions_calls_is_one_line_and_what_asks_to_be_read_stays() {
+        use crate::app::Call;
+        let entry = |kind, head: &str, calls: Vec<Call>, agent: Option<&str>| Entry {
+            kind,
+            head: head.to_owned(),
+            meta: String::new(),
+            body: String::new(),
+            streaming: false,
+            at: None,
+            calls,
+            agent: agent.map(str::to_owned),
+            attention: Attention::Routine,
+        };
+        let ok = |what: &str| {
+            let mut call = Call::started(what.to_owned(), None);
+            call.outcome = Some(niobe_core::event::ToolOutcome::Ok);
+            call
+        };
+        let failed = {
+            let mut call = ok("gone.py");
+            call.outcome = Some(niobe_core::event::ToolOutcome::Failed);
+            call
+        };
+        let entries = [
+            entry(EntryKind::Agent, "claude", Vec::new(), None),
+            entry(EntryKind::Tool, "Read", vec![ok("a.py")], None),
+            entry(EntryKind::SubAgent, "deep1", Vec::new(), Some("deep1")),
+            entry(EntryKind::Tool, "Read", vec![ok("b.py")], Some("deep1")),
+            entry(EntryKind::Tool, "Grep", vec![ok("etag")], None),
+            entry(EntryKind::Tool, "Read", vec![failed.clone()], Some("deep1")),
+            entry(EntryKind::Tool, "Read", vec![ok("c.py")], None),
+            entry(EntryKind::Tool, "Read", vec![failed], None),
+            entry(EntryKind::Tool, "Agent", vec![ok("review")], None),
+            entry(EntryKind::Agent, "claude", Vec::new(), None),
+            entry(EntryKind::Tool, "Edit", vec![ok("a.py")], None),
+        ];
+
+        assert_eq!(
+            order(&entries, false, false, None, true),
+            [
+                Slot::Entry(0),
+                Slot::Summary { first: 1, last: 4 },
+                Slot::Entry(5),
+                Slot::Summary { first: 6, last: 6 },
+                Slot::Entry(7),
+                Slot::Entry(8),
+                Slot::Entry(9),
+                Slot::Summary {
+                    first: 10,
+                    last: 10
+                },
+            ],
+            "a sub-agent's words and calls are left out without ending the run; \
+             its failure, the session's own and a hand-off are rows"
+        );
+        assert_eq!(
+            summary_of(&entries, 1, 4),
+            "Read 1 file, searched for 1 pattern"
+        );
+
+        let every: Vec<Slot> = (0..entries.len()).map(Slot::Entry).collect();
+        assert_eq!(order(&entries, false, false, None, false), every);
+        assert!(
+            !order(&entries, false, false, Some("deep1"), true)
+                .iter()
+                .any(|slot| matches!(slot, Slot::Summary { .. })),
+            "narrowed to one agent, its rows are what is asked for"
+        );
+    }
+
     #[test]
     fn notable_only_leaves_each_run_of_routine_entries_as_a_count_where_it_was() {
         use niobe_core::event::{Event, ToolOutcome};
@@ -9568,7 +9844,7 @@ mod tests {
                 .expect("the entry is in the transcript")
         };
         let (agents, session) = (at("Read"), at("Grep"));
-        let order = order(app.entries(), true, true, None);
+        let order = order(app.entries(), true, true, None, true);
         assert_eq!(
             order[1..3],
             [
@@ -9821,7 +10097,7 @@ mod tests {
         );
         let user = 0;
         assert_eq!(
-            order(app.entries(), true, false, None),
+            order(app.entries(), true, false, None, true),
             vec![
                 Slot::Entry(user),
                 Slot::Heading {

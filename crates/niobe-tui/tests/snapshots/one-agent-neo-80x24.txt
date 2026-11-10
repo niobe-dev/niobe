@@ -3,7 +3,7 @@
 ║ ↳ deep2  deep-reasoner: Review cache.py                                      ║
 ║   Let me check how eviction is triggered.                                    ║
 ║                                                                              ║
-║ ⚙ Read           deep2 catalog/cache.py                               2.8 kB ║
+║ ⚙ Read deep2 catalog/cache.py                                         2.8 kB ║
 ║                                                                              ║
 ║                                                                              ║
 ║                                                                              ║
