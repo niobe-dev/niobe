@@ -3666,19 +3666,47 @@ fn question_body(app: &App, ask: &Ask, inner: usize, theme: &Theme) -> QuestionB
 
     let focus = app.ask_focus();
     let selected = app.ask_selected();
+    let on_screen = app.question_on_screen();
+    let several = on_screen.is_some_and(|(question, _)| question.multiple);
     let lay = || {
         let (tool, more) = capped(&ask.tool, TOOL_NAME_CHARS);
         let label = match more {
             0 => tool_label(tool),
             more => format!("{}… ({more} more characters)", tool_label(tool)),
         };
-        let mut head = question_head(&label, inner, plain);
+        let mut head = match app.question_on_screen() {
+            Some((question, step)) => put_question(question, step, ask, inner, theme),
+            None => question_head(&label, inner, plain),
+        };
         head.extend(question_reason(ask, inner, theme));
         let words: Vec<(Answer, String, String)> = app
             .ask_options()
             .into_iter()
             .map(|answer| {
-                let (label, hint) = option_words(answer, ask, app.diffs_open());
+                let (label, hint) = match (answer, on_screen) {
+                    (Answer::Choose(at), Some((question, _))) => question
+                        .options
+                        .get(at)
+                        .map(|choice| {
+                            (
+                                choice.label.clone(),
+                                choice.description.clone().unwrap_or_default(),
+                            )
+                        })
+                        .unwrap_or_default(),
+                    (Answer::No, Some(_)) => (
+                        "Don't answer".to_owned(),
+                        "the agent gets no answer".to_owned(),
+                    ),
+                    (
+                        Answer::Once
+                        | Answer::AlwaysTool
+                        | Answer::AlwaysTarget
+                        | Answer::No
+                        | Answer::Choose(_),
+                        _,
+                    ) => option_words(answer, ask, app.diffs_open()),
+                };
                 (answer, label, hint)
             })
             .collect();
@@ -3686,7 +3714,11 @@ fn question_body(app: &App, ask: &Ask, inner: usize, theme: &Theme) -> QuestionB
         // whole: a standing answer is a rule the operator keeps, and keeping
         // one nobody could read to its end is agreeing to something unread.
         let mut consequences = Vec::new();
-        for (at, (_, label, hint)) in words.iter().enumerate() {
+        for (at, (answer, label, hint)) in words.iter().enumerate() {
+            // What an answer to a question means is drawn whole under it.
+            if matches!(answer, Answer::Choose(_)) {
+                continue;
+            }
             let (_, whole) = option_row(at + 1, (label, hint), false, inner, theme);
             if !whole {
                 if consequences.is_empty() {
@@ -3711,7 +3743,19 @@ fn question_body(app: &App, ask: &Ask, inner: usize, theme: &Theme) -> QuestionB
             let mut answers = vec![Line::from("")];
             for (at, (answer, label, hint)) in laid.words.iter().enumerate() {
                 let lit = focus == AskFocus::Choosing && *answer == selected;
-                answers.push(option_row(at + 1, (label, hint), lit, inner, theme).0);
+                match answer {
+                    Answer::Choose(choice) => answers.extend(choice_rows(
+                        at + 1,
+                        (label, hint),
+                        several.then(|| app.ticked(*choice)),
+                        lit,
+                        inner,
+                        theme,
+                    )),
+                    Answer::Once | Answer::AlwaysTool | Answer::AlwaysTarget | Answer::No => {
+                        answers.push(option_row(at + 1, (label, hint), lit, inner, theme).0);
+                    }
+                }
             }
             (
                 laid.head.clone(),
@@ -3723,14 +3767,19 @@ fn question_body(app: &App, ask: &Ask, inner: usize, theme: &Theme) -> QuestionB
     let mut rest = Vec::new();
     if focus == AskFocus::Writing {
         rest.push(Line::from(""));
-        rest.extend(written_answer(app.ask_draft(), inner, theme));
+        rest.extend(written_answer(
+            app.ask_draft(),
+            on_screen.is_some(),
+            inner,
+            theme,
+        ));
     }
     rest.push(Line::from(""));
-    rest.extend(key_rows(
-        &ask_keys(focus, app.ask_options().len()),
-        inner,
-        theme,
-    ));
+    let keys = match on_screen {
+        Some(_) => question_keys(focus, app.ask_options().len(), several),
+        None => ask_keys(focus, app.ask_options().len()),
+    };
+    rest.extend(key_rows(&keys, inner, theme));
     QuestionBody {
         head,
         call,
@@ -4113,25 +4162,170 @@ fn answer_words(answer: Answer, ask: &Ask, spelled: bool) -> (String, String) {
                 .unwrap_or_default(),
         ),
         Answer::No => ("Deny".to_owned(), "the call does not run".to_owned()),
+        // Offered only by a question, which says what its own answers are.
+        Answer::Choose(_) => (String::new(), String::new()),
     }
 }
 
 /// The answer being written in place of the numbered ones, wrapped, with a
 /// cursor at its end and a line saying where it goes.
-fn written_answer(draft: &str, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+fn written_answer(draft: &str, question: bool, width: usize, theme: &Theme) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = text::wrap(&format!("› {draft}▏"), width)
         .into_iter()
         .map(|wrapped| Line::from(wrapped).style(Style::new().fg(theme.hot)))
         .collect();
+    let said = match question {
+        true => "Sent as your answer to this question, word for word.",
+        false => "Sent with a refusal: the call does not run, and the agent is given these words.",
+    };
     lines.extend(
-        text::wrap(
-            "Sent with a refusal: the call does not run, and the agent is given these words.",
-            width,
-        )
-        .into_iter()
-        .map(|wrapped| Line::from(wrapped).style(Style::new().fg(theme.dim).italic())),
+        text::wrap(said, width)
+            .into_iter()
+            .map(|wrapped| Line::from(wrapped).style(Style::new().fg(theme.dim).italic())),
     );
     lines
+}
+
+/// The most characters of the agent's own words a question is drawn with —
+/// its text, an answer's name or what an answer means — each past this
+/// counted rather than drawn.
+const QUESTION_CHARS: usize = 4_096;
+
+/// `said` wrapped as words to `width` columns, at most [`QUESTION_CHARS`]
+/// of it and the rest counted, in `style`.
+fn agent_words(said: &str, width: usize, style: Style) -> Vec<Line<'static>> {
+    let (shown, more) = capped(said.trim(), QUESTION_CHARS);
+    let said = match more {
+        0 => shown.to_owned(),
+        more => format!("{shown}… ({more} more characters)"),
+    };
+    // A control is shown by its glyph rather than handed to the terminal,
+    // and a line break is still one.
+    text::wrap(&text::controls_shown_in_rows(&said), width)
+        .into_iter()
+        .map(|row| Line::from(row).style(style))
+        .collect()
+}
+
+/// The question on screen of those a call puts to the operator, `inner`
+/// columns wide, in place of the tool it runs: the word it is filed under
+/// and how far through them it is, dimmed, then what is asked, in bold. The
+/// words are the agent's, so they wrap between words, and how the call's
+/// arguments were sent is still behind Ctrl+T.
+fn put_question(
+    question: &niobe_core::Question,
+    step: usize,
+    ask: &Ask,
+    inner: usize,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let of = ask.questions().map_or(1, <[_]>::len);
+    let filed = question
+        .header
+        .as_deref()
+        .map(|header| text::controls_shown(header.trim()).into_owned());
+    let place = match (filed, of) {
+        (Some(header), 1) => Some(header),
+        (Some(header), of) => Some(format!("{header} · question {} of {of}", step + 1)),
+        (None, 1) => None,
+        (None, of) => Some(format!("question {} of {of}", step + 1)),
+    };
+    let mut rows: Vec<Line<'static>> = place
+        .map(|place| agent_words(&place, inner, Style::new().fg(theme.dim)))
+        .unwrap_or_default();
+    rows.extend(agent_words(
+        &question.text,
+        inner,
+        Style::new().fg(theme.fg).bold(),
+    ));
+    if question.options.is_empty() {
+        rows.extend(agent_words(
+            "It offers no answers to choose from: Tab writes yours.",
+            inner,
+            Style::new().fg(theme.dim).italic(),
+        ));
+    }
+    rows
+}
+
+/// One answer a question offers, numbered `number`: its name on the row,
+/// with a tick box where `ticked` says whether it is ticked, and what it
+/// means wrapped under the name, dimmed. The selected answer's row is a solid
+/// bar with the `▶` beside it, as every other answer's is.
+fn choice_rows(
+    number: usize,
+    (label, means): (&str, &str),
+    ticked: Option<bool>,
+    lit: bool,
+    width: usize,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let lead = format!("{} {number}. ", if lit { "▶" } else { " " });
+    let boxed = match ticked {
+        Some(true) => "[x] ",
+        Some(false) => "[ ] ",
+        None => "",
+    };
+    let under = text::width(&lead) + text::width(boxed);
+    let room = width.saturating_sub(under).max(1);
+    let base = match lit {
+        true => Style::new().bg(theme.title).fg(theme.pane_bg).bold(),
+        false => Style::new().fg(theme.fg),
+    };
+    let named = agent_words(label, room, base);
+    let mut rows = Vec::new();
+    for (at, line) in named.into_iter().enumerate() {
+        let used = under + line.width();
+        let mut spans = match at {
+            0 => vec![
+                Span::styled(lead.clone(), base),
+                Span::styled(boxed.to_owned(), base),
+            ],
+            _ => vec![Span::styled(" ".repeat(under), base)],
+        };
+        spans.extend(line.spans.into_iter().map(|span| span.patch_style(base)));
+        if lit {
+            spans.push(Span::styled(" ".repeat(width.saturating_sub(used)), base));
+        }
+        rows.push(Line::from(spans));
+    }
+    if rows.is_empty() {
+        rows.push(Line::from(vec![
+            Span::styled(lead, base),
+            Span::styled(boxed.to_owned(), base),
+        ]));
+    }
+    let indent = " ".repeat(under);
+    rows.extend(
+        agent_words(means, room, Style::new().fg(theme.dim))
+            .into_iter()
+            .map(|line| {
+                let mut spans = vec![Span::raw(indent.clone())];
+                spans.extend(line.spans);
+                Line::from(spans).style(line.style)
+            }),
+    );
+    rows
+}
+
+/// The keys that work at a question a call puts to the operator, for the
+/// state it is in: Space ticks where it takes several answers.
+fn question_keys(focus: AskFocus, options: usize, several: bool) -> Vec<(String, &'static str)> {
+    match focus {
+        AskFocus::Choosing => {
+            let mut keys = vec![("↑↓".to_owned(), "move"), (format!("1-{options}"), "jump")];
+            if several {
+                keys.push(("Space".to_owned(), "tick"));
+            }
+            keys.extend([
+                ("Enter".to_owned(), "answer"),
+                ("Tab".to_owned(), "write your own"),
+                ("Esc".to_owned(), "decide later"),
+            ]);
+            keys
+        }
+        AskFocus::Writing | AskFocus::Deferred => ask_keys(focus, options),
+    }
 }
 
 /// The keys that work at a question, as (key, what it does), for the state it
@@ -10076,6 +10270,7 @@ mod tests {
             id: "a3".into(),
             decision: PermissionDecision::Deny,
             message: None,
+            answers: Vec::new(),
         });
         app.apply(&start("m2", "Grep", None));
 

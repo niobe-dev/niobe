@@ -57,7 +57,10 @@ reviewers that encode both, for an agent working in this tree.
   share or another action's own, so the config that writes them and the shell that draws them agree;
   `proposal.rs` is what a call
   waiting on the operator would do — replace text in a file, write a file whole, run a command,
-  let a plan go ahead — as the backend read it out of the call's arguments, and which arguments that reading covers; `test_run.rs` recognises a shell
+  let a plan go ahead, put questions to the operator — as the backend read it out of the call's
+  arguments, and which arguments that reading covers, and the answers the operator gave
+  questions, which no standing rule ever gives, since leave alone reaches the agent as questions
+  nobody answered; `test_run.rs` recognises a shell
   command that runs `cargo test` and reads the counts out of its output, only where the output
   holds the whole run, and where it does not, whether what is left shows the run failing after its
   tests started, and which tests each failing binary listed wherever its list survived, so
@@ -234,7 +237,10 @@ reviewers that encode both, for an agent working in this tree.
   diff is, a file written as the lines it will hold and whether what it held is lost, a command
   once, a plan whole as its markdown — or as written, where that markdown would draw
   some of its words as nothing or the plan holds a control or text that draws as nothing — with no standing answer offered and its refusal named
-  "keep planning" — and the arguments that reading does not cover by key, `tags.rs` names each sub-agent by one short word of the kind of agent
+  "keep planning" — and the arguments that reading does not cover by key; the questions a call
+  puts to the operator are drawn in the question's frame instead of the tool, one at a time, each
+  with its answers and what each means, ticked with Space where several may be chosen, Tab
+  writing an answer of the operator's own, and go back with the leave to go ahead, `tags.rs` names each sub-agent by one short word of the kind of agent
   it was asked to be, numbered where two would read alike, `turns.rs` draws the rule under a
   finished turn with what that turn did and spent — its sub-agents and calls, its tokens, how far
   it moved the five-hour window and how long it took — giving up whole figures where the pane is narrow,
@@ -276,7 +282,8 @@ reviewers that encode both, for an agent working in this tree.
   `translate.rs` turns one message of it into events and owns no process — and reads the CLI's
   own mark of a call it did not run for want of permission, beside the result live and as the
   transcript's `permissionDecision`, as refused, whoever refused it — and reads an `Edit`,
-  `Write`, `Bash` or `ExitPlanMode` permission prompt's arguments as what the call would do, and the MCP
+  `Write`, `Bash` or `ExitPlanMode` permission prompt's arguments as what the call would do, and
+  an `AskUserQuestion` prompt's as the questions it puts to the operator, and the MCP
   servers every `init` lists, each with the tools of the session's that are its own, and the
   CLI's answer to `mcp_status` — why a server failed, its scope, its transport and command or
   address (never its arguments, environment or headers) — which it keeps for every later
@@ -299,7 +306,8 @@ reviewers that encode both, for an agent working in this tree.
   listed, which the model picker offers — keeps its
   standard input open for the life of the session and writes it from a queue on a thread of its
   own, so a CLI that is not reading never holds up the screen, answers the permission prompts the CLI
-  stops turns on, and starts it as the leader of a process group of its own, which a closing
+  stops turns on — an `AskUserQuestion` approved with the operator's answers under `answers`,
+  where the CLI reads them — and starts it as the leader of a process group of its own, which a closing
   session ends whole, and so does a CLI that leaves mid-session, so nothing the CLI started
   outlives it or holds the quit, or the report of its end, up on its pipes — a CLI that something
   stops with a signal between turns is reported with a notice rather than as the session's end,
@@ -426,7 +434,8 @@ reviewers that encode both, for an agent working in this tree.
   to that turn, for two minutes at most before the agent is heard from in it — whose
   reply is the one printed — each permission prompt answered by the standing rules — the config's, and those
   `--allow` gave for that run alone, which nothing writes down — and every other refused with
-  words that tell the agent no one is there, and an outcome — finished, failed, or stopped on the
+  words that tell the agent no one is there, a question the agent puts to the operator among
+  them whatever rule names its tool, and an outcome — finished, failed, or stopped on the
   budget, read off the figures rather than the backend's wording — that the binary exits 0, 1 or
   3 on, and a turn stopped by SIGTERM or SIGINT, which `signals.rs` catches, asked to stop and
   given three seconds to close, saved and reported as failed before the run ends by that signal, with `--json` in the shape `schema/print.schema.json` publishes, where the plan's windows

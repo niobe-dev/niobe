@@ -228,7 +228,7 @@ fn no_content_puts_a_control_or_a_direction_mark_on_the_terminal() {
     }));
     /// What a proposal does, built around a payload.
     type Proposing = fn(&str) -> Action;
-    let actions: [(&str, Proposing); 4] = [
+    let actions: [(&str, Proposing); 5] = [
         ("proposed-edit", |p: &str| Action::Replace {
             path: format!("src/{p}.rs"),
             old: format!("old {p}\nkept"),
@@ -245,6 +245,23 @@ fn no_content_puts_a_control_or_a_direction_mark_on_the_terminal() {
         }),
         ("proposed-plan", |p: &str| Action::Plan {
             plan: format!("# {p}\n\n1. **{p}**\n2. `{p}`"),
+        }),
+        ("proposed-questions", |p: &str| Action::Questions {
+            questions: vec![niobe_core::Question {
+                header: Some(format!("filed {p}")),
+                text: format!("asked {p}?"),
+                options: vec![
+                    niobe_core::Choice {
+                        label: format!("label {p}"),
+                        description: Some(format!("means {p}")),
+                    },
+                    niobe_core::Choice {
+                        label: p.to_owned(),
+                        description: None,
+                    },
+                ],
+                multiple: true,
+            }],
         }),
     ];
     for (name, action) in actions {
@@ -546,6 +563,7 @@ fn refused_answer(p: &str) -> App {
             id: "q1".into(),
             decision: niobe_core::event::PermissionDecision::Deny,
             message: Some(format!("not that {p} one")),
+            answers: Vec::new(),
         },
     ]);
     app.on_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));

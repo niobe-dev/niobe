@@ -2695,6 +2695,7 @@ mod tests {
             id: "t1".into(),
             decision: PermissionDecision::Deny,
             message: None,
+            answers: Vec::new(),
         });
         assert!(state.pending_permissions().is_empty());
         assert_eq!(state.permission_requests(), 1);
@@ -3160,6 +3161,7 @@ mod tests {
             id: "q1".into(),
             decision: PermissionDecision::Deny,
             message: None,
+            answers: Vec::new(),
         });
 
         assert_eq!(state.tools().unmatched_ends, 0);

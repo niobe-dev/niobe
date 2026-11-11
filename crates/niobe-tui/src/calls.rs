@@ -1318,6 +1318,7 @@ mod tests {
                 id: "t1".into(),
                 decision,
                 message: None,
+                answers: Vec::new(),
             });
             let mut ended = end("t1", "Bash", ToolOutcome::Ok, None);
             if let Event::ToolCallEnd { exit_code, .. } = &mut ended {
@@ -1360,6 +1361,7 @@ mod tests {
             id: "t1".into(),
             decision: niobe_core::event::PermissionDecision::Deny,
             message: Some("Do not create b.txt.\nUse the scratch directory instead.".to_owned()),
+            answers: Vec::new(),
         });
         app.apply(&end(
             "t1",
@@ -1402,6 +1404,7 @@ mod tests {
             id: "t1".into(),
             decision: niobe_core::event::PermissionDecision::Deny,
             message: None,
+            answers: Vec::new(),
         });
         app.apply(&end(
             "t1",
@@ -2081,6 +2084,7 @@ mod tests {
                 id: "t2".into(),
                 decision: niobe_core::event::PermissionDecision::Deny,
                 message: None,
+                answers: Vec::new(),
             },
             at(61_500),
         );
@@ -2597,6 +2601,7 @@ mod tests {
                 id: "t2".into(),
                 decision: niobe_core::event::PermissionDecision::Allow,
                 message: None,
+                answers: Vec::new(),
             },
             second(130),
         );

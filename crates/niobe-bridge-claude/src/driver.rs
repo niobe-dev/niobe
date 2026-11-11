@@ -51,6 +51,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use niobe_core::Answered;
 use niobe_core::event::{
     AgentId, AgentOutcome, Billing, Event, Mode, PermissionDecision, ToolCallId,
 };
@@ -1064,11 +1065,19 @@ impl Session {
     /// front of it here. It goes out with a refusal, which is the one place
     /// the protocol carries words back to the model about a call it asked to
     /// make; an approval has nowhere to put it.
+    ///
+    /// `answers` is what the operator answered the questions an
+    /// `AskUserQuestion` call put to them. The CLI hands the agent what it
+    /// finds under `answers` in the approved arguments — question by
+    /// question, its text to the answer — and an approval without them as
+    /// questions nobody answered, so they go back there, beside the questions
+    /// as they came.
     pub fn answer(
         &mut self,
         id: &ToolCallId,
         decision: PermissionDecision,
         message: Option<&str>,
+        answers: &[Answered],
     ) -> std::io::Result<()> {
         let asked = self
             .waiting
@@ -1091,7 +1100,7 @@ impl Session {
         }
 
         self.queue(
-            control_response(&request_id, &input, decision, message).to_string(),
+            control_response(&request_id, &input, decision, message, answers).to_string(),
             "answer",
         )
     }
@@ -2002,6 +2011,27 @@ fn control_request(request_id: &str, body: serde_json::Value) -> serde_json::Val
     })
 }
 
+/// `input` with `answers` under its `answers` key, each question's text to
+/// its answer, as the CLI reads them back off an approved `AskUserQuestion`;
+/// `input` as it came where nothing was answered, or where it is not an
+/// object to put them in.
+fn with_answers(input: &serde_json::Value, answers: &[Answered]) -> serde_json::Value {
+    let mut input = input.clone();
+    if let (false, Some(fields)) = (answers.is_empty(), input.as_object_mut()) {
+        let answered: serde_json::Map<String, serde_json::Value> = answers
+            .iter()
+            .map(|answered| {
+                (
+                    answered.question.clone(),
+                    serde_json::Value::String(answered.answer.clone()),
+                )
+            })
+            .collect();
+        fields.insert("answers".to_owned(), serde_json::Value::Object(answered));
+    }
+    input
+}
+
 /// The line that answers one permission prompt.
 ///
 /// Written as its own function because it is the half of answering that can be
@@ -2012,10 +2042,14 @@ fn control_response(
     input: &serde_json::Value,
     decision: PermissionDecision,
     message: Option<&str>,
+    answers: &[Answered],
 ) -> serde_json::Value {
     let refused = message.unwrap_or(REFUSED);
     let response = match decision.allowed() {
-        true => serde_json::json!({ "behavior": "allow", "updatedInput": input }),
+        true => serde_json::json!({
+            "behavior": "allow",
+            "updatedInput": with_answers(input, answers),
+        }),
         false => serde_json::json!({ "behavior": "deny", "message": refused }),
     };
     serde_json::json!({
@@ -2554,8 +2588,8 @@ mod tests {
     fn an_approval_sends_back_the_arguments_that_were_shown() {
         let input = serde_json::json!({ "file_path": "/repo/notes.txt" });
 
-        let allowed = control_response("c1", &input, PermissionDecision::Allow, None);
-        let always = control_response("c1", &input, PermissionDecision::AllowAlways, None);
+        let allowed = control_response("c1", &input, PermissionDecision::Allow, None, &[]);
+        let always = control_response("c1", &input, PermissionDecision::AllowAlways, None, &[]);
 
         assert_eq!(
             allowed,
@@ -2574,12 +2608,44 @@ mod tests {
     }
 
     #[test]
+    fn answered_questions_go_back_under_answers_beside_the_questions_as_asked() {
+        let input = serde_json::json!({
+            "questions": [
+                { "question": "Cut a release?", "header": "Deploy", "multiSelect": false,
+                  "options": [{ "label": "Yes" }, { "label": "No" }] },
+                { "question": "Which platforms?", "header": "Build", "multiSelect": true,
+                  "options": [{ "label": "macOS" }, { "label": "Linux" }] },
+            ],
+        });
+        let answers = [
+            Answered {
+                question: "Cut a release?".to_owned(),
+                answer: "No".to_owned(),
+            },
+            Answered {
+                question: "Which platforms?".to_owned(),
+                answer: "macOS, Linux".to_owned(),
+            },
+        ];
+
+        let allowed = control_response("c4", &input, PermissionDecision::Allow, None, &answers);
+
+        let approved = &allowed["response"]["response"]["updatedInput"];
+        assert_eq!(approved["questions"], input["questions"]);
+        assert_eq!(
+            approved["answers"],
+            serde_json::json!({ "Cut a release?": "No", "Which platforms?": "macOS, Linux" })
+        );
+    }
+
+    #[test]
     fn a_refusal_says_who_refused_because_the_model_is_told_it_as_an_error() {
         let refused = control_response(
             "c2",
             &serde_json::json!({ "command": "rm -rf build" }),
             PermissionDecision::Deny,
             None,
+            &[],
         );
 
         let response = &refused["response"]["response"];
@@ -2598,6 +2664,7 @@ mod tests {
             &serde_json::json!({ "command": "git push" }),
             PermissionDecision::Deny,
             Some("Refused: no one is at the terminal."),
+            &[],
         );
 
         let response = &refused["response"]["response"];
@@ -2617,7 +2684,12 @@ mod tests {
         let mut session = Session::spawn(&options).expect("`/bin/echo` is on every unix");
 
         let error = session
-            .answer(&ToolCallId::new("toolu_1"), PermissionDecision::Allow, None)
+            .answer(
+                &ToolCallId::new("toolu_1"),
+                PermissionDecision::Allow,
+                None,
+                &[],
+            )
             .expect_err("the CLI was never asked about this call");
 
         let said = error.to_string();
@@ -3434,7 +3506,7 @@ mod tests {
         }
         for id in &asked {
             session
-                .answer(id, PermissionDecision::Allow, None)
+                .answer(id, PermissionDecision::Allow, None, &[])
                 .expect("each prompt is waiting on its own answer");
         }
         while !session.reported {
@@ -3512,7 +3584,12 @@ mod tests {
         assert!(waiting.is_empty(), "{waiting:?}");
         drop(waiting);
         let said = session
-            .answer(&ToolCallId::new("toolu_1"), PermissionDecision::Allow, None)
+            .answer(
+                &ToolCallId::new("toolu_1"),
+                PermissionDecision::Allow,
+                None,
+                &[],
+            )
             .expect_err("there is no one left to answer")
             .to_string();
         assert!(said.contains("not waiting on a decision"), "{said}");
@@ -3584,7 +3661,12 @@ mod tests {
         });
 
         let said = session
-            .answer(&ToolCallId::new("toolu_1"), PermissionDecision::Allow, None)
+            .answer(
+                &ToolCallId::new("toolu_1"),
+                PermissionDecision::Allow,
+                None,
+                &[],
+            )
             .expect_err("the CLI no longer waits on this call")
             .to_string();
 

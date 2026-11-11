@@ -377,11 +377,26 @@ impl Ask {
     /// never to a plan, which it would let go ahead unread every time after.
     pub fn offers(&self, answer: Answer) -> bool {
         let plan = self.proposed.as_ref().is_some_and(Proposed::is_plan);
+        let asks = self.asks_the_operator();
         match answer {
-            Answer::Once | Answer::No => true,
-            Answer::AlwaysTool => !plan && self.tool_rule().is_some(),
-            Answer::AlwaysTarget => !plan && self.target_rule().is_some(),
+            Answer::No => true,
+            Answer::Once => !asks,
+            Answer::AlwaysTool => !plan && !asks && self.tool_rule().is_some(),
+            Answer::AlwaysTarget => !plan && !asks && self.target_rule().is_some(),
+            Answer::Choose(_) => asks,
         }
+    }
+
+    /// The questions the call puts to the operator, where it puts some
+    /// rather than asking leave to act.
+    pub fn questions(&self) -> Option<&[niobe_core::Question]> {
+        self.proposed.as_ref().and_then(Proposed::questions)
+    }
+
+    /// Whether only the operator can answer the call, which no standing
+    /// answer does: see [`niobe_core::Proposal::asks_the_operator`].
+    pub fn asks_the_operator(&self) -> bool {
+        self.questions().is_some()
     }
 
     /// The answers this prompt offers, in the order they are numbered.
@@ -420,6 +435,9 @@ pub enum Answer {
     AlwaysTarget,
     /// Refused.
     No,
+    /// The answer at this index of those the question on screen offers, of
+    /// the questions a call puts to the operator.
+    Choose(usize),
 }
 
 impl Answer {
@@ -1565,6 +1583,11 @@ pub struct App {
     ask_focus: AskFocus,
     /// The answer being written in place of the numbered ones.
     ask_draft: String,
+    /// What the operator answered of the questions the front prompt puts to
+    /// them, in order: the question on screen is the one after these.
+    ask_answers: Vec<niobe_core::Answered>,
+    /// The answers ticked on the question on screen, where it takes several.
+    ask_ticked: BTreeSet<usize>,
     /// Since when the front prompt has waited on a quiet keyboard: when it
     /// came to the front, or when a key last reached it that was not taken
     /// as an answer. `None` where no clock was handed in.
@@ -1972,7 +1995,7 @@ const NOT_ATTACHED: &str = "This session is not attached to a backend, so the pr
 /// the call, width, Ctrl+T, theme and answers in `key`.
 #[derive(Debug, Clone)]
 pub(crate) struct QuestionLaid {
-    key: (Option<u64>, usize, bool, &'static str, Vec<Answer>),
+    key: (Option<u64>, usize, bool, &'static str, Vec<Answer>, usize),
     /// What is asked, and why.
     pub(crate) head: Vec<ratatui::text::Line<'static>>,
     /// What would run.
@@ -2228,6 +2251,8 @@ impl App {
             ask_selected: 0,
             ask_focus: AskFocus::Choosing,
             ask_draft: String::new(),
+            ask_answers: Vec::new(),
+            ask_ticked: BTreeSet::new(),
             allowed: Allowlist::new(),
             learned: Vec::new(),
             produced: Vec::new(),
@@ -3309,6 +3334,7 @@ impl App {
                 id,
                 decision,
                 message,
+                answers: _,
             } => {
                 let asked = self.forget_ask(id);
                 if decision.allowed() {
@@ -3995,6 +4021,8 @@ impl App {
             self.ask_selected = 0;
             self.ask_focus = AskFocus::Choosing;
             self.ask_draft.clear();
+            self.ask_answers.clear();
+            self.ask_ticked.clear();
             self.ask_quiet_since = self.latest_instant();
         }
         self.asks.remove(at)
@@ -4097,6 +4125,8 @@ impl App {
         let draft = std::mem::take(&mut self.ask_draft);
         let had_keyboard = self.ask_focus != AskFocus::Deferred;
         self.ask_selected = 0;
+        self.ask_answers.clear();
+        self.ask_ticked.clear();
         self.ask_focus = AskFocus::Choosing;
         if !self.asks.is_empty() {
             self.ask_quiet_since = self.latest_instant();
@@ -4130,7 +4160,100 @@ impl App {
     /// The answers the prompt on screen offers, in the order they are
     /// numbered. Empty with no prompt waiting.
     pub fn ask_options(&self) -> Vec<Answer> {
-        self.asks.front().map(Ask::options).unwrap_or_default()
+        let Some(ask) = self.asks.front() else {
+            return Vec::new();
+        };
+        match self.question_on_screen() {
+            Some((question, _)) => (0..question.options.len())
+                .map(Answer::Choose)
+                .chain([Answer::No])
+                .collect(),
+            None => ask.options(),
+        }
+    }
+
+    /// The question on screen of those the front prompt puts to the
+    /// operator, and which of them it is, counted from zero.
+    pub fn question_on_screen(&self) -> Option<(&niobe_core::Question, usize)> {
+        let step = self.ask_answers.len();
+        let question = self.asks.front()?.questions()?.get(step)?;
+        Some((question, step))
+    }
+
+    /// Whether the answer at `at` of the question on screen is ticked.
+    pub fn ticked(&self, at: usize) -> bool {
+        self.ask_ticked.contains(&at)
+    }
+
+    /// Ticks the answer the cursor is on, or takes its tick off, where the
+    /// question on screen takes several answers.
+    fn tick_choice(&mut self) {
+        let several = self
+            .question_on_screen()
+            .is_some_and(|(question, _)| question.multiple);
+        if let (true, Answer::Choose(at)) = (several, self.ask_selected())
+            && !self.ask_ticked.remove(&at)
+        {
+            self.ask_ticked.insert(at);
+        }
+    }
+
+    /// What choosing the answer at `at` of the question on screen answers
+    /// it with: every ticked answer, in the order offered, where it takes
+    /// several and some are ticked, and otherwise the one at `at`.
+    fn chosen(&self, at: usize) -> Option<String> {
+        let (question, _) = self.question_on_screen()?;
+        let labels = |picked: &mut dyn Iterator<Item = usize>| {
+            picked
+                .filter_map(|at| question.options.get(at))
+                .map(|choice| choice.label.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        match question.multiple && !self.ask_ticked.is_empty() {
+            true => Some(labels(&mut self.ask_ticked.iter().copied())),
+            false => question.options.get(at).map(|choice| choice.label.clone()),
+        }
+    }
+
+    /// Answers the question on screen with `said`, and goes on to the next
+    /// one — or, where it was the last, lets the call go ahead with every
+    /// answer given, which is what the agent is handed.
+    fn answer_question(&mut self, said: String) {
+        let Some((question, _)) = self.question_on_screen() else {
+            return;
+        };
+        let answered = niobe_core::Answered {
+            question: question.text.clone(),
+            answer: said,
+        };
+        self.ask_answers.push(answered);
+        self.ask_ticked.clear();
+        self.ask_selected = 0;
+        self.ask_focus = AskFocus::Choosing;
+        self.ask_draft.clear();
+        if self.question_on_screen().is_some() {
+            // The next question comes up as a new one does, waiting for a
+            // quiet keyboard: a second Enter pressed with the first must not
+            // answer a question nobody has read.
+            self.ask_quiet_since = self.latest_instant();
+            self.question_seen = None;
+            self.scroll_to_tail();
+            return;
+        }
+        let Some(ask) = self.asks.front() else {
+            return;
+        };
+        let id = ask.id.clone();
+        let answers = std::mem::take(&mut self.ask_answers);
+        self.produce(Event::PermissionResponse {
+            id,
+            decision: PermissionDecision::Allow,
+            message: None,
+            answers,
+        });
+        self.question_seen = None;
+        self.scroll_to_tail();
     }
 
     /// The answer Enter would give the prompt on screen.
@@ -4221,6 +4344,7 @@ impl App {
         let covered: Vec<ToolCallId> = self
             .asks
             .iter()
+            .filter(|ask| !ask.asks_the_operator())
             .filter(|ask| self.allowed.allows(&ask.tool, ask.target.as_deref()))
             .map(|ask| ask.id.clone())
             .collect();
@@ -4229,6 +4353,7 @@ impl App {
                 id,
                 decision: PermissionDecision::AllowByRule,
                 message: None,
+                answers: Vec::new(),
             });
         }
     }
@@ -4247,9 +4372,23 @@ impl App {
         if self.refused_unattached_answer() {
             return;
         }
+        if ask.asks_the_operator() {
+            match answer {
+                Answer::Choose(at) => {
+                    if let Some(said) = self.chosen(at) {
+                        self.answer_question(said);
+                    }
+                    return;
+                }
+                Answer::No => {}
+                // Leave alone answers no question: the agent would be told
+                // that nobody answered.
+                Answer::Once | Answer::AlwaysTool | Answer::AlwaysTarget => return,
+            }
+        }
 
         let rule = match answer {
-            Answer::Once | Answer::No => None,
+            Answer::Once | Answer::No | Answer::Choose(_) => None,
             Answer::AlwaysTool => ask.tool_rule(),
             Answer::AlwaysTarget => ask.target_rule(),
         };
@@ -4268,6 +4407,7 @@ impl App {
             id: ask.id,
             decision,
             message: None,
+            answers: Vec::new(),
         });
         // What was seen of this call says nothing of a later one, whatever
         // id the backend gives it.
@@ -4294,11 +4434,17 @@ impl App {
         if words.is_empty() {
             return;
         }
+        // Words written at a question are its answer, not a refusal.
+        if ask.asks_the_operator() {
+            self.answer_question(words.to_owned());
+            return;
+        }
         let id = ask.id.clone();
         self.produce(Event::PermissionResponse {
             id,
             decision: PermissionDecision::Deny,
             message: Some(words.to_owned()),
+            answers: Vec::new(),
         });
         self.scroll_to_tail();
     }
@@ -6943,6 +7089,7 @@ impl App {
             open,
             theme,
             self.ask_options(),
+            self.ask_answers.len(),
         );
         let mut laid = self.question_laid.borrow_mut();
         let kept = match laid.take() {
@@ -9096,6 +9243,17 @@ impl App {
         // through the moment a question comes up would otherwise lose every
         // letter that came within the quiet of the one before it, each of
         // which restarts it.
+        // Space ticks an answer of a question that takes several; it is no
+        // answer itself, so it is never held back either.
+        if self.ask_focus == AskFocus::Choosing
+            && typed_char(key) == Some(' ')
+            && self
+                .question_on_screen()
+                .is_some_and(|(question, _)| question.multiple)
+        {
+            self.tick_choice();
+            return;
+        }
         if self.ask_focus == AskFocus::Choosing
             && let Some(typed) = typed_char(key).filter(|c| !c.is_ascii_digit())
         {
@@ -13188,6 +13346,7 @@ mod tests {
             id: "t1".into(),
             decision: PermissionDecision::Allow,
             message: None,
+            answers: Vec::new(),
         });
         app.follow = false;
         app.turn_began_with = (4, 5);
@@ -13345,6 +13504,154 @@ mod tests {
             code,
             ratatui::crossterm::event::KeyModifiers::NONE,
         )
+    }
+
+    /// The agent's `AskUserQuestion`, of two questions: one answer of two,
+    /// then several of three.
+    fn questions_asked() -> Event {
+        let choice = |label: &str| niobe_core::Choice {
+            label: label.to_owned(),
+            description: Some(format!("What {label} means.")),
+        };
+        Event::PermissionRequest {
+            id: "q1".into(),
+            tool: "AskUserQuestion".to_owned(),
+            input: r#"{"questions":[]}"#.to_owned(),
+            target: None,
+            proposal: Some(niobe_core::Proposal::new(
+                niobe_core::Action::Questions {
+                    questions: vec![
+                        niobe_core::Question {
+                            header: Some("Deploy".to_owned()),
+                            text: "Cut a release?".to_owned(),
+                            options: vec![choice("Push only"), choice("Release")],
+                            multiple: false,
+                        },
+                        niobe_core::Question {
+                            header: None,
+                            text: "Which platforms?".to_owned(),
+                            options: vec![choice("macOS"), choice("Linux"), choice("Windows")],
+                            multiple: true,
+                        },
+                    ],
+                },
+                ["questions"],
+            )),
+            reason: None,
+            agent: None,
+        }
+    }
+
+    fn answer_to(question: &str, answer: &str) -> niobe_core::Answered {
+        niobe_core::Answered {
+            question: question.to_owned(),
+            answer: answer.to_owned(),
+        }
+    }
+
+    /// A rule's answer is leave to go ahead, and a question let through with
+    /// leave alone reaches the agent as one nobody answered: so a rule that
+    /// names the tool answers no question, and none is offered for one.
+    #[test]
+    fn no_standing_rule_answers_a_question_put_to_the_operator() {
+        let mut allowed = Allowlist::new();
+        allowed.insert(Rule::tool("AskUserQuestion"));
+        let mut app = app().attached().with_rules(allowed);
+        app.apply(&questions_asked());
+
+        app.settle_rules();
+
+        assert!(app.take_produced().is_empty());
+        assert!(app.asking().is_some());
+        assert_eq!(
+            app.ask_options(),
+            [Answer::Choose(0), Answer::Choose(1), Answer::No]
+        );
+    }
+
+    #[test]
+    fn each_question_is_answered_in_turn_and_the_call_goes_ahead_with_every_answer() {
+        use ratatui::crossterm::event::KeyCode;
+        let mut app = app().attached();
+        app.apply(&questions_asked());
+
+        app.on_key(key(KeyCode::Char('2')));
+        app.on_key(key(KeyCode::Enter));
+        assert!(app.take_produced().is_empty(), "one question is left");
+        let (question, step) = app.question_on_screen().expect("the second is asked");
+        assert_eq!((question.text.as_str(), step), ("Which platforms?", 1));
+        assert_eq!(app.ask_selected(), Answer::Choose(0));
+
+        app.on_key(key(KeyCode::Char('3')));
+        app.on_key(key(KeyCode::Char(' ')));
+        app.on_key(key(KeyCode::Up));
+        app.on_key(key(KeyCode::Up));
+        app.on_key(key(KeyCode::Char(' ')));
+        assert!(app.ticked(0) && !app.ticked(1) && app.ticked(2));
+        assert_eq!(app.composed(), "", "Space ticks rather than types");
+        app.on_key(key(KeyCode::Enter));
+
+        assert_eq!(
+            app.take_produced(),
+            [Event::PermissionResponse {
+                id: "q1".into(),
+                decision: PermissionDecision::Allow,
+                message: None,
+                answers: vec![
+                    answer_to("Cut a release?", "Release"),
+                    answer_to("Which platforms?", "macOS, Windows"),
+                ],
+            }]
+        );
+    }
+
+    #[test]
+    fn words_written_at_a_question_are_its_answer_rather_than_a_refusal() {
+        use ratatui::crossterm::event::KeyCode;
+        let mut app = app().attached();
+        app.apply(&questions_asked());
+
+        app.on_key(key(KeyCode::Tab));
+        for c in "only a tag".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        app.on_key(key(KeyCode::Enter));
+        app.on_key(key(KeyCode::Enter));
+
+        assert_eq!(
+            app.take_produced(),
+            [Event::PermissionResponse {
+                id: "q1".into(),
+                decision: PermissionDecision::Allow,
+                message: None,
+                answers: vec![
+                    answer_to("Cut a release?", "only a tag"),
+                    answer_to("Which platforms?", "macOS"),
+                ],
+            }]
+        );
+    }
+
+    #[test]
+    fn a_question_not_answered_is_refused_and_nothing_answered_goes_with_it() {
+        use ratatui::crossterm::event::KeyCode;
+        let mut app = app().attached();
+        app.apply(&questions_asked());
+        app.on_key(key(KeyCode::Enter));
+
+        app.on_key(key(KeyCode::Char('4')));
+        assert_eq!(app.ask_selected(), Answer::No);
+        app.on_key(key(KeyCode::Enter));
+
+        assert_eq!(
+            app.take_produced(),
+            [Event::PermissionResponse {
+                id: "q1".into(),
+                decision: PermissionDecision::Deny,
+                message: None,
+                answers: Vec::new(),
+            }]
+        );
     }
 
     #[test]
@@ -13733,6 +14040,7 @@ mod tests {
                 id: "t1".into(),
                 decision: PermissionDecision::Allow,
                 message: None,
+                answers: Vec::new(),
             }]
         );
         assert!(
@@ -13890,6 +14198,7 @@ mod tests {
                     id: "t1".into(),
                     decision: PermissionDecision::AllowAlways,
                     message: None,
+                    answers: Vec::new(),
                 }]
             );
         }
@@ -14423,6 +14732,7 @@ mod tests {
                 id: "t1".into(),
                 decision: PermissionDecision::Deny,
                 message: Some("keep build".to_owned()),
+                answers: Vec::new(),
             }],
             "the words went somewhere other than the answer"
         );
@@ -14859,6 +15169,7 @@ mod tests {
             id: id.into(),
             decision: PermissionDecision::Deny,
             message: None,
+            answers: Vec::new(),
         };
         app.apply(&deny("t1"));
         app.apply(&asked_by("t2", None));
@@ -14903,6 +15214,7 @@ mod tests {
                 id: "t1".into(),
                 decision: PermissionDecision::AllowByRule,
                 message: None,
+                answers: Vec::new(),
             }],
             "the call was let through without the backend being told"
         );
@@ -14946,6 +15258,7 @@ mod tests {
                 id: "t2".into(),
                 decision: PermissionDecision::AllowByRule,
                 message: None,
+                answers: Vec::new(),
             }],
             "the call a rule allows waited on another question"
         );
@@ -17075,6 +17388,7 @@ mod tests {
             id: "t2".into(),
             decision: PermissionDecision::AllowByRule,
             message: None,
+            answers: Vec::new(),
         });
         assert_eq!(
             attention(&app).last(),
@@ -17086,6 +17400,7 @@ mod tests {
             id: "t1".into(),
             decision: PermissionDecision::AllowByRule,
             message: None,
+            answers: Vec::new(),
         });
         assert_eq!(
             attention(&app).last(),
@@ -17404,6 +17719,7 @@ mod tests {
                 id: "t1".into(),
                 decision: PermissionDecision::Deny,
                 message: None,
+                answers: Vec::new(),
             }]
         );
         assert_eq!(app.asking().map(|ask| ask.id.as_str()), Some("t2"));
@@ -17560,6 +17876,7 @@ mod tests {
                 id: "t1".into(),
                 decision: PermissionDecision::Allow,
                 message: None,
+                answers: Vec::new(),
             }]
         );
         assert_eq!(app.composed(), "hello", "the prompt typed waits to be sent");
@@ -17578,6 +17895,7 @@ mod tests {
                 id: "t1".into(),
                 decision: PermissionDecision::Allow,
                 message: None,
+                answers: Vec::new(),
             }]
         );
 
@@ -17592,6 +17910,7 @@ mod tests {
                 id: "t1".into(),
                 decision: PermissionDecision::Deny,
                 message: None,
+                answers: Vec::new(),
             }]
         );
     }
@@ -17647,6 +17966,7 @@ mod tests {
                 id: "t1".into(),
                 decision: PermissionDecision::Deny,
                 message: Some("no".to_owned()),
+                answers: Vec::new(),
             }]
         );
     }
@@ -18311,6 +18631,7 @@ mod tests {
             id: "t1".into(),
             decision,
             message: None,
+            answers: Vec::new(),
         });
     }
 
@@ -18468,6 +18789,7 @@ mod tests {
             id: "t2".into(),
             decision: PermissionDecision::Deny,
             message: None,
+            answers: Vec::new(),
         });
         app.apply(&ended("t2", "Edit", ToolOutcome::Denied, 0));
         called(&mut app, "t3", "Edit");
@@ -18484,6 +18806,7 @@ mod tests {
             id: id.into(),
             decision: PermissionDecision::Deny,
             message: said.map(str::to_owned),
+            answers: Vec::new(),
         });
     }
 
@@ -18959,6 +19282,7 @@ mod tests {
                 id: "t1".into(),
                 decision: PermissionDecision::Allow,
                 message: None,
+                answers: Vec::new(),
             },
             millis(61_100),
         );
@@ -19492,6 +19816,7 @@ mod tests {
                 id: "t1".into(),
                 decision: PermissionDecision::AllowAlways,
                 message: None,
+                answers: Vec::new(),
             }]
         );
         assert_eq!(app.take_rules(), [Rule::tool("Bash")]);
@@ -19513,6 +19838,7 @@ mod tests {
                 id: "t1".into(),
                 decision: PermissionDecision::Allow,
                 message: None,
+                answers: Vec::new(),
             }]
         );
     }
@@ -19609,6 +19935,7 @@ mod tests {
                 id: "t2".into(),
                 decision: PermissionDecision::Allow,
                 message: None,
+                answers: Vec::new(),
             }]
         );
     }
@@ -20098,6 +20425,7 @@ mod tests {
                 id: "t1".into(),
                 decision: PermissionDecision::AllowAlways,
                 message: None,
+                answers: Vec::new(),
             }],
             "the keys went to the question the operator was looking at"
         );
@@ -20285,6 +20613,7 @@ mod tests {
                 id: "t1".into(),
                 decision: PermissionDecision::Allow,
                 message: None,
+                answers: Vec::new(),
             }]
         );
     }
@@ -20781,6 +21110,7 @@ mod tests {
                     id: "t1".into(),
                     decision: PermissionDecision::Allow,
                     message: None,
+                    answers: Vec::new(),
                 }],
                 "{overlay:?}"
             );
@@ -22999,6 +23329,7 @@ mod tests {
                     id: "t1".into(),
                     decision: PermissionDecision::Allow,
                     message: None,
+                    answers: Vec::new(),
                 }],
                 "{name}: the question is still the one to answer"
             );

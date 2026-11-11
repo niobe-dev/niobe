@@ -97,7 +97,7 @@ impl Proposed {
                     .map(|l| DiffLine::Added(l.to_owned()))
                     .collect(),
             ),
-            Action::Command { .. } | Action::Plan { .. } => None,
+            Action::Command { .. } | Action::Plan { .. } | Action::Questions { .. } => None,
         };
         Self {
             proposal,
@@ -178,6 +178,21 @@ impl Proposed {
                 capped: false,
             });
         }
+        // The questions themselves are drawn above the answers, one at a
+        // time, by whatever asks them; what is left of the call is whatever
+        // else its arguments hold.
+        if let Action::Questions { .. } = self.proposal.action() {
+            self.others_under(input, width, theme, &mut rows, &mut markers);
+            if rows.first().is_some_and(|row| row.width() == 0) {
+                rows.remove(0);
+                markers.iter_mut().for_each(|marker| marker.0 -= 1);
+            }
+            return Some(Call {
+                rows,
+                markers,
+                capped: false,
+            });
+        }
         let (subject, said) = match (self.proposal.action(), &self.lines) {
             (Action::Replace { path, every, .. }, Some(_)) => (
                 path,
@@ -193,7 +208,7 @@ impl Proposed {
                 _,
             ) => (path, Some(written(content, *existed))),
             (Action::Command { command }, _) => (command, None),
-            (Action::Plan { .. }, _) => return None,
+            (Action::Plan { .. } | Action::Questions { .. }, _) => return None,
         };
         let (subject_rows, beyond) = self.subject_rows(subject, width);
         rows.extend(
@@ -254,6 +269,18 @@ impl Proposed {
     /// may approve: each plan is read before it is carried out.
     pub fn is_plan(&self) -> bool {
         matches!(self.proposal.action(), Action::Plan { .. })
+    }
+
+    /// The questions the call puts to the operator, where that is what it
+    /// does: see [`Proposal::asks_the_operator`].
+    pub fn questions(&self) -> Option<&[niobe_core::Question]> {
+        match self.proposal.action() {
+            Action::Questions { questions } => Some(questions),
+            Action::Replace { .. }
+            | Action::Write { .. }
+            | Action::Command { .. }
+            | Action::Plan { .. } => None,
+        }
     }
 
     /// Lays the arguments the proposal says nothing of under `rows`, by key,

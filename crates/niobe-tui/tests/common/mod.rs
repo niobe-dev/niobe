@@ -251,6 +251,7 @@ fn session_events() -> Vec<Event> {
             id: "t2".into(),
             decision: PermissionDecision::Allow,
             message: None,
+            answers: Vec::new(),
         },
         Event::ToolCallEnd {
             id: "t2".into(),

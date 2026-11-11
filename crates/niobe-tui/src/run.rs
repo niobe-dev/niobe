@@ -714,11 +714,12 @@ fn send_produced(
                 id,
                 decision,
                 message,
+                answers,
             } => {
                 // The record keeps the words as the operator wrote them; the
                 // agent is told, with them, that the operator wrote them.
                 let refused = message.as_deref().map(crate::bridge::operator_refused);
-                if let Err(error) = backend.answer(id, *decision, refused.as_deref()) {
+                if let Err(error) = backend.answer(id, *decision, refused.as_deref(), answers) {
                     app.not_answered(&error.to_string());
                 }
             }
@@ -1005,6 +1006,7 @@ mod tests {
         images: Vec<Vec<Image>>,
         answered: Vec<(ToolCallId, PermissionDecision)>,
         said: Vec<Option<String>>,
+        answers: Vec<Vec<niobe_core::Answered>>,
         modes: Vec<Mode>,
         models: Vec<String>,
         interrupts: usize,
@@ -1028,12 +1030,14 @@ mod tests {
             id: &ToolCallId,
             decision: PermissionDecision,
             message: Option<&str>,
+            answers: &[niobe_core::Answered],
         ) -> Result<(), BridgeError> {
             if self.refuse {
                 return Err("the subprocess has gone".into());
             }
             self.answered.push((id.clone(), decision));
             self.said.push(message.map(str::to_owned));
+            self.answers.push(answers.to_vec());
             Ok(())
         }
 
@@ -2011,6 +2015,7 @@ mod tests {
                 id: "t1".into(),
                 decision: PermissionDecision::Allow,
                 message: None,
+                answers: Vec::new(),
             }],
             "a resumed session would not know the call was allowed"
         );
@@ -2039,6 +2044,7 @@ mod tests {
                 id: "t1".into(),
                 decision: PermissionDecision::Deny,
                 message: Some("open a PR instead".to_owned()),
+                answers: Vec::new(),
             }],
             "the record holds what the operator wrote, and nothing put in front of it"
         );

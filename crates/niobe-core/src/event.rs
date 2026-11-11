@@ -1008,6 +1008,12 @@ pub enum Event {
         /// for every answer that was only a choice.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         message: Option<String>,
+        /// What the operator answered the questions the call put to them
+        /// ([`crate::Action::Questions`]), one entry a question, in the
+        /// order asked. Empty for every call that asked leave rather than a
+        /// question, and for a question refused unanswered.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        answers: Vec<crate::Answered>,
     },
 
     /// The backend stopped asking about a call: the turn it gated was
@@ -1808,6 +1814,7 @@ mod tests {
             id: "toolu_1".into(),
             decision: PermissionDecision::Deny,
             message: Some("use the staging bucket instead".to_owned()),
+            answers: Vec::new(),
         };
         let line = serde_json::to_string(&answered).expect("an event serializes");
         let read: Event = serde_json::from_str(&line).expect("what was written reads back");
@@ -1823,6 +1830,7 @@ mod tests {
                 id: "toolu_1".into(),
                 decision: PermissionDecision::Allow,
                 message: None,
+                answers: Vec::new(),
             }
         );
         assert_eq!(

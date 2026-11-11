@@ -119,6 +119,7 @@ fn allowing_the_prompt_answers_the_call_it_gates_and_leaves_no_rule() {
             id: "toolu_1".into(),
             decision: PermissionDecision::Allow,
             message: None,
+            answers: Vec::new(),
         }]
     );
     assert!(app.take_rules().is_empty());
@@ -143,6 +144,7 @@ fn denying_the_prompt_is_visible_in_the_timeline() {
             id: "toolu_1".into(),
             decision: PermissionDecision::Deny,
             message: None,
+            answers: Vec::new(),
         }]
     );
     assert!(app.take_rules().is_empty());
@@ -172,6 +174,7 @@ fn an_always_answer_survives_a_restart() {
             id: "toolu_1".into(),
             decision: PermissionDecision::AllowAlways,
             message: None,
+            answers: Vec::new(),
         }]
     );
 
@@ -201,6 +204,7 @@ fn an_always_answer_survives_a_restart() {
             id: "toolu_1".into(),
             decision: PermissionDecision::AllowByRule,
             message: None,
+            answers: Vec::new(),
         }]
     );
     assert!(next.session().pending_permissions().is_empty());
@@ -218,6 +222,7 @@ fn a_rule_covers_the_target_it_names_and_nothing_else() {
             id: "toolu_1".into(),
             decision: PermissionDecision::AllowAlways,
             message: None,
+            answers: Vec::new(),
         }]
     );
     assert_eq!(app.take_rules(), [Rule::targeted("Bash", "cargo test")]);
@@ -258,6 +263,7 @@ fn always_this_tool_answers_every_call_to_it() {
             id: "toolu_1".into(),
             decision: PermissionDecision::AllowAlways,
             message: None,
+            answers: Vec::new(),
         }]
     );
     assert_eq!(app.take_rules(), [Rule::tool("Bash")]);
@@ -280,6 +286,7 @@ fn always_this_tool_answers_every_call_to_it() {
             id: "toolu_2".into(),
             decision: PermissionDecision::AllowByRule,
             message: None,
+            answers: Vec::new(),
         }]
     );
     assert!(app.session().pending_permissions().is_empty());
@@ -301,6 +308,7 @@ fn an_answer_written_at_the_prompt_is_the_answer_the_call_gets() {
             id: "toolu_1".into(),
             decision: PermissionDecision::Deny,
             message: Some("run only the unit tests".to_owned()),
+            answers: Vec::new(),
         }],
         "the words did not go back as the answer to the call"
     );

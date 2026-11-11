@@ -72,6 +72,12 @@ pub const NO_OPERATOR: &str = "Refused: niobe -p runs with no one at the termina
                                [permissions] rule allows this call. Say what you needed it for \
                                instead of trying it again.";
 
+/// What a question the agent puts to the operator is refused with, where
+/// nobody is there to answer it.
+pub const NO_ONE_TO_ASK: &str = "Refused: niobe -p runs with no one at the terminal to answer \
+                                 questions. Go on with your best judgement, and say what you \
+                                 assumed.";
+
 /// How a headless turn ended.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Outcome {
@@ -229,15 +235,21 @@ fn run_waiting(
                     None
                 }
                 Event::PermissionRequest {
-                    id, tool, target, ..
+                    id,
+                    tool,
+                    target,
+                    proposal,
+                    ..
                 } if outcome.is_none() && !refused_by_backend(&events[at + 1..], id) => answered(
                     bridge,
                     journal,
                     &mut state,
                     allowed,
                     id,
-                    tool,
-                    target.as_deref(),
+                    (tool, target.as_deref()),
+                    proposal
+                        .as_ref()
+                        .is_some_and(niobe_core::Proposal::asks_the_operator),
                 ),
                 Event::Error {
                     message,
@@ -379,12 +391,21 @@ fn answered(
     state: &mut SessionState,
     allowed: &Allowlist,
     id: &niobe_core::event::ToolCallId,
-    tool: &str,
-    target: Option<&str>,
+    (tool, target): (&str, Option<&str>),
+    asks_the_operator: bool,
 ) -> Option<Outcome> {
-    let answer = answer(allowed, tool, target);
-    let message = (answer == PermissionDecision::Deny).then_some(NO_OPERATOR);
-    if let Err(error) = bridge.answer(id, answer, message) {
+    let answer = match asks_the_operator {
+        // A question is the operator's to answer, and there is none: leave
+        // from a rule would reach the agent as questions nobody answered.
+        true => PermissionDecision::Deny,
+        false => answer(allowed, tool, target),
+    };
+    let message = match (answer.allowed(), asks_the_operator) {
+        (true, _) => None,
+        (false, true) => Some(NO_ONE_TO_ASK),
+        (false, false) => Some(NO_OPERATOR),
+    };
+    if let Err(error) = bridge.answer(id, answer, message, &[]) {
         return Some(Outcome::Failed(format!(
             "a permission prompt could not be answered: {error}"
         )));
@@ -393,6 +414,7 @@ fn answered(
         id: id.clone(),
         decision: answer,
         message: message.map(str::to_owned),
+        answers: Vec::new(),
     };
     keep(journal, state, &answer);
     None
@@ -465,6 +487,7 @@ mod tests {
             id: &ToolCallId,
             decision: PermissionDecision,
             message: Option<&str>,
+            _: &[niobe_core::Answered],
         ) -> Result<(), BridgeError> {
             self.answered
                 .push((id.clone(), decision, message.map(str::to_owned)));
@@ -820,6 +843,7 @@ mod tests {
                 id,
                 decision: PermissionDecision::Deny,
                 message: None,
+                answers: Vec::new(),
             },
         ];
         let (turn, bridge, journal) = ran(vec![refused, ended_turn("could not")], &allowed, None);
@@ -835,6 +859,45 @@ mod tests {
             })
             .collect();
         assert_eq!(decisions, [PermissionDecision::Deny]);
+    }
+
+    /// Leave from a rule would reach the agent as questions nobody answered,
+    /// and nobody is at the terminal to answer them: so they are refused, in
+    /// words that tell the agent to go on without.
+    #[test]
+    fn a_question_put_to_the_operator_is_refused_whatever_rule_names_its_tool() {
+        let mut allowed = Allowlist::new();
+        allowed.insert(Rule::tool("AskUserQuestion"));
+        let asked = Event::PermissionRequest {
+            id: ToolCallId::new("q1"),
+            tool: "AskUserQuestion".to_owned(),
+            input: "{}".to_owned(),
+            target: None,
+            proposal: Some(niobe_core::Proposal::new(
+                niobe_core::Action::Questions {
+                    questions: vec![niobe_core::Question {
+                        header: None,
+                        text: "Cut a release?".to_owned(),
+                        options: Vec::new(),
+                        multiple: false,
+                    }],
+                },
+                ["questions"],
+            )),
+            reason: None,
+            agent: None,
+        };
+        let (turn, bridge, _) = ran(vec![vec![asked], ended_turn("went on")], &allowed, None);
+
+        assert_eq!(turn.outcome, Outcome::Finished);
+        assert_eq!(
+            bridge.answered,
+            [(
+                ToolCallId::new("q1"),
+                PermissionDecision::Deny,
+                Some(NO_ONE_TO_ASK.to_owned())
+            )]
+        );
     }
 
     #[test]

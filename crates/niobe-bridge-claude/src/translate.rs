@@ -106,7 +106,7 @@ use niobe_core::event::{
     SessionMeta, SlashCommand, TokenCounts, ToolCallId, ToolOutcome, Usage, UsageWindow,
     UsageWindows,
 };
-use niobe_core::proposal::{Action, Proposal};
+use niobe_core::proposal::{Action, Choice, Proposal, Question};
 use niobe_core::session::TestRunRecord;
 use niobe_core::test_run;
 
@@ -1974,6 +1974,7 @@ impl Translator {
             id,
             decision: PermissionDecision::Deny,
             message: None,
+            answers: Vec::new(),
         });
     }
 
@@ -2902,6 +2903,7 @@ impl Translator {
                     [] as [&str; 0],
                 ),
             }),
+            "AskUserQuestion" => questions_of(input),
             _ => None,
         }
     }
@@ -2978,6 +2980,7 @@ impl Translator {
                 id,
                 decision: PermissionDecision::Deny,
                 message: None,
+                answers: Vec::new(),
             });
         }
         self.ended_agents.clear();
@@ -4013,6 +4016,59 @@ pub(crate) fn kind_of(line: &str) -> String {
         .ok()
         .and_then(|tag| tag.kind)
         .unwrap_or_else(|| "(untyped)".to_owned())
+}
+
+/// The questions an `AskUserQuestion` call puts to the operator, read from
+/// its `questions`: each one's text, the word it is filed under, the answers
+/// it offers and whether several may be chosen. `None` where any question has
+/// no text, or the list is empty or not one — the call is then shown by its
+/// arguments, as one this does not know how to ask.
+///
+/// A question of a kind that takes words rather than a choice comes with no
+/// options, and is asked with none.
+fn questions_of(input: &serde_json::Value) -> Option<Proposal> {
+    let text = |value: &serde_json::Value, key: &str| {
+        value
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+    };
+    let asked = input.get("questions")?.as_array()?;
+    let questions = asked
+        .iter()
+        .map(|asked| {
+            let options = match asked.get("options") {
+                None | Some(serde_json::Value::Null) => Vec::new(),
+                Some(options) => options
+                    .as_array()?
+                    .iter()
+                    .map(|option| {
+                        Some(Choice {
+                            label: text(option, "label")?,
+                            description: text(option, "description")
+                                .filter(|said| !said.trim().is_empty()),
+                        })
+                    })
+                    .collect::<Option<Vec<_>>>()?,
+            };
+            Some(Question {
+                header: text(asked, "header").filter(|said| !said.trim().is_empty()),
+                text: text(asked, "question")?,
+                options,
+                multiple: asked
+                    .get("multiSelect")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false),
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    match questions.is_empty() {
+        true => None,
+        false => Some(Proposal::new(
+            Action::Questions { questions },
+            ["questions"],
+        )),
+    }
 }
 
 /// The text the CLI's `Edit` takes out of the file for `old_string` `old`
@@ -7484,6 +7540,87 @@ mod tests {
         );
         assert!(proposal.covers("plan"));
         assert!(!proposal.covers("planFilePath"));
+    }
+
+    #[test]
+    fn a_question_put_to_the_operator_is_proposed_as_its_questions() {
+        // The shape Claude Code 2.1.322 asks with: options carry a label and
+        // what choosing it means, and the second question takes several.
+        let proposal = proposal_asked(
+            r#"{"type":"control_request","request_id":"c1","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{"questions":[{"question":"Cut a release?","header":"Deploy","multiSelect":false,"options":[{"label":"Push only (Recommended)","description":"Already on main."},{"label":"Release","description":""}]},{"question":"Which platforms?","header":"","multiSelect":true,"options":[{"label":"macOS"},{"label":"Linux"}]}],"metadata":{"source":"remember"}},"tool_use_id":"toolu_1"}}"#,
+            &mut translator(),
+        )
+        .expect("questions are read");
+        let Action::Questions { questions } = proposal.action() else {
+            panic!("read as {:?}", proposal.action());
+        };
+        assert_eq!(
+            questions,
+            &[
+                Question {
+                    header: Some("Deploy".to_owned()),
+                    text: "Cut a release?".to_owned(),
+                    options: vec![
+                        Choice {
+                            label: "Push only (Recommended)".to_owned(),
+                            description: Some("Already on main.".to_owned()),
+                        },
+                        Choice {
+                            label: "Release".to_owned(),
+                            description: None,
+                        },
+                    ],
+                    multiple: false,
+                },
+                Question {
+                    header: None,
+                    text: "Which platforms?".to_owned(),
+                    options: vec![
+                        Choice {
+                            label: "macOS".to_owned(),
+                            description: None,
+                        },
+                        Choice {
+                            label: "Linux".to_owned(),
+                            description: None,
+                        },
+                    ],
+                    multiple: true,
+                },
+            ]
+        );
+        assert!(proposal.asks_the_operator());
+        assert!(proposal.covers("questions"));
+        assert!(!proposal.covers("metadata"));
+    }
+
+    #[test]
+    fn questions_not_of_the_shape_asked_are_left_to_be_shown_as_arguments() {
+        for input in [
+            "{}",
+            r#"{"questions":[]}"#,
+            r#"{"questions":"Cut a release?"}"#,
+            r#"{"questions":[{"header":"No text"}]}"#,
+            r#"{"questions":[{"question":"Q?","options":[{"description":"no label"}]}]}"#,
+        ] {
+            let line = format!(
+                r#"{{"type":"control_request","request_id":"c1","request":{{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{input},"tool_use_id":"toolu_1"}}}}"#
+            );
+            assert_eq!(proposal_asked(&line, &mut translator()), None, "{input}");
+        }
+    }
+
+    #[test]
+    fn a_question_that_takes_words_is_asked_with_no_options() {
+        let proposal = proposal_asked(
+            r#"{"type":"control_request","request_id":"c1","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{"questions":[{"question":"Name it?","kind":"text"}]},"tool_use_id":"toolu_1"}}"#,
+            &mut translator(),
+        )
+        .expect("a question is read");
+        let Action::Questions { questions } = proposal.action() else {
+            panic!("read as {:?}", proposal.action());
+        };
+        assert!(questions[0].options.is_empty());
     }
 
     /// Claude Code 2.1.310 fills `plan` in from the plan file before it asks,

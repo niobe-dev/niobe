@@ -30,7 +30,7 @@ pub use event::{
 pub use image::{Image, ImageError, MediaType};
 pub use keys::{Bindable, Chord, Keymap, KeymapError};
 pub use permission::{Allowlist, Rule, RuleError};
-pub use proposal::{Action, Proposal};
+pub use proposal::{Action, Answered, Choice, Proposal, Question};
 pub use session::{
     FileChanges, Owed, SessionState, TestRunRecord, ToolTotals, Totals, TurnRecord, WorkTotals,
 };

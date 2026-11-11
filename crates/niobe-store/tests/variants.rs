@@ -149,6 +149,7 @@ fn one_of_each() -> Vec<Event> {
             id: ToolCallId::new("t2"),
             decision: PermissionDecision::AllowByRule,
             message: Some(text("use b.rs")),
+            answers: Vec::new(),
         },
         Event::PermissionWithdrawn {
             id: ToolCallId::new("t2"),

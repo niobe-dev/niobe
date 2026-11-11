@@ -43,6 +43,22 @@ impl Proposal {
     pub fn covers(&self, key: &str) -> bool {
         self.covers.iter().any(|covered| covered == key)
     }
+
+    /// Whether only the operator can answer the call: it asks them
+    /// something rather than asking leave to act.
+    ///
+    /// No standing rule answers such a call, and none is offered for it. A
+    /// rule's answer is leave to go ahead, and a question let through with
+    /// leave alone reaches the agent as one nobody answered.
+    pub fn asks_the_operator(&self) -> bool {
+        match self.action {
+            Action::Questions { .. } => true,
+            Action::Replace { .. }
+            | Action::Write { .. }
+            | Action::Command { .. }
+            | Action::Plan { .. } => false,
+        }
+    }
 }
 
 /// What a call would do, in the terms a question shows it in.
@@ -84,6 +100,51 @@ pub enum Action {
         /// The plan, as the agent wrote it, in markdown.
         plan: String,
     },
+    /// Put `questions` to the operator, one after another, and hand the
+    /// agent what they answered. Never empty.
+    Questions {
+        /// The questions, in the order they are asked.
+        questions: Vec<Question>,
+    },
+}
+
+/// One question the agent puts to the operator.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Question {
+    /// A word or two the question is filed under, where the agent gave one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header: Option<String>,
+    /// What is asked, which the answer is handed back under.
+    pub text: String,
+    /// The answers on offer, in the agent's order. Empty where the agent
+    /// asks for words rather than a choice.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<Choice>,
+    /// Whether more than one of [`Self::options`] may be chosen.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub multiple: bool,
+}
+
+/// One answer a question offers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Choice {
+    /// What the answer is called, which is what is handed back when it is
+    /// chosen.
+    pub label: String,
+    /// What choosing it means, where the agent said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// The operator's answer to one question: the labels of the answers chosen,
+/// or the words written instead of choosing one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Answered {
+    /// The question, as [`Question::text`] has it.
+    pub question: String,
+    /// The answer: one label, several joined by `, `, or the operator's own
+    /// words.
+    pub answer: String,
 }
 
 #[cfg(test)]
@@ -115,6 +176,58 @@ mod tests {
         let stored = serde_json::to_string(&proposal).expect("a proposal serializes");
         assert!(!stored.contains("existed"), "{stored}");
         let read: Proposal = serde_json::from_str(&stored).expect("and reads back");
+        assert_eq!(read, proposal);
+    }
+
+    fn questions() -> Proposal {
+        Proposal::new(
+            Action::Questions {
+                questions: vec![Question {
+                    header: Some("Deploy".to_owned()),
+                    text: "Cut a release?".to_owned(),
+                    options: vec![
+                        Choice {
+                            label: "Yes".to_owned(),
+                            description: None,
+                        },
+                        Choice {
+                            label: "No".to_owned(),
+                            description: Some("Push only.".to_owned()),
+                        },
+                    ],
+                    multiple: false,
+                }],
+            },
+            ["questions"],
+        )
+    }
+
+    #[test]
+    fn only_questions_ask_the_operator_rather_than_for_leave() {
+        assert!(questions().asks_the_operator());
+        let command = Proposal::new(
+            Action::Command {
+                command: "ls".to_owned(),
+            },
+            ["command"],
+        );
+        let plan = Proposal::new(
+            Action::Plan {
+                plan: "1.".to_owned(),
+            },
+            ["plan"],
+        );
+        assert!(!command.asks_the_operator());
+        assert!(!plan.asks_the_operator());
+    }
+
+    #[test]
+    fn questions_are_stored_and_read_back_as_asked() {
+        let proposal = questions();
+        let stored = serde_json::to_string(&proposal).expect("questions serialize");
+        assert!(stored.contains(r#""kind":"questions""#), "{stored}");
+        assert!(!stored.contains("multiple"), "{stored}");
+        let read: Proposal = serde_json::from_str(&stored).expect("and read back");
         assert_eq!(read, proposal);
     }
 

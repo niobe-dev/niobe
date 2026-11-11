@@ -192,6 +192,7 @@ fn event(rng: &mut Rng, kinds: &[u64]) -> Event {
                     _ => PermissionDecision::Deny,
                 },
                 message: None,
+                answers: Vec::new(),
             },
         },
         24 | 25 => Event::AgentSpawn {

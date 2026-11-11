@@ -13,6 +13,7 @@
 //! draw and a signal flag to read on every tick, so it can never be inside a
 //! backend waiting for a reply.
 
+use niobe_core::Answered;
 use niobe_core::event::{Event, Mode, PermissionDecision, ToolCallId};
 use niobe_core::image::Image;
 
@@ -52,6 +53,10 @@ pub trait Bridge: std::fmt::Debug {
     /// for a call nobody at a terminal could be asked about. `None` leaves
     /// the backend's own words for a refusal.
     ///
+    /// `answers` is what the operator answered the questions a call put to
+    /// them, which goes to the agent with the leave to go ahead; empty for
+    /// every call that asked leave alone.
+    ///
     /// A backend that gates nothing is never asked, so the default refuses:
     /// an answer that went nowhere must be reported rather than dropped, or a
     /// refused call would look allowed.
@@ -60,8 +65,9 @@ pub trait Bridge: std::fmt::Debug {
         id: &ToolCallId,
         decision: PermissionDecision,
         message: Option<&str>,
+        answers: &[Answered],
     ) -> Result<(), BridgeError> {
-        let _ = (decision, message);
+        let _ = (decision, message, answers);
         Err(format!("nothing is waiting on a decision about tool call `{id}`").into())
     }
 

@@ -730,9 +730,10 @@ impl Bridge for Claude {
         id: &ToolCallId,
         decision: PermissionDecision,
         message: Option<&str>,
+        answers: &[niobe_core::Answered],
     ) -> Result<(), BridgeError> {
         self.session
-            .answer(id, decision, message)
+            .answer(id, decision, message, answers)
             .map_err(BridgeError::from)
     }
 

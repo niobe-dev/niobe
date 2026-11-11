@@ -582,6 +582,7 @@ fn a_sub_agents_question_and_its_refusal_say_which_agent_asked() {
         id: "f3".into(),
         decision: PermissionDecision::Deny,
         message: None,
+        answers: Vec::new(),
     });
     app.apply(&asked("c2", "python3 probe.py", "toolu_cache"));
 
@@ -685,6 +686,7 @@ fn a_denied_command_of_several_lines_keeps_its_lines_apart_on_its_row() {
         id: "multi".into(),
         decision: PermissionDecision::Deny,
         message: None,
+        answers: Vec::new(),
     });
 
     let frame = screen(&mut app, 120, 30);
@@ -1506,6 +1508,118 @@ fn a_question_on_a_window_too_small_to_draw_it_takes_no_answer_until_the_window_
     app.on_key_read(key(KeyCode::Enter), alone(grown + ASK_QUIET * 3));
     assert!(answered(&mut app), "the question on screen took no answer");
     assert!(app.asking().is_none());
+}
+
+/// A session the agent put two questions to, as the `AskUserQuestion` of a
+/// real session asked them: one answer of two, each saying what it means,
+/// then several of three.
+fn session_asking_questions() -> App {
+    let mut app = running_session();
+    let choice = |label: &str, means: Option<&str>| niobe_core::Choice {
+        label: label.to_owned(),
+        description: means.map(str::to_owned),
+    };
+    app.apply(&Event::PermissionRequest {
+        id: "toolu_questions".into(),
+        tool: "AskUserQuestion".to_owned(),
+        input: r#"{"questions":[{"question":"The loop is done. Is pushing to main the deploy, or should I also cut a release?"}]}"#
+            .to_owned(),
+        target: None,
+        proposal: Some(Proposal::new(
+            Action::Questions {
+                questions: vec![
+                    niobe_core::Question {
+                        header: Some("Deploy".to_owned()),
+                        text: "The loop is done. Is pushing to main the deploy, or should I \
+                               also cut a release?"
+                            .to_owned(),
+                        options: vec![
+                            choice(
+                                "Push to main is deploy (Recommended)",
+                                Some("Already done for every fix, with CI green. Nothing more to do."),
+                            ),
+                            choice(
+                                "Also cut a release now",
+                                Some("Run the gate, bump the version, tag it and push the tag."),
+                            ),
+                        ],
+                        multiple: false,
+                    },
+                    niobe_core::Question {
+                        header: Some("Build".to_owned()),
+                        text: "Which platforms?".to_owned(),
+                        options: vec![
+                            choice("macOS", None),
+                            choice("Linux", None),
+                            choice("Windows", None),
+                        ],
+                        multiple: true,
+                    },
+                ],
+            },
+            ["questions"],
+        )),
+        reason: None,
+        agent: None,
+    });
+    app
+}
+
+/// A question the agent puts to the operator is drawn as the question —
+/// what is asked, in words, and the answers it offers with what each means —
+/// not as a tool to allow, and with no standing answer on offer.
+#[test]
+fn a_question_the_agent_asks_is_drawn_as_its_question_and_answers() {
+    use niobe_tui::app::ASK_QUIET;
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use std::time::Instant;
+
+    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+    let mut app = session_asking_questions().attached();
+    let shown = Instant::now();
+    app.tick(shown, None);
+    let frame = screen(&mut app, 100, 30);
+    let rows = question_rows(&frame);
+    assert!(!frame.contains("to run"), "{frame}");
+    assert!(!frame.contains("Allow"), "{frame}");
+    assert!(
+        rows.iter().any(|row| row == "Deploy · question 1 of 2"),
+        "{frame}"
+    );
+    assert!(
+        rows.iter()
+            .any(|row| row.starts_with("The loop is done. Is pushing to main the deploy,")),
+        "{frame}"
+    );
+    assert!(
+        rows.iter()
+            .any(|row| row.starts_with("▶ 1. Push to main is deploy (Recommended)")),
+        "{frame}"
+    );
+    assert!(
+        rows.iter()
+            .any(|row| row == "Run the gate, bump the version, tag it and push"),
+        "{frame}"
+    );
+    assert!(
+        rows.iter().any(|row| row.starts_with("3. Don't answer")),
+        "{frame}"
+    );
+    assert_snapshot("questions-asked-100x30", &frame);
+
+    app.on_key_read(key(KeyCode::Enter), alone(shown + ASK_QUIET * 2));
+    assert!(!answered(&mut app), "a question is left to answer");
+    app.on_key_read(key(KeyCode::Char(' ')), alone(shown + ASK_QUIET * 4));
+    let frame = screen(&mut app, 100, 30);
+    let rows = question_rows(&frame);
+    assert!(
+        rows.iter().any(|row| row == "Build · question 2 of 2"),
+        "{frame}"
+    );
+    assert!(rows.iter().any(|row| row == "▶ 1. [x] macOS"), "{frame}");
+    assert!(rows.iter().any(|row| row == "2. [ ] Linux"), "{frame}");
+    assert!(frame.contains("Space tick"), "{frame}");
+    assert_snapshot("questions-several-100x30", &frame);
 }
 
 /// The rows of the question box, with its borders and the pane's taken off.

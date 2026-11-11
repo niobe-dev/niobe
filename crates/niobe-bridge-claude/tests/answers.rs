@@ -184,7 +184,7 @@ fn exchange(decide: impl Fn(&str) -> PermissionDecision) -> Exchanged {
         let drained = session.drain();
         for (id, tool) in questions(&drained) {
             session
-                .answer(&id, decide(&tool), None)
+                .answer(&id, decide(&tool), None, &[])
                 .expect("the prompt is answered");
         }
         let ended = drained.iter().any(|event| {
@@ -402,10 +402,10 @@ fn prompts_naming_one_call_are_each_answered_to_their_own_request() {
     assert_ne!(read_id, command_id);
 
     session
-        .answer(read_id, PermissionDecision::Allow, None)
+        .answer(read_id, PermissionDecision::Allow, None, &[])
         .expect("the read is waited on");
     session
-        .answer(command_id, PermissionDecision::Deny, None)
+        .answer(command_id, PermissionDecision::Deny, None, &[])
         .expect("the command is waited on");
 
     let started = Instant::now();
