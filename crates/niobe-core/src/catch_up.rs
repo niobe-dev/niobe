@@ -2,8 +2,9 @@
 // Copyright (c) Viacheslav Shynkarenko
 
 //! What happened since the operator last looked: the turns that ended, the
-//! files changed and by how much, the sub-agents started and finished, how far
-//! the five-hour window moved, and what is waiting on them now.
+//! agent's last reply and the decisions it stated, the files changed and by
+//! how much, the test runs that failed, the sub-agents started and finished,
+//! how far the five-hour window moved, and what is waiting on them now.
 //!
 //! Worked out from the session fold and nothing else — no model is asked to
 //! sum anything up — as the difference between the fold now and a [`Mark`] of
@@ -14,7 +15,7 @@
 use std::collections::BTreeMap;
 
 use crate::event::UsageWindow;
-use crate::session::{FileChanges, SessionState, TurnRecord};
+use crate::session::{DecisionRecord, FileChanges, SessionState, TurnRecord};
 
 /// The figures of a session at the moment the operator last looked, which a
 /// later [`CatchUp`] is counted from.
@@ -29,6 +30,9 @@ use crate::session::{FileChanges, SessionState, TurnRecord};
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Mark {
     turns: usize,
+    replies: u64,
+    decisions: usize,
+    tests_failed: u64,
     files: BTreeMap<String, FileChanges>,
     agents_spawned: u64,
     agents_finished: u64,
@@ -43,6 +47,9 @@ impl Mark {
     pub fn of(session: &SessionState) -> Self {
         Self {
             turns: session.turns().len(),
+            replies: session.assistant_messages(),
+            decisions: session.decisions().len(),
+            tests_failed: session.test_runs().failed,
             files: session
                 .files()
                 .iter()
@@ -65,6 +72,14 @@ impl Mark {
 pub struct CatchUp {
     /// The turns that ended, in the order they did.
     pub turns: Vec<TurnRecord>,
+    /// The session's last reply, where it completed one since the mark: the
+    /// agent's own account of where it got to, never a sub-agent's.
+    pub reply: Option<String>,
+    /// The decisions the agent's replies stated since the mark, in order:
+    /// its own account, never a fact the fold checked.
+    pub decisions: Vec<DecisionRecord>,
+    /// Test runs known to have failed after their tests started.
+    pub tests_failed: u64,
     /// Each file changed, with the lines and calls since the mark alone.
     /// [`FileChanges::why`] is the latest, as the session holds it.
     pub files: Vec<FileChanges>,
@@ -96,6 +111,15 @@ impl CatchUp {
                 .get(mark.turns..)
                 .unwrap_or_default()
                 .to_vec(),
+            reply: (session.assistant_messages() > mark.replies)
+                .then(|| session.last_assistant().map(str::to_owned))
+                .flatten(),
+            decisions: session
+                .decisions()
+                .get(mark.decisions..)
+                .unwrap_or_default()
+                .to_vec(),
+            tests_failed: session.test_runs().failed.saturating_sub(mark.tests_failed),
             files: session
                 .files()
                 .iter()
@@ -117,11 +141,14 @@ impl CatchUp {
     }
 
     /// Whether nothing happened that the operator would want told: no turn
-    /// ended, nothing changed, no sub-agent came or went, nothing failed and
-    /// nothing was asked. The window moving on its own is not news, and nor
+    /// ended, the agent said and decided nothing, nothing changed, no
+    /// sub-agent came or went, nothing failed and nothing was asked. The window moving on its own is not news, and nor
     /// is a question still waiting that was told of before.
     pub fn is_empty(&self) -> bool {
         self.turns.is_empty()
+            && self.reply.is_none()
+            && self.decisions.is_empty()
+            && self.tests_failed == 0
             && self.files.is_empty()
             && self.agents_started == 0
             && self.agents_finished == 0
@@ -267,6 +294,58 @@ mod tests {
             Some(0.0),
             "the window read again, and it had not moved"
         );
+    }
+
+    fn said(text: &str) -> Event {
+        Event::AssistantMessage {
+            text: text.to_owned(),
+            agent: None,
+        }
+    }
+
+    fn failed_run() -> Event {
+        Event::TestRun {
+            id: "t".into(),
+            counts: None,
+            exit_code: Some(101),
+            failed: true,
+            failures: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn what_the_agent_said_decided_and_failed_since_the_mark_is_news_and_what_came_before_is_not() {
+        let mut session = SessionState::new();
+        session.apply(&said("Read it.\nDECISION: kept the parser"));
+        session.apply(&failed_run());
+        let mark = Mark::of(&session);
+        assert!(CatchUp::since(&mark, &session).is_empty());
+
+        session.apply(&said("All green.\nDECISION: split the module"));
+        session.apply(&failed_run());
+        let caught = CatchUp::since(&mark, &session);
+        assert_eq!(
+            caught.reply.as_deref(),
+            Some("All green.\nDECISION: split the module")
+        );
+        let decided: Vec<&str> = caught
+            .decisions
+            .iter()
+            .map(|decision| decision.summary.as_str())
+            .collect();
+        assert_eq!(decided, ["split the module"]);
+        assert_eq!(caught.tests_failed, 1);
+        assert!(!caught.is_empty());
+    }
+
+    #[test]
+    fn a_reply_alone_since_the_mark_is_news() {
+        let mut session = SessionState::new();
+        let mark = Mark::of(&session);
+        session.apply(&said("Done."));
+        let caught = CatchUp::since(&mark, &session);
+        assert_eq!(caught.reply.as_deref(), Some("Done."));
+        assert!(!caught.is_empty());
     }
 
     #[test]

@@ -408,12 +408,7 @@ fn draw_sheet(frame: &mut Frame, body: Rect, app: &mut App, theme: &Theme) {
     let wrapped: Vec<String> = sheet
         .rows
         .iter()
-        // A row that fits is drawn as written, so the columns its spaces
-        // line up are kept; only a longer one is wrapped.
-        .flat_map(|row| match text::width(row) <= text_width {
-            true => vec![row.clone()],
-            false => text::wrap(row, text_width),
-        })
+        .flat_map(|row| sheet_rows(row, text_width))
         .collect();
     // A row of room above and below, and one each for the border and the
     // shadow, which the dialog keeps inside the body.
@@ -442,6 +437,26 @@ fn draw_sheet(frame: &mut Frame, body: Rect, app: &mut App, theme: &Theme) {
     frame.render_widget(Paragraph::new(lines), inner);
     app.measured_sheet(max_scroll);
     app.drew_dialog(Some(DialogDrawn::plain(Overlay::Sheet, inner)));
+}
+
+/// `row` of a sheet in rows of `width` columns. A row that fits is drawn as
+/// written, so the columns its spaces line up are kept; a longer one is
+/// wrapped, each row after its first under the first's indent, so an
+/// indented quote reads as one block under its head.
+fn sheet_rows(row: &str, width: usize) -> Vec<String> {
+    if text::width(row) <= width {
+        return vec![row.to_owned()];
+    }
+    let body = row.trim_start_matches(' ');
+    let indent = row.len() - body.len();
+    if indent == 0 || indent * 2 >= width {
+        return text::wrap(row, width);
+    }
+    let pad = " ".repeat(indent);
+    text::wrap(body, width - indent)
+        .into_iter()
+        .map(|line| format!("{pad}{line}"))
+        .collect()
 }
 
 /// The open menu's list, hung from its name on the bar and cast on what is

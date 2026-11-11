@@ -25,13 +25,13 @@
  ║                                                                                                                              ║ │   server/                                                         █
  ║                                                          ╔═══════════════════════════ Since you last looked ════════════════════════════╗lers/manifest.ts                                   +97 −4 █
  ║                                                          ║                                                                              ║lers/health.ts                                     +3 −19 █
- ║                                                          ║  3 files changed:                                                            ║leware/etag.ts                                    +41 −37 █
- ║                                                          ║    catalog/fetch.ts  +6 −2                                                   ║x.ts                                                +8 −6 █
- ║                                                          ║    catalog/etag.test.ts  +24 —                                               ║                                                          █
- ║                                                          ║    docs/notebooks/catalog.ipynb  — —                                         ║.test.ts                                          +122 −8 █
- ║                                                          ║  sub-agents: 3 started, 2 finished                                           ║h.test.ts                                         +76 −14 █
- ║                                                          ║  1 question asked                                                            ║ers.ts                                              +5 −2 █
- ║                                                          ║  now: thinking                                                               ║rded_catalog_2026-09-18_manifest_not_modified.json +97 −0 │
+ ║                                                          ║  claude said:                                                                ║leware/etag.ts                                    +41 −37 █
+ ║                                                          ║    Etags cached in the LRU; 304s short-circuit. One test still red — the     ║x.ts                                                +8 −6 █
+ ║                                                          ║    304 path asserts a body that is no longer sent.                           ║                                                          █
+ ║                                                          ║  changed 3 files:                                                            ║.test.ts                                          +122 −8 █
+ ║                                                          ║    catalog/fetch.ts  +6 −2                                                   ║h.test.ts                                         +76 −14 █
+ ║                                                          ║    catalog/etag.test.ts  +24 —                                               ║ers.ts                                              +5 −2 █
+ ║                                                          ║    docs/notebooks/catalog.ipynb  — —                                         ║rded_catalog_2026-09-18_manifest_not_modified.json +97 −0 │
  ║                                                          ║                                                                              ║es/manifest.json => tests/fixtures/manifest.v2.json +6 −3 │
  ║                                                          ╚═════════════════════════════════ Esc close ══════════════════════════════════╝                                                          │
  ║                                                                                                                              ║ │     components/Catalog.tsx                                +54 −31 │

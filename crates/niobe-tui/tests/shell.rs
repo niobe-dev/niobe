@@ -2517,10 +2517,10 @@ fn notable_only_counts_the_routine_entries_it_leaves_out_at_both_sizes() {
 }
 
 /// What happened since the operator last caught up is a sheet over the
-/// session, each row a figure of the fold, with what the session is doing now
-/// as its last.
+/// session, in words: what the agent said, the files it changed and what
+/// waits on the operator, and no count that says nothing.
 #[test]
-fn what_happened_is_a_sheet_of_the_session_s_own_figures_at_both_sizes() {
+fn what_happened_is_a_sheet_of_what_the_session_said_and_did_at_both_sizes() {
     let mut app = running_session().with_theme(NEO);
     app.show_catch_up();
     for (name, width, height) in [
@@ -2529,8 +2529,8 @@ fn what_happened_is_a_sheet_of_the_session_s_own_figures_at_both_sizes() {
     ] {
         let frame = screen(&mut app, width, height);
         assert!(frame.contains("Since you last looked"), "{frame}");
-        assert!(frame.contains("files changed:"), "{frame}");
-        assert!(frame.contains("now: "), "{frame}");
+        assert!(frame.contains("changed "), "{frame}");
+        assert!(!frame.contains("turns ended"), "{frame}");
         assert_snapshot(name, &frame);
     }
     assert_snapshot("catch-up-neo-painted-80x24", &paint(&mut app, 80, 24));

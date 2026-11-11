@@ -83,9 +83,10 @@ reviewers that encode both, for an agent working in this tree.
   went; `attention.rs` is how much an event asks of the operator — it needs them, it is notable,
   or it is routine — read from the event alone, never by a model, so the shell's transcript can
   leave the routine out and a session read back reads as it did live. `catch_up.rs` is what happened
-  since the operator last looked — the turns ended, the files changed and by how much, the
-  sub-agents started and finished, the errors, the questions asked and waiting, how far the
-  five-hour window moved — as the fold now less a `Mark` of it, so every figure is the fold of
+  since the operator last looked — the turns ended, the agent's last reply and the decisions it
+  stated, the files changed and by how much, the test runs that failed, the sub-agents started
+  and finished, the errors, the questions asked and waiting, how far the five-hour window
+  moved — as the fold now less a `Mark` of it, so every figure is the fold of
   the events after the mark and no model sums anything up; the shell records the mark as
   `Event::Looked` on a key pressed after something it counts, so a session taken up again
   tells the operator what happened after they last looked. `decision.rs` reads the
@@ -265,8 +266,11 @@ reviewers that encode both, for an agent working in this tree.
   binary says the terminal shows — when a question no standing rule answers comes up or a turn
   sent from this shell ends without being stopped, which the app works out after the rules have
   answered and the loop writes after the frame that shows it. `catch_up.rs` is the sheet of what
-  happened since the operator last looked, a row a figure, which the first key after minutes
-  with none opens — that key is spent on it — and `c` in a side pane or View › What happened…
+  happened since the operator last looked, in words — the opening of what the agent last said,
+  the decisions it stated, the files it changed, what failed, how far the window moved and each
+  question waiting by what it would run — with no count that tells someone coming back nothing,
+  and no sheet where that is all there is; the first key after minutes
+  with none opens it — that key is spent on it — and `c` in a side pane or View › What happened…
   opens since the last one shown. `detail.rs` is one tool call read whole — the arguments it
   started with and the output its end carried, each headed by its size, nothing cut, and where
   Niobe's hook trimmed that output, the whole of it behind `w` — opened from

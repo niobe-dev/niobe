@@ -7,13 +7,13 @@
 ║ ◆ Caching the etag beside the body so a 304 can be answered from the LRU.    ║
 ║   ╔═══════════════════════ Since you last looked ════════════════════════╗   █
 ║   ║                                                                      ║   █
-║   ║  3 files changed:                                                    ║   █
-║ ◆ ║    catalog/fetch.ts  +6 −2                                           ║   █
-║   ║    catalog/etag.test.ts  +24 —                                       ║   █
-║ ◆ ║    docs/notebooks/catalog.ipynb  — —                                 ║   █
-║   ║  sub-agents: 3 started, 2 finished                                   ║   █
-║ ✗ ║  1 question asked                                                    ║4s █
-║   ║  now: thinking                                                       ║   █
+║   ║  claude said:                                                        ║   █
+║ ◆ ║    Etags cached in the LRU; 304s short-circuit. One test still red   ║   █
+║   ║    — the 304 path asserts a body that is no longer sent.             ║   █
+║ ◆ ║  changed 3 files:                                                    ║   █
+║   ║    catalog/fetch.ts  +6 −2                                           ║   █
+║ ✗ ║    catalog/etag.test.ts  +24 —                                       ║4s █
+║   ║    docs/notebooks/catalog.ipynb  — —                                 ║   █
 ║   ║                                                                      ║   █
 ║ ◆ ╚═════════════════════════════ Esc close ══════════════════════════════╝4  █
 ║   path asserts a body that is no longer sent.                                █

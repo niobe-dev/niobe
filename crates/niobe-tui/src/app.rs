@@ -3882,38 +3882,45 @@ impl App {
     /// or says in one line that nothing has.
     pub fn show_catch_up(&mut self) {
         let caught = CatchUp::since(&self.caught_up, &self.session);
-        match caught.is_empty() {
-            true => self.hint = Some(crate::catch_up::NOTHING.to_owned()),
-            false => self.open_catch_up(&caught),
+        match self.catch_up_sheet(&caught) {
+            None => self.hint = Some(crate::catch_up::NOTHING.to_owned()),
+            Some(sheet) => self.open_catch_up(sheet),
         }
     }
 
-    /// Opens the sheet of what `caught` says happened, from which the next
-    /// catch-up of either kind counts.
-    fn open_catch_up(&mut self, caught: &CatchUp) {
-        let now = self.now_for_catch_up();
-        self.sheet = Some(crate::catch_up::sheet(caught, now));
+    /// Opens `sheet` of what happened, from which the next catch-up of
+    /// either kind counts.
+    fn open_catch_up(&mut self, sheet: Sheet) {
+        self.sheet = Some(sheet);
         self.produce(Event::Looked);
         self.caught_up = self.looked.clone();
     }
 
-    /// What the session is at this moment, for a catch-up's last row, in the
-    /// order the top bar settles its state in: a running turn first, then a
-    /// shell with no backend, then a backend that ended the session. The
-    /// sheet is most often read after a backend died unwatched, and saying
-    /// idle there would tell the operator a prompt will be taken.
-    fn now_for_catch_up(&self) -> crate::catch_up::Now {
-        use crate::catch_up::Now;
-        if self.session.turn_running() {
-            return Now::Working(self.doing());
-        }
-        if !self.attached {
-            return Now::NotAttached;
-        }
-        match self.session.fatal_error() {
-            Some(_) => Now::Ended,
-            None => Now::Idle,
-        }
+    /// The sheet of what `caught` says happened, with what the shell knows
+    /// beside it: the agent's name, each question waiting by its tool and
+    /// what it acts on, and the error that ended the session, which is said
+    /// where the backend behind this shell ended — a session read back with
+    /// none attached ended nothing here. `None` where none of it is worth
+    /// reading.
+    fn catch_up_sheet(&self, caught: &CatchUp) -> Option<Sheet> {
+        let agent = self.agent_name();
+        let waiting = self
+            .asks
+            .iter()
+            .map(|ask| match &ask.target {
+                Some(target) => format!("{}  {target}", ask.tool),
+                None => ask.tool.clone(),
+            })
+            .collect();
+        let context = crate::catch_up::Context {
+            agent: &agent,
+            waiting,
+            ended: self
+                .session
+                .fatal_error()
+                .filter(|_| self.attached && !self.session.turn_running()),
+        };
+        crate::catch_up::sheet(caught, &context)
     }
 
     /// Opens what happened while the operator was away, where this key is
@@ -3949,11 +3956,16 @@ impl App {
         }
         let shown =
             away && self.catch_up_automatic && self.overlay().is_none() && self.trusting.is_none();
-        match shown {
-            true => self.open_catch_up(&caught),
-            false => self.produce(Event::Looked),
+        match shown.then(|| self.catch_up_sheet(&caught)).flatten() {
+            Some(sheet) => {
+                self.open_catch_up(sheet);
+                true
+            }
+            None => {
+                self.produce(Event::Looked);
+                false
+            }
         }
-        shown
     }
 
     /// Whether the Activity pane counts calls per tool: see
@@ -11784,11 +11796,11 @@ mod tests {
 
     const AWAY: Duration = Duration::from_secs(6 * 60);
 
-    /// The backend ended while the operator was away: the sheet says what
-    /// the session is now as the bar above it does, and an ended session
-    /// is not one waiting for its next prompt.
+    /// The backend ended while the operator was away: the sheet says so,
+    /// with the error it ended on, since an ended session is not one waiting
+    /// for its next prompt.
     #[test]
-    fn a_session_that_ended_while_away_is_said_to_have_ended_not_to_be_idle() {
+    fn a_session_that_ended_while_away_is_said_to_have_ended_with_its_error() {
         let mut app = laid_out().attached();
         let left = Instant::now();
         app.tick(left, None);
@@ -11806,22 +11818,72 @@ mod tests {
         let rows = &app.sheet().expect("a file changed while away").rows;
         assert_eq!(
             rows.last().map(String::as_str),
-            Some("now: ended"),
+            Some("the session ended: the CLI exited"),
             "{rows:?}"
         );
     }
 
     #[test]
-    fn a_session_read_back_with_nothing_attached_is_said_to_be_so_not_idle() {
+    fn a_session_read_back_with_nothing_attached_is_not_said_to_have_ended_here() {
         let mut app = laid_out();
         app.apply(&changed("src/lib.rs"));
+        app.apply(&Event::Error {
+            message: "the CLI exited".to_owned(),
+            fatal: true,
+        });
         app.show_catch_up();
         let rows = &app.sheet().expect("a file changed").rows;
-        assert_eq!(
-            rows.last().map(String::as_str),
-            Some("now: not attached"),
+        assert!(
+            !rows.iter().any(|row| row.starts_with("the session ended")),
             "{rows:?}"
         );
+    }
+
+    #[test]
+    fn the_sheet_says_what_the_agent_said_and_what_the_waiting_question_asks() {
+        let mut app = laid_out().attached();
+        app.apply(&Event::UserMessage {
+            text: "go".to_owned(),
+        });
+        app.apply(&Event::AssistantMessage {
+            text: "The gate is green.".to_owned(),
+            agent: None,
+        });
+        app.apply(&Event::PermissionRequest {
+            id: "t1".into(),
+            tool: "Bash".to_owned(),
+            input: r#"{"command":"cargo test"}"#.to_owned(),
+            target: Some("cargo test".to_owned()),
+            proposal: None,
+            reason: None,
+            agent: None,
+        });
+        app.show_catch_up();
+        let rows = &app.sheet().expect("the agent replied and asked").rows;
+        let agent = app.agent_name();
+        assert_eq!(
+            rows[..],
+            [
+                format!("{agent} said:"),
+                "  The gate is green.".to_owned(),
+                "waiting on you: Bash  cargo test".to_owned(),
+            ],
+            "{rows:?}"
+        );
+    }
+
+    #[test]
+    fn counts_alone_open_no_sheet_and_say_nothing_has_happened() {
+        let mut app = laid_out();
+        app.apply(&Event::AgentSpawn {
+            id: AgentId::from("a1"),
+            parent: None,
+            kind: None,
+            label: "look".to_owned(),
+        });
+        app.show_catch_up();
+        assert!(app.sheet().is_none(), "{:?}", app.sheet());
+        assert_eq!(app.hint(), Some(crate::catch_up::NOTHING));
     }
 
     #[test]
@@ -11835,7 +11897,7 @@ mod tests {
         app.on_key(key(KeyCode::Char('x')));
         let sheet = app.sheet().expect("something happened while away");
         assert_eq!(sheet.title, crate::catch_up::TITLE);
-        assert_eq!(sheet.rows[..2], ["1 file changed:", "  src/lib.rs  +4 −1"]);
+        assert_eq!(sheet.rows[..2], ["changed 1 file:", "  src/lib.rs  +4 −1"]);
         assert_eq!(app.composed(), "", "the key went on telling them");
 
         app.on_key(key(KeyCode::Esc));
@@ -12002,11 +12064,8 @@ mod tests {
         app.on_key(key(KeyCode::Char('y')));
         let rows = &app.sheet().expect("the sub-agent finished while away").rows;
         assert_eq!(
-            rows[..2],
-            [
-                "the five-hour window moved 15 points",
-                "sub-agents: 0 started, 1 finished",
-            ],
+            rows[..],
+            ["the five-hour window moved 15 points"],
             "{rows:?}"
         );
     }
