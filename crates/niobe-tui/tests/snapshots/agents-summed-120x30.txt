@@ -12,12 +12,12 @@
  ┃ ✗ Bash           npm test                                  exit 1 · 0.4s █ │ ⎇ main ↑3                             █
  ┃   └ 1 failing: fetch returns the cached body on a 304                    █ │ ▾ Working tree  23 files  +≥977 −≥259 █
  ┃                                                                          █ │   .                                   █
- ┃ ◆ Etags cached in the LRU; 304s short-circuit. One test still red — the  █ │     CHANGELOG.md                +0 −0 │
+ ┃ ◆ Etags cached in the LRU; 304s short-circuit. One test still red — the  █ │     CHANGELOG.md               +0  −0 │
  ┃   304 path asserts a body that is no longer sent.                        █ │   catalog/                            │
  ┃                                                                          █ │     fetch.ts                 +149 −12 │
  ┃ > you                                                                    █ │     etag.ts                   +88 −41 │
- ┃   Review fetch.py and cache.py in parallel.                              █ │     cache/lru.ts               +31 −9 │
- ┃                                                                          █ │     cache/index.ts             +12 −0 │
+ ┃   Review fetch.py and cache.py in parallel.                              █ │     cache/lru.ts              +31  −9 │
+ ┃                                                                          █ │     cache/index.ts            +12  −0 │
  ┃ ▾ Agent ×2       deep-reasoner: Review fetch.py, deep-reasoner: …  240 B █ └───────────────────────────────────────┘
  ┃   ├ deep-reasoner: Review fetch.py                                 120 B █ ┌────────────── Activity ───────────────┐
  ┃   └ deep-reasoner: Review cache.py                                 120 B █ │ ▾ Sub-agents  3 running · 1 failed    █

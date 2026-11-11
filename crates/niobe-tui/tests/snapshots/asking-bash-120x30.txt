@@ -12,12 +12,12 @@
  ┃   │ cargo test -p catalog                                              │ ┃ │ ⎇ main ↑3                             █
  ┃   │                                                                    │ ┃ │ ▾ Working tree  23 files  +≥977 −≥259 █
  ┃   │ description: Run the catalog tests                                 │ █ │   .                                   █
- ┃   │                                                                    │ █ │     CHANGELOG.md                +0 −0 │
+ ┃   │                                                                    │ █ │     CHANGELOG.md               +0  −0 │
  ┃   │ ▶ 1. Allow once                                     this call only │ █ │   catalog/                            │
  ┃   │   2. Always allow Bash                            niobe saves Bash │ █ │     fetch.ts                 +149 −12 │
  ┃   │   3. Always allow this target  niobe saves Bash(cargo test -p cat… │ █ │     etag.ts                   +88 −41 │
- ┃   │   4. Deny                                    the call does not run │ █ │     cache/lru.ts               +31 −9 │
- ┃   │                                                                    │ █ │     cache/index.ts             +12 −0 │
+ ┃   │   4. Deny                                    the call does not run │ █ │     cache/lru.ts              +31  −9 │
+ ┃   │                                                                    │ █ │     cache/index.ts            +12  −0 │
  ┃   │ 3. niobe saves Bash(cargo test -p catalog)                         │ █ └───────────────────────────────────────┘
  ┃   │                                                                    │ █ ┌────────────── Activity ───────────────┐
  ┃   │ ↑↓ move · 1-4 jump · Enter confirm · Tab type your own             │ █ │ ▾ Sub-agents  1 running · 1 failed    █

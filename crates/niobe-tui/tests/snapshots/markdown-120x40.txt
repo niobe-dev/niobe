@@ -12,16 +12,16 @@
  ┃ ✗ Bash           npm test                                  exit 1 · 0.4s █ │ ⎇ main ↑3                             █
  ┃   └ 1 failing: fetch returns the cached body on a 304                    █ │ ▾ Working tree  23 files  +≥977 −≥259 █
  ┃                                                                          █ │   .                                   █
- ┃ ◆ Etags cached in the LRU; 304s short-circuit. One test still red — the  █ │     CHANGELOG.md                +0 −0 █
+ ┃ ◆ Etags cached in the LRU; 304s short-circuit. One test still red — the  █ │     CHANGELOG.md               +0  −0 █
  ┃   304 path asserts a body that is no longer sent.                        █ │   catalog/                            █
  ┃                                                                          █ │     fetch.ts                 +149 −12 █
  ┃ > you                                                                    █ │     etag.ts                   +88 −41 │
- ┃   What changed?                                                          █ │     cache/lru.ts               +31 −9 │
- ┃                                                                          █ │     cache/index.ts             +12 −0 │
+ ┃   What changed?                                                          █ │     cache/lru.ts              +31  −9 │
+ ┃                                                                          █ │     cache/index.ts            +12  −0 │
  ┃ ◆ What changed                                                           █ │   docs/                               │
  ┃                                                                          █ │     caching.md                +64 −22 │
- ┃   How it works: the fetcher keeps the etag beside the body, so a 304 is  █ │     adr/0004-etags.md          +34 −1 │
- ┃   answered from the LRU without reading the body again.                  █ │     diagrams/cache.png            — — │
+ ┃   How it works: the fetcher keeps the etag beside the body, so a 304 is  █ │     adr/0004-etags.md         +34  −1 │
+ ┃   answered from the LRU without reading the body again.                  █ │     diagrams/cache.png          —   — │
  ┃   • catalog/fetch.ts keeps the etag                                      █ │   server/                             │
  ┃     • and sends If-None-Match                                            █ └───────────────────────────────────────┘
  ┃   • etag.test.ts asserts the cached body                                 █ ┌────────────── Activity ───────────────┐

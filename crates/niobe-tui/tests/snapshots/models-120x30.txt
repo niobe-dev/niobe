@@ -14,11 +14,11 @@
  ┃                                                                          █ │ ⎇ main ↑3                             █
  ┃   Edited 1 file +6 −2                                                    █ │ ▾ Working tree  23 files  +≥977 −≥259 █
  ┃                                                                          █ │   .                                   │
- ┃ ◆ Rewriting the 304 test around the cached body.                         █ │     CHANGELOG.md                +0 −0 │
+ ┃ ◆ Rewriting the 304 test around the cached body.                         █ │     CHANGELOG.md               +0  −0 │
  ┃                                                                          █ │   catalog/                            │
  ┃ ◆ The notebook that demonstrates the fetcher needs the new call shape.   █ │     fetch.ts                 +149 −12 │
  ┃                                                                          █ │     etag.ts                   +88 −41 │
- ┃ ✗ Bash           npm test                                  exit 1 · 0.4s █ │     cache/lru.ts               +31 −9 │
+ ┃ ✗ Bash           npm test                                  exit 1 · 0.4s █ │     cache/lru.ts              +31  −9 │
  ┃   └ 1 failing: fetch returns the cached body on a 304                    █ └───────────────────────────────────────┘
  ┃                                                                          █ ┌────────────── Activity ───────────────┐
  ┃ ◆ Etags cached in the LRU; 304s short-circuit. One test still red — the  █ │ ▾ Sub-agents  1 running · 1 failed    █

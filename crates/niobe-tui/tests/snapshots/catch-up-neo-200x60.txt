@@ -12,27 +12,27 @@
  ║                                                                                                                              ║ │ ⎇ main ↑3                                                         █
  ║ ◆ Caching the etag beside the body so a 304 can be answered from the LRU.                                                    ║ │ ▾ Working tree  23 files  +≥977 −≥259                             █
  ║                                                                                                                              ║ │   .                                                               █
- ║   Edited 1 file +6 −2                                                                                                        ║ │     CHANGELOG.md                                            +0 −0 █
+ ║   Edited 1 file +6 −2                                                                                                        ║ │     CHANGELOG.md                                           +0  −0 █
  ║                                                                                                                              ║ │   catalog/                                                        █
  ║ ◆ Rewriting the 304 test around the cached body.                                                                             ║ │     fetch.ts                                             +149 −12 █
  ║                                                                                                                              ║ │     etag.ts                                               +88 −41 █
- ║ ◆ The notebook that demonstrates the fetcher needs the new call shape.                                                       ║ │     cache/lru.ts                                           +31 −9 █
- ║                                                                                                                              ║ │     cache/index.ts                                         +12 −0 █
+ ║ ◆ The notebook that demonstrates the fetcher needs the new call shape.                                                       ║ │     cache/lru.ts                                          +31  −9 █
+ ║                                                                                                                              ║ │     cache/index.ts                                        +12  −0 █
  ║ ✗ Bash           npm test                                                                                      exit 1 · 0.4s ║ │   docs/                                                           █
  ║   └ 1 failing: fetch returns the cached body on a 304                                                                        ║ │     caching.md                                            +64 −22 █
- ║                                                                                                                              ║ │     adr/0004-etags.md                                      +34 −1 █
- ║ ◆ Etags cached in the LRU; 304s short-circuit. One test still red — the 304 path asserts a body that is no longer sent.      ║ │     diagrams/cache.png                                        — — █
+ ║                                                                                                                              ║ │     adr/0004-etags.md                                     +34  −1 █
+ ║ ◆ Etags cached in the LRU; 304s short-circuit. One test still red — the 304 path asserts a body that is no longer sent.      ║ │     diagrams/cache.png                                      —   — █
  ║                                                                                                                              ║ │   server/                                                         █
- ║                                                          ╔═══════════════════════════ Since you last looked ════════════════════════════╗lers/manifest.ts                                   +97 −4 █
+ ║                                                          ╔═══════════════════════════ Since you last looked ════════════════════════════╗lers/manifest.ts                                  +97  −4 █
  ║                                                          ║                                                                              ║lers/health.ts                                     +3 −19 █
  ║                                                          ║  claude said:                                                                ║leware/etag.ts                                    +41 −37 █
- ║                                                          ║    Etags cached in the LRU; 304s short-circuit. One test still red — the     ║x.ts                                                +8 −6 █
+ ║                                                          ║    Etags cached in the LRU; 304s short-circuit. One test still red — the     ║x.ts                                               +8  −6 █
  ║                                                          ║    304 path asserts a body that is no longer sent.                           ║                                                          █
- ║                                                          ║  changed 3 files:                                                            ║.test.ts                                          +122 −8 █
+ ║                                                          ║  changed 3 files:                                                            ║.test.ts                                         +122  −8 █
  ║                                                          ║    catalog/fetch.ts  +6 −2                                                   ║h.test.ts                                         +76 −14 █
- ║                                                          ║    catalog/etag.test.ts  +24 —                                               ║ers.ts                                              +5 −2 █
- ║                                                          ║    docs/notebooks/catalog.ipynb  — —                                         ║rded_catalog_2026-09-18_manifest_not_modified.json +97 −0 │
- ║                                                          ║                                                                              ║es/manifest.json => tests/fixtures/manifest.v2.json +6 −3 │
+ ║                                                          ║    catalog/etag.test.ts  +24 —                                               ║ers.ts                                             +5  −2 █
+ ║                                                          ║    docs/notebooks/catalog.ipynb  — —                                         ║ed_catalog_2026-09-18_manifest_not_modified.json  +97  −0 │
+ ║                                                          ║                                                                              ║manifest.json => tests/fixtures/manifest.v2.json   +6  −3 │
  ║                                                          ╚═════════════════════════════════ Esc close ══════════════════════════════════╝                                                          │
  ║                                                                                                                              ║ │     components/Catalog.tsx                                +54 −31 │
  ║                                                                                                                              ║ └───────────────────────────────────────────────────────────────────┘

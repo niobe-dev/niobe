@@ -12,12 +12,12 @@
  ┃ ◆ Caching the e┃    Fable 5.1              fable              For your toughest challenges        ┃                █
  ┃   LRU.         ┃    Sonnet 5.5             sonnet             Most efficient for simpler tasks    ┃es  +≥977 −≥259 █
  ┃                ┃    Haiku 4.5              haiku              Fastest for quick answers           ┃                █
- ┃   Edited 1 file┃    Sonnet 5               claude-sonnet-5    Efficient for routine tasks         ┃          +0 −0 │
+ ┃   Edited 1 file┃    Sonnet 5               claude-sonnet-5    Efficient for routine tasks         ┃         +0  −0 │
  ┃                ┃    Opus 5                 claude-opus-5      Best for everyday, complex tasks    ┃                │
  ┃ ◆ Rewriting the┃    Fable 5                claude-fable-5     Most capable for your hardest and…  ┃       +149 −12 │
  ┃                ┃    Opus 4.8               claude-opus-4-8    Best for everyday, complex tasks    ┃        +88 −41 │
- ┃ ◆ The notebook ┃    Opus 4.7               claude-opus-4-7    Best for everyday, complex tasks    ┃         +31 −9 │
- ┃                ┃    Opus 4.6               claude-opus-4-6    Best for everyday, complex tasks    ┃         +12 −0 │
+ ┃ ◆ The notebook ┃    Opus 4.7               claude-opus-4-7    Best for everyday, complex tasks    ┃        +31  −9 │
+ ┃                ┃    Opus 4.6               claude-opus-4-6    Best for everyday, complex tasks    ┃        +12  −0 │
  ┃ ✗ Bash         ┃    Sonnet 4.6             claude-sonnet-4-6  Efficient for routine tasks         ┃────────────────┘
  ┃   └ 1 failing: ┃                                                                                  ┃ ───────────────┐
  ┃                ┃  ↑↓ choose · Enter switch · Esc keep this one                                    ┃g · 1 failed    █

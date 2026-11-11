@@ -12,12 +12,12 @@
  ┃ ◆ Caching the eta┃  Model     opus-5                                                            ┃                  █
  ┃   LRU.           ┃  Mode      ask                                                               ┃iles  +≥977 −≥259 █
  ┃                  ┃  Theme     cyber                                                             ┃                  █
- ┃   Edited 1 file +┃                                                                              ┃            +0 −0 │
+ ┃   Edited 1 file +┃                                                                              ┃           +0  −0 │
  ┃                  ┃  Config files, the later over the earlier:                                   ┃                  │
  ┃ ◆ Rewriting the 3┃    /home/me/.config/niobe/config.toml                                        ┃         +149 −12 │
  ┃                  ┃    /home/me/src/niobe/.niobe/config.toml — not there                         ┃          +88 −41 │
- ┃ ◆ The notebook th┃                                                                              ┃           +31 −9 │
- ┃                  ┃  niobe reads them as a session starts, so a change takes effect in the next  ┃           +12 −0 │
+ ┃ ◆ The notebook th┃                                                                              ┃          +31  −9 │
+ ┃                  ┃  niobe reads them as a session starts, so a change takes effect in the next  ┃          +12  −0 │
  ┃ ✗ Bash           ┃  one.                                                                        ┃──────────────────┘
  ┃   └ 1 failing: fe┃                                                                              ┃ty ───────────────┐
  ┃                  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ o open · Esc close ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ing · 1 failed    █

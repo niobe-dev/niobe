@@ -12,12 +12,12 @@
  ┃   116 +     etag: res.headers.get("ETag"),                               ┃ │ ⎇ main ↑3                             █
  ┃   117       body,                                                        ┃ │ ▾ Working tree  23 files  +≥977 −≥259 █
  ┃   └ allowed by you                                                       █ │   .                                   █
- ┃                                                                          █ │     CHANGELOG.md                +0 −0 │
+ ┃                                                                          █ │     CHANGELOG.md               +0  −0 │
  ┃ ◆ Rewriting the 304 test around the cached body.                         █ │   catalog/                            │
  ┃                                                                          █ │     fetch.ts                 +149 −12 │
  ┃ ◆ The notebook that demonstrates the fetcher needs the new call shape.   █ │     etag.ts                   +88 −41 │
- ┃                                                                          █ │     cache/lru.ts               +31 −9 │
- ┃ ✗ Bash           npm test                                  exit 1 · 0.4s █ │     cache/index.ts             +12 −0 │
+ ┃                                                                          █ │     cache/lru.ts              +31  −9 │
+ ┃ ✗ Bash           npm test                                  exit 1 · 0.4s █ │     cache/index.ts            +12  −0 │
  ┃   $ npm test -- fetch                                                    █ └───────────────────────────────────────┘
  ┃   └ 1 failing: fetch returns the cached body on a 304                    █ ┌────────────── Activity ───────────────┐
  ┃                                                                          █ │ ▾ Sub-agents  1 running · 1 failed    █

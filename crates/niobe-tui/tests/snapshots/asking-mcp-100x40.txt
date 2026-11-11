@@ -12,16 +12,16 @@
  ┃   │ to run Notion·create-pages                            │ ┃ │ ⎇ main ↑3                      █
  ┃   │ pages: 1 item                                         │ ┃ │ ▾ Working tree  +≥977 −≥259    █
  ┃   │   content:                                            │ ┃ │   .                            █
- ┃   │     **Severity:** High                                │ ┃ │     CHANGELOG.md         +0 −0 █
+ ┃   │     **Severity:** High                                │ ┃ │     CHANGELOG.md        +0  −0 █
  ┃   │     ## Report                                         │ █ │   catalog/                     █
  ┃   │     The fetcher downloads every manifest again.       │ █ │     fetch.ts          +149 −12 █
  ┃   │     … 5 more lines                                    │ █ │     etag.ts            +88 −41 │
- ┃   │   properties:                                         │ █ │     cache/lru.ts        +31 −9 │
- ┃   │     Name: Etag support                                │ █ │     cache/index.ts      +12 −0 │
+ ┃   │   properties:                                         │ █ │     cache/lru.ts       +31  −9 │
+ ┃   │     Name: Etag support                                │ █ │     cache/index.ts     +12  −0 │
  ┃   │     Priority: High                                    │ █ │   docs/                        │
  ┃   │     Status: Not started                               │ █ │     caching.md         +64 −22 │
- ┃   │     date:Due:start: 2026-10-04                        │ █ │     adr/0004-etags.md   +34 −1 │
- ┃   │     date:Due:is_datetime: 0                           │ █ │     diagrams/cache.png     — — │
+ ┃   │     date:Due:start: 2026-10-04                        │ █ │     adr/0004-etags.md  +34  −1 │
+ ┃   │     date:Due:is_datetime: 0                           │ █ │     …agrams/cache.png    —   — │
  ┃   │ … 3 more lines · Ctrl+T shows the arguments as sent   │ █ │   server/                      │
  ┃   │                                                       │ █ └────────────────────────────────┘
  ┃   │ ▶ 1. Allow once                        this call only │ █ ┌─────────── Activity ───────────┐

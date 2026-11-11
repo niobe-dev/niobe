@@ -12,12 +12,12 @@
  ┃ ! denied  deep1 › Bash · curl -sI localhost:8080                         ┃ │ ⎇ main ↑3                             █
  ┃                                                                          ┃ │ ▾ Working tree  23 files  +≥977 −≥259 █
  ┃   ┌─ ? deep2 asks ────────────────────────────────────── blocks turn 2 ┐ ┃ │   .                                   █
- ┃   │ to run Bash                                                        │ █ │     CHANGELOG.md                +0 −0 │
+ ┃   │ to run Bash                                                        │ █ │     CHANGELOG.md               +0  −0 │
  ┃   │ python3 probe.py                                                   │ █ │   catalog/                            │
  ┃   │                                                                    │ █ │     fetch.ts                 +149 −12 │
  ┃   │ ▶ 1. Allow once                                     this call only │ █ │     etag.ts                   +88 −41 │
- ┃   │   2. Always allow Bash                            niobe saves Bash │ █ │     cache/lru.ts               +31 −9 │
- ┃   │   3. Always allow this target   niobe saves Bash(python3 probe.py) │ █ │     cache/index.ts             +12 −0 │
+ ┃   │   2. Always allow Bash                            niobe saves Bash │ █ │     cache/lru.ts              +31  −9 │
+ ┃   │   3. Always allow this target   niobe saves Bash(python3 probe.py) │ █ │     cache/index.ts            +12  −0 │
  ┃   │   4. Deny                                    the call does not run │ █ └───────────────────────────────────────┘
  ┃   │                                                                    │ █ ┌────────────── Activity ───────────────┐
  ┃   │ ↑↓ move · 1-4 jump · Enter confirm · Tab type your own             │ █ │ ▾ Sub-agents  3 running · 1 failed    █

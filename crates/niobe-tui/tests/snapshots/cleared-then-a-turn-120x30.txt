@@ -9,12 +9,12 @@
  ┃   where was I?                                                           ┃ │ ⎇ main ↑3                             █
  ┃                                                                          ┃ │ ▾ Working tree  23 files  +≥977 −≥259 █
  ┃ ◆ A new conversation.                                                    ┃ │   .                                   █
- ┃                                                                          ┃ │     CHANGELOG.md                +0 −0 │
+ ┃                                                                          ┃ │     CHANGELOG.md               +0  −0 │
  ┃ ── turn 1 13:41 · 600 tok ────────────────────────────────────────────── ┃ │   catalog/                            │
  ┃                                                                          ┃ │     fetch.ts                 +149 −12 │
  ┃                                                                          ┃ │     etag.ts                   +88 −41 │
- ┃                                                                          ┃ │     cache/lru.ts               +31 −9 │
- ┃                                                                          ┃ │     cache/index.ts             +12 −0 │
+ ┃                                                                          ┃ │     cache/lru.ts              +31  −9 │
+ ┃                                                                          ┃ │     cache/index.ts            +12  −0 │
  ┃                                                                          ┃ │   docs/                               │
  ┃                                                                          ┃ └───────────────────────────────────────┘
  ┃                                                                          ┃ ┌────────────── Activity ───────────────┐

@@ -10,12 +10,12 @@
  ┃   └ 404 object_not_found — the page is not shared with the integration   █ │ ⎇ main ↑3                             █
  ┃                                                                          █ │ ▾ Working tree  23 files  +≥977 −≥259 █
  ┃ ◆ Caching the etag beside the body so a 304 can be answered from the     █ │   .                                   █
- ┃   LRU.                                                                   █ │     CHANGELOG.md                +0 −0 │
+ ┃   LRU.                                                                   █ │     CHANGELOG.md               +0  −0 │
  ┃                                                                          █ │   catalog/                            │
  ┃   Edited 1 file +6 −2                                                    █ │     fetch.ts                 +149 −12 │
  ┃                                                                          █ │     etag.ts                   +88 −41 │
- ┃ ◆ Rewriting the 304 test around the cached body.                         █ │     cache/lru.ts               +31 −9 │
- ┃                                                                          █ │     cache/index.ts             +12 −0 │
+ ┃ ◆ Rewriting the 304 test around the cached body.                         █ │     cache/lru.ts              +31  −9 │
+ ┃                                                                          █ │     cache/index.ts            +12  −0 │
  ┃ ◆ The notebook that demonstrates the fetcher needs the new call shape.   █ │   docs/                               │
  ┃                                                                          █ └───────────────────────────────────────┘
  ┃ ✗ Bash           npm test                                  exit 1 · 0.4s █ ┌────────────── Activity ───────────────┐

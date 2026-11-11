@@ -6792,6 +6792,88 @@ fn new_files_are_in_the_working_tree_marked_new_and_counted_where_read() {
     assert!(header.contains("3 files  +≥4 −0"), "{header}");
 }
 
+/// Each side of a file's counts is a column: the added figures end on one
+/// cell and the removed on another, whatever their widths, so a long list
+/// reads down its columns like a `git diff --stat` rather than zigzagging.
+#[test]
+fn the_working_tree_counts_line_up_in_a_column_for_each_side() {
+    let working = |path: &str, added: Option<u64>, removed: Option<u64>, new: bool| {
+        niobe_tui::app::WorkingFile {
+            path: path.to_owned(),
+            added,
+            removed,
+            new,
+        }
+    };
+    let mut app = App::new(Repo {
+        name: "niobe".to_owned(),
+        branch: Some("main".to_owned()),
+        read: true,
+        working: vec![
+            working("AGENTS.md", Some(14), Some(4), false),
+            working("transcript.rs", Some(587), Some(122), false),
+            working("main.rs", Some(1), Some(0), false),
+            working("manifest.rs", Some(327), Some(0), true),
+            working("diagram.png", None, None, false),
+        ],
+        ..Repo::default()
+    });
+
+    let frame = screen(&mut app, 120, 30);
+
+    // Where each figure on a file's row ends, in cells, by the sign it opens
+    // with; an em dash is the column it stands in for, read by its place.
+    let ends = |name: &str| -> Vec<(char, usize)> {
+        let line = frame
+            .lines()
+            .find(|line| line.contains(name))
+            .unwrap_or_else(|| panic!("{name} is drawn:\n{frame}"));
+        let chars: Vec<char> = line.chars().collect();
+        let from = line[..line.find(name).expect("the name is on its row")]
+            .chars()
+            .count()
+            + name.chars().count();
+        let mut ends = Vec::new();
+        let mut at = from;
+        while at < chars.len() && chars[at] != '│' && chars[at] != '┃' {
+            if chars[at] == ' ' {
+                at += 1;
+                continue;
+            }
+            let sign = chars[at];
+            while at < chars.len() && chars[at] != ' ' && chars[at] != '│' && chars[at] != '┃' {
+                at += 1;
+            }
+            ends.push((sign, at));
+        }
+        ends
+    };
+    let agents = ends("AGENTS.md");
+    let (added, removed) = match agents.as_slice() {
+        [('+', added), ('−', removed)] => (*added, *removed),
+        other => panic!("AGENTS.md's row reads {other:?}:\n{frame}"),
+    };
+    for name in ["transcript.rs", "main.rs"] {
+        let row = ends(name);
+        assert_eq!(
+            row.iter().map(|(_, end)| *end).collect::<Vec<_>>(),
+            vec![added, removed],
+            "{name}'s counts are out of column:\n{frame}"
+        );
+    }
+    let new = ends("manifest.rs");
+    assert_eq!(
+        new.last(),
+        Some(&('+', added)),
+        "the new file's added count is out of column:\n{frame}"
+    );
+    assert_eq!(
+        ends("diagram.png"),
+        vec![('—', added), ('—', removed)],
+        "a binary file's dashes are out of column:\n{frame}"
+    );
+}
+
 /// Git counts no lines in a binary file, so a working tree whose only change
 /// is one has no figure to add up: its header says so rather than `+0 −0`.
 #[test]

@@ -12,27 +12,27 @@
  ║                                                                                                                              ║ │ ⎇ main ↑3                                                         █
  ║ ◆ Caching the etag beside the body so a 304 can be answered from the LRU.                                                    ║ │ ▾ Working tree  23 files  +≥977 −≥259                             █
  ║                                                                                                                              ║ │   .                                                               █
- ║   Edited 1 file +6 −2                                                                                                        ║ │     CHANGELOG.md                                            +0 −0 █
+ ║   Edited 1 file +6 −2                                                                                                        ║ │     CHANGELOG.md                                           +0  −0 █
  ║                                                                                                                              ║ │   catalog/                                                        █
  ║ ◆ Rewriting the 304 test around the cached body.                                                                             ║ │     fetch.ts                                             +149 −12 █
  ║                                                                                                                              ║ │     etag.ts                                               +88 −41 █
- ║ ◆ The notebook that demonstrates the ╔══════════════════════════════════════════════════ Project overview ══════════════════════════════════════════════════╗                               +31 −9 █
- ║                                      ║                                                                                                                      ║                               +12 −0 █
+ ║ ◆ The notebook that demonstrates the ╔══════════════════════════════════════════════════ Project overview ══════════════════════════════════════════════════╗                              +31  −9 █
+ ║                                      ║                                                                                                                      ║                              +12  −0 █
  ║ ✗ Bash           npm test            ║  # What has been built in catalog                                                                                    ║                                      █
  ║   └ 1 failing: fetch returns the cach║                                                                                                                      ║                              +64 −22 █
- ║                                      ║  2 sessions recorded, the first started 2026-09-18 12:00 UTC and the last 2026-09-18 12:00 UTC.                      ║                               +34 −1 █
- ║ ◆ Etags cached in the LRU; 304s short║                                                                                                                      ║                                  — — █
+ ║                                      ║  2 sessions recorded, the first started 2026-09-18 12:00 UTC and the last 2026-09-18 12:00 UTC.                      ║                              +34  −1 █
+ ║ ◆ Etags cached in the LRU; 304s short║                                                                                                                      ║                                —   — █
  ║                                      ║  ## Highlights                                                                                                       ║                                      █
- ║                                      ║                                                                                                                      ║                               +97 −4 █
+ ║                                      ║                                                                                                                      ║                              +97  −4 █
  ║                                      ║  - 0 turns ended.                                                                                                    ║                               +3 −19 █
  ║                                      ║  - 6 prompts sent, 15 replies from the agent.                                                                        ║                              +41 −37 █
- ║                                      ║  - 24 of 27 tool calls finished without failing.                                                                     ║                                +8 −6 █
+ ║                                      ║  - 24 of 27 tool calls finished without failing.                                                                     ║                               +8  −6 █
  ║                                      ║                                                                                                                      ║                                      █
- ║                                      ║  ## Lowlights                                                                                                        ║                              +122 −8 █
+ ║                                      ║  ## Lowlights                                                                                                        ║                             +122  −8 █
  ║                                      ║                                                                                                                      ║                              +76 −14 █
- ║                                      ║  - 3 tool calls failed, 1 denied.                                                                                    ║                                +5 −2 █
- ║                                      ║  - Session 1: 3 failed calls, 1 denied call — `niobe --resume 1`                                                     ║-18_manifest_not_modified.json +97 −0 │
- ║                                      ║                                                                                                                      ║tests/fixtures/manifest.v2.json +6 −3 │
+ ║                                      ║  - 3 tool calls failed, 1 denied.                                                                                    ║                               +5  −2 █
+ ║                                      ║  - Session 1: 3 failed calls, 1 denied call — `niobe --resume 1`                                                     ║8_manifest_not_modified.json  +97  −0 │
+ ║                                      ║                                                                                                                      ║ts/fixtures/manifest.v2.json   +6  −3 │
  ║                                      ║  ## Most used tools                                                                                                  ║                                      │
  ║                                      ║                                                                                                                      ║                              +54 −31 │
  ║                                      ║  | Tool | Calls | Failed |                                                                                           ║──────────────────────────────────────┘

@@ -12,16 +12,16 @@
  ┃   304 path asserts a body that is no longer sent.                        ┃ │ ⎇ main ↑3                             █
  ┃                                                                          █ │ ▾ Working tree  23 files  +≥977 −≥259 █
  ┃   ┌─ ? claude asks ───────────────────────────────────── blocks turn 1 ┐ █ │   .                                   █
- ┃   │ to run Bash                                                        │ █ │     CHANGELOG.md                +0 −0 █
+ ┃   │ to run Bash                                                        │ █ │     CHANGELOG.md               +0  −0 █
  ┃   │ python3 -c '                                                       │ █ │   catalog/                            █
  ┃   │ class H:                                                           │ █ │     fetch.ts                 +149 −12 █
  ┃   │     def log(self, a): pass                                         │ █ │     etag.ts                   +88 −41 │
- ┃   │     print("a    b")                                                │ █ │     cache/lru.ts               +31 −9 │
- ┃   │ ' # three   spaces                                                 │ █ │     cache/index.ts             +12 −0 │
+ ┃   │     print("a    b")                                                │ █ │     cache/lru.ts              +31  −9 │
+ ┃   │ ' # three   spaces                                                 │ █ │     cache/index.ts            +12  −0 │
  ┃   │                                                                    │ █ │   docs/                               │
  ┃   │ ▶ 1. Allow once                                     this call only │ █ │     caching.md                +64 −22 │
- ┃   │   2. Always allow Bash                            niobe saves Bash │ █ │     adr/0004-etags.md          +34 −1 │
- ┃   │   3. Always allow this target  niobe saves Bash(python3 -c ' ↵ cl… │ █ │     diagrams/cache.png            — — │
+ ┃   │   2. Always allow Bash                            niobe saves Bash │ █ │     adr/0004-etags.md         +34  −1 │
+ ┃   │   3. Always allow this target  niobe saves Bash(python3 -c ' ↵ cl… │ █ │     diagrams/cache.png          —   — │
  ┃   │   4. Deny                                    the call does not run │ █ │   server/                             │
  ┃   │                                                                    │ █ └───────────────────────────────────────┘
  ┃   │ 3. niobe saves Bash(python3 -c '                                   │ █ ┌────────────── Activity ───────────────┐

@@ -12,12 +12,12 @@
  ┃ ◆ Cachi┃                                                                                                  ┃        █
  ┃   LRU. ┃  › user         ~/.claude/CLAUDE.md                                                1 line · 8 B  ┃7 −≥259 █
  ┃        ┃    imported       ~/.claude/RTK.md                                               3 lines · 16 B  ┃        █
- ┃   Edite┃    parent       ~/CLAUDE.md                                                       1 line · 21 B  ┃  +0 −0 │
+ ┃   Edite┃    parent       ~/CLAUDE.md                                                       1 line · 21 B  ┃ +0  −0 │
  ┃        ┃    project      CLAUDE.md                                                         1 line · 11 B  ┃        │
  ┃ ◆ Rewri┃    imported       AGENTS.md                                           8 lines · 155 B · changed  ┃149 −12 │
  ┃        ┃    auto-memory  ~/.claude/projects/-home-me-src-niobe/memory/MEMORY.md           2 lines · 96 B  ┃+88 −41 │
- ┃ ◆ The n┃    note           priorities.md — what matters first                              1 line · 16 B  ┃ +31 −9 │
- ┃        ┃    note           facts.md — verified CLI facts                                   1 line · 13 B  ┃ +12 −0 │
+ ┃ ◆ The n┃    note           priorities.md — what matters first                              1 line · 16 B  ┃+31  −9 │
+ ┃        ┃    note           facts.md — verified CLI facts                                   1 line · 13 B  ┃+12  −0 │
  ┃ ✗ Bash ┗━━━━━━━━━━━━━━━━━━━━━━━━━━ ↑↓ choose · Enter read · e edit · Esc close ━━━━━━━━━━━━━━━━━━━━━━━━━━━┛────────┘
  ┃   └ 1 failing: fetch returns the cached body on a 304                    █ ┌────────────── Activity ───────────────┐
  ┃                                                                          █ │ ▾ Sub-agents  1 running · 1 failed    █

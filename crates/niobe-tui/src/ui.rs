@@ -5982,8 +5982,13 @@ enum PaneRow {
     /// A row laid out as it was listed.
     Drawn(Line<'static>),
     /// A file of the working tree, by where it is in the repository's list,
-    /// with the bytes of its path its directory row already said.
-    WorkingFile { at: usize, under: usize },
+    /// with the bytes of its path its directory row already said and the
+    /// columns every file's counts are drawn in.
+    WorkingFile {
+        at: usize,
+        under: usize,
+        columns: Columns,
+    },
 }
 
 impl PaneRow {
@@ -5991,8 +5996,8 @@ impl PaneRow {
     fn line(self, app: &App, width: usize, theme: &Theme) -> Line<'static> {
         match self {
             PaneRow::Drawn(line) => line,
-            PaneRow::WorkingFile { at, under } => match app.repo().working.get(at) {
-                Some(file) => working_file_row(file, under, width, theme),
+            PaneRow::WorkingFile { at, under, columns } => match app.repo().working.get(at) {
+                Some(file) => working_file_row(file, under, columns, width, theme),
                 None => Line::default(),
             },
         }
@@ -6269,6 +6274,7 @@ fn working_tree_rows(
 
     // `grouped` keeps the files in the order the repository gave them, so
     // the files' rows count through that list.
+    let columns = Columns::of(&repo.working);
     let mut at = 0;
     for row in tree::grouped(&repo.working) {
         rows.push(match row {
@@ -6280,7 +6286,7 @@ fn working_tree_rows(
                 .style(Style::new().fg(theme.dim)),
             ),
             tree::Row::File { under, .. } => {
-                let row = PaneRow::WorkingFile { at, under };
+                let row = PaneRow::WorkingFile { at, under, columns };
                 at += 1;
                 row
             }
@@ -6294,6 +6300,7 @@ fn working_tree_rows(
 fn working_file_row(
     file: &crate::app::WorkingFile,
     under: usize,
+    columns: Columns,
     width: usize,
     theme: &Theme,
 ) -> Line<'static> {
@@ -6301,9 +6308,12 @@ fn working_file_row(
     counted_row(
         FILE_INDENT,
         row.name(),
-        Tag::new(file.new),
-        &measured('+', file.added),
-        &removed_of(file),
+        (
+            Tag::new(file.new),
+            &measured('+', file.added),
+            &removed_of(file),
+        ),
+        columns,
         width,
         theme,
     )
@@ -6694,7 +6704,49 @@ impl Tag {
     }
 }
 
+/// The cells each part of a counted row's figures takes, the same on every
+/// row of a list, so the added counts end on one column and the removed on
+/// another however many digits each has, as `git diff --stat` lines them up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct Columns {
+    tag: usize,
+    added: usize,
+    removed: usize,
+}
+
+impl Columns {
+    /// The columns as wide as the widest of each part across `files`.
+    fn of(files: &[crate::app::WorkingFile]) -> Self {
+        files.iter().fold(Columns::default(), |columns, file| {
+            columns.widened(
+                Tag::new(file.new),
+                &measured('+', file.added),
+                &removed_of(file),
+            )
+        })
+    }
+
+    /// The columns widened, where they need to be, to hold one row's parts.
+    fn widened(self, tag: Tag, added: &str, removed: &str) -> Self {
+        Columns {
+            tag: self.tag.max(text::width(tag.text())),
+            added: self.added.max(text::width(added)),
+            removed: self.removed.max(text::width(removed)),
+        }
+    }
+
+    /// The cells all the figures take, the space between the sides included.
+    fn width(self) -> usize {
+        self.tag + self.added + 1 + self.removed
+    }
+}
+
 /// A row whose counts keep their columns and whose name gives way.
+///
+/// Each count is right-aligned in its column, and the tag stands to the left
+/// of the added column, so a file the repository does not track yet, which
+/// removed nothing, leaves the removed column blank rather than moving its
+/// added count into it.
 ///
 /// The name loses its front rather than its tail: a path cut at the front
 /// still names the file, and a count cut anywhere is a different number. The
@@ -6702,26 +6754,30 @@ impl Tag {
 fn counted_row(
     indent: &'static str,
     name: &str,
-    tag: Tag,
-    added: &str,
-    removed: &str,
+    (tag, added, removed): (Tag, &str, &str),
+    columns: Columns,
     width: usize,
     theme: &Theme,
 ) -> Line<'static> {
-    let counts = text::width(tag.text()) + text::width(added) + 1 + text::width(removed);
+    // A row wider than the columns it was given still draws every figure
+    // whole, which is the narrower misalignment of the two.
+    let columns = columns.widened(tag, added, removed);
+    let counts = columns.width();
     let room = width.saturating_sub(text::width(indent) + counts + 1);
     let name = text::truncate_start(name, room);
     let gap = width
         .saturating_sub(text::width(indent) + counts)
         .saturating_sub(text::width(&name));
+    let pad = |column: usize, part: &str| " ".repeat(column.saturating_sub(text::width(part)));
 
     Line::from(vec![
         Span::raw(indent),
         Span::styled(name, Style::new().fg(theme.fg)),
         Span::raw(" ".repeat(gap)),
         Span::styled(tag.text(), Style::new().fg(theme.dim)),
+        Span::raw(pad(columns.tag, tag.text()) + &pad(columns.added, added)),
         Span::styled(added.to_owned(), Style::new().fg(theme.add)),
-        Span::raw(" "),
+        Span::raw(" ".to_owned() + &pad(columns.removed, removed)),
         Span::styled(removed.to_owned(), Style::new().fg(theme.del)),
     ])
 }
@@ -8098,9 +8154,8 @@ mod tests {
         counted_row(
             ROW_INDENT,
             path,
-            Tag::None,
-            &measured('+', added),
-            &measured('−', removed),
+            (Tag::None, &measured('+', added), &measured('−', removed)),
+            Columns::default(),
             width,
             &Theme::default(),
         )

@@ -12,12 +12,12 @@
  ┃ ◆ Cachi┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ MCP servers · remote docs ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓        █
  ┃   LRU. ┃                                                                                                  ┃7 −≥259 █
  ┃        ┃  status       failed                                                                             ┃        █
- ┃   Edite┃  why          ECONNREFUSED: Unable to connect. Is the computer able to access the url?           ┃  +0 −0 │
+ ┃   Edite┃  why          ECONNREFUSED: Unable to connect. Is the computer able to access the url?           ┃ +0  −0 │
  ┃        ┃  scope        local                                                                              ┃        │
  ┃ ◆ Rewri┃  reached by   http · http://127.0.0.1:9/mcp                                                      ┃149 −12 │
  ┃        ┃  calls itself —                                                                                  ┃+88 −41 │
- ┃ ◆ The n┃  tools        none                                                                               ┃ +31 −9 │
- ┃        ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ ↑↓ scroll · Esc back ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ +12 −0 │
+ ┃ ◆ The n┃  tools        none                                                                               ┃+31  −9 │
+ ┃        ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ ↑↓ scroll · Esc back ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛+12  −0 │
  ┃ ✗ Bash           npm test                                  exit 1 · 0.4s █ └───────────────────────────────────────┘
  ┃   └ 1 failing: fetch returns the cached body on a 304                    █ ┌────────────── Activity ───────────────┐
  ┃                                                                          █ │ ▾ Sub-agents  1 running · 1 failed    █

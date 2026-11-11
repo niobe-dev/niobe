@@ -12,27 +12,27 @@
  ┃ ⚙ Notion·search  {}                                                                                                   1.1 kB ┃ │ ⎇ main ↑3                                                         █
  ┃ ⚙ Notion·fetch   {}                                                                                                   2.5 kB ┃ │ ▾ Working tree  23 files  +≥977 −≥259                             █
  ┃ ✗ Notion·update… {}                                                                                                   failed ┃ │   .                                                               █
- ┃   └ 404 object_not_found — the page is not shared with the integration                                                       ┃ │     CHANGELOG.md                                            +0 −0 █
+ ┃   └ 404 object_not_found — the page is not shared with the integration                                                       ┃ │     CHANGELOG.md                                           +0  −0 █
  ┃                                                                                                                              ┃ │   catalog/                                                        █
  ┃ ◆ Caching the etag beside the body so a 304 can be answered from the LRU.                                                    ┃ │     fetch.ts                                             +149 −12 █
  ┃                                                                                                                              ┃ │     etag.ts                                               +88 −41 █
- ┃ ⚙ Edit           catalog/fetch.ts                                                                               +6 −2 · 0.4s ┃ │     cache/lru.ts                                           +31 −9 █
- ┃    41     const cached = cache.get(url);                                                                                     ┃ │     cache/index.ts                                         +12 −0 █
+ ┃ ⚙ Edit           catalog/fetch.ts                                                                               +6 −2 · 0.4s ┃ │     cache/lru.ts                                          +31  −9 █
+ ┃    41     const cached = cache.get(url);                                                                                     ┃ │     cache/index.ts                                        +12  −0 █
  ┃    42     const headers = new Headers(init.headers);                                                                         ┃ │   docs/                                                           █
  ┃    43 -   if (cached) headers.set("If-None-Match", cached.etag);                                                             ┃ │     caching.md                                            +64 −22 █
- ┃    44 -   const res = await fetch(url, init);                                                                                ┃ │     adr/0004-etags.md                                      +34 −1 █
- ┃    43 +   if (cached?.etag) {                                                                                                ┃ │     diagrams/cache.png                                        — — █
+ ┃    44 -   const res = await fetch(url, init);                                                                                ┃ │     adr/0004-etags.md                                     +34  −1 █
+ ┃    43 +   if (cached?.etag) {                                                                                                ┃ │     diagrams/cache.png                                      —   — █
  ┃    44 +     headers.set("If-None-Match", cached.etag);                                                                       ┃ │   server/                                                         █
- ┃    45 +   }                                                                                                                  ┃ │     handlers/manifest.ts                                   +97 −4 █
+ ┃    45 +   }                                                                                                                  ┃ │     handlers/manifest.ts                                  +97  −4 █
  ┃    46 +   const res = await fetch(url, { ...init, headers });                                                                ┃ │     handlers/health.ts                                     +3 −19 █
  ┃    47 +   if (res.status === 304 && cached) return cached.body;                                                              ┃ │     middleware/etag.ts                                    +41 −37 █
- ┃    48     return res;                                                                                                        ┃ │     index.ts                                                +8 −6 █
+ ┃    48     return res;                                                                                                        ┃ │     index.ts                                               +8  −6 █
  ┃       …                                                                                                                      ┃ │   tests/                                                          █
- ┃   115     cache.set(url, {                                                                                                   ┃ │     etag.test.ts                                          +122 −8 █
+ ┃   115     cache.set(url, {                                                                                                   ┃ │     etag.test.ts                                         +122  −8 █
  ┃   116 +     etag: res.headers.get("ETag"),                                                                                   ┃ │     fetch.test.ts                                         +76 −14 █
- ┃   117       body,                                                                                                            ┃ │     helpers.ts                                              +5 −2 █
- ┃   └ allowed by you                                                                                                           ┃ │     …ecorded_catalog_2026-09-18_manifest_not_modified.json +97 −0 │
- ┃                                                                                                                              ┃ │     …tures/manifest.json => tests/fixtures/manifest.v2.json +6 −3 │
+ ┃   117       body,                                                                                                            ┃ │     helpers.ts                                             +5  −2 █
+ ┃   └ allowed by you                                                                                                           ┃ │     …orded_catalog_2026-09-18_manifest_not_modified.json  +97  −0 │
+ ┃                                                                                                                              ┃ │     …es/manifest.json => tests/fixtures/manifest.v2.json   +6  −3 │
  ┃ ◆ Rewriting the 304 test around the cached body.                                                                             ┃ │   web/                                                            │
  ┃                                                                                                                              ┃ │     components/Catalog.tsx                                +54 −31 │
  ┃ ◆ The notebook that demonstrates the fetcher needs the new call shape.                                                       ┃ └───────────────────────────────────────────────────────────────────┘

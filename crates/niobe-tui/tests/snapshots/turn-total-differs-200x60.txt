@@ -8,30 +8,30 @@
  ┃ · claude                                                                                                                     ┃ │ ⎇ main ↑3                                                         █
  ┃   The reply above was cut off before the CLI said it was finished, and the CLI is carrying the turn on from where it         ┃ │ ▾ Working tree  23 files  +≥977 −≥259                             █
  ┃   stopped. The CLI recorded no count for it, so its tokens are not counted. Message msg_011Cfh9DZarQmXXnvywwTKDD (request    ┃ │   .                                                               █
- ┃   req_011Cfh9DZCJ19ME3Je89LBSJ).                                                                                             ┃ │     CHANGELOG.md                                            +0 −0 █
+ ┃   req_011Cfh9DZCJ19ME3Je89LBSJ).                                                                                             ┃ │     CHANGELOG.md                                           +0  −0 █
  ┃                                                                                                                              ┃ │   catalog/                                                        █
  ┃ ◆ The six pages are written.                                                                                                 ┃ │     fetch.ts                                             +149 −12 █
  ┃                                                                                                                              ┃ │     etag.ts                                               +88 −41 █
- ┃ · claude                                                                                                                     ┃ │     cache/lru.ts                                           +31 −9 █
- ┃   The CLI counted 120891 tokens for this turn beyond what its messages reported. The session's totals hold them where the    ┃ │     cache/index.ts                                         +12 −0 █
+ ┃ · claude                                                                                                                     ┃ │     cache/lru.ts                                          +31  −9 █
+ ┃   The CLI counted 120891 tokens for this turn beyond what its messages reported. The session's totals hold them where the    ┃ │     cache/index.ts                                        +12  −0 █
  ┃   CLI's bill carried them; no message accounts for them.                                                                     ┃ │   docs/                                                           █
  ┃   turn 1 · 13:49 · CLI session 506fa4fd-8719-4564-8c62-5c6ae4b1a471 · no final count: msg_011Cfh9DZarQmXXnvywwTKDD (request  ┃ │     caching.md                                            +64 −22 █
- ┃   req_011Cfh9DZCJ19ME3Je89LBSJ) · per message 6 in, 9167 out, 234375 cache read, 4685 cache write · reported 8 in, 9175 out, ┃ │     adr/0004-etags.md                                      +34 −1 █
- ┃   352445 cache read, 7496 cache write                                                                                        ┃ │     diagrams/cache.png                                        — — █
+ ┃   req_011Cfh9DZCJ19ME3Je89LBSJ) · per message 6 in, 9167 out, 234375 cache read, 4685 cache write · reported 8 in, 9175 out, ┃ │     adr/0004-etags.md                                     +34  −1 █
+ ┃   352445 cache read, 7496 cache write                                                                                        ┃ │     diagrams/cache.png                                      —   — █
  ┃                                                                                                                              ┃ │   server/                                                         █
- ┃ ── turn 1 13:49 · 369k tok · 13m 12s ─────────────────────────────────────────────────────────────────────────────────────── ┃ │     handlers/manifest.ts                                   +97 −4 █
+ ┃ ── turn 1 13:49 · 369k tok · 13m 12s ─────────────────────────────────────────────────────────────────────────────────────── ┃ │     handlers/manifest.ts                                  +97  −4 █
  ┃                                                                                                                              ┃ │     handlers/health.ts                                     +3 −19 █
  ┃                                                                                                                              ┃ │     middleware/etag.ts                                    +41 −37 █
- ┃                                                                                                                              ┃ │     index.ts                                                +8 −6 █
+ ┃                                                                                                                              ┃ │     index.ts                                               +8  −6 █
  ┃                                                                                                                              ┃ │   tests/                                                          █
- ┃                                                                                                                              ┃ │     etag.test.ts                                          +122 −8 █
+ ┃                                                                                                                              ┃ │     etag.test.ts                                         +122  −8 █
  ┃                                                                                                                              ┃ │     fetch.test.ts                                         +76 −14 █
- ┃                                                                                                                              ┃ │     helpers.ts                                              +5 −2 █
- ┃                                                                                                                              ┃ │     …ecorded_catalog_2026-09-18_manifest_not_modified.json +97 −0 █
- ┃                                                                                                                              ┃ │     …tures/manifest.json => tests/fixtures/manifest.v2.json +6 −3 █
+ ┃                                                                                                                              ┃ │     helpers.ts                                             +5  −2 █
+ ┃                                                                                                                              ┃ │     …orded_catalog_2026-09-18_manifest_not_modified.json  +97  −0 █
+ ┃                                                                                                                              ┃ │     …es/manifest.json => tests/fixtures/manifest.v2.json   +6  −3 █
  ┃                                                                                                                              ┃ │   web/                                                            █
  ┃                                                                                                                              ┃ │     components/Catalog.tsx                                +54 −31 │
- ┃                                                                                                                              ┃ │     components/Manifest.tsx                                +18 −7 │
+ ┃                                                                                                                              ┃ │     components/Manifest.tsx                               +18  −7 │
  ┃                                                                                                                              ┃ │     hooks/useCatalog.ts                                   +27 −18 │
  ┃                                                                                                                              ┃ └───────────────────────────────────────────────────────────────────┘
  ┃                                                                                                                              ┃ ┌──────────────────────────── Activity ─────────────────────────────┐
