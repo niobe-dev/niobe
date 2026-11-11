@@ -132,7 +132,9 @@ reviewers that encode both, for an agent working in this tree.
   every failure, and the line and key of every invalid value; `lib.rs` layers a repository's file over the user's, withholds
   what an untrusted file may not set, and selects the profile a session runs under.
 - **`crates/niobe-store/`** — the session store: every event of every session, append-only, in
-  SQLite (`store.rs`; the triggers in its schema refuse an update or a delete), which also reads
+  SQLite (`store.rs`; the triggers in its schema refuse an update or a delete), which lists its
+  sessions the one used last first, each named by its title or its first prompt that is not a
+  command, as the history dialog names them, and also reads
   every prompt of every session in one statement, and the backend conversations each carried
   on, for the shell's history, and the newest plan usage windows a profile's sessions recorded,
   which a new session shows, dated, until its own backend reports, and the span of times each

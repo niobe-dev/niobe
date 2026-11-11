@@ -16,7 +16,12 @@ const PROMPT_CHARS: usize = 60;
 /// What stands where a session has no prompt to be named by.
 const NOTHING: &str = "—";
 
-/// The list, one session per line under a header, newest first.
+/// The list, one session per line under a header, in the order given — the
+/// store's, the one used last first.
+///
+/// Each is dated by when it was last used and named by its title, or else
+/// its first prompt, as the history dialog dates and names it: two lists that
+/// named one session two ways read as if they held different sessions.
 pub fn table(sessions: &[SessionSummary]) -> Vec<String> {
     let id_width = sessions
         .iter()
@@ -26,17 +31,18 @@ pub fn table(sessions: &[SessionSummary]) -> Vec<String> {
         .max("ID".len());
 
     let mut lines = vec![format!(
-        "{:>id_width$}  {:<16}  {:>6}  FIRST PROMPT",
-        "ID", "STARTED (UTC)", "EVENTS"
+        "{:>id_width$}  {:<16}  {:>6}  TITLE OR FIRST PROMPT",
+        "ID", "LAST (UTC)", "EVENTS"
     )];
     lines.extend(sessions.iter().map(|s| {
         format!(
             "{:>id_width$}  {:<16}  {:>6}  {}",
             s.id,
-            utc_minute(s.started_at),
+            utc_minute(s.last_at.unwrap_or(s.started_at)),
             s.events,
-            s.first_prompt
+            s.title
                 .as_deref()
+                .or(s.first_prompt.as_deref())
                 .map_or_else(|| NOTHING.to_owned(), prompt_line)
         )
     }));
@@ -202,10 +208,30 @@ mod tests {
         assert_eq!(
             table(&sessions),
             [
-                "ID  STARTED (UTC)     EVENTS  FIRST PROMPT",
-                "12  2026-09-10 00:26     200  add etag support",
+                "ID  LAST (UTC)        EVENTS  TITLE OR FIRST PROMPT",
+                "12  2026-09-10 00:27     200  add etag support",
+                // Nothing recorded in it: dated by when it was created.
                 " 3  1970-01-01 00:00       0  —",
             ]
+        );
+    }
+
+    /// Named as the history dialog names it, so that the two lists read as
+    /// the same sessions: by the title its backend gave it, where one did.
+    #[test]
+    fn a_titled_session_is_listed_by_its_title() {
+        let sessions = [SessionSummary {
+            id: "24".parse().expect("a number is a session id"),
+            started_at: at(1_789_000_000),
+            last_at: Some(at(1_789_000_060)),
+            events: 9,
+            first_prompt: Some("be sure to stop commits at 8am".to_owned()),
+            title: Some("Stop commits at 8am".to_owned()),
+        }];
+
+        assert_eq!(
+            table(&sessions)[1],
+            "24  2026-09-10 00:27       9  Stop commits at 8am"
         );
     }
 }

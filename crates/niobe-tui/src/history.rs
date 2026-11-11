@@ -296,12 +296,21 @@ pub struct SessionRow {
 }
 
 impl SessionRow {
-    /// What the row is named by: its first prompt.
+    /// What the row is named by: its first prompt that says what the session
+    /// was asked to do, which a command does not, such as `/clear`, and a
+    /// prompt of nothing but blanks does not either.
+    ///
+    /// The one the store or the CLI's transcript named it by where there is
+    /// one, read by the same rule (`niobe_store::Store::sessions`), so that
+    /// `niobe sessions` and this dialog name a session alike; read from its
+    /// prompts where not, as for the session open now.
     pub fn first(&self) -> Option<&str> {
-        self.prompts
-            .first()
-            .or(self.first_prompt.as_ref())
-            .map(String::as_str)
+        self.first_prompt.as_deref().or_else(|| {
+            self.prompts.iter().map(String::as_str).find(|prompt| {
+                let said = prompt.trim_start();
+                !said.is_empty() && !said.starts_with('/')
+            })
+        })
     }
 
     /// What the list names it by: its title, or else its first prompt.
@@ -593,6 +602,34 @@ mod tests {
         assert!(row.matches("#12"));
         assert!(!row.matches("deadlock"));
         assert_eq!(row.first(), Some("add etag support"));
+    }
+
+    /// The dialog names a session by the prompt `niobe sessions` names it by,
+    /// so that the two lists do not seem to hold different sessions: the
+    /// first that is not a command, typed after blanks or not.
+    #[test]
+    fn a_session_is_named_by_its_first_prompt_that_is_not_a_command() {
+        let row = |prompts: &[&str], first_prompt: Option<&str>| SessionRow {
+            target: Some(Target::Recorded("23".to_owned())),
+            last: None,
+            prompts: prompts.iter().map(|p| (*p).to_owned()).collect(),
+            first_prompt: first_prompt.map(str::to_owned),
+            title: None,
+            open_elsewhere: false,
+        };
+        let open_now = row(
+            &["/clear", " /goal keep going", "  ", "add etag support"],
+            None,
+        );
+        let recorded = row(
+            &["/goal keep going", "Computer was restarted"],
+            Some("Computer was restarted"),
+        );
+        let only_commands = row(&["/context"], None);
+
+        assert_eq!(open_now.first(), Some("add etag support"));
+        assert_eq!(recorded.caption(), Some("Computer was restarted"));
+        assert_eq!(only_commands.caption(), None);
     }
 
     #[test]

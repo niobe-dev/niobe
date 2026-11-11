@@ -13,7 +13,7 @@
 )]
 
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use niobe_core::event::{AgentId, Event, TokenCounts, ToolCallId, Usage};
 use niobe_core::session::SessionState;
@@ -866,6 +866,49 @@ fn a_session_that_opens_with_a_slash_command_is_listed_by_the_prompt_after_it() 
     store
         .append(session, &user("add etag support"))
         .expect("a session in a temporary store takes an event");
+
+    let listed = store.sessions().expect("listing works");
+
+    assert_eq!(listed[0].first_prompt.as_deref(), Some("add etag support"));
+}
+
+/// A session carried on today was used after one started yesterday and left,
+/// whichever was created first: the list is in the order they were last used,
+/// as the history dialog lists them, so the one to carry on is at the top.
+#[test]
+fn sessions_are_listed_by_when_they_were_last_used() {
+    let store = Store::open_in_memory().expect("an in-memory store opens");
+    let day = |n: u64| UNIX_EPOCH + Duration::from_secs(86_400 * n);
+    let carried_on = store.create_session().expect("a session is created");
+    let left = store.create_session().expect("a session is created");
+    store
+        .append_at(carried_on, &user("started first"), day(1))
+        .expect("a session in a temporary store takes an event");
+    store
+        .append_at(left, &user("started second"), day(2))
+        .expect("a session in a temporary store takes an event");
+    store
+        .append_at(carried_on, &user("and carried on"), day(3))
+        .expect("a session in a temporary store takes an event");
+
+    let listed = store.sessions().expect("listing works");
+
+    assert_eq!(
+        listed.iter().map(|s| s.id).collect::<Vec<_>>(),
+        [carried_on, left]
+    );
+}
+
+/// A command typed after a space is still a command: the CLI reads it as one.
+#[test]
+fn a_slash_command_typed_after_a_space_is_not_the_first_prompt() {
+    let store = Store::open_in_memory().expect("an in-memory store opens");
+    let session = store.create_session().expect("a session is created");
+    for text in [" /goal keep going", "\n/clear", "add etag support"] {
+        store
+            .append(session, &user(text))
+            .expect("a session in a temporary store takes an event");
+    }
 
     let listed = store.sessions().expect("listing works");
 

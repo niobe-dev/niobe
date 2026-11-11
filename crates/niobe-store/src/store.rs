@@ -606,11 +606,16 @@ impl Store {
         .collect()
     }
 
-    /// Every session in the store, newest first.
+    /// Every session in the store, the one used last first: by its newest
+    /// event, or where it has none, by when it was created. A session carried
+    /// on today is the one most likely to be carried on again, whichever was
+    /// created first, and the history dialog lists them in this order too.
     ///
-    /// A slash command is passed over when looking for the first prompt: it
-    /// is an instruction to the CLI, such as `/clear`, and not what the
-    /// session was asked to do. A prompt that reached no backend is not one
+    /// A slash command is passed over when looking for the first prompt, as
+    /// is a prompt of nothing but blanks: the command is an instruction to
+    /// the CLI, such as `/clear`, and not what the session was asked to do,
+    /// whether or not blanks were typed before it. The shell names the session
+    /// open in it by the same rule (`niobe_tui::history::SessionRow::first`). A prompt that reached no backend is not one
     /// of the session's prompts at all: it is stored as
     /// [`Event::PromptNotSent`], which neither listing reads.
     ///
@@ -630,7 +635,9 @@ impl Store {
                         AND CASE WHEN json_valid(f.event)
                                  THEN json_extract(f.event, '$.type') = 'user_message'
                                       AND json_type(f.event, '$.text') = 'text'
-                                      AND substr(json_extract(f.event, '$.text'), 1, 1) <> '/'
+                                      AND substr(ltrim(json_extract(f.event, '$.text'),
+                                                       ' ' || char(9, 10, 13)),
+                                                 1, 1) NOT IN ('', '/')
                             END
                       ORDER BY f.seq
                       LIMIT 1),
@@ -646,7 +653,7 @@ impl Store {
                FROM sessions s
                LEFT JOIN events e ON e.session_id = s.id
               GROUP BY s.id
-              ORDER BY s.id DESC",
+              ORDER BY COALESCE(MAX(e.at), s.started_at) DESC, s.id DESC",
         )?;
 
         let rows = statement.query_map([], |row| {
