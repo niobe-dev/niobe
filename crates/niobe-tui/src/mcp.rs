@@ -140,6 +140,8 @@ struct Drawn {
     lines: Vec<Line<'static>>,
     keys: &'static str,
     max_scroll: Option<usize>,
+    /// The servers the list has a row for, from its second line down.
+    shown: std::ops::Range<usize>,
 }
 
 /// Draws the MCP view over `body`, if it is open.
@@ -173,6 +175,12 @@ pub(crate) fn draw(frame: &mut Frame, body: Rect, app: &mut App, theme: &Theme) 
     if let Some(max_scroll) = drawn.max_scroll {
         app.measured_mcp(max_scroll);
     }
+    app.drew_dialog(Some(crate::app::DialogDrawn::listing(
+        crate::app::Overlay::Mcp,
+        inner,
+        1,
+        drawn.shown,
+    )));
 }
 
 /// The view's title, lines and keys, for the list or for one server.
@@ -191,33 +199,39 @@ fn contents(app: &App, view: &View, (width, rows): (usize, usize), theme: &Theme
                     false => " ↑↓ scroll · Esc back ",
                 },
                 max_scroll: Some(max_scroll),
+                shown: 0..0,
             }
         }
-        None => Drawn {
-            title: TITLE.to_owned(),
-            lines: listing(app, servers, view.at, (width, rows), theme),
-            keys: match (servers.is_empty(), reconnects) {
-                (true, _) => " Esc close ",
-                (false, true) => " ↑↓ choose · Enter detail · r reconnect · Esc close ",
-                (false, false) => " ↑↓ choose · Enter detail · Esc close ",
-            },
-            max_scroll: None,
-        },
+        None => {
+            let (lines, shown) = listing(app, servers, view.at, (width, rows), theme);
+            Drawn {
+                title: TITLE.to_owned(),
+                lines,
+                keys: match (servers.is_empty(), reconnects) {
+                    (true, _) => " Esc close ",
+                    (false, true) => " ↑↓ choose · Enter detail · r reconnect · Esc close ",
+                    (false, false) => " ↑↓ choose · Enter detail · Esc close ",
+                },
+                max_scroll: None,
+                shown,
+            }
+        }
     }
 }
 
-/// The list: a row a server, in the backend's order, then where a change to
-/// one is made.
+/// The list: a row a server, in the backend's order, a blank line over them,
+/// then where a change to one is made; and which of the servers have a row.
 fn listing(
     app: &App,
     servers: &[McpServer],
     at: usize,
     (width, rows): (usize, usize),
     theme: &Theme,
-) -> Vec<Line<'static>> {
+) -> (Vec<Line<'static>>, std::ops::Range<usize>) {
     let dim = Style::new().fg(theme.dialog_dim);
     let mut lines = vec![Line::from("")];
     let elsewhere = elsewhere(app, width);
+    let mut shown = 0..0;
     if servers.is_empty() {
         for said in text::wrap(
             "No MCP server has been reported: the backend lists its servers as a turn \
@@ -234,13 +248,14 @@ fn listing(
             .max(1);
         let at = at.min(servers.len().saturating_sub(1));
         let first = at.saturating_sub(room.saturating_sub(1));
+        shown = first..servers.len().min(first.saturating_add(room));
         for (i, server) in servers.iter().enumerate().skip(first).take(room) {
             lines.push(row(server, &columns, i == at, width, theme));
         }
     }
     lines.push(Line::from(""));
     lines.extend(elsewhere.into_iter().map(|said| Line::styled(said, dim)));
-    lines
+    (lines, shown)
 }
 
 /// Where adding, removing, turning off or signing in to a server is done,
@@ -598,7 +613,7 @@ mod tests {
 
     fn listed(servers: &[McpServer], at: usize, rows: usize) -> Vec<String> {
         let app = App::new(crate::app::Repo::default());
-        said(&listing(&app, servers, at, (60, rows), &Theme::default()))
+        said(&listing(&app, servers, at, (60, rows), &Theme::default()).0)
     }
 
     #[test]

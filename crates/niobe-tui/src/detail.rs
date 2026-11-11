@@ -457,6 +457,10 @@ pub(crate) fn draw(frame: &mut Frame, body: Rect, app: &mut App, theme: &Theme) 
     let inner = crate::ui::dialog(frame, body, (width, lines.len()), (&title, footer), theme);
     frame.render_widget(Paragraph::new(lines), inner);
     app.measured_detail(text_width, room);
+    app.drew_dialog(Some(crate::app::DialogDrawn::plain(
+        crate::app::Overlay::Detail,
+        inner,
+    )));
 }
 
 impl Detail {

@@ -291,7 +291,7 @@ pub(crate) fn draw(frame: &mut Frame, body: Rect, app: &mut App, theme: &Theme) 
     let rows = usize::from(body.height).saturating_sub(4);
     let text_width = usize::from(width).saturating_sub(crate::ui::DIALOG_INSET);
     let mut measured = None;
-    let (title, lines, keys) = match &view.reading {
+    let (title, (lines, shown), keys) = match &view.reading {
         Some((at, page)) => {
             let file = view.files.as_ref().and_then(|files| files.get(*at));
             let title = file.map_or_else(
@@ -302,7 +302,7 @@ pub(crate) fn draw(frame: &mut Frame, body: Rect, app: &mut App, theme: &Theme) 
             measured = Some((text_width, room));
             (
                 title,
-                reading(page, (text_width, room), theme),
+                (reading(page, (text_width, room), theme), 0..0),
                 " ↑↓ PgUp PgDn scroll · e edit · Esc back ",
             )
         }
@@ -324,20 +324,27 @@ pub(crate) fn draw(frame: &mut Frame, body: Rect, app: &mut App, theme: &Theme) 
     if let Some((width, room)) = measured {
         app.measured_memory(width, room);
     }
+    app.drew_dialog(Some(crate::app::DialogDrawn::listing(
+        crate::app::Overlay::Memory,
+        inner,
+        1,
+        shown,
+    )));
 }
 
-/// The list: a row a file, in the order the agent is given them.
+/// The list: a row a file, in the order the agent is given them, a blank
+/// line over them; and which of the files have a row.
 fn listing(
     app: &App,
     view: &View,
     (width, rows): (usize, usize),
     theme: &Theme,
-) -> Vec<Line<'static>> {
+) -> (Vec<Line<'static>>, std::ops::Range<usize>) {
     let dim = Style::new().fg(theme.dialog_dim);
     let mut lines = vec![Line::from("")];
     let Some(files) = view.files.as_ref() else {
         lines.push(Line::styled("reading…", dim));
-        return lines;
+        return (lines, 0..0);
     };
     if files.is_empty() {
         lines.push(Line::styled(
@@ -356,14 +363,15 @@ fn listing(
                 dim,
             ));
         }
-        return lines;
+        return (lines, 0..0);
     }
     let room = rows.saturating_sub(2).max(1);
     let first = view.at.saturating_sub(room.saturating_sub(1));
+    let shown = first..files.len().min(first.saturating_add(room));
     for (i, file) in files.iter().enumerate().skip(first).take(room) {
         lines.push(row(app, file, i == view.at, width, theme));
     }
-    lines
+    (lines, shown)
 }
 
 /// One file's row: where it comes from, where it is, what the backend's index
@@ -572,6 +580,7 @@ mod tests {
         view.on_key(key(KeyCode::End));
         let app = App::new(crate::app::Repo::default());
         let drawn: Vec<String> = listing(&app, &view, (60, 6), &Theme::default())
+            .0
             .iter()
             .map(Line::to_string)
             .collect();

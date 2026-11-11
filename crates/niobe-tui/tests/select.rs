@@ -364,23 +364,31 @@ fn a_link_written_with_an_escape_that_fills_its_row_opens_without_the_word_on_th
 fn a_click_or_a_drag_over_an_open_dialog_reaches_nothing_under_it() {
     use niobe_tui::menu::Action;
 
+    // Opened and drawn, as the shell draws a frame before the next mouse
+    // report: a click outside a dialog closes it, and a click inside does
+    // what the dialog says, so each gesture gets a dialog of its own.
+    let opened = |open: Action| {
+        let mut app = replied("The docs are at https://example.com/docs/select. Read them.");
+        let frame = screen(&mut app, WIDTH, HEIGHT);
+        let link = cell_of(&frame, "example.com");
+        app.perform(open);
+        screen(&mut app, WIDTH, HEIGHT);
+        (app, link)
+    };
     for (name, open) in [
         ("history", Action::History),
         ("theme", Action::Theme),
         ("search", Action::Find),
     ] {
-        let mut app = replied("The docs are at https://example.com/docs/select. Read them.");
-        let frame = screen(&mut app, WIDTH, HEIGHT);
-        let (column, row) = cell_of(&frame, "example.com");
-        app.perform(open);
+        let (mut app, (column, row)) = opened(open);
         assert!(
             app.picking().is_some() || app.finding().is_some() || app.browser().is_some(),
             "{name} did not open"
         );
-
         click(&mut app, (column + 3, row));
         assert_eq!(app.take_handoffs(), vec![], "{name}: a click opened it");
 
+        let (mut app, (column, row)) = opened(open);
         drag(&mut app, (column, row), (column + 9, row));
         assert_eq!(app.take_handoffs(), vec![], "{name}: a drag copied it");
     }

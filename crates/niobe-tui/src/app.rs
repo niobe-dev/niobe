@@ -454,7 +454,7 @@ impl Answer {
 /// Something the operator opened over the session that takes the keyboard
 /// from the composer, and from a question waiting under it, until it closes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Overlay {
+pub(crate) enum Overlay {
     /// A menu from the bar.
     Menu,
     /// A sheet: the shortcuts, the settings, the permissions and the like.
@@ -474,6 +474,21 @@ enum Overlay {
 }
 
 impl Overlay {
+    /// Whether it is drawn as a dialog over the body, which a click inside
+    /// keeps open and one outside closes: a menu hangs from the bar and has
+    /// clicks of its own, and the search is on the bar.
+    fn is_dialog(self) -> bool {
+        match self {
+            Overlay::Menu | Overlay::Search => false,
+            Overlay::Sheet
+            | Overlay::Memory
+            | Overlay::Mcp
+            | Overlay::History
+            | Overlay::List
+            | Overlay::Detail => true,
+        }
+    }
+
     /// Every overlay there is.
     #[cfg(test)]
     const ALL: [Overlay; 8] = [
@@ -499,6 +514,68 @@ pub enum AskFocus {
     /// turn stays waiting on it, and the keyboard is the shell's until Esc
     /// brings the operator back.
     Deferred,
+}
+
+/// Where the last frame drew the dialog that is open, so that a click lands on
+/// what the operator sees there: its frame, border included, and the rows of
+/// the list in it, the first of them the item at `first`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DialogDrawn {
+    overlay: Overlay,
+    frame: ratatui::layout::Rect,
+    rows: ratatui::layout::Rect,
+    first: usize,
+}
+
+impl DialogDrawn {
+    /// `overlay` drawn as a dialog whose contents are in `inner`, the area
+    /// [`crate::ui::dialog`] returned, with no row a click picks.
+    pub(crate) fn plain(overlay: Overlay, inner: ratatui::layout::Rect) -> Self {
+        Self::listing(overlay, inner, 0, 0..0)
+    }
+
+    /// `overlay` drawn as a dialog whose contents are in `inner`, the items
+    /// `shown` of its list on consecutive rows from `offset` lines down. Rows
+    /// the dialog cut off at its bottom are not among them.
+    pub(crate) fn listing(
+        overlay: Overlay,
+        inner: ratatui::layout::Rect,
+        offset: usize,
+        shown: std::ops::Range<usize>,
+    ) -> Self {
+        use ratatui::layout::Rect;
+
+        // The border and the two columns of padding on each side, and the
+        // border above and below.
+        let side = u16::try_from(crate::ui::DIALOG_INSET / 2).unwrap_or(u16::MAX);
+        let frame = Rect::new(
+            inner.x.saturating_sub(side),
+            inner.y.saturating_sub(1),
+            inner.width.saturating_add(side.saturating_mul(2)),
+            inner.height.saturating_add(2),
+        );
+        let top = inner
+            .y
+            .saturating_add(u16::try_from(offset).unwrap_or(u16::MAX))
+            .min(inner.bottom());
+        let height = u16::try_from(shown.len())
+            .unwrap_or(u16::MAX)
+            .min(inner.bottom() - top);
+        Self {
+            overlay,
+            frame,
+            rows: Rect::new(inner.x, top, inner.width, height),
+            first: shown.start,
+        }
+    }
+
+    /// The item of the list drawn at `point`, if a row of it is there.
+    fn row_at(&self, point: ratatui::layout::Position) -> Option<usize> {
+        self.rows.contains(point).then(|| {
+            self.first
+                .saturating_add(usize::from(point.y - self.rows.y))
+        })
+    }
 }
 
 /// A list the operator is choosing one of: what it is for, what it offers and
@@ -1627,6 +1704,8 @@ pub struct App {
     /// Where the last frame drew the open menu's list, border included, so a
     /// click can tell which item it landed on.
     menu_list: Option<ratatui::layout::Rect>,
+    /// Where the last frame drew the dialog that is open, and its list.
+    dialog_drawn: Option<DialogDrawn>,
     /// Where the last frame drew the menu bar and the F-key bar.
     bars: Option<(ratatui::layout::Rect, ratatui::layout::Rect)>,
     /// What the shell is saying at more length than a hint, while it is up.
@@ -2274,6 +2353,7 @@ impl App {
             picking: None,
             menu: None,
             menu_list: None,
+            dialog_drawn: None,
             bars: None,
             sheet: None,
             memory: None,
@@ -5442,6 +5522,12 @@ impl App {
         self.menu_list = at;
     }
 
+    /// Where the last frame drew the dialog that is open, and the rows of
+    /// its list; `None` as a frame starts, and where none was drawn.
+    pub(crate) fn drew_dialog(&mut self, drawn: Option<DialogDrawn>) {
+        self.dialog_drawn = drawn;
+    }
+
     /// Told by the draw how far the open sheet can scroll, so a key past its
     /// end does not leave a scroll the next key has to undo first.
     pub(crate) fn measured_sheet(&mut self, max_scroll: usize) {
@@ -6292,8 +6378,9 @@ impl App {
         }
     }
 
-    /// A left click on the menus, the F-key bar or an open sheet. Returns
-    /// whether the click was theirs.
+    /// A left click on the menus, the F-key bar or an open dialog. Returns
+    /// whether the click was theirs; a dialog's are said at
+    /// [`App::on_dialog_click`].
     ///
     /// With a menu open every click is: one on an item runs it, one on a
     /// menu's name opens that menu or closes this one, and one anywhere else
@@ -6327,15 +6414,7 @@ impl App {
             };
             return true;
         }
-        if self.sheet.is_some()
-            || self.memory.is_some()
-            || self.mcp.is_some()
-            || self.detail.is_some()
-        {
-            self.sheet = None;
-            self.memory = None;
-            self.mcp = None;
-            self.detail = None;
+        if self.on_dialog_click(point) {
             return true;
         }
         if on_menu_bar {
@@ -6357,6 +6436,76 @@ impl App {
             return true;
         }
         false
+    }
+
+    /// A click while a dialog is open: on a row of its list, the cursor goes
+    /// to that row, and on the row the cursor is already on, it is chosen as
+    /// Enter would choose it — so a double click chooses, and a single one
+    /// never opens a session in place of this one by surprise. Anywhere else
+    /// in the dialog it does nothing, and outside it the dialog closes, as Esc
+    /// closes it. Returns whether a dialog took the click.
+    fn on_dialog_click(&mut self, point: ratatui::layout::Position) -> bool {
+        let Some(overlay) = self.overlay().filter(|overlay| overlay.is_dialog()) else {
+            return false;
+        };
+        let inside = self
+            .dialog_drawn
+            .filter(|drawn| drawn.overlay == overlay && drawn.frame.contains(point));
+        match inside {
+            Some(drawn) => {
+                if let Some(row) = drawn.row_at(point) {
+                    self.click_row(overlay, row);
+                }
+            }
+            None => self.close_dialog(overlay),
+        }
+        true
+    }
+
+    /// A click on `row` of `overlay`'s list: the keys that move its cursor
+    /// there, or Enter where it is there already, so the list's own rules —
+    /// the last row, a list that changed since it was drawn — hold for the
+    /// mouse as they do for the keys.
+    fn click_row(&mut self, overlay: Overlay, row: usize) {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use std::cmp::Ordering;
+
+        let Some(at) = self.cursor_of(overlay) else {
+            return;
+        };
+        let (code, presses) = match row.cmp(&at) {
+            Ordering::Equal => (KeyCode::Enter, 1),
+            Ordering::Less => (KeyCode::Up, at - row),
+            Ordering::Greater => (KeyCode::Down, row - at),
+        };
+        for _ in 0..presses {
+            self.key_over(overlay, KeyEvent::new(code, KeyModifiers::NONE));
+        }
+    }
+
+    /// The row the cursor of `overlay`'s list is on, where it has one.
+    fn cursor_of(&self, overlay: Overlay) -> Option<usize> {
+        match overlay {
+            Overlay::List => self.picking.as_ref().map(|picker| picker.at),
+            Overlay::History => self.browser.as_ref().map(|browser| browser.at),
+            Overlay::Memory => self.memory.as_ref().map(|view| view.at),
+            Overlay::Mcp => self.mcp.as_ref().map(|view| view.at),
+            Overlay::Menu | Overlay::Sheet | Overlay::Search | Overlay::Detail => None,
+        }
+    }
+
+    /// Closes `overlay`, as Esc closes it from where it opened.
+    fn close_dialog(&mut self, overlay: Overlay) {
+        match overlay {
+            Overlay::Menu => self.menu = None,
+            Overlay::Sheet => self.sheet = None,
+            Overlay::Memory => self.memory = None,
+            Overlay::Mcp => self.mcp = None,
+            Overlay::Detail => self.detail = None,
+            Overlay::History => self.browser = None,
+            Overlay::List => self.picking = None,
+            Overlay::Search => self.find = None,
+        }
     }
 
     /// Whether something the operator opened over the session takes the
@@ -8344,7 +8493,8 @@ impl App {
     /// to the pane under the pointer, the wheel then scrolls it, and a click on
     /// the way back down returns the transcript to its newest line. With a
     /// dialog or a menu open, the wheel is that dialog's, and moves nothing
-    /// under it.
+    /// under it; a click on a row of a dialog's list moves its cursor there,
+    /// a second chooses it, and a click outside the dialog closes it.
     ///
     /// Over the transcript, a drag selects what it covers and letting go
     /// copies it, and a click that does not drag opens the link under it: a
@@ -8444,27 +8594,34 @@ impl App {
         use ratatui::crossterm::event::{KeyEvent, KeyModifiers};
 
         let arrow = KeyEvent::new(notch, KeyModifiers::NONE);
-        match overlay {
+        let presses = match overlay {
             Overlay::Search => return false,
-            Overlay::Menu => {}
-            Overlay::Sheet => {
-                for _ in 0..Self::WHEEL_LINES {
-                    self.on_sheet_key(arrow);
-                }
-            }
-            Overlay::Detail => {
-                if let Some(detail) = self.detail.as_mut() {
-                    for _ in 0..Self::WHEEL_LINES {
-                        let _ = detail.on_key(arrow);
-                    }
-                }
-            }
-            Overlay::Memory => self.on_memory_key(arrow),
-            Overlay::Mcp => self.on_mcp_key(arrow),
-            Overlay::History => self.on_browser_key(arrow),
-            Overlay::List => self.on_pick_key(arrow),
+            Overlay::Menu => 0,
+            Overlay::Sheet | Overlay::Detail => Self::WHEEL_LINES,
+            Overlay::Memory | Overlay::Mcp | Overlay::History | Overlay::List => 1,
+        };
+        for _ in 0..presses {
+            self.key_over(overlay, arrow);
         }
         true
+    }
+
+    /// `key` handed to `overlay` as its own keys are, for the mouse: a notch
+    /// of the wheel or a click on a row of its list.
+    fn key_over(&mut self, overlay: Overlay, key: ratatui::crossterm::event::KeyEvent) {
+        match overlay {
+            Overlay::Search | Overlay::Menu => {}
+            Overlay::Sheet => self.on_sheet_key(key),
+            Overlay::Detail => {
+                if let Some(detail) = self.detail.as_mut() {
+                    let _ = detail.on_key(key);
+                }
+            }
+            Overlay::Memory => self.on_memory_key(key),
+            Overlay::Mcp => self.on_mcp_key(key),
+            Overlay::History => self.on_browser_key(key),
+            Overlay::List => self.on_pick_key(key),
+        }
     }
 
     /// The transcript cell at a place on the screen, or `None` where the
@@ -20172,6 +20329,159 @@ mod tests {
         assert_eq!(app.trust_answer(), Some(crate::trust::Answer::Trust));
         assert!(app.trusting().is_none());
         assert!(app.should_quit());
+    }
+
+    /// `app` drawn on a 90×30 terminal, as the operator sees it.
+    fn screen_of(app: &mut App) -> ratatui::buffer::Buffer {
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(90, 30))
+            .expect("a test backend never fails to start");
+        terminal
+            .draw(|frame| crate::ui::draw(frame, app))
+            .expect("a test backend never fails to draw");
+        terminal.backend().buffer().clone()
+    }
+
+    /// The cell `said` starts at on `screen`, the lowest row it is on first:
+    /// a dialog is drawn over the session, whose bars may say it too.
+    fn spot(screen: &ratatui::buffer::Buffer, said: &str) -> (u16, u16) {
+        (0..screen.area.height)
+            .rev()
+            .find_map(|y| {
+                let line: String = (0..screen.area.width)
+                    .map(|x| screen[(x, y)].symbol())
+                    .collect();
+                let at = line.find(said)?;
+                let column = u16::try_from(crate::text::width(&line[..at])).ok()?;
+                Some((column, y))
+            })
+            .unwrap_or_else(|| panic!("{said:?} is drawn"))
+    }
+
+    /// A click on a row of a list moves the cursor to it, and a click on the
+    /// row the cursor is on chooses it, as Enter would: the mouse picks a
+    /// theme as the keys do, and a stray click never switches one.
+    #[test]
+    fn a_click_on_a_listed_theme_puts_the_cursor_on_it_and_a_second_chooses_it() {
+        let mut app = app();
+        app.perform(crate::menu::Action::Theme);
+        let screen = screen_of(&mut app);
+        let (column, row) = spot(&screen, "classic");
+        assert_ne!(app.theme().name, "CLASSIC");
+
+        app.on_mouse(click_at(column, row));
+        assert_eq!(
+            app.picking()
+                .map(|picker| picker.options[picker.at].value.as_str()),
+            Some("CLASSIC")
+        );
+        assert_ne!(
+            app.theme().name,
+            "CLASSIC",
+            "one click only moves the cursor"
+        );
+
+        screen_of(&mut app);
+        app.on_mouse(click_at(column, row));
+        assert_eq!(app.theme().name, "CLASSIC");
+        assert!(app.picking().is_none());
+        assert_eq!(
+            app.take_preferences(),
+            vec![Preference::Theme("CLASSIC".to_owned())]
+        );
+    }
+
+    /// A click inside a dialog that lands on none of its rows leaves it as
+    /// it was, and one outside it closes it, as Esc does.
+    #[test]
+    fn a_click_off_the_rows_leaves_a_list_open_and_one_outside_it_closes_it() {
+        let mut app = app();
+        app.perform(crate::menu::Action::Theme);
+        let screen = screen_of(&mut app);
+        let at = app.picking().map(|picker| picker.at);
+        let (column, row) = spot(&screen, "Enter switch");
+
+        app.on_mouse(click_at(column, row));
+        assert_eq!(app.picking().map(|picker| picker.at), at);
+
+        screen_of(&mut app);
+        app.on_mouse(click_at(1, 3));
+        assert!(app.picking().is_none());
+        assert!(!app.should_quit());
+    }
+
+    /// A list longer than its dialog shows the rows around the cursor, and a
+    /// click lands on the one drawn where it clicked, not on the one that
+    /// row would hold had the list not scrolled.
+    #[test]
+    fn a_click_on_a_scrolled_list_lands_on_the_row_drawn_there() {
+        let mut app = app();
+        app.picking = Some(Picker {
+            purpose: Purpose::Effort,
+            options: (0..60)
+                .map(|n| Choice::plain(format!("level-{n:02}")))
+                .collect(),
+            at: 59,
+            more: 0,
+        });
+        let screen = screen_of(&mut app);
+        let (column, row) = spot(&screen, "level-50");
+
+        app.on_mouse(click_at(column, row));
+
+        assert_eq!(app.picking().map(|picker| picker.at), Some(50));
+    }
+
+    /// A sheet keeps a click inside it, and closes on one outside it.
+    #[test]
+    fn a_click_inside_a_sheet_keeps_it_and_one_outside_closes_it() {
+        let mut app = app();
+        app.perform(crate::menu::Action::About);
+        screen_of(&mut app);
+        assert!(app.sheet().is_some());
+        let frame = app.dialog_drawn.expect("the sheet was drawn").frame;
+        let (column, row) = (frame.x + frame.width / 2, frame.y + frame.height / 2);
+
+        app.on_mouse(click_at(column, row));
+        assert!(app.sheet().is_some(), "a click inside keeps it");
+
+        screen_of(&mut app);
+        app.on_mouse(click_at(1, 3));
+        assert!(app.sheet().is_none(), "a click outside closes it");
+    }
+
+    /// The history dialog's rows answer the mouse as a list's do.
+    #[test]
+    fn a_click_on_a_remembered_prompt_puts_the_cursor_on_it_and_a_second_puts_it_in_the_prompt() {
+        let mut app = remembering(&[("newer words", "3"), ("older words", "3")], &["3"]);
+        app.on_key(ctrl('r'));
+        let screen = screen_of(&mut app);
+        let (column, row) = spot(&screen, "older words");
+
+        app.on_mouse(click_at(column, row));
+        assert_eq!(app.browser().map(|browser| browser.at), Some(1));
+
+        screen_of(&mut app);
+        app.on_mouse(click_at(column, row));
+        assert!(app.browser().is_none());
+        assert_eq!(app.composed(), "older words");
+    }
+
+    /// A click inside the Memory view's frame no longer closes it; one on a
+    /// file's row puts the cursor there.
+    #[test]
+    fn a_click_inside_the_memory_view_moves_its_cursor_and_does_not_close_it() {
+        let mut app = app().attached();
+        app.on_key(key(KeyCode::F(8)));
+        app.set_memory(vec![
+            remembered("CLAUDE.md", crate::memory::Scope::Project, 0),
+            remembered("NOTES.md", crate::memory::Scope::Project, 0),
+        ]);
+        let screen = screen_of(&mut app);
+        let (column, row) = spot(&screen, "NOTES.md");
+
+        app.on_mouse(click_at(column, row));
+
+        assert_eq!(app.memory().map(|view| view.at), Some(1));
     }
 
     #[test]

@@ -151,7 +151,9 @@ reviewers that encode both, for an agent working in this tree.
   `at` in the milliseconds the store dates an event by.
 - **`crates/niobe-tui/`** — the terminal UI (ratatui). `app.rs` is the state the shell draws from,
   including which pane has the keyboard — the one the scroll keys, the wheel and a section cursor
-  go to — and each transcript entry's attention, the highest of the events that built it, `ui.rs`
+  go to — where the last frame drew the dialog that is open and its list's rows, so a click on a
+  row moves the cursor there, a click on the cursor's row chooses it as Enter does and a click
+  outside closes the dialog, and each transcript entry's attention, the highest of the events that built it, `ui.rs`
   draws it, leaving the routine entries out where `n` is pressed in a side pane, each run of them
   a row that counts them, its Activity pane listing the decisions the agent's replies stated,
   newest first under a heading that says they are its own account, a sub-agent's named by its

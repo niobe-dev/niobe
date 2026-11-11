@@ -48,19 +48,22 @@ const SESSION_COLUMNS: usize = 15;
 const FILTER_EMPTY: &str = "type to filter";
 
 /// Draws the history dialog over `body`, if it is open.
-pub(crate) fn draw(frame: &mut Frame, body: Rect, app: &App, theme: &Theme) {
-    let Some(browser) = app.browser() else {
-        return;
-    };
+pub(crate) fn draw(
+    frame: &mut Frame,
+    body: Rect,
+    app: &App,
+    theme: &Theme,
+) -> Option<crate::app::DialogDrawn> {
+    let browser = app.browser()?;
     let width = COLUMNS.min(body.width.saturating_sub(crate::ui::DIALOG_MARGIN * 2));
     if width < MIN_COLUMNS {
-        return;
+        return None;
     }
     // A row each for the border and the shadow, and one of room, which the
     // dialog keeps inside the body.
     let rows = usize::from(body.height).saturating_sub(4);
     let text_width = usize::from(width).saturating_sub(crate::ui::DIALOG_INSET);
-    let lines = match browser.view {
+    let (lines, shown) = match browser.view {
         View::Prompts => prompts(app, browser, (text_width, rows), theme),
         View::Sessions => sessions(app, browser, (text_width, rows), theme),
     };
@@ -75,15 +78,21 @@ pub(crate) fn draw(frame: &mut Frame, body: Rect, app: &App, theme: &Theme) {
     };
     let inner = crate::ui::dialog(frame, body, (width, rows), ("History", &footer), theme);
     frame.render_widget(Paragraph::new(lines), inner);
+    Some(crate::app::DialogDrawn::listing(
+        crate::app::Overlay::History,
+        inner,
+        HEAD_ROWS,
+        shown,
+    ))
 }
 
-/// The dialog on its prompts.
+/// The dialog on its prompts, and which of them have a row under the head.
 fn prompts(
     app: &App,
     browser: &Browser,
     (width, rows): (usize, usize),
     theme: &Theme,
-) -> Vec<Line<'static>> {
+) -> (Vec<Line<'static>>, std::ops::Range<usize>) {
     let listed = app.prompt_rows();
     let mut lines = head(browser, listed.len(), width, theme);
     let (list_rows, detail_rows) = split(rows);
@@ -115,16 +124,16 @@ fn prompts(
             theme,
         ));
     }
-    lines
+    (lines, shown_of(listed.len(), browser.at, list_rows))
 }
 
-/// The dialog on its sessions.
+/// The dialog on its sessions, and which of them have a row under the head.
 fn sessions(
     app: &App,
     browser: &Browser,
     (width, rows): (usize, usize),
     theme: &Theme,
-) -> Vec<Line<'static>> {
+) -> (Vec<Line<'static>>, std::ops::Range<usize>) {
     let listed = app.session_rows();
     let mut lines = head(browser, listed.len(), width, theme);
     let (list_rows, detail_rows) = split(rows);
@@ -160,7 +169,7 @@ fn sessions(
     if let Some(row) = listed.get(browser.at) {
         lines.extend(session_detail(row, width, detail_rows, theme));
     }
-    lines
+    (lines, shown_of(listed.len(), browser.at, list_rows))
 }
 
 /// The views, the one shown marked, how many rows the filter keeps, and the
@@ -212,8 +221,18 @@ fn split(rows: usize) -> (usize, usize) {
 /// The rows of `listed` that fit in `room`, with the one at `at` among them,
 /// each with its place in the whole list.
 fn window<T>(listed: &Listed<T>, at: usize, room: usize) -> impl Iterator<Item = (usize, &T)> {
+    let shown = shown_of(listed.len(), at, room);
+    listed
+        .iter()
+        .enumerate()
+        .skip(shown.start)
+        .take(shown.len())
+}
+
+/// Which of `len` rows fit in `room` with the one at `at` among them.
+fn shown_of(len: usize, at: usize, room: usize) -> std::ops::Range<usize> {
     let first = at.saturating_sub(room.saturating_sub(1));
-    listed.iter().enumerate().skip(first).take(room)
+    first..len.min(first.saturating_add(room))
 }
 
 /// The rows shown, or where there are none, why: still being read, or
@@ -468,7 +487,7 @@ mod tests {
             query: String::new(),
             at,
         };
-        said(&sessions(app, &browser, (60, rows), &Theme::default()))
+        said(&sessions(app, &browser, (60, rows), &Theme::default()).0)
     }
 
     /// The session open now is always listed, so a list of it alone has no

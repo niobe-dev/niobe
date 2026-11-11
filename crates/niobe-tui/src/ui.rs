@@ -36,8 +36,8 @@ use niobe_core::event::{
 use niobe_core::session::{SessionState, ToolTotals, Totals, WorkTotals};
 
 use crate::app::{
-    Activity, Answer, App, Ask, AskFocus, Change, Entry, EntryKind, Focus, Pane, Picker,
-    PlanWindows, Purpose, Section, SelectedProfile, SubAgent, tool_label,
+    Activity, Answer, App, Ask, AskFocus, Change, DialogDrawn, Entry, EntryKind, Focus, Overlay,
+    Pane, Picker, PlanWindows, Purpose, Section, SelectedProfile, SubAgent, tool_label,
 };
 use crate::calls::Detail;
 use crate::clock::{self, Stamp};
@@ -147,6 +147,7 @@ fn strip_direction_marks(buffer: &mut ratatui::buffer::Buffer) {
 fn draw_frame(frame: &mut Frame, app: &mut App) {
     let theme = *app.theme();
     let area = frame.area();
+    app.drew_dialog(None);
 
     let too_small = area.width < MIN_SIZE.0 || area.height < MIN_SIZE.1;
     app.drew_too_small(too_small);
@@ -175,8 +176,11 @@ fn draw_frame(frame: &mut Frame, app: &mut App) {
     // Last, and over the body: the list is something the operator opened, and
     // nothing drawn afterwards may cover it. A permission prompt is not drawn
     // here — it is in the transcript, under the work that led to it.
+    // Each dialog says where it was drawn, so a click lands on what is
+    // there; the one drawn last is on top.
     if let Some(picker) = app.picking() {
-        draw_pick(frame, body, picker, app.picked(), &theme);
+        let drawn = draw_pick(frame, body, picker, app.picked(), &theme);
+        app.drew_dialog(drawn);
     }
     if app.sheet().is_some() {
         draw_sheet(frame, body, app, &theme);
@@ -184,7 +188,9 @@ fn draw_frame(frame: &mut Frame, app: &mut App) {
     crate::memory::draw(frame, body, app, &theme);
     crate::mcp::draw(frame, body, app, &theme);
     crate::detail::draw(frame, body, app, &theme);
-    crate::browse::draw(frame, body, app, &theme);
+    if let Some(drawn) = crate::browse::draw(frame, body, app, &theme) {
+        app.drew_dialog(Some(drawn));
+    }
     // The open menu hangs from the bar over everything, a list included: it
     // was opened last.
     let list = app
@@ -248,7 +254,7 @@ fn draw_pick(
     picker: &Picker,
     current: Option<usize>,
     theme: &Theme,
-) {
+) -> Option<DialogDrawn> {
     let described = picker
         .options
         .iter()
@@ -259,7 +265,7 @@ fn draw_pick(
     };
     let width = widest.min(body.width.saturating_sub(DIALOG_MARGIN * 2));
     if width < 20 {
-        return;
+        return None;
     }
 
     let (title, footer, keys) = pick_words(picker.purpose);
@@ -300,6 +306,7 @@ fn draw_pick(
         .saturating_sub(1 + tail.len())
         .max(1);
     let first = picker.at.saturating_sub(rows - 1);
+    let shown = first..picker.options.len().min(first.saturating_add(rows));
     let mut lines: Vec<Line> = vec![Line::from("")];
     for (i, choice) in picker.options.iter().enumerate().skip(first).take(rows) {
         let on_it = i == picker.at;
@@ -327,6 +334,7 @@ fn draw_pick(
 
     let inner = dialog(frame, body, (width, lines.len()), (title, footer), theme);
     frame.render_widget(Paragraph::new(lines), inner);
+    Some(DialogDrawn::listing(Overlay::List, inner, 1, shown))
 }
 
 /// How wide a described list's name and id columns are: as wide as the widest
@@ -433,6 +441,7 @@ fn draw_sheet(frame: &mut Frame, body: Rect, app: &mut App, theme: &Theme) {
     let inner = dialog(frame, body, (width, lines.len()), (&title, footer), theme);
     frame.render_widget(Paragraph::new(lines), inner);
     app.measured_sheet(max_scroll);
+    app.drew_dialog(Some(DialogDrawn::plain(Overlay::Sheet, inner)));
 }
 
 /// The open menu's list, hung from its name on the bar and cast on what is
