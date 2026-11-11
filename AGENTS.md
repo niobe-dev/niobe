@@ -126,6 +126,9 @@ reviewers that encode both, for an agent working in this tree.
   write or a crash leaves the old file rather than half of the new one; `read.rs` is how every
   config file is read — without waiting on a FIFO, only if it is a regular file and only up to a
   mebibyte — because a repository can commit its config as a link to `/dev/zero`;
+  `preferences.rs` is the theme, and each profile's model and effort, last picked in the shell,
+  kept in `choices.toml` beside the user's config — a file of Niobe's own, rewritten whole under
+  the lock a rule is written under, and read as nothing chosen where it cannot be read;
   `trust.rs` records which config files may put an `env`, `args`, a `settings` file or an
   `auth_refresh` in front of a backend — or say how a profile is billed, choose the default
   profile, allow tool calls without asking, or replace one of the user's — as each file's SHA-256 under the user's own config
@@ -153,7 +156,8 @@ reviewers that encode both, for an agent working in this tree.
   a row that counts them, its Activity pane listing the decisions the agent's replies stated,
   newest first under a heading that says they are its own account, a sub-agent's named by its
   tag, and counting tool calls by kind of work with what did each under it, and by the tools' own names where `t` is pressed in that pane, `run.rs` is the event loop, `journal.rs` is the trait the loop hands the
-  operator's events to and `rules.rs` the one it hands their standing answers to, `bridge.rs`
+  operator's events to and `rules.rs` the one it hands their standing answers to, `preferences.rs`
+  the one it hands the theme, model and effort they pick to, kept for the next session, `bridge.rs`
   the one it sends turns to and takes events from, `watch.rs` the one it asks what the
   repository looks like now, and `prices.rs` the one it asks to value the tokens no reported
   cost covers yet, which it shows marked as an estimate, `terminal.rs`
@@ -409,6 +413,10 @@ reviewers that encode both, for an agent working in this tree.
   file — and
   the `git` reads of the working tree made on a thread of its own as the shell's `Watch`,
   each dated by when it began and, where the shell asked for it, sent though nothing changed;
+  `preferences.rs` keeps the shell's picks in the user's `choices.toml`, under the session's
+  profile, and reads them back so that a new shell opens on the theme last picked — over the
+  config's, under `--theme` — and starts its backend with the model and effort last picked under
+  its profile, over the profile's own flags;
   `rules.rs` writes a standing answer into the repository's `.niobe/config.toml`, keeping the
   operator's trust decision about that file; `prices.rs` is the price table `niobe prices`
   prints and the sheet the shell values tokens with, at the rates of the days a session

@@ -257,7 +257,8 @@ pub struct Options {
     pub env: BTreeMap<String, String>,
     /// Arguments appended after the ones this bridge passes, so that a profile
     /// can reach a flag Niobe does not model. A `--model` among them is left
-    /// out where [`Options::model`] names one, and a `--permission-mode`
+    /// out where [`Options::model`] names one, an `--effort` where
+    /// [`Options::effort`] does, and a `--permission-mode`
     /// where [`Options::resume`] carries a conversation on in
     /// [`Options::mode`] and [`Options::mode_known`] says that is the mode it
     /// was in: those are the session's, which the profile's would undo.
@@ -269,6 +270,9 @@ pub struct Options {
     pub billing: Option<Billing>,
     /// The model to ask for. `None` leaves the choice to the CLI.
     pub model: Option<String>,
+    /// How hard the model works on a turn, as the CLI's `--effort` takes it.
+    /// `None` leaves the choice to the CLI.
+    pub effort: Option<String>,
     /// How tool calls are gated.
     pub mode: Mode,
     /// Whether [`Options::mode`] is the mode the conversation was last in.
@@ -363,6 +367,7 @@ impl Options {
             profile: profile.into(),
             billing: None,
             model: None,
+            effort: None,
             mode: Mode::Ask,
             mode_known: true,
             budget_usd: None,
@@ -407,6 +412,7 @@ impl Options {
         }
         for (flag, value) in [
             ("--model", &self.model),
+            ("--effort", &self.effort),
             ("--resume", &self.resume),
             ("--settings", &self.settings),
         ] {
@@ -423,8 +429,9 @@ impl Options {
     /// value for that came from the conversation rather than the profile.
     ///
     /// The CLI takes the last of a flag given twice, so a profile's
-    /// `--model` or `--permission-mode`, coming last, would otherwise undo
-    /// what the operator chose: a model picked in the session, or a mode a
+    /// `--model`, `--effort` or `--permission-mode`, coming last, would
+    /// otherwise undo what the operator chose: a model or an effort picked
+    /// in the shell, or a mode a
     /// conversation carried on was left in — plan undone into a mode that
     /// edits without asking, after the CLI is started again on the
     /// conversation. Where the session holds nothing of its own, or does not
@@ -434,6 +441,9 @@ impl Options {
         let mut overridden = Vec::new();
         if self.model.is_some() {
             overridden.push("--model");
+        }
+        if self.effort.is_some() {
+            overridden.push("--effort");
         }
         if self.resume.is_some() && self.mode_known {
             overridden.push("--permission-mode");
@@ -2432,6 +2442,21 @@ mod tests {
         let argv = options.argv();
 
         assert_eq!(taken(&argv, "--model"), Some("haiku"), "{argv:?}");
+        assert_eq!(&argv[argv.len() - 2..], ["--add-dir", "/other"]);
+    }
+
+    #[test]
+    fn an_effort_chosen_is_the_one_the_cli_starts_at_over_the_profiles() {
+        let mut options = options();
+        options.args = ["--effort=low", "--add-dir", "/other"]
+            .map(str::to_owned)
+            .to_vec();
+        assert_eq!(taken(&options.argv(), "--effort"), Some("low"));
+
+        options.effort = Some("xhigh".to_owned());
+        let argv = options.argv();
+
+        assert_eq!(taken(&argv, "--effort"), Some("xhigh"), "{argv:?}");
         assert_eq!(&argv[argv.len() - 2..], ["--add-dir", "/other"]);
     }
 

@@ -32,6 +32,7 @@ mod manifest;
 mod memory;
 mod overview;
 mod playback;
+mod preferences;
 mod prices;
 mod printable;
 mod profiles;
@@ -299,32 +300,69 @@ struct Asked {
     notification: Option<niobe_tui::Notification>,
 }
 
-/// The palette a session opens in: what `--theme` asked for, or what the
-/// config names, or the default.
+/// The palette a session opens in: see [`theme_in_force`].
 ///
 /// A name in the config that no theme answers to is reported at its line
-/// rather than falling back: an operator who wrote a theme into their config
-/// and got the usual one would read it as the file not being loaded. View ›
-/// Theme… changes it from here for the rest of the session.
+/// rather than passed over, whatever is in force: an operator who wrote a
+/// theme into their config and got another would read it as the file not
+/// being loaded.
 fn chosen_theme(asked: &Asked, loaded: &config::Loaded) -> Result<Theme, String> {
     if let Some(problem) = themes::problem() {
         return Err(problem.to_owned());
     }
-    if let Some(theme) = asked.theme {
-        return Ok(theme);
-    }
-    let Some(named) = loaded.config.theme() else {
-        return Ok(Theme::default());
+    let configured = match loaded.config.theme() {
+        None => None,
+        Some(named) => Some(Theme::by_name(named.name()).ok_or_else(|| {
+            named
+                .invalid(&format!(
+                    "`{}` is not a theme; expected {}",
+                    named.name(),
+                    theme::listed()
+                ))
+                .to_string()
+        })?),
     };
-    Theme::by_name(named.name()).ok_or_else(|| {
-        named
-            .invalid(&format!(
-                "`{}` is not a theme; expected {}",
-                named.name(),
-                theme::listed()
-            ))
-            .to_string()
-    })
+    Ok(theme_in_force(
+        asked.theme,
+        preferences::saved().theme(),
+        configured,
+    ))
+}
+
+/// What `--theme` asked for; or the theme last chosen in the shell, where a
+/// theme still answers to its name — View › Theme… is the operator saying
+/// what they want now, which the config they wrote before does not undo —
+/// or what the config names; or the default.
+fn theme_in_force(asked: Option<Theme>, saved: Option<&str>, configured: Option<Theme>) -> Theme {
+    asked
+        .or_else(|| saved.and_then(Theme::by_name))
+        .or(configured)
+        .unwrap_or_default()
+}
+
+/// The model and effort last chosen in the shell under `selected`, which a
+/// shell's backend is started with.
+///
+/// An effort that is not one of the levels the shell offers is passed over
+/// rather than handed on: the file is the operator's to edit, and a level
+/// the CLI refuses would stop every session under the profile from starting
+/// until the file was found and fixed. A model is handed on as kept, since
+/// the backend's list of them changes, and one it cannot run is refused in
+/// the session, where picking another replaces it.
+fn saved_choices(
+    saved: &niobe_config::preferences::Saved,
+    selected: Option<&niobe_config::Selected<'_>>,
+) -> (Option<String>, Option<String>) {
+    let Some(selected) = selected else {
+        return (None, None);
+    };
+    let effort = saved
+        .effort(selected.name)
+        .filter(|effort| niobe_tui::app::EFFORTS.contains(effort));
+    (
+        saved.model(selected.name).map(str::to_owned),
+        effort.map(str::to_owned),
+    )
 }
 
 /// Refuses a `--budget` for a session on a profile billed as a plan.
@@ -434,6 +472,7 @@ fn shell(profile: Option<&str>, asked: &Asked, opening: Opening) -> Result<Optio
         selected.as_ref(),
     );
 
+    let (model, effort) = saved_choices(&preferences::saved(), selected.as_ref());
     // Spawned after the terminal check and before the shell takes the screen:
     // a piped run starts no subprocess, and a backend that will not start says
     // why on a screen that is still the operator's.
@@ -447,13 +486,15 @@ fn shell(profile: Option<&str>, asked: &Asked, opening: Opening) -> Result<Optio
             decisions: loaded.config.decisions(),
             tap: tap.clone(),
             trim: trim_for(&root, loaded.config.trim())?,
+            model: model.clone(),
+            effort: effort.clone(),
             ..backend::Attach::default()
         },
         std::env::var_os(niobe_bridge_claude::transcript::CONFIG_DIR_VAR),
         std::env::var_os("HOME"),
     );
     let (mut backend, app) = attached_or_noticed(&loaded, attempt, app)?;
-    let app = say_tap(app, tap.as_deref());
+    let app = say_tap(app, tap.as_deref()).with_effort(effort);
     let app = if backend.attached() {
         app.attached()
     } else {
@@ -479,6 +520,9 @@ fn shell(profile: Option<&str>, asked: &Asked, opening: Opening) -> Result<Optio
             journal: &mut journal,
             backend: backend.bridge(),
             rules: &mut rules,
+            preferences: &mut preferences::ChoicesFile::for_profile(
+                selected.as_ref().map(|selected| selected.name),
+            ),
             watch: &mut watching,
             shell: &mut commands,
             images: &mut images_for(&root),
@@ -732,6 +776,7 @@ fn resume(
     // stopped, and the backend is started that way: a session that came back
     // asking about everything it had been told to stop asking about would have
     // lost a decision the operator made.
+    let (model, effort) = saved_choices(&preferences::saved(), selected.as_ref());
     let attempt = backend::attach(
         &root,
         selected.as_ref(),
@@ -746,13 +791,15 @@ fn resume(
             decisions: false,
             tap: tap.clone(),
             trim: trim_for(&root, loaded.config.trim())?,
+            model: model.clone(),
+            effort: effort.clone(),
             one_turn: false,
         },
         std::env::var_os(niobe_bridge_claude::transcript::CONFIG_DIR_VAR),
         std::env::var_os("HOME"),
     );
     let (mut backend, app) = attached_or_noticed(&loaded, attempt, app)?;
-    let app = say_tap(app, tap.as_deref());
+    let app = say_tap(app, tap.as_deref()).with_effort(effort);
     let app = if backend.attached() {
         app.attached()
     } else {
@@ -773,6 +820,9 @@ fn resume(
             journal: &mut journal,
             backend: backend.bridge(),
             rules: &mut rules,
+            preferences: &mut preferences::ChoicesFile::for_profile(
+                selected.as_ref().map(|selected| selected.name),
+            ),
             watch: &mut watching,
             shell: &mut commands,
             images: &mut images_for(&root),
@@ -960,6 +1010,7 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<Option<
     }
     keys_can_be_read()?;
 
+    let (model, effort) = saved_choices(&preferences::saved(), selected.as_ref());
     let attempt = backend::attach(
         &root,
         selected.as_ref(),
@@ -976,13 +1027,15 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<Option<
             decisions: false,
             tap: tap.clone(),
             trim: trim_for(&root, loaded.config.trim())?,
+            model: model.clone(),
+            effort: effort.clone(),
             one_turn: false,
         },
         std::env::var_os(niobe_bridge_claude::transcript::CONFIG_DIR_VAR),
         std::env::var_os("HOME"),
     );
     let (mut backend, app) = attached_or_noticed(&loaded, attempt, app)?;
-    let mut app = say_tap(app, tap.as_deref());
+    let mut app = say_tap(app, tap.as_deref()).with_effort(effort);
 
     // Recorded only once there is a terminal to continue it on and a backend
     // started to continue it with: a piped run is a look at the transcript,
@@ -1022,6 +1075,9 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<Option<
             journal: &mut journal,
             backend: backend.bridge(),
             rules: &mut rules,
+            preferences: &mut preferences::ChoicesFile::for_profile(
+                selected.as_ref().map(|selected| selected.name),
+            ),
             watch: &mut watching,
             shell: &mut commands,
             images: &mut images_for(&root),
@@ -1932,6 +1988,7 @@ fn replay(log: &Path, speed: Option<playback::Speed>, asked: &Asked) -> Result<(
             journal: &mut Unrecorded,
             backend,
             rules: &mut Forgotten,
+            preferences: &mut niobe_tui::preferences::Unkept,
             watch: &mut Unwatched,
             shell: &mut NoShell,
             images: &mut NoImages::default(),
@@ -2425,11 +2482,18 @@ MODE AND MODEL:
     name it is given and says what it ended up on, which may be spelt
     differently from the way it was asked for.
 
+    The model chosen, and the effort Model › Effort… or /effort <level>
+    picks, are what the next shell under the same profile starts the backend
+    with, over the profile's own --model and --effort. They are kept, with
+    the theme, in choices.toml beside the user's config, which niobe rewrites
+    whole on each choice.
+
 THEME:
     cyber is green and magenta on black, classic is DOS blue, neo is green on
     black and modern is an editor's grey. --theme <name> opens the shell in
     one, theme = \"neo\" at the top of a config makes it the one every session
-    opens in, and View › Theme… picks another while a session runs.
+    opens in, and View › Theme… picks another, which the next session opens
+    in too, over the config's, until another is picked.
 
     classic is drawn in the sixteen colours the terminal names, so your own
     colour scheme is what they mean. cyber, neo and modern are drawn in their
@@ -2516,6 +2580,66 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn a_saved_effort_the_shell_does_not_offer_is_not_handed_to_the_backend() {
+        let config = niobe_config::Config::parse(
+            "[profiles.max]\nbackend = \"claude\"\n",
+            Path::new("/u/config.toml"),
+        )
+        .expect("parses");
+        let selected = config
+            .select(Some("max"))
+            .expect("the profile is defined")
+            .expect("a profile was selected");
+        let saved = |text: &str| niobe_config::preferences::Saved::parse(text);
+
+        assert_eq!(
+            saved_choices(
+                &saved("[profiles.max]\nmodel = \"opus\"\neffort = \"xhigh\"\n"),
+                Some(&selected)
+            ),
+            (Some("opus".to_owned()), Some("xhigh".to_owned()))
+        );
+        assert_eq!(
+            saved_choices(
+                &saved("[profiles.max]\neffort = \"--dangerously\"\n"),
+                Some(&selected)
+            ),
+            (None, None)
+        );
+        assert_eq!(
+            saved_choices(
+                &saved("[profiles.other]\nmodel = \"opus\"\n"),
+                Some(&selected)
+            ),
+            (None, None)
+        );
+        assert_eq!(
+            saved_choices(&saved("[profiles.max]\nmodel = \"opus\"\n"), None),
+            (None, None)
+        );
+    }
+
+    #[test]
+    fn a_theme_asked_for_beats_the_one_last_chosen_which_beats_the_configs() {
+        let theme = |name: &str| Theme::by_name(name).expect("a bundled theme");
+        let (asked, saved, configured) = (theme("neo"), theme("classic"), theme("modern"));
+
+        assert_eq!(
+            theme_in_force(Some(asked), Some(saved.name), Some(configured)).name,
+            asked.name
+        );
+        assert_eq!(
+            theme_in_force(None, Some(saved.name), Some(configured)).name,
+            saved.name
+        );
+        assert_eq!(
+            theme_in_force(None, Some("a theme since deleted"), Some(configured)).name,
+            configured.name
+        );
+        assert_eq!(theme_in_force(None, None, None).name, Theme::default().name);
+    }
 
     /// A standard error that cannot be written to, the way the terminal a
     /// session drew on cannot once it has gone.

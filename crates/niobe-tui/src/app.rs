@@ -35,6 +35,7 @@ use crate::alert::{Alert, Alerts};
 use crate::clock::{Clock, LocalTime, Stamp};
 use crate::history::{Browser, Listed, Newer, PromptRow, Recall, SessionRow, Target, View};
 use crate::images::{Attachments, DraftId, Fetched, Source, image_path};
+use crate::preferences::Preference;
 use crate::prices::Prices;
 use crate::proposed::Proposed;
 use crate::text::{could_be_tag_flag, is_tag, is_tag_flag};
@@ -1604,6 +1605,16 @@ pub struct App {
     allowed: Allowlist,
     /// Rules made here that have not been handed out to be kept.
     learned: Vec<Rule>,
+    /// Choices made here — a theme, a model, an effort — that have not been
+    /// handed out to be kept for the next session.
+    preferred: Vec<Preference>,
+    /// Whether the operator chose a model here, which is what makes the
+    /// backend refusing one a choice not to keep: a refusal read back from a
+    /// record refuses a choice made in another session.
+    model_chosen_here: bool,
+    /// The effort level last chosen here, or the one the backend was started
+    /// with; the backend does not report the level in force.
+    effort: Option<String>,
     /// Events the operator produced that have not been handed out to be kept.
     produced: Vec<Event>,
     /// The images attached to prompts, and the ones asked for.
@@ -2255,6 +2266,9 @@ impl App {
             ask_ticked: BTreeSet::new(),
             allowed: Allowlist::new(),
             learned: Vec::new(),
+            preferred: Vec::new(),
+            model_chosen_here: false,
+            effort: None,
             produced: Vec::new(),
             images: Attachments::default(),
             picking: None,
@@ -2322,6 +2336,14 @@ impl App {
     pub fn apply(&mut self, event: &Event) {
         self.heard = true;
         self.fold_event(event);
+        // A model the backend refused is not what the next session should
+        // open on: it keeps the one the backend went back to, where a change
+        // it took put it there, and otherwise none, leaving the backend's own.
+        if let Event::ModelRefused { back_to } = event
+            && self.model_chosen_here
+        {
+            self.preferred.push(Preference::Model(back_to.clone()));
+        }
     }
 
     /// Whether anything has come in that the shell did not produce itself:
@@ -4470,6 +4492,45 @@ impl App {
         std::mem::take(&mut self.learned)
     }
 
+    /// The choices the operator made since the last call, oldest first, to
+    /// be kept for the next session.
+    pub fn take_preferences(&mut self) -> Vec<Preference> {
+        std::mem::take(&mut self.preferred)
+    }
+
+    /// Says in the transcript that a choice holds for this session only, so
+    /// the operator is not surprised when the next one opens without it.
+    pub fn preference_not_kept(&mut self, preference: &Preference, error: &str) {
+        self.say(Entry {
+            attention: Attention::Notable,
+            kind: EntryKind::Failure,
+            head: "not saved".to_owned(),
+            meta: preference.described(),
+            body: format!(
+                "The choice holds for this session and was not saved, so the next session \
+                 opens without it: {error}"
+            ),
+            streaming: false,
+            at: self.at,
+            calls: Vec::new(),
+            agent: None,
+        });
+    }
+
+    /// Moves the session to `model`, and keeps it for the next session.
+    fn choose_model(&mut self, model: String) {
+        self.model_chosen_here = true;
+        self.preferred.push(Preference::Model(Some(model.clone())));
+        self.produce(Event::ModelSelected { model });
+    }
+
+    /// Notes `effort` as the level in force, and keeps it for the next
+    /// session.
+    fn chose_effort(&mut self, effort: &str) {
+        self.effort = Some(effort.to_owned());
+        self.preferred.push(Preference::Effort(effort.to_owned()));
+    }
+
     /// Says in the transcript that a standing answer will not outlive the
     /// session, so the operator is not surprised by the prompt returning.
     pub fn not_remembered(&mut self, rule: &Rule, error: &str) {
@@ -5070,19 +5131,28 @@ impl App {
 
     /// Opens the list of effort levels, where the backend takes `/effort`.
     ///
-    /// The cursor starts on the first: the backend does not report the level
-    /// in force, so no row can be marked as it.
+    /// The cursor starts on the level chosen here or the backend was started
+    /// with, which is marked as the one in force; where neither, on the
+    /// first, unmarked, since the backend does not report the level.
     fn pick_effort(&mut self) {
         if let Err(why) = self.can_send("effort") {
             self.hint = Some(why);
             return;
         }
+        let options: Vec<Choice> = EFFORTS.iter().copied().map(Choice::plain).collect();
+        let at = self.effort_row(&options).unwrap_or(0);
         self.picking = Some(Picker {
             purpose: Purpose::Effort,
-            options: EFFORTS.iter().copied().map(Choice::plain).collect(),
-            at: 0,
+            options,
+            at,
             more: 0,
         });
+    }
+
+    /// The row of `options` that is the effort in force, where it is known.
+    fn effort_row(&self, options: &[Choice]) -> Option<usize> {
+        let effort = self.effort.as_deref()?;
+        options.iter().position(|choice| choice.value == effort)
     }
 
     /// Keeps what the call `id` returned for the view of it, as the end
@@ -5258,7 +5328,7 @@ impl App {
             Purpose::Model => {
                 in_force(&picker.options, self.session.models(), self.session.model())
             }
-            Purpose::Effort => None,
+            Purpose::Effort => self.effort_row(&picker.options),
             Purpose::Rewind => None,
             Purpose::Call => None,
             Purpose::Agent => None,
@@ -5303,8 +5373,13 @@ impl App {
     /// Does what choosing `chosen` from a list for `purpose` does.
     fn choose(&mut self, purpose: Purpose, chosen: String) {
         match purpose {
-            Purpose::Model => self.produce(Event::ModelSelected { model: chosen }),
-            Purpose::Effort => self.send_command("effort", Some(&chosen)),
+            Purpose::Model => self.choose_model(chosen),
+            Purpose::Effort => {
+                if self.can_send("effort").is_ok() {
+                    self.chose_effort(&chosen);
+                }
+                self.send_command("effort", Some(&chosen));
+            }
             Purpose::Rewind => {
                 if let Ok(prompt) = chosen.parse::<usize>() {
                     let named = self.sent.get(prompt).cloned().unwrap_or_default();
@@ -5317,6 +5392,7 @@ impl App {
             Purpose::Theme => {
                 if let Some(theme) = Theme::by_name(&chosen) {
                     self.set_theme(theme);
+                    self.preferred.push(Preference::Theme(chosen));
                 }
             }
             Purpose::Agent => {
@@ -6554,6 +6630,14 @@ impl App {
     #[must_use]
     pub fn with_theme(mut self, theme: Theme) -> Self {
         self.set_theme(theme);
+        self
+    }
+
+    /// The same shell on a backend started at `effort`, which the effort list
+    /// opens on and marks as the level in force.
+    #[must_use]
+    pub fn with_effort(mut self, effort: Option<String>) -> Self {
+        self.effort = effort;
         self
     }
 
@@ -9559,7 +9643,7 @@ impl App {
                 return;
             }
             let draft = self.take_composer_for_the_shell();
-            self.produce(Event::ModelSelected { model });
+            self.choose_model(model);
             self.give_back(&draft);
             self.scroll_to_tail();
             return;
@@ -9631,6 +9715,14 @@ impl App {
             return;
         }
         let argument = argument.map(str::to_owned);
+        // A level typed after `/effort` is chosen as one picked from the
+        // list is; anything else after it is the backend's to make sense of.
+        if typed.action == crate::menu::Action::Effort
+            && let Some(level) = argument.as_deref().map(str::trim)
+            && EFFORTS.contains(&level)
+        {
+            self.chose_effort(level);
+        }
         let draft = self.take_composer_for_the_shell();
         match argument {
             Some(argument) => self.send_command(typed.name, Some(&argument)),
@@ -21895,6 +21987,164 @@ mod tests {
                 text: "/effort medium".to_owned()
             }]
         );
+    }
+
+    #[test]
+    fn a_theme_picked_from_the_list_is_handed_out_to_be_kept_once() {
+        use crate::theme::NEO;
+
+        let mut app = app();
+        app.on_key(alt('v'));
+        app.on_key(key(KeyCode::Char('t')));
+        app.on_key(key(KeyCode::Enter));
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Enter));
+
+        assert_eq!(
+            app.take_preferences(),
+            [Preference::Theme(NEO.name.to_owned())]
+        );
+        assert_eq!(app.take_preferences(), [], "handed out once");
+    }
+
+    #[test]
+    fn a_list_left_with_esc_keeps_nothing() {
+        let mut app = app();
+        app.on_key(alt('v'));
+        app.on_key(key(KeyCode::Char('t')));
+        app.on_key(key(KeyCode::Enter));
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Esc));
+
+        assert_eq!(app.take_preferences(), []);
+    }
+
+    #[test]
+    fn an_effort_picked_is_kept_and_the_list_opens_again_on_it_marked() {
+        let mut app = offering(&["effort"]);
+        app.on_key(alt('m'));
+        app.on_key(key(KeyCode::Char('e')));
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(app.picked(), None, "nothing says which level is in force");
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(
+            app.take_preferences(),
+            [Preference::Effort("high".to_owned())]
+        );
+        // The list opens only between turns, and `/effort` ran as one.
+        app.apply(&Event::TurnEnded);
+
+        app.on_key(alt('m'));
+        app.on_key(key(KeyCode::Char('e')));
+        app.on_key(key(KeyCode::Enter));
+        let picker = app.picking().expect("the effort list");
+        assert_eq!(picker.options[picker.at].value, "high");
+        assert_eq!(app.picked(), Some(picker.at));
+    }
+
+    #[test]
+    fn the_effort_a_backend_was_started_at_is_the_one_the_list_opens_on() {
+        let mut app = offering(&["effort"]).with_effort(Some("xhigh".to_owned()));
+        app.on_key(alt('m'));
+        app.on_key(key(KeyCode::Char('e')));
+        app.on_key(key(KeyCode::Enter));
+
+        let picker = app.picking().expect("the effort list");
+        assert_eq!(picker.options[picker.at].value, "xhigh");
+        assert_eq!(
+            app.take_preferences(),
+            [],
+            "opening the list chooses nothing"
+        );
+    }
+
+    #[test]
+    fn an_effort_typed_as_a_level_is_kept_and_one_typed_otherwise_is_not() {
+        let mut app = offering(&["effort"]);
+        submitted(&mut app, "/effort  max ");
+        assert_eq!(
+            app.take_preferences(),
+            [Preference::Effort("max".to_owned())]
+        );
+
+        for typed in ["/effort", "/effort fastest", "/effort high please"] {
+            // Each between turns, so that it is the words that keep
+            // nothing rather than a turn still running.
+            app.apply(&Event::TurnEnded);
+            submitted(&mut app, typed);
+            assert_eq!(app.take_preferences(), [], "{typed}");
+        }
+
+        let mut unlisted = offering(&["model"]);
+        submitted(&mut unlisted, "/effort low");
+        assert_eq!(
+            unlisted.take_preferences(),
+            [],
+            "a backend that lists no /effort takes no level"
+        );
+    }
+
+    #[test]
+    fn a_model_picked_or_typed_is_kept() {
+        let mut picked = under_a_profile(&["opus", "sonnet"]);
+        picked.on_key(key(KeyCode::F(4)));
+        picked.on_key(key(KeyCode::Down));
+        picked.on_key(key(KeyCode::Enter));
+        assert_eq!(
+            picked.take_preferences(),
+            [Preference::Model(Some("sonnet".to_owned()))]
+        );
+
+        let mut typed = offering_model(app().attached());
+        submitted(&mut typed, "/model haiku");
+        assert_eq!(
+            typed.take_preferences(),
+            [Preference::Model(Some("haiku".to_owned()))]
+        );
+    }
+
+    #[test]
+    fn a_model_the_backend_refused_is_replaced_by_the_one_it_went_back_to() {
+        let mut app = under_a_profile(&["opus", "sonnet"]);
+        app.on_key(key(KeyCode::F(4)));
+        app.on_key(key(KeyCode::Enter));
+        app.take_preferences();
+
+        app.apply(&Event::ModelRefused { back_to: None });
+        assert_eq!(app.take_preferences(), [Preference::Model(None)]);
+
+        app.apply(&Event::ModelRefused {
+            back_to: Some("sonnet".to_owned()),
+        });
+        assert_eq!(
+            app.take_preferences(),
+            [Preference::Model(Some("sonnet".to_owned()))]
+        );
+    }
+
+    #[test]
+    fn a_refusal_read_back_from_another_session_keeps_nothing() {
+        let mut app = app().attached();
+        app.apply(&Event::ModelSelected {
+            model: "opus".to_owned(),
+        });
+        app.apply(&Event::ModelRefused { back_to: None });
+
+        assert_eq!(app.take_preferences(), []);
+    }
+
+    #[test]
+    fn a_choice_that_was_not_kept_is_said_in_the_transcript() {
+        let mut app = app();
+        app.preference_not_kept(&Preference::Theme("neo".to_owned()), "disk full");
+
+        let said = app.entries().last().expect("an entry");
+        assert_eq!(said.kind, EntryKind::Failure);
+        assert_eq!(said.meta, "theme neo");
+        assert!(said.body.ends_with("disk full"), "{}", said.body);
     }
 
     #[test]

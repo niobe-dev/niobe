@@ -99,6 +99,10 @@
 //! automatic = false
 //! ```
 //!
+//! The theme, model and effort the operator last picked in the shell are not
+//! config: [`preferences`] keeps them in a file of Niobe's own beside the
+//! user's config, which a new shell reads over what the config says.
+//!
 //! Which palettes there are is the shell's business, not this crate's, so the
 //! name is carried as written and the caller resolves it; [`ThemeName`] keeps
 //! the line so that a name nothing answers to is reported where it was
@@ -134,6 +138,7 @@
 
 mod error;
 mod parse;
+pub mod preferences;
 pub mod read;
 mod replace;
 pub mod trust;

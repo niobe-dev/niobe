@@ -26,6 +26,7 @@ use crate::input::{Input, Wait};
 use crate::journal::{Journal, Unrecorded};
 use crate::memory::{Memory, NoMemory};
 use crate::overview::{NoOverview, Overview};
+use crate::preferences::{Preferences, Unkept};
 use crate::rules::{Forgotten, Reach, Rules};
 use crate::shell::{NoShell, Shell};
 use crate::terminal::{
@@ -102,6 +103,9 @@ pub struct Around<'a> {
     pub backend: &'a mut dyn Bridge,
     /// Where the standing answers the operator makes are kept.
     pub rules: &'a mut dyn Rules,
+    /// Where the choices the operator makes — a theme, a model, an effort —
+    /// are kept for the next session.
+    pub preferences: &'a mut dyn Preferences,
     /// Where the state of the repository comes from. Asked once a tick and
     /// never waited on, so a read that is slow, that failed, or that has
     /// nothing new to say costs the frame nothing and leaves the last one on
@@ -183,6 +187,7 @@ pub fn ask_trust(app: App, question: trust::Question) -> io::Result<Option<trust
             journal: &mut Unrecorded,
             backend: &mut Detached,
             rules: &mut Forgotten,
+            preferences: &mut Unkept,
             watch: &mut Unwatched,
             shell: &mut NoShell,
             images: &mut NoImages::default(),
@@ -360,6 +365,7 @@ fn event_loop<B: Backend<Error = io::Error>>(
         journal,
         backend,
         rules,
+        preferences,
         watch,
         shell,
         images,
@@ -415,6 +421,7 @@ fn event_loop<B: Backend<Error = io::Error>>(
             fetch_images(app, images);
             let lent = hand_off(app, desktop, machine.suspend)?;
             send_produced(app, journal, backend, rules);
+            keep_preferences(app, preferences);
             // An editor drew on the screen while it had the terminal, and a draw
             // sends only what changed since the last frame: a resize to the same
             // size forgets that frame, as after a stop.
@@ -441,6 +448,7 @@ fn event_loop<B: Backend<Error = io::Error>>(
                     fetch_images(app, images);
                     owed_frame |= hand_off(app, desktop, machine.suspend)?;
                     send_produced(app, journal, backend, rules);
+                    keep_preferences(app, preferences);
                 }
                 Input::Idle => {
                     let mut events = Vec::new();
@@ -451,6 +459,7 @@ fn event_loop<B: Backend<Error = io::Error>>(
                         fetch_images(app, images);
                         owed_frame |= hand_off(app, desktop, machine.suspend)?;
                         send_produced(app, journal, backend, rules);
+                        keep_preferences(app, preferences);
                     }
                 }
                 // The terminal is gone: there is no one left to type and nothing
@@ -497,6 +506,7 @@ fn event_loop<B: Backend<Error = io::Error>>(
     })();
 
     close_out(app, shell, watch, journal, backend, rules);
+    keep_preferences(app, preferences);
     looped?;
 
     // Asked for by the operator, and ended as a quit is: what the shell held
@@ -556,6 +566,16 @@ fn close_out(
         app.leave();
     }
     send_produced(app, journal, backend, rules);
+}
+
+/// Hands the choices the operator made to `preferences`, and says in the
+/// transcript of each one not kept that it holds for this session only.
+fn keep_preferences(app: &mut App, preferences: &mut dyn Preferences) {
+    for preference in app.take_preferences() {
+        if let Err(error) = preferences.keep(&preference) {
+            app.preference_not_kept(&preference, &error.to_string());
+        }
+    }
 }
 
 /// Passes on a load of the earlier sessions the shell asked for, and hands it
@@ -1098,6 +1118,60 @@ mod tests {
                 false => Reach::NextSession,
             })
         }
+    }
+
+    /// Keeps choices in order, or refuses every one.
+    #[derive(Debug, Default)]
+    struct Chosen {
+        kept: Vec<crate::preferences::Preference>,
+        refuse: bool,
+    }
+
+    impl Preferences for Chosen {
+        fn keep(
+            &mut self,
+            preference: &crate::preferences::Preference,
+        ) -> Result<(), crate::preferences::PreferencesError> {
+            if self.refuse {
+                return Err("the config directory is read-only".into());
+            }
+            self.kept.push(preference.clone());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_choice_made_is_handed_to_be_kept_once_and_one_refused_is_said_in_the_transcript() {
+        use crate::preferences::Preference;
+
+        let themes = crate::theme::Theme::all();
+        let last = themes.last().expect("there are themes").name;
+        let pick_last_theme = |app: &mut App| {
+            app.on_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT));
+            app.on_key(KeyEvent::from(KeyCode::Char('t')));
+            app.on_key(KeyEvent::from(KeyCode::Enter));
+            for _ in 0..themes.len() {
+                app.on_key(KeyEvent::from(KeyCode::Down));
+            }
+            app.on_key(KeyEvent::from(KeyCode::Enter));
+        };
+        let mut app = App::new(Repo::default());
+        let mut chosen = Chosen::default();
+
+        pick_last_theme(&mut app);
+        keep_preferences(&mut app, &mut chosen);
+        keep_preferences(&mut app, &mut chosen);
+        assert_eq!(chosen.kept, [Preference::Theme(last.to_owned())]);
+
+        let mut refusing = Chosen {
+            refuse: true,
+            ..Chosen::default()
+        };
+        pick_last_theme(&mut app);
+        keep_preferences(&mut app, &mut refusing);
+        let said = app.entries().last().expect("the refusal is said");
+        assert_eq!(said.head, "not saved");
+        assert!(said.body.contains("read-only"), "{}", said.body);
     }
 
     /// A watch that hands over reads in order and counts what it was told.

@@ -390,7 +390,7 @@ fn array(rules: &[&str]) -> String {
 /// A target is whatever a call acts on, so it can hold a quote, a backslash or
 /// a newline; every one of those is escaped here, because a rule that was
 /// written unescaped would be a config file the next session cannot read.
-fn quoted(rule: &str) -> String {
+pub(crate) fn quoted(rule: &str) -> String {
     let mut out = String::with_capacity(rule.len() + 2);
     out.push('"');
     for c in rule.chars() {

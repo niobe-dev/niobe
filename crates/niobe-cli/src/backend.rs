@@ -52,6 +52,14 @@ pub struct Attach {
     /// config says `trim = true`. Unlike [`Attach::terse`] it holds for a
     /// conversation carried on too: the CLI reads its hooks at every start.
     pub trim: Option<crate::trim::Trim>,
+    /// The model the operator last chose in the shell under this profile,
+    /// which the backend is started on over the profile's own `--model`.
+    /// `None` leaves it to the profile and the backend.
+    pub model: Option<String>,
+    /// The effort level the operator last chose in the shell under this
+    /// profile, which the backend is started at over the profile's own
+    /// `--effort`. `None` leaves it to the profile and the backend.
+    pub effort: Option<String>,
     /// Whether the session is one turn that nothing sends another prompt
     /// after, as `niobe -p`'s is. A CLI stopped between turns is then not
     /// left to be started again by a next prompt that never comes: its end
@@ -610,6 +618,8 @@ fn claude_options(
         )?);
     }
     options.resume = with.resume.clone();
+    options.model = with.model.clone();
+    options.effort = with.effort.clone();
     options.budget_usd = with.budget_usd;
     options.tap = with.tap.clone();
     // A resumed session starts the CLI in the mode it was left in; a new one
@@ -961,6 +971,8 @@ mod tests {
                 decisions: false,
                 tap: None,
                 trim: None,
+                model: None,
+                effort: None,
                 one_turn: false,
             },
             Some(claude.path().as_os_str().to_owned()),
@@ -1431,6 +1443,49 @@ mod tests {
         assert_eq!(options.args, ["--mcp-config", "mcp.json"]);
     }
 
+    #[test]
+    fn the_model_and_effort_last_chosen_start_the_backend_over_the_profiles_own() {
+        let (_dir, user, root) = user_and_repository();
+        let config = Config::parse(
+            "[profiles.max]\nbackend = \"claude\"\nargs = [\"--model\", \"opus\", \"--effort\", \"low\"]\n",
+            &user.join("config.toml"),
+        )
+        .expect("parses");
+        let selected = config
+            .select(Some("max"))
+            .expect("the profile is defined")
+            .expect("a profile was selected");
+        let chosen = Attach {
+            model: Some("haiku".to_owned()),
+            effort: Some("max".to_owned()),
+            ..Attach::default()
+        };
+
+        let argv = claude_options(&root, &selected, &chosen, NO_HOME)
+            .expect("the profile names no file")
+            .argv();
+        let after = |flag: &str| {
+            argv.iter()
+                .rposition(|arg| arg == flag)
+                .and_then(|at| argv.get(at + 1))
+                .map(String::as_str)
+        };
+        assert_eq!(after("--model"), Some("haiku"), "{argv:?}");
+        assert_eq!(after("--effort"), Some("max"), "{argv:?}");
+
+        let argv = claude_options(&root, &selected, &Attach::default(), NO_HOME)
+            .expect("the profile names no file")
+            .argv();
+        let after = |flag: &str| {
+            argv.iter()
+                .rposition(|arg| arg == flag)
+                .and_then(|at| argv.get(at + 1))
+                .map(String::as_str)
+        };
+        assert_eq!(after("--model"), Some("opus"), "nothing chosen: {argv:?}");
+        assert_eq!(after("--effort"), Some("low"), "nothing chosen: {argv:?}");
+    }
+
     /// The user's profile `max` with `env` written as `env`, from the user's
     /// own file beside a cloned repository.
     fn users_env(user: &Path, env: &str) -> Config {
@@ -1615,6 +1670,8 @@ mod tests {
                 decisions: false,
                 tap: None,
                 trim: None,
+                model: None,
+                effort: None,
                 one_turn: false,
             },
             NO_HOME,

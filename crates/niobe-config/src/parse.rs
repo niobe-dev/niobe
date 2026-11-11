@@ -569,7 +569,7 @@ pub(crate) fn env_key(profile: &str, name: &str) -> String {
 }
 
 /// A key as TOML would need it written: bare when it can be, quoted when not.
-fn quoted(name: &str) -> String {
+pub(crate) fn quoted(name: &str) -> String {
     let bare = !name.is_empty()
         && name
             .chars()

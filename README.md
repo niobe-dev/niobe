@@ -167,6 +167,10 @@ A terminal that eats an F-key can give the bar's action another one: `[keys]` wi
 `mcp = "ctrl+l"` in the config, and the bar, the menus and the help draw the new key.
 `niobe --help` lists the actions and the keys that can be bound.
 
+The theme you pick from View › Theme…, and the model and effort you pick for a profile, are what
+the next session opens with. Niobe keeps them in `~/.config/niobe/choices.toml`, apart from the
+config you write; `--theme` still wins for one run.
+
 A theme of your own is a TOML file in `~/.config/niobe/themes`: a `base` theme and the colours to
 change, in hex or the sixteen names. `niobe --help` has the format; one that cannot be read is
 refused at its line.

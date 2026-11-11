@@ -1145,7 +1145,7 @@ const CLASSIC_MENU: &str = "\u{1b}[38;5;0;48;5;6m";
 /// The three ways a palette is chosen, on the one screen that can show it: the
 /// flag, a config key, and the View menu's list while the session runs.
 #[test]
-fn a_theme_is_selected_by_the_flag_by_the_config_and_from_the_view_menu() {
+fn a_theme_is_selected_by_the_flag_by_the_config_and_from_the_view_menu_and_kept_for_the_next() {
     let repo = repo();
     let home = user_config("theme = \"neo\"\n");
     let (terminal, slave) = Terminal::open();
@@ -1181,10 +1181,27 @@ fn a_theme_is_selected_by_the_flag_by_the_config_and_from_the_view_menu() {
     let (_, status) = ended(&mut shell);
     assert!(status.success(), "the shell ended with {status}");
 
+    // The theme chosen from the menu is the one the next shell opens on,
+    // over the config's: the operator chose it after writing the config.
+    let (reopened, reopened_slave) = Terminal::open();
+    let mut shell = shell_command(&reopened_slave, repo.path())
+        .env("XDG_CONFIG_HOME", home.path())
+        .spawn()
+        .expect("the niobe binary runs");
+    reopened.shows(MODERN_MENU);
+    reopened.typed(CTRL_Q);
+    let (_, status) = ended(&mut shell);
+    assert!(status.success(), "the shell ended with {status}");
+    let kept = std::fs::read_to_string(home.path().join("niobe").join("choices.toml"))
+        .expect("the choice was kept beside the user's config");
+    assert!(kept.contains("theme = \"MODERN\""), "{kept}");
+
     drop(slave);
     drop(flagged_slave);
+    drop(reopened_slave);
     terminal.drained();
     flagged.drained();
+    reopened.drained();
 }
 
 /// Opens the View menu's theme list, moves its cursor by `step` and takes

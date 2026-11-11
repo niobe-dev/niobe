@@ -52,6 +52,7 @@ mod mention;
 pub mod menu;
 mod meter;
 pub mod overview;
+pub mod preferences;
 pub mod prices;
 pub mod proposed;
 pub mod rules;
