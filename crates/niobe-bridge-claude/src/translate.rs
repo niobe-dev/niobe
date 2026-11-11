@@ -567,15 +567,22 @@ pub struct Translator {
     /// [`Translator::take_model_answers`], oldest first.
     model_answers: Vec<ModelAnswer>,
     /// The `request_id`s of the titles Niobe asked for that the CLI has not
-    /// answered yet: an answer to one of those carries a title rather than a
-    /// change taking effect.
-    title_requests: BTreeSet<String>,
-    /// The `request_id`s of titles asked for before a `/clear` that the CLI
-    /// has not answered yet. Each was asked from the conversation the clear
-    /// ended, so its answer titles nothing: arriving after the clear, it
-    /// would otherwise caption — and be stored as — the conversation that
-    /// started over, which the prompt it was made from was never part of.
-    cleared_title_requests: BTreeSet<String>,
+    /// answered yet, in the order they were asked: an answer to one of those
+    /// carries a title rather than a change taking effect.
+    title_requests: Vec<String>,
+    /// The `request_id`s of titles asked for that the CLI has not answered
+    /// yet and whose answer titles nothing. One asked before a `/clear` was
+    /// asked from the conversation the clear ended: arriving after the clear,
+    /// it would otherwise caption — and be stored as — the conversation that
+    /// started over, which the prompts it was made from were never part of.
+    /// One asked before a request the CLI has already answered was made from
+    /// fewer of the session's prompts, and would put back the caption the
+    /// newer title replaced: the CLI answers them as its model finishes, not
+    /// in the order they were asked (Claude Code 2.1.322).
+    unwanted_title_requests: BTreeSet<String>,
+    /// Whether the CLI has refused to title the session, which is said once:
+    /// it is asked again after every prompt.
+    title_refused: bool,
     /// The `request_id`s of the `mcp_status` requests Niobe made that the CLI
     /// has not answered yet: a refusal of one changed nothing the session runs
     /// with, and says only that this CLI does not answer it.
@@ -770,8 +777,9 @@ impl Translator {
             started_in: None,
             taken_model: None,
             model_answers: Vec::new(),
-            title_requests: BTreeSet::new(),
-            cleared_title_requests: BTreeSet::new(),
+            title_requests: Vec::new(),
+            unwanted_title_requests: BTreeSet::new(),
+            title_refused: false,
             mcp_status_requests: BTreeSet::new(),
             reconnects: BTreeMap::new(),
             rewinds: BTreeMap::new(),
@@ -1023,7 +1031,23 @@ impl Translator {
     /// a `title` in it is the session's, and that a refusal of it changed
     /// nothing the session was running with.
     pub fn asked_for_title(&mut self, request_id: &str) {
-        self.title_requests.insert(request_id.to_owned());
+        self.title_requests.push(request_id.to_owned());
+    }
+
+    /// Whether `request_id` names a title request still wanted, which it
+    /// stops waiting on, along with every title asked before it: those were
+    /// made from fewer of the session's prompts, and their answers are
+    /// passed over when they come.
+    fn answered_title(&mut self, request_id: Option<&str>) -> bool {
+        let Some(at) =
+            request_id.and_then(|id| self.title_requests.iter().position(|asked| asked == id))
+        else {
+            return false;
+        };
+        let mut older: Vec<String> = self.title_requests.drain(..=at).collect();
+        older.pop();
+        self.unwanted_title_requests.extend(older);
+        true
     }
 
     /// Records that the control request `request_id` asks the CLI how its MCP
@@ -1366,18 +1390,16 @@ impl Translator {
                 taken: outcome.subtype.as_deref() == Some("success"),
             });
         }
-        let of_title = outcome
-            .request_id
-            .as_deref()
-            .is_some_and(|id| self.title_requests.remove(id));
-        if of_title {
-            out.extend(titled(outcome));
+        if self.answered_title(outcome.request_id.as_deref()) {
+            if let Some(event) = titled(outcome, &mut self.title_refused) {
+                out.push(event);
+            }
             return;
         }
         if outcome
             .request_id
             .as_deref()
-            .is_some_and(|id| self.cleared_title_requests.remove(id))
+            .is_some_and(|id| self.unwanted_title_requests.remove(id))
         {
             return;
         }
@@ -2058,7 +2080,7 @@ impl Translator {
         self.checked_release = false;
         self.unread_said.clear();
         let asked_before = std::mem::take(&mut self.title_requests);
-        self.cleared_title_requests.extend(asked_before);
+        self.unwanted_title_requests.extend(asked_before);
         out.push(Event::Cleared);
     }
 
@@ -3916,14 +3938,16 @@ pub(crate) fn read_mode(mode: &str) -> Option<Mode> {
     }
 }
 
-/// What the CLI's answer to a request for the session's title says.
+/// What the CLI's answer to a request for the session's title says, where
+/// `refused` says whether the CLI has refused one before.
 ///
 /// A title is the session's caption from then on. None — the CLI makes none
-/// for a prompt too short to name or one that is a command — leaves the caption
-/// on the first prompt, which is nothing to say. A refusal is said as a notice
-/// rather than a warning: nothing the session runs with was changed or kept
-/// from changing, and the caption is still the first prompt.
-fn titled(outcome: wire::ControlOutcome) -> Option<Event> {
+/// for a prompt too short to name — leaves the caption as it was, which is
+/// nothing to say. A refusal is said as a notice rather than a warning:
+/// nothing the session runs with was changed or kept from changing, and the
+/// caption is as it was. It is said once, since a session asks again after
+/// every prompt and a CLI that refused one refuses the next.
+fn titled(outcome: wire::ControlOutcome, refused: &mut bool) -> Option<Event> {
     if outcome.subtype.as_deref() == Some("success") {
         let title = outcome.response?.title?;
         let title = title.trim();
@@ -3931,9 +3955,12 @@ fn titled(outcome: wire::ControlOutcome) -> Option<Event> {
             title: title.to_owned(),
         });
     }
+    if std::mem::replace(refused, true) {
+        return None;
+    }
     Some(Event::Notice {
         message: format!(
-            "the CLI did not title the session, so it is captioned by its first prompt: {}",
+            "the CLI did not title the session, so its caption stays as it was: {}",
             outcome.error.as_deref().unwrap_or("the CLI gave no reason")
         ),
     })
@@ -8676,8 +8703,52 @@ mod tests {
         assert!(blank.is_empty(), "{blank:?}");
     }
 
+    /// The CLI answers title requests in the order its small model finishes
+    /// them, not the order they were asked in, and a title made from fewer
+    /// of the session's prompts would put back the caption a newer one gave.
     #[test]
-    fn a_title_the_cli_did_not_make_leaves_the_caption_to_the_first_prompt() {
+    fn a_title_answered_after_a_newer_one_titles_nothing() {
+        let mut translator = translator();
+        translator.asked_for_title("niobe-9");
+        translator.asked_for_title("niobe-10");
+
+        let newer = translator.line(
+            r#"{"type":"control_response","response":{"subtype":"success","request_id":"niobe-10","response":{"title":"Etag support and its test"}}}"#,
+        );
+        let older = translator.line(
+            r#"{"type":"control_response","response":{"subtype":"success","request_id":"niobe-9","response":{"title":"Etag support"}}}"#,
+        );
+
+        assert_eq!(
+            newer,
+            [Event::Titled {
+                title: "Etag support and its test".to_owned()
+            }]
+        );
+        assert!(older.is_empty(), "{older:?}");
+    }
+
+    /// A session asks for a title after every prompt, so a CLI that does not
+    /// make them would say so after every prompt.
+    #[test]
+    fn a_cli_that_refuses_to_title_the_session_is_said_to_once() {
+        let mut translator = translator();
+        let refusal = |id: &str| {
+            format!(
+                r#"{{"type":"control_response","response":{{"subtype":"error","request_id":"{id}","error":"Unsupported control request subtype: generate_session_title"}}}}"#
+            )
+        };
+        translator.asked_for_title("niobe-2");
+        let first = translator.line(&refusal("niobe-2"));
+        translator.asked_for_title("niobe-4");
+        let second = translator.line(&refusal("niobe-4"));
+
+        assert_eq!(first.len(), 1, "{first:?}");
+        assert!(second.is_empty(), "{second:?}");
+    }
+
+    #[test]
+    fn a_title_the_cli_did_not_make_leaves_the_caption_as_it_was() {
         let mut translator = translator();
         translator.asked_for_title("niobe-2");
         translator.asked_for_title("niobe-3");
@@ -8698,7 +8769,7 @@ mod tests {
             matches!(
                 refused.as_slice(),
                 [Event::Notice { message }]
-                    if message.contains("first prompt")
+                    if message.contains("did not title the session")
                         && message.contains("Unsupported control request subtype")
             ),
             "{refused:?}"

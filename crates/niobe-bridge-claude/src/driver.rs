@@ -111,15 +111,27 @@ const STALLED: Duration = Duration::from_secs(5);
 /// that never ends a line cannot fill memory with one.
 const LINE_LIMIT: u64 = 64 * 1024 * 1024;
 
-/// The most of the first prompt, in bytes, that the CLI is asked to make a
-/// title from.
+/// The most of one prompt, in bytes, that the CLI is asked to make a title
+/// from.
 ///
 /// The CLI hands the description to its small model whole, so without a cut
 /// a long paste is billed a second time for a title of a few words: a
 /// 45,656-character first prompt cost 21,897 input tokens for the title alone
-/// on Claude Code 2.1.292. The opening kilobyte says what the session is about
-/// as well as the rest would.
-const TITLE_DESCRIPTION: usize = 1024;
+/// on Claude Code 2.1.292. A prompt's opening says what it asks as well as
+/// the rest would.
+const TITLE_PROMPT: usize = 256;
+
+/// How many of the newest prompts the CLI is asked to make a title from,
+/// beside the session's first, which says what the session set out to do.
+/// The prompts between are left out, so a title costs the same however long
+/// the session runs.
+const TITLE_NEWEST: usize = 3;
+
+/// What a title's description opens with. The CLI makes no title it keeps
+/// from a description that opens with a slash, as a prompt that is a command
+/// does (Claude Code 2.1.322, measured on 11 November 2026), and words that
+/// say what the lines are let its model read them as a session's.
+const TITLE_LEAD: &str = "The prompts the operator sent in this session, oldest first:";
 
 /// What the CLI is told when a call is refused with no words of its own.
 ///
@@ -311,17 +323,23 @@ pub struct Options {
     /// reported as a notice that the next prompt starts the CLI again; with
     /// it off it ends the session, since nothing would.
     pub carry_on: bool,
-    /// Whether the CLI is asked to title the session from the first prompt
-    /// sent that is not a slash command.
+    /// Whether the CLI is asked to title the session after each prompt that
+    /// says something, so the title follows what the session is about.
     ///
     /// The CLI makes the title with its small model, on the operator's
     /// account, and bills it into the session's running totals: 899 input
     /// tokens and 10 output for a short prompt, measured on Claude Code
-    /// 2.1.292 with haiku. Only the prompt's first kilobyte is sent, so a long
-    /// paste adds a few hundred input tokens to that rather than its own
-    /// length again. It writes the title into its own transcript too, and
-    /// starts no other session to make it. Off unless asked for.
+    /// 2.1.292 with haiku, each time it is asked. Only the opening of the
+    /// session's first prompt and of its newest few is sent, so a long session
+    /// or a long paste adds a few hundred input tokens to that at most. It
+    /// keeps the first title in its own transcript too, and starts no other
+    /// session to make one. Off unless asked for.
     pub ask_title: bool,
+    /// The prompts of the conversation its title is made from, oldest first:
+    /// its first and its newest few, each on one line and cut as
+    /// [`TITLE_PROMPT`] says. Kept by the session as it sends them, so a CLI
+    /// started again on the conversation titles it from them all.
+    pub titled_from: Vec<String>,
     /// A directory to keep a copy of what crosses the CLI's pipes in, one
     /// file per process, where one is asked for; see [`crate::tap`]. The file
     /// holds the whole conversation, so the caller decides where it may go:
@@ -382,6 +400,7 @@ impl Options {
             ask_over_stdio: false,
             carry_on: false,
             ask_title: false,
+            titled_from: Vec::new(),
             tap: None,
             transcripts: None,
             sent: Vec::new(),
@@ -612,8 +631,8 @@ pub struct Session {
     /// acted on by the next drain: only this side writes to the CLI.
     mcp_status_wanted: Arc<AtomicBool>,
     /// Set by the thread reading the CLI when it reports the conversation
-    /// started over, which is a session with no title yet: the next prompt
-    /// that is not a command is asked about again.
+    /// started over, which is a session with no title yet: it is titled from
+    /// the prompts after it alone.
     cleared: Arc<AtomicBool>,
     /// Set by the thread reading the CLI to whether the last turn's end said
     /// a prompt is queued behind it, before that end goes out: see
@@ -629,9 +648,6 @@ pub struct Session {
     /// cannot be part of the turn that end closed, nor counted in its queue;
     /// an end read after the line was queued may be the turn's own.
     sent_after_ends: u64,
-    /// Whether [`Options::ask_title`] was on when the session started, which
-    /// is what a clear puts back.
-    titles_wanted: bool,
     stderr: Arc<Mutex<Tail>>,
     /// The threads reading standard output and standard error, in that
     /// order, and the one writing standard input.
@@ -961,7 +977,6 @@ impl Session {
             ends_read,
             ends_heard: 0,
             sent_after_ends: 0,
-            titles_wanted: options.ask_title,
             stderr: kept,
             threads: vec![reader, errors, writer],
             control_requests: 0,
@@ -1033,28 +1048,28 @@ impl Session {
         Ok(())
     }
 
-    /// Asks the CLI to title the session from `prompt`, where
-    /// [`Options::ask_title`] says to and no prompt has been asked about yet.
+    /// Asks the CLI to title the session from the prompts sent so far, now
+    /// that `prompt` has been, where [`Options::ask_title`] says to and
+    /// `prompt` says something.
     ///
-    /// A slash command is passed over: it says what the CLI is to do, not
-    /// what the session is about, and the CLI makes no title from one. Asked
-    /// after the turn has gone in, so the turn is not held behind it, and with
-    /// `persist`, so the CLI keeps the title in its own transcript and answers
-    /// with the one it has rather than making another. Asked once a session:
-    /// a CLI started again carries the conversation on, title and all. A
+    /// Asked after the turn has gone in, so the turn is not held behind it.
+    /// The first title of a conversation is asked with `persist`, so the CLI
+    /// keeps it in its own transcript; the later ones without, since the CLI
+    /// answers a request with `persist` with the title it already kept. A
     /// conversation started over with `/clear` is a session of its own, and
-    /// is asked about again from its first prompt.
+    /// is titled from the prompts after the clear alone.
     fn ask_for_title(&mut self, prompt: &str) -> std::io::Result<()> {
         if self.cleared.swap(false, Ordering::AcqRel) {
-            self.next.ask_title = self.titles_wanted;
+            self.next.titled_from.clear();
         }
         if !self.next.ask_title {
             return Ok(());
         }
-        let Some(about) = title_description(prompt) else {
+        let Some(line) = title_line(prompt) else {
             return Ok(());
         };
-        self.next.ask_title = false;
+        let first = self.next.titled_from.is_empty();
+        remember_for_title(&mut self.next.titled_from, line);
         let id = self.next_request_id();
         if let Ok(mut asked) = self.title_requests.lock() {
             asked.push(id.clone());
@@ -1063,8 +1078,8 @@ impl Session {
             &id,
             serde_json::json!({
                 "subtype": "generate_session_title",
-                "description": about,
-                "persist": true,
+                "description": title_description(&self.next.titled_from),
+                "persist": first,
             }),
         ))
     }
@@ -2007,27 +2022,59 @@ fn label_of(prompt: &str) -> String {
     }
 }
 
+/// `prompt` as a line of what a title is made from: its words on one line,
+/// cut on a character boundary to at most [`TITLE_PROMPT`] bytes, or nothing
+/// where it says nothing or is a slash command with no words after it, which
+/// says what the CLI is to do and not what the session is about. A command
+/// with words after it, such as `/goal` with its condition, says both.
+fn title_line(prompt: &str) -> Option<String> {
+    let about = prompt.trim();
+    if about.is_empty() || (about.starts_with('/') && !about.contains(char::is_whitespace)) {
+        return None;
+    }
+    // Only the opening is read, so a megabyte paste is not walked whole.
+    // Joining its words shrinks only the space between them, so eight times
+    // the cut is more than enough for any prompt but one mostly blank.
+    let mut end = about.len().min(TITLE_PROMPT * 8);
+    while !about.is_char_boundary(end) {
+        end -= 1;
+    }
+    let joined = about[..end]
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut end = joined.len().min(TITLE_PROMPT);
+    while !joined.is_char_boundary(end) {
+        end -= 1;
+    }
+    Some(joined[..end].trim_end().to_owned())
+}
+
+/// Adds `line` to the prompts a title is made from, keeping the first and
+/// the [`TITLE_NEWEST`] newest.
+fn remember_for_title(about: &mut Vec<String>, line: String) {
+    about.push(line);
+    if about.len() > TITLE_NEWEST + 1 {
+        about.remove(1);
+    }
+}
+
+/// What the CLI is asked to make a title from: [`TITLE_LEAD`], then each of
+/// `about` on a line of its own.
+fn title_description(about: &[String]) -> String {
+    let mut description = TITLE_LEAD.to_owned();
+    for line in about {
+        description.push('\n');
+        description.push_str(line);
+    }
+    description
+}
+
 /// The line that asks the CLI to change something about the running session.
 ///
 /// Written as its own function for the same reason as [`control_response`]:
 /// what reaches the CLI's standard input is the whole of the protocol on this
 /// side, and it can be checked without a subprocess.
-/// What the CLI is asked to title a session from: `prompt` without the
-/// space around it, cut on a character boundary to at most
-/// [`TITLE_DESCRIPTION`] bytes, or nothing where it is empty or a slash
-/// command.
-fn title_description(prompt: &str) -> Option<&str> {
-    let about = prompt.trim();
-    if about.is_empty() || about.starts_with('/') {
-        return None;
-    }
-    let mut end = about.len().min(TITLE_DESCRIPTION);
-    while !about.is_char_boundary(end) {
-        end -= 1;
-    }
-    Some(about[..end].trim_end())
-}
-
 fn control_request(request_id: &str, body: serde_json::Value) -> serde_json::Value {
     serde_json::json!({
         "type": "control_request",
@@ -2966,24 +3013,30 @@ mod tests {
         );
     }
 
-    /// The session is titled from the first prompt that is not a command, by
-    /// asking the CLI once, after that prompt has gone in.
+    /// The session is titled from the prompts that say something, asked
+    /// again after each, so the title follows the session rather than its
+    /// opening: the first ask is kept in the CLI's transcript, and the later
+    /// ones, which the CLI would answer with the kept title, are not.
     #[cfg(unix)]
     #[test]
-    fn the_cli_is_asked_once_for_a_title_from_the_first_prompt_that_is_not_a_command() {
+    fn the_cli_is_asked_to_title_the_session_again_from_each_prompt_that_says_something() {
         let scratch = tempfile::tempdir().expect("a scratch directory");
         let asked = scratch.path().join("asked");
         let (mut session, _dir) = started_with(
             &format!(
-                "read -r init\nread -r slash\nread -r turn\nread -r title\nread -r second\n\
-                 printf '%s\\n' \"$slash\" \"$turn\" \"$title\" \"$second\" > '{asked}'\n\
-                 id=$(printf '%s' \"$title\" | sed 's/.*\"request_id\":\"\\([^\"]*\\)\".*/\\1/')\n\
-                 printf '{{\"type\":\"control_response\",\"response\":{{\"subtype\":\"success\",\"request_id\":\"%s\",\"response\":{{\"title\":\"Etag support\"}}}}}}\\n' \"$id\"\n",
+                "read -r init\nread -r slash\nread -r turn\nread -r title\nread -r second\nread -r retitle\n\
+                 printf '%s\\n' \"$slash\" \"$turn\" \"$title\" \"$second\" \"$retitle\" > '{asked}'\n\
+                 id=$(printf '%s' \"$retitle\" | sed 's/.*\"request_id\":\"\\([^\"]*\\)\".*/\\1/')\n\
+                 printf '{{\"type\":\"control_response\",\"response\":{{\"subtype\":\"success\",\"request_id\":\"%s\",\"response\":{{\"title\":\"Etag support and its test\"}}}}}}\\n' \"$id\"\n",
                 asked = asked.display()
             ),
             |options| options.ask_title = true,
         );
-        for prompt in ["/model opus", "add etag support", "and a test for it"] {
+        for prompt in [
+            "/cost",
+            "add etag support",
+            "/goal and a test for it passes",
+        ] {
             session.send(prompt, &[]).expect("the stand-in is reading");
         }
 
@@ -3000,7 +3053,7 @@ mod tests {
 
         assert!(
             events.contains(&Event::Titled {
-                title: "Etag support".to_owned()
+                title: "Etag support and its test".to_owned()
             }),
             "{events:#?}"
         );
@@ -3009,23 +3062,35 @@ mod tests {
             .lines()
             .map(|line| serde_json::from_str(line).expect("each line is JSON"))
             .collect();
-        assert_eq!(lines[0]["type"], "user", "{written}");
+        assert_eq!(
+            lines[0]["type"], "user",
+            "a bare command says nothing: {written}"
+        );
         assert_eq!(lines[1]["type"], "user", "{written}");
         assert_eq!(
             lines[2]["request"],
             serde_json::json!({
                 "subtype": "generate_session_title",
-                "description": "add etag support",
+                "description": "The prompts the operator sent in this session, oldest first:\nadd etag support",
                 "persist": true,
             }),
             "{written}"
         );
-        assert_eq!(lines[3]["type"], "user", "asked once: {written}");
+        assert_eq!(lines[3]["type"], "user", "{written}");
+        assert_eq!(
+            lines[4]["request"],
+            serde_json::json!({
+                "subtype": "generate_session_title",
+                "description": "The prompts the operator sent in this session, oldest first:\nadd etag support\n/goal and a test for it passes",
+                "persist": false,
+            }),
+            "{written}"
+        );
     }
 
     /// A conversation started over is a session with no title, so the CLI is
-    /// asked for one again, from the first prompt that is not a command after
-    /// the clear.
+    /// asked for one again from the prompts after the clear alone, and keeps
+    /// the first of them.
     #[cfg(unix)]
     #[test]
     fn the_cli_is_asked_for_a_title_again_after_a_clear() {
@@ -3036,8 +3101,8 @@ mod tests {
         let (mut session, _dir) = started_with(
             &format!(
                 "read -r init\nread -r one\nread -r title_one\nprintf '%s\\n' '{reset}'\n\
-                 read -r clear\nread -r two\nread -r title_two\nread -r three\n\
-                 printf '%s\\n' \"$one\" \"$title_one\" \"$clear\" \"$two\" \"$title_two\" \"$three\" > '{asked}'\n",
+                 read -r clear\nread -r two\nread -r title_two\nread -r three\nread -r title_three\n\
+                 printf '%s\\n' \"$one\" \"$title_one\" \"$clear\" \"$two\" \"$title_two\" \"$three\" \"$title_three\" > '{asked}'\n",
                 asked = asked.display()
             ),
             |options| options.ask_title = true,
@@ -3073,26 +3138,68 @@ mod tests {
             .lines()
             .map(|line| serde_json::from_str(line).expect("each line is JSON"))
             .collect();
-        let described: Vec<&str> = lines
+        let described: Vec<(&str, bool)> = lines
             .iter()
             .filter(|line| line["request"]["subtype"] == "generate_session_title")
-            .filter_map(|line| line["request"]["description"].as_str())
+            .filter_map(|line| {
+                Some((
+                    line["request"]["description"].as_str()?,
+                    line["request"]["persist"].as_bool()?,
+                ))
+            })
             .collect();
-        assert_eq!(described, ["add etag support", "a new thing"], "{written}");
-        assert_eq!(lines[5]["type"], "user", "asked once more only: {written}");
+        let lead = "The prompts the operator sent in this session, oldest first:";
+        assert_eq!(
+            described,
+            [
+                (format!("{lead}\nadd etag support").as_str(), true),
+                (format!("{lead}\na new thing").as_str(), true),
+                (format!("{lead}\na new thing\nand more").as_str(), false),
+            ],
+            "{written}"
+        );
     }
 
     #[test]
-    fn a_long_first_prompt_is_cut_on_a_character_boundary_before_it_is_sent_for_a_title() {
+    fn a_long_prompt_is_cut_on_a_character_boundary_before_it_is_sent_for_a_title() {
         let prompt = "é".repeat(50 * 1024) + "x";
 
-        let about = title_description(&prompt).expect("the prompt says something");
+        let line = title_line(&prompt).expect("the prompt says something");
 
         // A literal, not the constant: a bound read off itself holds at any
-        // value, and what it keeps from a second bill is a kilobyte.
-        assert!(about.len() <= 1024, "{} bytes", about.len());
-        assert!(about.len() >= 1023, "{} bytes", about.len());
-        assert!(prompt.starts_with(about));
+        // value, and what it keeps from a second bill is the rest of a long
+        // paste.
+        assert!(line.len() <= 256, "{} bytes", line.len());
+        assert!(line.len() >= 255, "{} bytes", line.len());
+        assert!(prompt.starts_with(&line));
+    }
+
+    #[test]
+    fn a_prompt_is_one_line_for_a_title_and_a_bare_command_is_none() {
+        assert_eq!(
+            title_line("  add etag\n\n support\t to it\n").as_deref(),
+            Some("add etag support to it")
+        );
+        assert_eq!(
+            title_line("/goal every test passes").as_deref(),
+            Some("/goal every test passes")
+        );
+        assert_eq!(title_line(" /compact "), None);
+        assert_eq!(title_line(" \n "), None);
+    }
+
+    #[test]
+    fn a_title_is_asked_from_the_first_prompt_and_the_newest_ones() {
+        let mut about = Vec::new();
+        for prompt in ["one", "two", "three", "four", "five", "six"] {
+            remember_for_title(&mut about, prompt.to_owned());
+        }
+
+        assert_eq!(about, ["one", "four", "five", "six"]);
+        assert_eq!(
+            title_description(&about),
+            "The prompts the operator sent in this session, oldest first:\none\nfour\nfive\nsix"
+        );
     }
 
     /// What is left out and what is shown add up to what was written, even
@@ -3116,16 +3223,6 @@ mod tests {
             .split_once("] ")
             .map_or(0, |(_, text)| text.len() as u64);
         assert_eq!(left_out + shown, total, "{left_out} + {shown} of {total}");
-    }
-
-    #[test]
-    fn a_short_first_prompt_is_sent_for_a_title_whole() {
-        assert_eq!(
-            title_description("  add etag support\n"),
-            Some("add etag support")
-        );
-        assert_eq!(title_description("/model opus"), None);
-        assert_eq!(title_description(" \n "), None);
     }
 
     #[cfg(unix)]

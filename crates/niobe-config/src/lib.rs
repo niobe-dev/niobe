@@ -49,8 +49,8 @@
 //! theme = "neo"
 //! ```
 //!
-//! and how a session is titled — by the model, from what its first prompt
-//! asks, unless a file turns that off:
+//! and how a session is titled — by the model, from what its prompts ask,
+//! after each one, unless a file turns that off:
 //!
 //! ```toml
 //! titles = "first-prompt"
@@ -387,12 +387,14 @@ impl ThemeName {
 /// How a session gets the title its pane and the history dialog name it by.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Titles {
-    /// The backend is asked for a few words on what the first prompt asks.
-    /// The `claude` CLI answers from its small model: 899 input tokens and 10
-    /// output for a short prompt, measured on Claude Code 2.1.292 with haiku,
-    /// and a few hundred more at most for a long one, since the bridge sends
-    /// only the prompt's first kilobyte. The CLI bills it into the session's
-    /// running totals and the bridge counts it with the next turn.
+    /// The backend is asked for a few words on what the session's prompts
+    /// ask, after each prompt that says something, so the title follows the
+    /// session. The `claude` CLI answers from its small model: 899 input
+    /// tokens and 10 output for a short prompt, measured on Claude Code
+    /// 2.1.292 with haiku, each time, and a few hundred more at most for long
+    /// ones, since the bridge sends only the opening of the first prompt and
+    /// of the newest three. The CLI bills it into the session's running
+    /// totals and the bridge counts it with the next turn.
     #[default]
     Model,
     /// The first line of the first prompt, as the shell did before the

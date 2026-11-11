@@ -316,10 +316,12 @@ reviewers that encode both, for an agent working in this tree.
   `mcp_reconnect`, which it sends for the MCP view's `r` — starts it with
   `CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING` and sends each prompt with a `uuid`, which
   `rewind_files` names to put the files back as they were before that prompt: a dry run first,
-  for which files, and the rewind itself only once the dry run has answered, said as one notice — asks it once,
-  where the config leaves titles on, to title a new session from its first prompt that is not a
-  command (`generate_session_title`, which the CLI answers from its small model and bills into the
-  session's running totals), and the only place the models the signed-in account can run are
+  for which files, and the rewind itself only once the dry run has answered, said as one notice — asks it,
+  where the config leaves titles on, to title a new session again after each prompt that says
+  something, a bare slash command being none, from the opening of its first prompt and of its newest
+  three (`generate_session_title`, which the CLI answers from its small model, in the order it
+  finishes them, and bills into the session's running totals; the first title kept in the CLI's
+  transcript, an answer older than one already heard passed over), and the only place the models the signed-in account can run are
   listed, which the model picker offers — keeps its
   standard input open for the life of the session and writes it from a queue on a thread of its
   own, so a CLI that is not reading never holds up the screen, answers the permission prompts the CLI
