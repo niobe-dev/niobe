@@ -9627,6 +9627,15 @@ impl App {
         self
     }
 
+    /// Opens on the history dialog's sessions, as Session › Resume… does, for
+    /// `niobe --resume` given no session: the operator asked which one to
+    /// carry on, and Enter on one opens it. A shell that keeps no record has
+    /// none to list, and says so as the menu item would.
+    pub fn choosing_a_session(mut self) -> Self {
+        self.perform(crate::menu::Action::Resume);
+        self
+    }
+
     /// Whether the shell has asked for the repository's earlier sessions to
     /// be read since this was last asked: once as it opens, and again each
     /// time the history dialog does, so a session another shell ended since
@@ -22706,6 +22715,28 @@ mod tests {
                 .collect(),
             unread: None,
         }
+    }
+
+    #[test]
+    fn a_shell_opened_to_choose_a_session_lists_the_sessions_and_reads_them() {
+        let mut app = app().remembers().choosing_a_session();
+
+        assert_eq!(
+            app.browser().map(|browser| browser.view),
+            Some(View::Sessions)
+        );
+        assert!(
+            app.take_history_request(),
+            "the sessions are read to list them"
+        );
+    }
+
+    #[test]
+    fn a_shell_that_keeps_no_record_has_no_sessions_to_choose_from() {
+        let app = app().choosing_a_session();
+
+        assert!(app.browser().is_none());
+        assert_eq!(app.hint.as_deref(), Some(NO_RECORD_HINT));
     }
 
     /// Opening the dialog reads the history again, and the read lands while

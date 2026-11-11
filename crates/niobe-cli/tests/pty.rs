@@ -2171,6 +2171,50 @@ fn a_session_chosen_in_the_history_reopens_the_shell_on_it() {
     assert!(started[2].contains("--resume conv-1"), "{started:?}");
 }
 
+/// `niobe --resume` with no session opens on the list of the repository's
+/// sessions, and Enter on one carries it on, as the history dialog does.
+#[test]
+fn resume_given_no_session_opens_on_the_list_and_carries_the_chosen_one_on() {
+    let repo = repo();
+    let home = stand_in(repo.path(), WRITES_DOWN_ITS_ARGUMENTS_CLAUDE);
+    {
+        let (terminal, slave) = Terminal::open();
+        let mut shell = shell_driving_the_stand_in(&slave, repo.path(), home.path())
+            .spawn()
+            .expect("the niobe binary runs");
+        terminal.shows(OPENING_FRAME);
+        terminal.typed(b"recorded-before\r");
+        terminal.shows("answered-the-turn");
+        lines_written(&repo.path().join("args.log"), 1);
+        terminal.typed(CTRL_Q);
+        let (_, status) = ended(&mut shell);
+        let (drawn, _) = released(terminal, slave);
+        assert!(
+            status.success(),
+            "the first session ended with {status}: {drawn}"
+        );
+    }
+
+    let (terminal, slave) = Terminal::open();
+    let mut shell = shell_driving_the_stand_in(&slave, repo.path(), home.path())
+        .arg("--resume")
+        .spawn()
+        .expect("the niobe binary runs");
+    // Listed without a key: the sessions are what the shell opened on.
+    terminal.shows("recorded-before");
+    terminal.typed(DOWN);
+    terminal.typed(ENTER);
+    let started = lines_written(&repo.path().join("args.log"), 3);
+    terminal.shows("answered-the-turn");
+    terminal.typed(CTRL_Q);
+    let (_, status) = ended(&mut shell);
+    let (drawn, _) = released(terminal, slave);
+    assert!(status.success(), "{drawn}");
+
+    let started: Vec<&str> = started.lines().collect();
+    assert!(started[2].contains("--resume conv-1"), "{started:?}");
+}
+
 /// A session another niobe has open is marked in the history dialog, and
 /// choosing it leaves the operator in their own shell, with what they were
 /// writing, told why: ending this one first would leave them with neither.

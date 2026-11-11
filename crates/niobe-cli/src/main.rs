@@ -169,7 +169,13 @@ fn run(
         ),
     };
     let mut next = match command {
-        Command::Shell => shell(profile, &asked)?,
+        Command::Shell => shell(profile, &asked, Opening::New)?,
+        // With nothing to draw a list to choose from on, the list is printed:
+        // the operator asked what there is to carry on, and that answers it.
+        Command::Resume(Resume::Pick) if !std::io::stdout().is_terminal() => {
+            return list_sessions().map(|()| 0);
+        }
+        Command::Resume(Resume::Pick) => shell(profile, &asked, Opening::Choosing)?,
         Command::Resume(Resume::Recorded(session)) => resume(session, profile, &asked)?,
         Command::Resume(Resume::Imported(session)) => import(&session, profile, &asked)?,
         Command::Print { prompt, json } => {
@@ -360,13 +366,24 @@ fn carried_conversation(root: &Path, conversation: &str) -> Option<SessionId> {
         .min()
 }
 
-/// Opens the shell on a new session, recorded into this repository's store.
+/// What the shell opens showing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Opening {
+    /// The new session, ready for a prompt.
+    New,
+    /// The list of the repository's sessions, to choose the one to carry on,
+    /// over the new session it leaves the operator in if they choose none.
+    Choosing,
+}
+
+/// Opens the shell on a new session, recorded into this repository's store,
+/// showing what `opening` says.
 ///
 /// Without a terminal there is nothing to draw into and raw mode would fail, so
 /// a piped or redirected run prints the help instead of an errno. The config is
 /// read first either way, so a config that cannot be used is reported rather
 /// than hidden behind the help.
-fn shell(profile: Option<&str>, asked: &Asked) -> Result<Option<Target>, String> {
+fn shell(profile: Option<&str>, asked: &Asked, opening: Opening) -> Result<Option<Target>, String> {
     let root = repo::root(&cwd()?);
     let Some(loaded) = consented(&root, asked)? else {
         return Ok(None);
@@ -445,6 +462,10 @@ fn shell(profile: Option<&str>, asked: &Asked) -> Result<Option<Target>, String>
     // A command typed after `!` runs whether or not a backend does: it is the
     // operator's, not the agent's.
     let app = app.runs_commands().remembers();
+    let app = match opening {
+        Opening::New => app,
+        Opening::Choosing => app.choosing_a_session(),
+    };
 
     let mut journal = StoreJournal::pending(root.clone());
     let mut rules = ConfigRules::at(&root);
@@ -2000,6 +2021,8 @@ what the agent did, decided and touched, what it is doing now and what it cost.
 USAGE:
     niobe                  Open the shell on a new session
     niobe --resume <id>    Open the shell on an earlier session and continue it
+    niobe --resume         Open the shell on the list of earlier sessions, to choose one;
+                           piped, print the list `niobe sessions` prints
     niobe -p <prompt>      Run one turn with no terminal and print the reply; --json prints
                            its outcome, reply and spend in the shape schema/print.schema.json
                            publishes. [permissions] rules answer the calls they allow and

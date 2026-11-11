@@ -102,6 +102,8 @@ pub enum Command {
 /// can I carry on with? — and `niobe sessions` prints both answers under it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Resume {
+    /// None: the flag alone, which asks for the list to choose one from.
+    Pick,
     /// One Niobe recorded, by the number `niobe sessions` prints.
     Recorded(SessionId),
     /// One the `claude` CLI recorded for this repository, by the id it calls
@@ -349,9 +351,7 @@ fn command(args: &[&str]) -> Result<Command, String> {
         [] => Command::Shell,
         ["-h" | "--help", ..] => Command::Help,
         ["-V" | "--version", ..] => Command::Version,
-        ["--resume"] => {
-            return Err("`--resume` needs a session id; `niobe sessions` lists them".to_owned());
-        }
+        ["--resume"] => Command::Resume(Resume::Pick),
         ["--resume", id, rest @ ..] => {
             no_more(rest)?;
             Command::Resume(resume(id)?)
@@ -641,8 +641,17 @@ mod tests {
     }
 
     #[test]
-    fn resume_without_an_id_at_all_points_at_the_session_list() {
-        for args in [&["--resume"][..], &["--resume="], &["--resume", " "]] {
+    fn resume_with_no_id_after_it_asks_which_session_to_carry_on() {
+        assert_eq!(parsed(&["--resume"]), Ok(Command::Resume(Resume::Pick)));
+        assert_eq!(
+            invocation(&["--resume", "--profile", "work"]).map(|i| i.command),
+            Ok(Command::Resume(Resume::Pick))
+        );
+    }
+
+    #[test]
+    fn resume_given_an_id_that_is_blank_points_at_the_session_list() {
+        for args in [&["--resume="][..], &["--resume", " "]] {
             let error = parsed(args).expect_err("no id");
             assert!(error.contains("niobe sessions"), "{args:?}: {error}");
         }

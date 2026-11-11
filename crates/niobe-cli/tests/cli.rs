@@ -298,6 +298,18 @@ fn the_session_list_shows_what_the_store_holds() {
     assert!(row.contains("Read catalog/fetch.py"), "{out}");
 }
 
+/// `--resume` with no session asks which one to carry on. On a terminal the
+/// shell opens on the list to choose from; piped, the list is the answer.
+#[test]
+fn resume_given_no_session_prints_the_list_to_choose_one_from() {
+    let repo = repo_with_the_fixture_recorded();
+    let listed = niobe(repo.path(), &["sessions"]);
+    let output = niobe(repo.path(), &["--resume"]);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(stdout(&output), stdout(&listed));
+}
+
 /// A store the operator can read and not write — a checkout on a read-only
 /// mount, or one whose files they made read-only — is listed as it is.
 #[cfg(unix)]

@@ -74,7 +74,8 @@ With no config file naming a profile it runs the `claude` on your `PATH` with th
 settings, under a profile it calls `claude`; the `[permissions]` rules niobe writes into the
 repository's `.niobe/config.toml` when you answer a question for good leave it running. `niobe --help` lists the commands, the config keys and the keys the
 shell answers to; `niobe sessions` lists the sessions you can carry on with
-`niobe --resume <id>`.
+`niobe --resume <id>`, the one used last first, and `niobe --resume` alone opens the shell on that
+list to choose one.
 
 A turn that spends more than three times the tokens the session's earlier turns averaged is
 named in the transcript when it ends, with how many times the average it spent.
