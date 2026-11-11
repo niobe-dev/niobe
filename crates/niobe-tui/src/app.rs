@@ -24,6 +24,7 @@ use niobe_core::event::{
     AgentId, AgentOutcome, Backend, Billing, CompactTrigger, Event, Mode, PermissionDecision,
     SlashCommand, TokenCounts, ToolCallId, ToolOutcome, UsageWindow, UsageWindows,
 };
+use niobe_core::goal::GoalReport;
 use niobe_core::permission::{Allowlist, Rule};
 use niobe_core::session::{DecisionRecord, SessionState, TestRunRecord};
 use ratatui_textarea::{Input, TextArea, WrapMode};
@@ -2702,6 +2703,7 @@ impl App {
             | Event::Models { .. }
             | Event::TurnTotalDiffers { .. }
             | Event::Looked
+            | Event::Goal { .. }
             | Event::Notice { .. }
             | Event::LimitReached { .. }
             | Event::Error { .. } => None,
@@ -3280,6 +3282,30 @@ impl App {
 
             // The plan's limit reads as any other notice: the operator did
             // nothing wrong, and the session goes on once the window does.
+            // The goal's standing is on the rule above the composer while it
+            // is worked toward. Its being met is kept in the transcript too,
+            // where the turns it kept going are: the rule gives it up at the
+            // next prompt. The backend's own reply already says it was set or
+            // cleared.
+            Event::Goal { report } => match report {
+                GoalReport::Met { .. } => {
+                    if let Some(goal) = self.session.goal() {
+                        self.push(Entry {
+                            attention: Attention::Notable,
+                            kind: EntryKind::Notice,
+                            head: self.agent_name(),
+                            meta: String::new(),
+                            body: crate::goal::met(goal),
+                            streaming: false,
+                            at: self.at,
+                            calls: Vec::new(),
+                            agent: None,
+                        });
+                    }
+                }
+                GoalReport::Set { .. } | GoalReport::NotMet { .. } | GoalReport::Cleared => {}
+            },
+
             Event::Notice { message } | Event::LimitReached { message } => self.push(Entry {
                 attention: Attention::Routine,
                 kind: EntryKind::Notice,

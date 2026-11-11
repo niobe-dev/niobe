@@ -106,11 +106,13 @@ use niobe_core::event::{
     SessionMeta, SlashCommand, TokenCounts, ToolCallId, ToolOutcome, Usage, UsageWindow,
     UsageWindows,
 };
+use niobe_core::goal::GoalReport;
 use niobe_core::proposal::{Action, Choice, Proposal, Question};
 use niobe_core::session::TestRunRecord;
 use niobe_core::test_run;
 
 use crate::conformance;
+use crate::goal;
 use crate::wire;
 
 /// The names of the tool whose call is a sub-agent rather than an action.
@@ -689,6 +691,15 @@ pub struct Translator {
     /// What says whether a file is at a path, where the caller handed one
     /// in. `None` leaves it unsaid of every file a write would replace.
     file_exists: Option<FileExists>,
+    /// The condition of the goal the operator set, while the CLI checks it,
+    /// so that a stop hook's feedback is read as a check of it only where it
+    /// names it.
+    goal: Option<String>,
+    /// What reads the last check of the goal from the CLI's transcript, and
+    /// the directory the CLI keeps this session's transcript in, where the
+    /// caller handed them in. `None` leaves a goal met unsaid: the stream
+    /// has no record of it.
+    read_goal: Option<(ReadGoal, PathBuf)>,
     /// Whether the CLI's last request state was `compacting`, so that the
     /// state after it is reported as the compaction's end.
     compacting: bool,
@@ -721,6 +732,13 @@ pub(crate) type ReadSpilled = fn(&Path, u64) -> Option<String>;
 ///
 /// Handed in as [`ReadSpilled`] is, so the translator does no I/O of its own.
 pub(crate) type FileExists = fn(&Path) -> Option<bool>;
+
+/// The last check of the goal set with the condition given, read from the
+/// CLI's transcript at the path given, where it found the goal met; see
+/// [`crate::goal`].
+///
+/// Handed in as [`ReadSpilled`] is, so the translator does no I/O of its own.
+pub(crate) type ReadGoal = fn(&Path, &str) -> Option<GoalReport>;
 
 impl Translator {
     /// A translator for a session running under `profile`.
@@ -786,6 +804,8 @@ impl Translator {
             served_metered: false,
             read_spilled: None,
             file_exists: None,
+            goal: None,
+            read_goal: None,
             compacting: false,
             mode: None,
         }
@@ -899,6 +919,27 @@ impl Translator {
     #[must_use]
     pub(crate) fn checking_files_with(mut self, exists: FileExists) -> Self {
         self.file_exists = Some(exists);
+        self
+    }
+
+    /// The same translator, reading with `read` whether the goal was met
+    /// from the session's transcript under `transcripts`, the directory the
+    /// CLI keeps this working directory's transcripts in.
+    ///
+    /// Only a live session's translator reads it: a transcript read back
+    /// holds each check where it happened.
+    #[must_use]
+    pub(crate) fn reading_goal_with(mut self, read: ReadGoal, transcripts: PathBuf) -> Self {
+        self.read_goal = Some((read, transcripts));
+        self
+    }
+
+    /// The same translator, told the condition of the goal the conversation
+    /// it carries on still has set, which the CLI restores without a word on
+    /// its stream.
+    #[must_use]
+    pub(crate) fn pursuing_goal(mut self, condition: Option<String>) -> Self {
+        self.goal = condition;
         self
     }
 
@@ -1997,6 +2038,8 @@ impl Translator {
     /// is counted again: the CLI's totals from here on hold nothing from
     /// before.
     fn reset(&mut self, out: &mut Vec<Event>) {
+        // The CLI drops a goal with the conversation it was set in.
+        self.goal = None;
         self.reported.clear();
         self.restored_unknown = false;
         // The turn a resumed bill left uncounted belongs to the conversation
@@ -2097,6 +2140,9 @@ impl Translator {
         let blocks = match envelope.message.content {
             Some(wire::Content::Blocks(blocks)) => blocks,
             Some(wire::Content::Text(text)) => {
+                if written_by_cli && agent.is_none() {
+                    self.goal_replied(&text, out);
+                }
                 let text = lines_kept_where(written_by_cli, text);
                 out.push(Event::AssistantMessage { text, agent });
                 return;
@@ -2155,10 +2201,70 @@ impl Translator {
         // The text first: it is what the model said before it acted, and the
         // transcript reads in that order.
         if !text.is_empty() {
+            if written_by_cli && agent.is_none() {
+                self.goal_replied(&text, out);
+            }
             let text = lines_kept_where(written_by_cli, text);
             out.push(Event::AssistantMessage { text, agent });
         }
         out.append(&mut calls);
+    }
+
+    /// What the CLI's own reply `said` reports of the goal, where it answers
+    /// `/goal`: one set, which a stop hook's feedback is then read against,
+    /// or one cleared. Said beside the reply, which is the CLI's answer to
+    /// the command and stays in the transcript as one.
+    fn goal_replied(&mut self, said: &str, out: &mut Vec<Event>) {
+        let Some(report) = goal::replied(said) else {
+            return;
+        };
+        self.goal = match &report {
+            GoalReport::Set { condition } => Some(condition.clone()),
+            GoalReport::NotMet { .. } | GoalReport::Met { .. } | GoalReport::Cleared => None,
+        };
+        out.push(Event::Goal { report });
+    }
+
+    /// A check of the goal that found it not met, where `said` is the
+    /// message the CLI continued the turn with after its stop hooks and one
+    /// of them was the goal's.
+    fn goal_fed_back(&self, said: Option<&wire::Content>, out: &mut Vec<Event>) {
+        let Some(condition) = &self.goal else {
+            return;
+        };
+        let reasons = match said {
+            Some(wire::Content::Text(text)) => vec![goal::not_met(text, condition)],
+            Some(wire::Content::Blocks(blocks)) => blocks
+                .iter()
+                .map(|block| match block {
+                    wire::Block::Text { text } => goal::not_met(text, condition),
+                    wire::Block::ToolUse { .. }
+                    | wire::Block::ToolResult { .. }
+                    | wire::Block::Other => None,
+                })
+                .collect(),
+            None => Vec::new(),
+        };
+        out.extend(reasons.into_iter().flatten().map(|reason| Event::Goal {
+            report: GoalReport::NotMet { reason },
+        }));
+    }
+
+    /// Whether the check that let the turn end found the goal met, read
+    /// from the transcript where the CLI alone records it. A turn stopped or
+    /// failed before a check found it met leaves the goal set, as the CLI
+    /// does.
+    fn goal_checked_at_end(&mut self, out: &mut Vec<Event>) {
+        let (Some(condition), Some((read, transcripts)), Some(session)) =
+            (&self.goal, &self.read_goal, &self.backend_session)
+        else {
+            return;
+        };
+        let path = transcripts.join(format!("{session}.jsonl"));
+        if let Some(met) = read(&path, condition) {
+            self.goal = None;
+            out.push(Event::Goal { report: met });
+        }
     }
 
     /// The CLI's words for a request of the session's that failed, said as
@@ -2199,6 +2305,9 @@ impl Translator {
             .filter(|id| envelope.refused(id))
             .collect();
         let reported = envelope.tool_use_result;
+        if main {
+            self.goal_fed_back(envelope.message.content.as_ref(), out);
+        }
         let Some(wire::Content::Blocks(blocks)) = envelope.message.content else {
             // A `user` message with plain text is the turn Niobe itself wrote,
             // echoed back. The shell already has it; folding it again would
@@ -2926,6 +3035,7 @@ impl Translator {
     }
 
     fn result(&mut self, outcome: wire::Outcome, out: &mut Vec<Event>) {
+        self.goal_checked_at_end(out);
         self.turn_follows = Some(outcome.queued_turn_count.unwrap_or(0) > 0);
         self.turn_under_way = false;
         let owes_a_turn = std::mem::take(&mut self.untaken_end);
@@ -11443,6 +11553,159 @@ error: could not compile `demo` (lib test) due to 1 previous error";
                 .iter()
                 .any(|event| matches!(event, Event::TurnEnded)),
             "{finished:?}"
+        );
+    }
+
+    const GOAL_SET: &str = r#"{"type":"assistant","message":{"model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"Goal set: two replies, A then B"}],"usage":{"input_tokens":0,"output_tokens":0}}}"#;
+
+    /// The message the CLI continues a turn with where a check found the
+    /// goal named `condition` not met, as Claude Code 2.1.322 sends it.
+    fn fed_back(condition: &str, reason: &str) -> String {
+        let text = serde_json::to_string(&format!("Stop hook feedback:\n[{condition}]: {reason}"))
+            .expect("a string is JSON");
+        format!(
+            r#"{{"type":"user","message":{{"role":"user","content":[{{"type":"text","text":{text}}}]}},"parent_tool_use_id":null,"isSynthetic":true}}"#
+        )
+    }
+
+    /// Reads a goal met where the translator asks of `s-1`'s transcript
+    /// about the goal the tests set, as the transcript would say it.
+    fn met_in_transcript(path: &Path, condition: &str) -> Option<GoalReport> {
+        (path == Path::new("/claude/projects/repo/s-1.jsonl")
+            && condition == "two replies, A then B")
+            .then(|| GoalReport::Met {
+                reason: Some("Both were sent.".to_owned()),
+            })
+    }
+
+    fn goals(events: &[Event]) -> Vec<GoalReport> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Goal { report } => Some(report.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn goal_session() -> Translator {
+        let mut translator = Translator::new("max")
+            .reading_goal_with(met_in_transcript, PathBuf::from("/claude/projects/repo"));
+        translator
+            .line(r#"{"type":"system","subtype":"init","session_id":"s-1","model":"opus-5"}"#);
+        translator
+    }
+
+    #[test]
+    fn a_goal_set_is_said_beside_the_clis_reply_and_each_check_not_met_after_it() {
+        let mut translator = goal_session();
+        let set = translator.line(GOAL_SET);
+        assert_eq!(
+            goals(&set),
+            [GoalReport::Set {
+                condition: "two replies, A then B".to_owned()
+            }]
+        );
+        assert!(
+            set.iter().any(|event| matches!(
+                event,
+                Event::AssistantMessage { text, agent: None } if text == "Goal set: two replies, A then B"
+            )),
+            "{set:?}"
+        );
+
+        let checked = translator.line(&fed_back("two replies, A then B", "Only A so far."));
+        assert_eq!(
+            goals(&checked),
+            [GoalReport::NotMet {
+                reason: "Only A so far.".to_owned()
+            }]
+        );
+        let other_hook = translator.line(&fed_back("lint.sh", "two warnings"));
+        assert_eq!(goals(&other_hook), []);
+    }
+
+    #[test]
+    fn a_turn_ending_with_a_goal_set_reads_whether_its_last_check_found_it_met() {
+        let mut translator = goal_session();
+        translator.line(GOAL_SET);
+        let ended = translator.line(
+            r#"{"type":"result","subtype":"success","usage":{"input_tokens":2,"output_tokens":9}}"#,
+        );
+        assert_eq!(
+            goals(&ended),
+            [GoalReport::Met {
+                reason: Some("Both were sent.".to_owned())
+            }]
+        );
+        let met_at = ended
+            .iter()
+            .position(|event| matches!(event, Event::Goal { .. }));
+        let end_at = ended.iter().position(|event| *event == Event::TurnEnded);
+        assert!(met_at < end_at, "{ended:?}");
+
+        // Met, the goal is no longer checked: a later turn reads nothing.
+        let again = translator.line(
+            r#"{"type":"result","subtype":"success","usage":{"input_tokens":2,"output_tokens":9}}"#,
+        );
+        assert_eq!(goals(&again), []);
+    }
+
+    #[test]
+    fn with_no_goal_set_or_no_transcript_to_read_a_turns_end_says_nothing_of_one() {
+        let mut unset = goal_session();
+        let ended = unset.line(
+            r#"{"type":"result","subtype":"success","usage":{"input_tokens":2,"output_tokens":9}}"#,
+        );
+        assert_eq!(goals(&ended), []);
+
+        let mut unread = Translator::new("max");
+        unread.line(r#"{"type":"system","subtype":"init","session_id":"s-1","model":"opus-5"}"#);
+        unread.line(GOAL_SET);
+        let ended = unread.line(
+            r#"{"type":"result","subtype":"success","usage":{"input_tokens":2,"output_tokens":9}}"#,
+        );
+        assert_eq!(goals(&ended), []);
+    }
+
+    #[test]
+    fn a_goal_cleared_by_the_command_or_with_the_conversation_is_no_longer_checked() {
+        let mut translator = goal_session();
+        translator.line(GOAL_SET);
+        let cleared = translator.line(r#"{"type":"assistant","message":{"model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"Goal cleared: two replies, A then B"}]}}"#);
+        assert_eq!(goals(&cleared), [GoalReport::Cleared]);
+        let late = translator.line(&fed_back("two replies, A then B", "Only A so far."));
+        assert_eq!(goals(&late), []);
+
+        translator.line(GOAL_SET);
+        translator
+            .line(r#"{"type":"conversation_reset","new_conversation_id":"s-2","trigger":"clear"}"#);
+        let late = translator.line(&fed_back("two replies, A then B", "Only A so far."));
+        assert_eq!(goals(&late), []);
+    }
+
+    #[test]
+    fn a_model_writing_the_clis_words_sets_no_goal() {
+        let mut translator = goal_session();
+        let said = translator.line(r#"{"type":"assistant","message":{"model":"opus-5","role":"assistant","content":[{"type":"text","text":"Goal set: two replies, A then B"}]}}"#);
+        assert_eq!(goals(&said), []);
+        let checked = translator.line(&fed_back("two replies, A then B", "Only A so far."));
+        assert_eq!(goals(&checked), []);
+    }
+
+    #[test]
+    fn a_conversation_carried_on_with_its_goal_still_set_reads_its_checks() {
+        let mut translator = Translator::new("max")
+            .reading_goal_with(met_in_transcript, PathBuf::from("/claude/projects/repo"))
+            .pursuing_goal(Some("two replies, A then B".to_owned()));
+        translator
+            .line(r#"{"type":"system","subtype":"init","session_id":"s-1","model":"opus-5"}"#);
+        let checked = translator.line(&fed_back("two replies, A then B", "Only A so far."));
+        assert_eq!(
+            goals(&checked),
+            [GoalReport::NotMet {
+                reason: "Only A so far.".to_owned()
+            }]
         );
     }
 }

@@ -22,6 +22,7 @@
 //! records it covers stop being owed for.
 
 use crate::decision;
+use crate::goal::Goal;
 use crate::test_run::{self, FailedTests, TestCounts};
 use crate::work::{self, Work};
 use std::collections::{BTreeMap, BTreeSet};
@@ -759,6 +760,10 @@ pub struct SessionState {
     models: Vec<ModelOption>,
     /// The MCP servers the backend last said it has configured.
     mcp_servers: Vec<McpServer>,
+    /// The goal the operator set, while it is worked toward and, once a
+    /// check found it met or the operator cleared it, until their next
+    /// prompt. A clear of the conversation ends it, as the backend does.
+    goal: Option<Goal>,
     /// Whether the turn that typed a clear has not ended — or, for a
     /// conversation read back from the clear it opens on, may not have: its
     /// end belongs to the conversation that was cleared, and is not a turn of
@@ -892,6 +897,7 @@ impl SessionState {
             // its first turn's, as it is live.
             Event::UserMessage { text } => {
                 bump(&mut self.user_messages);
+                self.goal = self.goal.take().filter(Goal::is_pursued);
                 if self.first_prompt.is_none() {
                     self.first_prompt = Some(text.clone());
                 }
@@ -1193,6 +1199,7 @@ impl SessionState {
             // Passed over in `apply`, before the fold: the turn it forecasts
             // is counted when it comes, from what it does.
             Event::Looked | Event::TurnFollows => {}
+            Event::Goal { report } => self.goal = Goal::after(self.goal.take(), report),
             // Kept apart rather than added to the totals: where the backend
             // bills what its messages did not report, the turn's bill already
             // carries it, and adding it here would count it twice.
@@ -1846,6 +1853,13 @@ impl SessionState {
     /// order. Empty until it has said, or where it has none.
     pub fn mcp_servers(&self) -> &[McpServer] {
         &self.mcp_servers
+    }
+
+    /// The goal the operator set, while it is worked toward, and how it
+    /// ended until their next prompt; see [`crate::goal`]. `None` where no
+    /// goal was set, or the conversation was cleared since.
+    pub fn goal(&self) -> Option<&Goal> {
+        self.goal.as_ref()
     }
 
     /// The models the backend last said it offers, in its order. Empty until
@@ -5657,5 +5671,56 @@ mod tests {
         let [start, end] = ended("a", "Bash", Some("ls"), ToolOutcome::Ok);
         let state = SessionState::replay(&[start, end.clone(), end]);
         assert_eq!(state.tools().by_work[&Work::Exploring].calls, 1);
+    }
+
+    fn goal(report: crate::goal::GoalReport) -> Event {
+        Event::Goal { report }
+    }
+
+    fn goal_set() -> Event {
+        goal(crate::goal::GoalReport::Set {
+            condition: "the tests pass".to_owned(),
+        })
+    }
+
+    #[test]
+    fn a_goal_is_held_while_it_is_worked_toward_and_its_end_until_the_next_prompt() {
+        use crate::goal::{GoalReport, Standing};
+        let met = goal(GoalReport::Met {
+            reason: Some("they pass".to_owned()),
+        });
+        let mut state = SessionState::replay(&[
+            prompt(),
+            goal_set(),
+            goal(GoalReport::NotMet {
+                reason: "one fails".to_owned(),
+            }),
+            prompt(),
+        ]);
+        let pursued = state.goal().expect("the goal is still worked toward");
+        assert_eq!(pursued.checks(), 1);
+
+        state.apply(&met);
+        state.apply(&Event::TurnEnded);
+        let ended = state
+            .goal()
+            .expect("the goal's end is shown until a prompt");
+        assert_eq!(
+            ended.standing(),
+            &Standing::Met {
+                reason: Some("they pass".to_owned())
+            }
+        );
+        assert_eq!(ended.checks(), 2);
+
+        state.apply(&prompt());
+        assert_eq!(state.goal(), None);
+    }
+
+    #[test]
+    fn a_cleared_conversation_has_no_goal_as_the_backend_drops_it() {
+        let state = SessionState::replay(&[prompt(), goal_set(), Event::TurnEnded, Event::Cleared]);
+        assert_eq!(state.goal(), None);
+        assert!(SessionState::new().goal().is_none());
     }
 }

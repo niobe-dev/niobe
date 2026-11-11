@@ -7934,3 +7934,47 @@ fn esc_puts_the_view_back_on_the_same_lines_after_the_calls_above_were_folded() 
 
     assert_eq!(after, expected, "Esc put the view on other lines");
 }
+
+#[test]
+fn a_goal_stands_on_the_rule_above_the_composer_until_the_prompt_after_it_ended() {
+    use niobe_core::GoalReport;
+
+    let goal = |report| Event::Goal { report };
+    let mut app = running_session();
+    app.apply(&goal(GoalReport::Set {
+        condition: "every test\npasses".to_owned(),
+    }));
+    let frame = screen(&mut app, 120, 30);
+    assert!(frame.contains("─ ◎ goal: every test passes ─"), "{frame}");
+
+    for reason in ["two tests fail", "one test fails"] {
+        app.apply(&goal(GoalReport::NotMet {
+            reason: reason.to_owned(),
+        }));
+    }
+    let frame = screen(&mut app, 120, 30);
+    assert!(
+        frame.contains("─ ◎ goal not met after 2 checks: one test fails ─"),
+        "{frame}"
+    );
+    assert_snapshot("goal-not-met-120x30", &frame);
+
+    app.apply(&goal(GoalReport::Met {
+        reason: Some("all 41 pass".to_owned()),
+    }));
+    app.apply(&Event::TurnEnded);
+    let frame = screen(&mut app, 120, 30);
+    assert!(
+        frame.contains("─ ✓ goal met after 3 checks: every test passes ─"),
+        "{frame}"
+    );
+    assert!(frame.contains("Goal met after 3 checks"), "{frame}");
+    assert!(frame.contains("all 41 pass"), "{frame}");
+
+    app.apply(&Event::UserMessage {
+        text: "next".to_owned(),
+    });
+    let frame = screen(&mut app, 120, 30);
+    assert!(!frame.contains("goal met after"), "{frame}");
+    assert!(frame.contains("Goal met after 3 checks"), "{frame}");
+}

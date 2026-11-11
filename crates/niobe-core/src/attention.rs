@@ -10,6 +10,7 @@
 //! a transcript entry several events built is as high as the highest of them.
 
 use crate::event::Event;
+use crate::goal::GoalReport;
 
 /// How much an event asks of the operator, lowest first, so the higher of
 /// two is their [`Ord::max`].
@@ -56,6 +57,14 @@ impl Attention {
             Event::FileChange { scope, .. } => match scope.is_project() {
                 true => Self::Notable,
                 false => Self::Routine,
+            },
+            // A goal reached is what the turns it kept going were for; a
+            // check that found it not met yet is the backend's own workings.
+            Event::Goal { report } => match report {
+                GoalReport::Met { .. } => Self::Notable,
+                GoalReport::Set { .. } | GoalReport::NotMet { .. } | GoalReport::Cleared => {
+                    Self::Routine
+                }
             },
 
             Event::SessionMeta(_)

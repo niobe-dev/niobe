@@ -558,6 +558,7 @@ fn resumed_options(
     home: Option<OsString>,
 ) -> Result<Options, String> {
     let mut options = claude_options(root, profile, with, home.clone())?;
+    options.transcripts = transcripts(Some(profile), root, config_dir.clone(), home.clone());
     if let Some(id) = &with.resume {
         options.spent = spent(profile, root, id, config_dir, home);
     }
@@ -981,6 +982,8 @@ mod tests {
         .expect("the options are made");
         assert_eq!(options.spent.cost_usd("opus-5"), Some(0.25));
         assert_eq!(options.resume.as_deref(), Some("s-1"));
+        // Where a goal's last check is read from, as the spend is.
+        assert_eq!(options.transcripts.as_deref(), Some(dir.as_path()));
         assert_eq!(options.mode, niobe_core::event::Mode::Plan);
 
         let missing = spent(

@@ -92,7 +92,11 @@ reviewers that encode both, for an agent working in this tree.
   tells the operator what happened after they last looked. `decision.rs` reads the
   decisions a reply states — each line that opens `DECISION:`, outside fenced code — which
   the binary asks the agent for and the fold keeps as the agent's own account, never as a
-  fact it checked. Depends on no other
+  fact it checked. `goal.rs` is the goal the operator set the agent with `/goal` — set, each check
+  the backend ran on it and why it found it not met, met, or cleared — as the backend reported it,
+  folded into where the goal stands, which the fold keeps while it is worked toward and, once it
+  ended, until the operator's next prompt; every verdict is the backend's model's, never Niobe's.
+  Depends on no other
   workspace crate and on no wire format.
 - **`crates/niobe-ledger/`** — token and cost accounting, and the provenance label every figure
   carries (`Measured`, `ApiEquivalent`, `Unpriced`). `prices.toml` is the bundled price table:
@@ -271,7 +275,10 @@ reviewers that encode both, for an agent working in this tree.
   question waiting by what it would run — with no count that tells someone coming back nothing,
   and no sheet where that is all there is; the first key after minutes
   with none opens it — that key is spent on it — and `c` in a side pane or View › What happened…
-  opens since the last one shown. `detail.rs` is one tool call read whole — the arguments it
+  opens since the last one shown. `goal.rs` words the goal the operator set: where it stands on
+  the rule above the composer — the condition until a check runs, the last check's reason while it
+  is not met, and how it ended until the next prompt — and the row the transcript keeps once a
+  check found it met. `detail.rs` is one tool call read whole — the arguments it
   started with and the output its end carried, each headed by its size, nothing cut, and where
   Niobe's hook trimmed that output, the whole of it behind `w` — opened from
   the list of the conversation's calls that `d` in a side pane or View › Tool calls… shows, or by a click on the
@@ -329,6 +336,13 @@ reviewers that encode both, for an agent working in this tree.
   too large to hand over to, so a whole test run is counted from it rather than from the
   preview, and the file under `.niobe/trim/` Niobe's hook wrote an output it trimmed to, which the
   call's end carries as its `untrimmed` output, and both the driver and the transcript reader hand it to the translator;
+  `goal.rs` reads the goal the operator set with `/goal` — set and cleared from the CLI's own reply
+  to the command, each check that found it not met from the stop hook's feedback the CLI continues
+  the turn with, and a check that found it met, which the stream never carries, from the last
+  `goal_status` in the last mebibyte of the CLI's transcript, read when a turn ends with a goal
+  set, since the CLI writes it there before the turn's `result`, and the goal a resumed
+  conversation still has set, which the CLI restores without a word, from the same transcript as
+  the CLI starts; a transcript read back reads each `goal_status` where it stands;
   `memory.rs` finds the files the CLI gives the agent as memory by the CLI's documented lookup —
   the user's, every directory's from the root down, the rules under each one's `rules`
   directory that name no `paths`, their `@` imports and the CLI's

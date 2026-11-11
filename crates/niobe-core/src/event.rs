@@ -1298,6 +1298,15 @@ pub enum Event {
     /// happened after they last looked, even where the process that ran it
     /// was ended while they were away.
     Looked,
+
+    /// What the backend reported about the goal the operator set: that one
+    /// was set, how a check of it went, or that it was cleared; see
+    /// [`crate::goal`].
+    Goal {
+        /// What was reported.
+        report: crate::goal::GoalReport,
+    },
+
     /// Something went wrong.
     Error {
         /// The message, as it will be shown.

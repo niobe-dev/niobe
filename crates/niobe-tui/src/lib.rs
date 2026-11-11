@@ -34,6 +34,7 @@ pub mod clock;
 pub mod desktop;
 pub mod detail;
 mod find;
+mod goal;
 pub mod history;
 mod hunks;
 pub mod images;

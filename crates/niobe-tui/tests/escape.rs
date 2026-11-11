@@ -298,6 +298,41 @@ fn no_content_puts_a_control_or_a_direction_mark_on_the_terminal() {
             title: format!("title {p}"),
         }])
     }));
+    all.extend(check("goal condition", |p| {
+        with(vec![Event::Goal {
+            report: niobe_core::GoalReport::Set {
+                condition: format!("goal {p}"),
+            },
+        }])
+    }));
+    all.extend(check("goal check", |p| {
+        with(vec![
+            Event::Goal {
+                report: niobe_core::GoalReport::Set {
+                    condition: "tests pass".to_owned(),
+                },
+            },
+            Event::Goal {
+                report: niobe_core::GoalReport::NotMet {
+                    reason: format!("reason {p}"),
+                },
+            },
+        ])
+    }));
+    all.extend(check("goal met", |p| {
+        with(vec![
+            Event::Goal {
+                report: niobe_core::GoalReport::Set {
+                    condition: format!("goal {p}"),
+                },
+            },
+            Event::Goal {
+                report: niobe_core::GoalReport::Met {
+                    reason: Some(format!("reason {p}")),
+                },
+            },
+        ])
+    }));
     all.extend(check("notice", |p| {
         with(vec![Event::Notice {
             message: format!("notice {p}"),

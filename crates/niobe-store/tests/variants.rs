@@ -266,6 +266,11 @@ fn one_of_each() -> Vec<Event> {
             message: text("You've hit your session limit · resets 11:10pm"),
         },
         Event::Looked,
+        Event::Goal {
+            report: niobe_core::GoalReport::NotMet {
+                reason: text("two tests fail"),
+            },
+        },
         Event::Error {
             message: text("gone"),
             fatal: true,
@@ -318,12 +323,13 @@ fn every_variant_is_listed() {
             Event::Notice { .. } => "notice",
             Event::LimitReached { .. } => "limit_reached",
             Event::Looked => "looked",
+            Event::Goal { .. } => "goal",
             Event::Error { .. } => "error",
         };
         assert!(!seen.contains(&name), "{name} is listed twice");
         seen.push(name);
     }
-    assert_eq!(seen.len(), 41, "every variant has one value: {seen:?}");
+    assert_eq!(seen.len(), 42, "every variant has one value: {seen:?}");
 }
 
 #[test]

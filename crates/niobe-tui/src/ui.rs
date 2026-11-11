@@ -33,6 +33,7 @@ use niobe_core::attention::Attention;
 use niobe_core::event::{
     Billing, Context, Overage, OverageRefusal, SlashCommand, UsageWindow, UsageWindows,
 };
+use niobe_core::goal::Goal;
 use niobe_core::session::{SessionState, ToolTotals, Totals, WorkTotals};
 
 use crate::app::{
@@ -1326,8 +1327,13 @@ fn draw_session(frame: &mut Frame, area: Rect, panes: bool, app: &mut App, theme
     );
 
     frame.render_widget(
-        Paragraph::new(divider_line(app.recall_label(), divider.width, theme))
-            .style(Style::new().fg(theme.frame).bg(theme.pane_bg)),
+        Paragraph::new(divider_line(
+            app.recall_label(),
+            app.session().goal(),
+            divider.width,
+            theme,
+        ))
+        .style(Style::new().fg(theme.frame).bg(theme.pane_bg)),
         divider,
     );
 
@@ -1336,23 +1342,38 @@ fn draw_session(frame: &mut Frame, area: Rect, panes: bool, app: &mut App, theme
 }
 
 /// The rule between the transcript and the composer, `width` columns wide,
-/// with `label` set into it where the composer holds a recalled prompt.
+/// with `label` set into it where the composer holds a recalled prompt, and
+/// after it where the session's goal stands while one is set.
 ///
 /// The label is on the divider rather than on the bar beside the prompt: a
 /// recalled prompt can fill every column of the bar, and this is the one
-/// thing the operator must not miss about it.
-fn divider_line(label: Option<String>, width: u16, theme: &Theme) -> Line<'static> {
+/// thing the operator must not miss about it. The goal is on it because it
+/// is about every turn to come, and the rule is drawn whatever the
+/// transcript shows.
+fn divider_line(
+    label: Option<String>,
+    goal: Option<&Goal>,
+    width: u16,
+    theme: &Theme,
+) -> Line<'static> {
     let width = usize::from(width);
-    let Some(label) = label else {
-        return Line::from("─".repeat(width));
-    };
-    let label = text::truncate(&format!(" {label} "), width.saturating_sub(1));
-    let rest = width.saturating_sub(1).saturating_sub(text::width(&label));
-    Line::from(vec![
-        Span::raw("─".repeat(width.min(1))),
-        Span::styled(label, Style::new().fg(theme.hot).bold()),
-        Span::raw("─".repeat(rest)),
-    ])
+    let labels = label
+        .map(|label| (label, Style::new().fg(theme.hot).bold()))
+        .into_iter()
+        .chain(goal.map(|goal| crate::goal::status(goal, theme)));
+    let mut spans = Vec::new();
+    let mut room = width;
+    for (label, style) in labels {
+        if room < 2 {
+            break;
+        }
+        let label = text::truncate(&format!(" {label} "), room - 1);
+        room = room - 1 - text::width(&label);
+        spans.push(Span::raw("─"));
+        spans.push(Span::styled(label, style));
+    }
+    spans.push(Span::raw("─".repeat(room)));
+    Line::from(spans)
 }
 
 /// The files an `@` word could name, or the backend's commands the `/` that

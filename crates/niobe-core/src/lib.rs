@@ -13,6 +13,7 @@ pub mod catch_up;
 pub mod decision;
 pub mod diff;
 pub mod event;
+pub mod goal;
 pub mod image;
 pub mod keys;
 pub mod permission;
@@ -27,6 +28,7 @@ pub use event::{
     AgentId, AgentOutcome, Backend, Billing, ChangeScope, CompactTrigger, Event, Mode,
     OPERATOR_SHELL, PermissionDecision, SessionMeta, TokenCounts, ToolCallId, ToolOutcome, Usage,
 };
+pub use goal::{Goal, GoalReport, Standing};
 pub use image::{Image, ImageError, MediaType};
 pub use keys::{Bindable, Chord, Keymap, KeymapError};
 pub use permission::{Allowlist, Rule, RuleError};

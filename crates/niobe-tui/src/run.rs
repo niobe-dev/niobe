@@ -762,6 +762,7 @@ fn send_produced(
             SessionEvent::SessionMeta(_)
             | SessionEvent::PromptNotSent { .. }
             | SessionEvent::Looked
+            | SessionEvent::Goal { .. }
             | SessionEvent::Titled { .. }
             | SessionEvent::AssistantDelta { .. }
             | SessionEvent::AssistantMessage { .. }

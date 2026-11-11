@@ -1795,16 +1795,23 @@ impl Fold {
         }));
     }
 
-    /// What the CLI attached to a running turn. Two attachments are read: a
-    /// notification that background work stopped while the turn ran, and a
-    /// prompt the operator typed while it ran, in the session's own file; the
-    /// rest is context the CLI gave the model, and says nothing about what
-    /// the session did.
+    /// What the CLI attached to a running turn. Three attachments are read: a
+    /// notification that background work stopped while the turn ran, and, in
+    /// the session's own file, a prompt the operator typed while it ran and
+    /// what became of the goal the operator set — set, checked or cleared;
+    /// the rest is context the CLI gave the model, and says nothing about
+    /// what the session did.
     fn attachment(&mut self, record: Attachment, agent: Option<&str>) {
         let Some(attached) = record.attachment else {
             return;
         };
         let field = |key: &str| attached.get(key).and_then(serde_json::Value::as_str);
+        if agent.is_none()
+            && let Some(report) = crate::goal::Status::read(&attached)
+        {
+            self.out.push(Event::Goal { report });
+            return;
+        }
         if field("type") != Some("queued_command") {
             return;
         }
@@ -2456,6 +2463,7 @@ mod tests {
 
     use std::time::Duration;
 
+    use niobe_core::GoalReport;
     use niobe_core::event::{AgentId, AgentOutcome, Mode};
 
     #[test]
@@ -3394,6 +3402,50 @@ mod tests {
             r#"{"type":"assistant","message":{"id":"msg_2","model":"claude-opus-5","content":[{"type":"text","text":"Listed, hidden ones skipped."}]}}"#,
             r#"{"type":"user","message":{"role":"user","content":"Thanks."}}"#,
         ])
+    }
+
+    #[test]
+    fn a_goal_read_back_is_set_checked_and_met_where_the_cli_recorded_each() {
+        let goals = |lines: &[&str]| -> Vec<GoalReport> {
+            folded(lines)
+                .into_iter()
+                .filter_map(|event| match event {
+                    Event::Goal { report } => Some(report),
+                    _ => None,
+                })
+                .collect()
+        };
+        let set = r#"{"type":"attachment","attachment":{"type":"goal_status","met":false,"sentinel":true,"condition":"two replies"}}"#;
+        let read = goals(&[
+            set,
+            r#"{"type":"user","message":{"role":"user","content":"<command-name>/goal</command-name>"}}"#,
+            r#"{"type":"system","subtype":"local_command","content":"<local-command-stdout>Goal set: two replies</local-command-stdout>"}"#,
+            r#"{"type":"assistant","message":{"id":"msg_1","model":"claude-opus-5","content":[{"type":"text","text":"A"}]}}"#,
+            r#"{"type":"user","isMeta":true,"message":{"role":"user","content":[{"type":"text","text":"Stop hook feedback:\n[two replies]: Only A so far."}]}}"#,
+            r#"{"type":"attachment","attachment":{"type":"goal_status","met":false,"condition":"two replies","reason":"Only A so far."}}"#,
+            r#"{"type":"assistant","message":{"id":"msg_2","model":"claude-opus-5","content":[{"type":"text","text":"B"}]}}"#,
+            r#"{"type":"attachment","attachment":{"type":"goal_status","met":true,"condition":"two replies","reason":"Both were sent.","iterations":2}}"#,
+        ]);
+        assert_eq!(
+            read,
+            [
+                GoalReport::Set {
+                    condition: "two replies".to_owned()
+                },
+                GoalReport::NotMet {
+                    reason: "Only A so far.".to_owned()
+                },
+                GoalReport::Met {
+                    reason: Some("Both were sent.".to_owned())
+                },
+            ]
+        );
+
+        let cleared = goals(&[
+            set,
+            r#"{"type":"attachment","attachment":{"type":"goal_status","met":true,"sentinel":true}}"#,
+        ]);
+        assert_eq!(cleared.last(), Some(&GoalReport::Cleared));
     }
 
     #[test]

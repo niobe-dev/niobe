@@ -327,6 +327,11 @@ pub struct Options {
     /// holds the whole conversation, so the caller decides where it may go:
     /// this creates the directory and writes to it wherever it is.
     pub tap: Option<PathBuf>,
+    /// The directory the CLI keeps this working directory's transcripts in,
+    /// where the caller knows it. A check that found the goal the operator
+    /// set met is recorded only there, so without it a goal met reads as
+    /// still set; see [`crate::goal`].
+    pub transcripts: Option<PathBuf>,
     /// The prompts sent to the conversation so far, oldest first, each by the
     /// id it was sent with, which is what a rewind names. Kept by the session
     /// as it sends them, so a CLI started again on the conversation can still
@@ -378,6 +383,7 @@ impl Options {
             carry_on: false,
             ask_title: false,
             tap: None,
+            transcripts: None,
             sent: Vec::new(),
         }
     }
@@ -757,6 +763,15 @@ impl Session {
             .reading_spilled_with(spilled::read)
             .checking_files_with(file_exists)
             .started_in(options.mode);
+        if let Some(transcripts) = &options.transcripts {
+            let resumed = options
+                .resume
+                .as_ref()
+                .and_then(|id| crate::goal::pursued(&transcripts.join(format!("{id}.jsonl"))));
+            translator = translator
+                .reading_goal_with(crate::goal::met, transcripts.clone())
+                .pursuing_goal(resumed);
+        }
         if let Some(billing) = options.billing {
             translator = translator.billed_as(billing);
             // Said before the CLI says anything: the CLI writes its `init`
