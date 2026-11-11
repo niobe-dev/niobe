@@ -3980,7 +3980,7 @@ fn question_reason(ask: &Ask, inner: usize, theme: &Theme) -> Vec<Line<'static>>
         0 => reason.to_owned(),
         more => format!("{reason}… ({more} more characters)"),
     };
-    text::wrap_exact(&format!("{BECAUSE}{reason}"), inner)
+    text::wrap_words_exact(&format!("{BECAUSE}{reason}"), inner)
         .into_iter()
         .map(|row| Line::from(row).style(Style::new().fg(theme.fg).italic()))
         .collect()

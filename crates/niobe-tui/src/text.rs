@@ -514,6 +514,135 @@ pub fn wrap_exact(text: &str, columns: usize) -> Vec<String> {
     lines
 }
 
+/// [`wrap_exact`], breaking a line between words where one is there to
+/// break at: after a space that stands alone between two words, or after a
+/// `/`, so a path wraps at a directory and prose at a word. A line with no
+/// such place in a row's width breaks at the column, as [`wrap_exact`]
+/// does.
+///
+/// Still every character is kept and drawn. A row cut short ends in the
+/// one space it broke at, never a run of them — a run is broken only where
+/// it reaches the column — so the text reads back as written.
+///
+/// For the agent's words and the change it would make, read before they are
+/// approved: a word cut in two at the frame reads as two. A line longer than
+/// [`WORD_BREAK_BYTES`] is broken at the column, as a minified bundle or a
+/// data line is no prose to read, and walking one by word with every
+/// layout would cost a frame.
+pub fn wrap_words_exact(text: &str, columns: usize) -> Vec<String> {
+    wrap_words_exact_first(text, columns, usize::MAX)
+}
+
+/// The first `rows` rows of [`wrap_words_exact`]'s, without laying out the
+/// rest: see [`wrap_exact_first`].
+pub fn wrap_words_exact_first(text: &str, columns: usize, rows: usize) -> Vec<String> {
+    let mut shown = Vec::new();
+    if columns == 0 || text.is_empty() {
+        return shown;
+    }
+    for line in text.split('\n') {
+        let left = rows.saturating_sub(shown.len());
+        if left == 0 {
+            break;
+        }
+        let shown_line = controls_shown_in_rows(line);
+        let line = tabs_expanded(&shown_line);
+        match line.is_empty() {
+            true => shown.push(String::new()),
+            false => shown.extend(
+                row_pieces(&line, columns, left)
+                    .into_iter()
+                    .map(str::to_owned),
+            ),
+        }
+    }
+    shown
+}
+
+/// How many rows [`wrap_words_exact`] makes of `text`, without making the
+/// rows of a line past [`WORD_BREAK_BYTES`], which [`wrap_exact_rows`]
+/// counts as it breaks them.
+pub fn wrap_words_exact_rows(text: &str, columns: usize) -> usize {
+    if columns == 0 || text.is_empty() {
+        return 0;
+    }
+    controls_shown_in_rows(text)
+        .split('\n')
+        .map(|line| match line.len() > WORD_BREAK_BYTES {
+            true => wrap_exact_rows(line, columns),
+            false => {
+                let line = tabs_expanded(line);
+                row_pieces(&line, columns, usize::MAX).len().max(1)
+            }
+        })
+        .fold(0, usize::saturating_add)
+}
+
+/// The longest line, in bytes, that [`wrap_words_exact`] breaks between
+/// words.
+pub const WORD_BREAK_BYTES: usize = 4_096;
+
+/// The first `rows` of `line` — one line, its controls shown and its tabs
+/// expanded — in rows no wider than `columns`, broken between words where
+/// it can be: see [`wrap_words_exact`]. A line past [`WORD_BREAK_BYTES`] is
+/// cut only as far as `rows`, since it can be megabytes.
+fn row_pieces(line: &str, columns: usize, rows: usize) -> Vec<&str> {
+    if line.len() > WORD_BREAK_BYTES {
+        return chunks_to_width(line, columns).take(rows).collect();
+    }
+    let cells: Vec<(usize, &str, usize)> = {
+        let mut at = 0;
+        graphemes(line)
+            .map(|(grapheme, width)| {
+                let start = at;
+                at += grapheme.len();
+                (start, grapheme, width)
+            })
+            .collect()
+    };
+    let mut pieces = Vec::new();
+    let mut start = 0;
+    let mut width = 0;
+    // Where the row could break: the byte after the place, and the row's
+    // width up to it.
+    let mut place: Option<(usize, usize)> = None;
+    for (index, &(at, grapheme, cells_wide)) in cells.iter().enumerate() {
+        while width + cells_wide > columns && at > start {
+            match place.take() {
+                Some((after, upto)) if after > start => {
+                    pieces.push(&line[start..after]);
+                    start = after;
+                    width -= upto;
+                }
+                _ => {
+                    pieces.push(&line[start..at]);
+                    start = at;
+                    width = 0;
+                }
+            }
+        }
+        width += cells_wide;
+        let before = index.checked_sub(1).and_then(|before| cells.get(before));
+        let after = cells.get(index + 1);
+        let alone = |neighbour: Option<&(usize, &str, usize)>| {
+            neighbour.is_some_and(|(_, grapheme, _)| *grapheme != " ")
+        };
+        let breaks = match grapheme {
+            " " => alone(before) && alone(after),
+            "/" => after.is_some(),
+            _ => false,
+        };
+        if breaks {
+            place = Some((at + grapheme.len(), width));
+        }
+    }
+    if start < line.len() {
+        pieces.push(&line[start..]);
+    }
+    pieces.truncate(rows);
+    pieces
+}
+
 /// [`wrap`] where it loses nothing, and [`wrap_exact`] where it would: words
 /// joined by one space read as they were written unless the text has a run
 /// of spaces, a tab or a space at either end, which is then kept.
@@ -1035,6 +1164,78 @@ fn advance(text: &str, from: usize, tab: u8) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn words_wrap_whole_and_every_character_is_kept() {
+        let said = "hands it the code and settings in that directory";
+        let rows = wrap_words_exact(said, 20);
+        assert_eq!(
+            rows,
+            ["hands it the code ", "and settings in ", "that directory"]
+        );
+        assert_eq!(rows.concat(), said);
+        assert_eq!(wrap_words_exact_rows(said, 20), rows.len());
+    }
+
+    #[test]
+    fn a_path_wraps_at_a_directory_rather_than_inside_a_name() {
+        let path = "/Users/me/projects/niobe/crates/niobe-cli/src/manifest.rs";
+        let rows = wrap_words_exact(path, 40);
+        assert_eq!(
+            rows,
+            [
+                "/Users/me/projects/niobe/crates/",
+                "niobe-cli/src/manifest.rs"
+            ]
+        );
+        assert_eq!(wrap_words_exact_rows(path, 40), 2);
+    }
+
+    /// A row cut short ends in the one space it broke at: a run of spaces
+    /// is broken only at the column, so none hides at the end of a row.
+    #[test]
+    fn a_run_of_spaces_is_never_where_a_row_is_cut_short() {
+        let said = "aaaa    bbbb cc";
+        let rows = wrap_words_exact(said, 10);
+        assert_eq!(rows, ["aaaa    bb", "bb cc"]);
+        assert_eq!(rows.concat(), said);
+    }
+
+    #[test]
+    fn a_word_wider_than_the_row_is_cut_at_the_column() {
+        assert_eq!(
+            wrap_words_exact("abcdefghij kl", 4),
+            ["abcd", "efgh", "ij ", "kl"]
+        );
+        assert_eq!(wrap_words_exact_rows("abcdefghij kl", 4), 4);
+    }
+
+    #[test]
+    fn words_wrapped_keep_blank_lines_tabs_and_wide_characters_counted_alike() {
+        for (said, columns) in [
+            ("one two\n\nthree\tfour five", 6),
+            ("日本語 の テキスト を 折り返す", 7),
+            ("x/y/z", 2),
+            ("", 5),
+        ] {
+            let rows = wrap_words_exact(said, columns);
+            assert_eq!(wrap_words_exact_rows(said, columns), rows.len(), "{said:?}");
+            for row in &rows {
+                assert!(width(row) <= columns, "{row:?} of {said:?}");
+            }
+            assert_eq!(
+                wrap_words_exact_first(said, columns, 2),
+                rows[..rows.len().min(2)]
+            );
+        }
+    }
+
+    #[test]
+    fn a_line_past_the_word_bound_is_cut_at_the_column() {
+        let long = "ab ".repeat(WORD_BREAK_BYTES);
+        assert_eq!(wrap_words_exact(&long, 10), wrap_exact(&long, 10));
+        assert_eq!(wrap_words_exact_rows(&long, 10), wrap_exact_rows(&long, 10));
+    }
 
     /// The rows a word-or-glyph editor `columns` wide draws `line` in, read
     /// off the editor itself: its cursor at the end of the text sits on the

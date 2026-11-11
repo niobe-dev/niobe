@@ -277,8 +277,8 @@ fn wrapped_row(
     let (sign, sign_colour, text_colour, bg) = look(line, theme);
     let room = width.saturating_sub(2).max(1);
     // An empty line is still a row of the change.
-    let all = text::wrap_exact_rows(line.text(), room).max(1);
-    let mut parts = text::wrap_exact_first(line.text(), room, rows);
+    let all = text::wrap_words_exact_rows(line.text(), room).max(1);
+    let mut parts = text::wrap_words_exact_first(line.text(), room, rows);
     if parts.is_empty() && rows > 0 {
         parts.push(String::new());
     }

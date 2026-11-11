@@ -164,7 +164,7 @@ impl Proposed {
                     );
                     rows.push(Line::from(""));
                     rows.extend(
-                        text::wrap_exact(plan.trim_end(), width)
+                        text::wrap_words_exact(plan.trim_end(), width)
                             .into_iter()
                             .map(|row| Line::from(row).style(plain)),
                     );
@@ -253,7 +253,7 @@ impl Proposed {
         let all = match self.subject_count.get() {
             Some((counted_at, all)) if counted_at == width => all,
             _ => {
-                let all = text::wrap_exact_rows(subject, width);
+                let all = text::wrap_words_exact_rows(subject, width);
                 self.subject_count.set(Some((width, all)));
                 all
             }
@@ -262,7 +262,10 @@ impl Proposed {
             true => hunks::OPEN_ROWS,
             false => all,
         };
-        (text::wrap_exact_first(subject, width, laid), all - laid)
+        (
+            text::wrap_words_exact_first(subject, width, laid),
+            all - laid,
+        )
     }
 
     /// Whether what is asked is a plan going ahead, which no standing answer
@@ -411,7 +414,34 @@ mod tests {
         let input = r#"{"file_path":"/repo/notes.txt","old_string":"x","new_string":"abcdefghijkl","replace_all":false}"#;
         assert_eq!(
             drawn(replace("x", "abcdefghijkl", false), input, 8, false),
-            ["/repo/no", "tes.txt", "", "- x", "+ abcdef", "  ghijkl"]
+            ["/repo/", "notes.tx", "t", "", "- x", "+ abcdef", "  ghijkl"]
+        );
+    }
+
+    /// The path and the lines of a file written wrap between words, as a
+    /// reader reads them, and keep every character.
+    #[test]
+    fn a_file_written_wraps_its_path_and_lines_between_words() {
+        let content = "//! hands it the code and settings in that directory";
+        let input = serde_json::json!({ "file_path": "/repo/crates/cli/src/manifest.rs", "content": content })
+            .to_string();
+        let written = Proposal::new(
+            Action::Write {
+                path: "/repo/crates/cli/src/manifest.rs".to_owned(),
+                content: content.to_owned(),
+                existed: Some(false),
+            },
+            ["file_path", "content"],
+        );
+        let rows = drawn(written, &input, 24, false);
+        assert_eq!(rows[..2], ["/repo/crates/cli/src/", "manifest.rs"]);
+        assert_eq!(
+            rows[rows.len() - 3..],
+            [
+                "+ //! hands it the code",
+                "  and settings in that",
+                "  directory"
+            ]
         );
     }
 
