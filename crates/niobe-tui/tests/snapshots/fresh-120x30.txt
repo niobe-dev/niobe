@@ -1,29 +1,29 @@
  Niobe  Session  Context  Model  View  Help                                                                 ○ starting
  ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━ Session ─ niobe ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓ ┌──────────────── Usage ────────────────┐
- ┃                                                                          ┃ │ 5h   —                                │
- ┃   niobe                                                                  ┃ │ 7d   —                                │
- ┃   A terminal coding agent that keeps you aware of what is                ┃ │ asked of the backend                  │
- ┃   being built and how.                                                   ┃ │ ───────────────────────────────────── │
- ┃                                                                          ┃ │ no tokens reported yet                │
- ┃   What the agent did, decided and touched, what it is doing now          ┃ │ session — · billing not known         │
- ┃   and what it cost, visible while it happens and never a guess.          ┃ └───────────────────────────────────────┘
- ┃   You stay on the loop instead of in it.                                 ┃ ┌─────────────── Changes ───────────────┐
- ┃                                                                          ┃ │ ⎇ main                                │
- ┃   Ask for a change; the bill is on the right.                            ┃ │ ▾ Working tree  —                     │
- ┃                                                                          ┃ │   not read yet                        │
- ┃                                                                          ┃ │                                       │
- ┃                                                                          ┃ │                                       │
- ┃                                                                          ┃ │                                       │
- ┃                                                                          ┃ │                                       │
- ┃                                                                          ┃ │                                       │
- ┃                                                                          ┃ │                                       │
- ┃                                                                          ┃ └───────────────────────────────────────┘
- ┃                                                                          ┃ ┌────────────── Activity ───────────────┐
- ┃                                                                          ┃ │ ▾ Sub-agents  0 running · 0 spawned   │
- ┃                                                                          ┃ │   none spawned                        │
- ┃                                                                          ┃ │ ▾ Decisions, as the agent says  0     │
- ┃                                                                          ┃ │   none stated yet                     │
- ┃                                                                          ┃ │ ▾ Tools  0 calls · 0 denied · 0 B out │
+ ┃  ﾐ   ﾍ     ｴ ﾛ ｴ ﾓ   ｧ   ﾜ ｩ           7 ｰ     ﾙ ｹ   ﾉ 1 0       ﾝ ﾑ ｬ   ┃ │ 5h   —                                │
+ ┃  ｹ   ｪ     ﾔ = ｫ ｷ ｦ .   6 ｻ           < 6     ﾃ ¦ ﾑ ﾉ ﾏ ﾀ       : ﾜ ﾕ   ┃ │ 7d   —                                │
+ ┃  ｬ   0     ｯ < 1 4 ｮ ﾌ   ﾐ   ﾖ         3 ﾖ     ｩ ﾙ ｷ ﾂ < ｰ       ｪ ﾚ ﾖ   ┃ │ asked of the backend                  │
+ ┃  6   ｧ     7 ｳ + ｾ ﾐ ｧ   ﾆ   ﾔ       ﾐ ｲ ｽ     ｴ ｦ ﾙ ｬ ｹ :       ｻ ｽ ﾑ   ┃ │ ───────────────────────────────────── │
+ ┃  1 . ｦ     ﾌ ｼ ｨ = > +       ｧ       ﾗ ﾁ ﾜ     ﾃ ﾂ ﾋ ｸ 0 <       5 ﾂ ﾁ   ┃ │ no tokens reported yet                │
+ ┃  ｵ ﾋ ﾖ     * 9 ﾙ 4 1 ｾ       ｬ   :   ﾄ ﾖ -     ｰ ｳ ｼ ﾋ ﾇ 7       ｯ 2 ﾏ   ┃ │ session — · billing not known         │
+ ┃  ﾃ ﾊ ｨ   ｻ 2     ｼ 8         ﾐ   ﾈ   ﾂ ｭ ｹ     ﾜ ﾅ ﾅ ﾖ : 4       ﾑ ｧ ｩ   ┃ └───────────────────────────────────────┘
+ ┃    ﾚ ｭ   2 ﾉ     ｰ 2         ｻ   ｼ 5 . 2 ﾀ   ﾏ ｽ ｽ ﾛ 2 ﾜ < ﾅ   ｭ ｸ - ﾚ   ┃ ┌─────────────── Changes ───────────────┐
+ ┃    ｱ .   ﾙ       ｩ ｲ         *   ｳ ｨ ﾅ + ﾈ   ﾘ 9 < ﾎ ﾆ ﾋ ｴ ﾗ   ｬ 3 ﾖ ｸ   ┃ │ ⎇ main                                │
+ ┃    - ｾ   ﾛ       3 ﾌ         2   ﾒ = > ｺ .   <   ｷ | ｼ ｻ ﾚ +   Z + ﾀ ﾃ   ┃ │ ▾ Working tree  —                     │
+ ┃    ｺ ｱ   ﾘ       ﾆ |         ﾛ   ｫ " < ｦ ｺ   ﾑ   ｳ ｴ 7 ｴ ﾕ 9   ﾖ . ﾀ ﾑ   ┃ │   not read yet                        │
+ ┃    ｵ .   ﾊ   5   ｮ ｯ         9   ﾒ ｷ ﾋ ｱ     ¦   ¦ ﾗ ｬ ﾉ ｯ ﾄ   ﾗ ﾑ + ｳ   ┃ │                                       │
+ ┃    ﾒ 0   ﾓ   ﾗ   ﾜ ﾖ         ｺ   ｪ ｪ ¦ ｺ     2   ｦ ﾜ   ﾝ ﾉ ｯ   < 7 ﾕ     ┃ │                                       │
+ ┃      ﾏ   ｳ   ｭ   ﾌ ﾃ         ﾋ   ﾋ ﾎ 2 ｨ     9   ｬ |   ﾁ ｹ ｼ   7 ｧ ｱ     ┃ │                                       │
+ ┃      |   ﾌ   1   ﾒ 6       6 ｮ * 1 ¦ ﾕ >     ﾛ   ﾏ ﾂ     ﾂ +   ｻ ﾁ 2     ┃ │                                       │
+ ┃      :   0 - ﾋ     ｱ       + : ﾒ ﾆ ｳ ﾐ ｪ ｯ   ｳ   5 ﾝ     ｹ ｮ   ｹ ﾇ ｾ     ┃ │                                       │
+ ┃      ﾁ   9 ｭ ｶ     ｭ       ｹ ﾇ ﾃ ﾐ ﾔ ｸ ﾙ ｷ   ｿ   ｶ .     ﾋ ｴ   3 ｪ 9     ┃ │                                       │
+ ┃      ｶ     ｹ :     ﾝ       ﾋ   ﾉ ﾂ ﾜ 9   ｱ   9   ｪ 7     ﾓ ﾁ   ｴ ｸ ｯ     ┃ └───────────────────────────────────────┘
+ ┃      ｩ     | "     5       0   ﾂ " ﾓ 6   5   5   ｽ ｴ     <     Z ﾕ ｦ     ┃ ┌────────────── Activity ───────────────┐
+ ┃        ｸ   ﾌ ｷ     ﾄ       =   0 ﾒ ﾎ ｷ   ﾕ   ﾗ   > ｸ     ｿ     >   9     ┃ │ ▾ Sub-agents  0 running · 0 spawned   │
+ ┃        ﾉ   " ｺ     *       Z   ﾖ ｦ ﾈ ﾚ   ｶ < ﾛ   ｶ       ｸ     ｨ   - ｪ   ┃ │   none spawned                        │
+ ┃        Z   ﾂ ﾐ     ﾜ       ｸ   5 ﾄ   ﾅ   ﾐ ｩ ﾏ ｰ |       ﾊ           ｧ   ┃ │ ▾ Decisions, as the agent says  0     │
+ ┃        ﾀ   ｻ ｷ     ﾒ       ﾆ   0 8       ｭ - ﾉ ｺ 6                   ﾆ   ┃ │   none stated yet                     │
+ ┃        ﾆ   ｱ ﾏ     ｴ       ﾎ   ｬ ｽ       . ｹ ﾜ ﾊ ｾ                   ｹ   ┃ │ ▾ Tools  0 calls · 0 denied · 0 B out │
  ┃ ──────────────────────────────────────────────────────────────────────── ┃ │   none called                         │
  ┃  —  >  Ask for a change · Ctrl+F find    Shift+Tab mode · Ctrl+J newline ┃ │                                       │
  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ └───────────────────────────────────────┘

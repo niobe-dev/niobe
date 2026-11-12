@@ -1813,6 +1813,10 @@ pub struct App {
     /// The clock, as the event loop last handed it in. The draw never reads
     /// the time itself, so a test draws the same frame every time.
     now: Option<Instant>,
+    /// What the rain's lanes and glyphs are drawn from: a fixed one, so a
+    /// test draws the same rain, until the event loop gives the shell one of
+    /// its own.
+    rain_seed: u64,
     /// The wall clock the same tick read, which is what every event folded in
     /// now is stamped with. `None` until the loop has ticked, which is also
     /// what a fold with no clock behind it — a JSON Lines log — leaves behind:
@@ -2390,6 +2394,7 @@ impl App {
             heard: false,
             clock: None,
             now: None,
+            rain_seed: 0,
             at: None,
             unsaved: None,
             asides: BTreeSet::new(),
@@ -7089,6 +7094,32 @@ impl App {
     /// Whether a backend is listening.
     pub fn is_attached(&self) -> bool {
         self.attached
+    }
+
+    /// Whether the session pane shows the rain: nothing has happened in it,
+    /// and no question waits there. The loop draws faster while it does.
+    pub fn raining(&self) -> bool {
+        self.entries.is_empty() && self.asks.is_empty()
+    }
+
+    /// The moment the rain is drawn at: the wall clock the last tick handed
+    /// in, as time since the epoch, so that two shells handed one moment
+    /// draw one frame of it; nothing where no tick named one.
+    pub fn rain_clock(&self) -> std::time::Duration {
+        self.at
+            .and_then(|at| at.at().duration_since(std::time::UNIX_EPOCH).ok())
+            .unwrap_or_default()
+    }
+
+    /// What the rain is drawn from.
+    pub fn rain_seed(&self) -> u64 {
+        self.rain_seed
+    }
+
+    /// Has the rain drawn from `seed`, so that one session's does not fall as
+    /// the last one's did.
+    pub fn seed_rain(&mut self, seed: u64) {
+        self.rain_seed = seed;
     }
 
     /// What the session is about: the title the backend gave it, or else the

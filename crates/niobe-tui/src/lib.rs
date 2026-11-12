@@ -56,6 +56,7 @@ pub mod overview;
 pub mod preferences;
 pub mod prices;
 pub mod proposed;
+mod rain;
 pub mod rules;
 pub mod run;
 mod select;

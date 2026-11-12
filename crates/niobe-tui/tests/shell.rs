@@ -4605,9 +4605,12 @@ fn a_wheel_notch_over_the_activity_pane_moves_only_that_pane() {
 
 /// The row the ask bar is drawn on: the one where a badge meets the prompt's
 /// marker, whichever mode the badge names.
+/// The composer's row: the last one holding its prompt, since the rain an
+/// empty session pane shows can write a `>` anywhere above it.
 fn bar_row(frame: &str) -> String {
     frame
         .lines()
+        .rev()
         .find(|row| row.contains("  > "))
         .map(str::to_owned)
         .unwrap_or_else(|| panic!("no ask bar on the frame:\n{frame}"))

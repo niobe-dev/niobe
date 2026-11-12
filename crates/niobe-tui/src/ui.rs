@@ -2216,13 +2216,26 @@ fn draw_transcript(
     let question = question.lines;
 
     if app.entries().is_empty() && question.is_empty() {
-        let lines = empty_transcript(app.is_attached(), theme);
         app.drew_transcript(area, 0);
-        app.measured(lines.len(), height);
-        frame.render_widget(
-            Paragraph::new(lines).style(Style::new().bg(theme.pane_bg)),
+        app.measured(0, height);
+        crate::rain::draw(
+            frame.buffer_mut(),
             area,
+            app.rain_clock(),
+            app.rain_seed(),
+            theme,
         );
+        if !app.is_attached() {
+            let notice = unattached(theme);
+            let width = u16::try_from(notice.width())
+                .unwrap_or(u16::MAX)
+                .min(area.width);
+            let row = Rect::new(area.x, area.y, width, area.height.min(1));
+            // Cleared first: a style laid over a cell keeps the modifiers it
+            // had, and the rain's faint glyphs are dim.
+            frame.render_widget(Clear, row);
+            frame.render_widget(Paragraph::new(notice), row);
+        }
         return;
     }
 
@@ -3497,27 +3510,13 @@ fn working_line(activity: &Activity, width: usize, theme: &Theme) -> Line<'stati
     ])
 }
 
-/// What the session pane says before anything has happened in it.
-fn empty_transcript(attached: bool, theme: &Theme) -> Vec<Line<'static>> {
-    vec![
-        Line::from(""),
-        Line::from("  niobe").style(Style::new().fg(theme.hot).bold()),
-        Line::from("  A terminal coding agent that keeps you aware of what is")
-            .style(Style::new().fg(theme.fg)),
-        Line::from("  being built and how.").style(Style::new().fg(theme.fg)),
-        Line::from(""),
-        Line::from("  What the agent did, decided and touched, what it is doing now")
-            .style(Style::new().fg(theme.dim)),
-        Line::from("  and what it cost, visible while it happens and never a guess.")
-            .style(Style::new().fg(theme.dim)),
-        Line::from("  You stay on the loop instead of in it.").style(Style::new().fg(theme.dim)),
-        Line::from(""),
-        Line::from(match attached {
-            true => "  Ask for a change; the bill is on the right.",
-            false => "  No backend attached. `niobe profiles` shows what is defined.",
-        })
-        .style(Style::new().fg(theme.dim)),
-    ]
+/// What the session pane says, over the rain, where no backend is attached
+/// to ask anything of.
+fn unattached(theme: &Theme) -> Line<'static> {
+    Line::from(Span::styled(
+        " No backend attached. `niobe profiles` shows what is defined. ",
+        Style::new().fg(theme.fg).bg(theme.pane_bg),
+    ))
 }
 
 /// Which rows of a question of `rows` rows, starting `above` rows into the

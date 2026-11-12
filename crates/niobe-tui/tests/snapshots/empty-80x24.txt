@@ -1,23 +1,23 @@
  Niobe  Session  Context  Model  View  Help                     ○ not attached
 ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ Session ─ niobe ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-┃                                                                              ┃
-┃   niobe                                                                      ┃
-┃   A terminal coding agent that keeps you aware of what is                    ┃
-┃   being built and how.                                                       ┃
-┃                                                                              ┃
-┃   What the agent did, decided and touched, what it is doing now              ┃
-┃   and what it cost, visible while it happens and never a guess.              ┃
-┃   You stay on the loop instead of in it.                                     ┃
-┃                                                                              ┃
-┃   No backend attached. `niobe profiles` shows what is defined.               ┃
-┃                                                                              ┃
-┃                                                                              ┃
-┃                                                                              ┃
-┃                                                                              ┃
-┃                                                                              ┃
-┃                                                                              ┃
-┃                                                                              ┃
-┃                                                                              ┃
+┃  No backend attached. `niobe profiles` shows what is defined.    ﾝ   ｬ :   ｺ ┃
+┃  ｹ < ｪ "   ﾔ   ｫ ｷ   .   6           ﾑ <   ﾇ         ﾉ ﾏ     ﾇ   :   ﾕ ｯ ﾈ - ┃
+┃  ｬ   0 ﾃ   ｯ   1 4   ﾌ   ﾐ           ｰ 3   ｸ         ﾂ <     ｴ   ｪ   ﾖ 1 ｺ ﾃ ┃
+┃  6   ｧ 6   7   + ｾ   ｧ   ﾆ   ﾑ       ¦ ｲ   ｽ         ｬ ｭ     0   ｻ ﾔ ﾑ ｷ ﾝ ｴ ┃
+┃  1   ｦ ﾇ   ﾌ   ｨ =   +   ﾛ   * ﾅ     ｪ ﾁ   ﾘ ﾅ       ｸ ﾉ     ﾉ     : ﾁ   ｨ ｦ ┃
+┃  ｵ   ﾖ ｼ   *     4   ｾ   ﾝ   ｩ ｰ     ﾁ ﾖ     ﾔ     ｼ ﾋ .   ｴ ｲ     + ﾏ   ﾘ ﾚ ┃
+┃        0   2     ｼ   ﾈ   ｪ   ｵ 3     1 ｭ     ﾘ     ﾅ ﾖ 7   2 ｦ     ｾ ｩ   ｳ ｵ ┃
+┃            ﾉ     ｰ   Z       ﾂ ﾐ     | 2     ﾏ ｽ   ﾛ 2 5   ﾅ ｿ     ｽ ﾚ   ﾚ > ┃
+┃            ｷ     ｩ   :     ｬ ﾜ ﾁ     ｳ       ﾘ 9   ﾎ ﾆ ﾒ   ﾗ ｯ     ｬ ｸ     ｭ ┃
+┃            ｫ   ﾏ 3   |     : > ﾙ     2       < ｩ   | ｼ ﾚ ﾚ +       ﾗ ﾃ     ﾓ ┃
+┃          ﾘ ﾇ   |   | ﾂ     ｦ ﾖ "     ﾐ       ﾑ ｹ   ｴ 7 " ﾕ 9       ｸ ﾑ ｩ     ┃
+┃          ﾊ ｧ   ｾ   ｯ       ﾎ ﾌ ﾓ     "       ¦ ﾉ   ﾗ ｬ ｩ ｯ ﾄ       ｱ ｳ ﾐ     ┃
+┃          ﾓ ﾄ   ｫ   ﾖ       ｱ ｿ ﾄ ｪ   ﾗ       2 ｷ   ﾜ ﾗ ｿ ﾉ ｯ       >   3     ┃
+┃          ｳ + ﾅ <   ﾃ       ﾚ ｷ ﾏ ﾋ   ｫ       9 ﾚ   |   ｫ ｹ ｼ       6   ﾍ     ┃
+┃          ﾌ ﾘ ｯ .   6       ﾚ 7 * 1   ｯ       ﾛ ﾋ       ｭ ﾂ +       ﾜ   ﾔ     ┃
+┃          0 ﾛ ｸ ｭ   ｱ       ﾛ 9 ﾒ ﾆ   ｵ         ﾓ       + ｹ ｮ       ｰ   ﾖ     ┃
+┃  ｪ       9 " ｧ 6   ｭ   <   > ｲ ﾃ ﾐ   ｽ       Z ﾃ       1 ﾋ ｴ       ﾒ   ｻ     ┃
+┃  ｪ         ｽ ﾀ ｾ   ﾝ   ﾄ   4 ﾈ ﾉ ﾂ   6       - ｹ       ﾒ ﾓ ﾁ       ﾛ   ｪ 1   ┃
 ┃ ──────────────────────────────────────────────────────────────────────────── ┃
 ┃  —  >  Ask for a change · Ctrl+F find        Shift+Tab mode · Ctrl+J newline ┃
 ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛

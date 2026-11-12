@@ -260,7 +260,10 @@ reviewers that encode both, for an agent working in this tree.
   pane's breakdown — each model's share in whole percent that add up to 100, what each model
   is called in a row and what the cache saved — `meter.rs` the two-tone bar every share in that
   pane is drawn with, `tree.rs` groups the working tree's files under the directories they
-  share, and `spike.rs` finds a turn that spent more than three times the tokens the session's earlier
+  share, `rain.rs` is the glyph rain the session pane shows while nothing has happened in it —
+  katakana, digits and marks written by falling heads and fading behind them in the theme's
+  accent, green only where the accent is, worked out from a seed and the wall clock the loop last
+  read, so two draws at one moment draw one frame, and drawn every 33 ms by the loop while it shows — and `spike.rs` finds a turn that spent more than three times the tokens the session's earlier
   turns averaged, which the loop, never the fold, calls out by the turn's number; the loop also
   has the app name the files a turn changed that no edit call reported, from a read of the
   working tree that began after the turn started and one that began after it ended; and
@@ -757,7 +760,7 @@ Where tests live:
     `UPDATE_SNAPSHOTS=1 cargo test -p niobe-tui --test shell` and **read the diff** of the
     snapshot files before accepting it. The session both draw is in `tests/common/mod.rs`.
   - `niobe-tui/tests/frame_budget.rs` times a 200×60 resize, a resize of a reply quoted thousands
-    deep, a resize of a paragraph of thousands of links, a resize of linked images nested thousands deep, and the steady redraw of a long session of markdown replies, against a 16 ms budget, and a long line typed or pasted into
+    deep, a resize of a paragraph of thousands of links, a resize of linked images nested thousands deep, and the steady redraw of a long session of markdown replies, and the rain an empty session pane shows in every theme, against a 16 ms budget, and a long line typed or pasted into
     the composer: a paste as long as the composer holds against 50 ms, a key typed into it
     against 16 ms, and keys read together against a linear ratio — and a
     100,000-line file written from scratch, applied and drawn against 50 ms, and the question for a

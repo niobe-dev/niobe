@@ -117,7 +117,9 @@ const POLL: Timespec = Timespec {
 
 /// Text from the opening frame with no styling inside it to be broken up by
 /// escape sequences: once it has been read off the pty, the shell has drawn.
-const OPENING_FRAME: &str = "A terminal coding agent that keeps you aware of what is";
+/// The composer's placeholder, since the session pane above it opens on
+/// glyph rain that draws no words.
+const OPENING_FRAME: &str = "Ask for a change";
 
 /// Entering the mode the shell draws in: the alternate screen. Leaving it
 /// proves nothing unless the shell entered it first.
@@ -2267,11 +2269,11 @@ fn a_session_another_niobe_holds_is_not_opened_from_the_history() {
     terminal.typed(b"\r");
     terminal.shows_since(chosen, "#1 is open in another niobe");
     // Esc closes the dialog, and the draft is sent: only the shell that kept
-    // it can send it. The Enter waits for the welcome the dialog covered to
-    // be drawn again, since the two read together are Alt+Enter.
+    // it can send it. The Enter waits for the draft the dialog covered to be
+    // drawn again, since the two read together are Alt+Enter.
     let closing = terminal.mark();
     terminal.typed(b"\x1b");
-    terminal.shows_since(closing, "visible");
+    terminal.shows_since(closing, "draft-kept");
     terminal.typed(b"\r");
     let started = lines_written(&repo.path().join("args.log"), 2);
     terminal.shows("answered-the-turn");
