@@ -18,9 +18,7 @@ use niobe_core::{Backend, Billing};
 use toml::Spanned;
 use toml::de::{DeString, DeTable, DeValue};
 
-use crate::{
-    CatchUp, Config, ConfigError, DefaultProfile, Notify, Profile, Settings, ThemeName, Titles,
-};
+use crate::{Config, ConfigError, DefaultProfile, Notify, Profile, Settings, ThemeName, Titles};
 
 /// What `backend` may be, in the order an error lists them.
 const BACKENDS: [Backend; 3] = [Backend::Claude, Backend::Codex, Backend::Native];
@@ -68,18 +66,19 @@ impl File<'_> {
                 // The switch for the desktop's animation, which the shell no
                 // longer has. A file written to turn it off still loads.
                 "effects" => {}
+                // The sheet of what happened while the operator was away,
+                // which the shell no longer has. A file that set it still loads.
+                "catch_up" => {}
                 "permissions" => config.allowed = self.permissions(value, &at)?,
                 "keys" => config.keys = self.keys(value, &at)?,
                 "notify" => config.notify = self.notify(value, &at)?,
-                "catch_up" => config.catch_up = self.catch_up(value, &at)?,
                 "profiles" => config.profiles.extend(self.profiles(value, &at)?),
                 _ => {
                     return Err(self.invalid(
                         &key.span(),
                         &at,
                         "unknown key; expected `default_profile`, `theme`, `titles`, `terse`, \
-                         `decisions`, `trim`, `profiles`, `permissions`, `keys`, `notify` or \
-                         `catch_up`",
+                         `decisions`, `trim`, `profiles`, `permissions`, `keys` or `notify`",
                     ));
                 }
             }
@@ -205,26 +204,6 @@ impl File<'_> {
             }
         }
         Ok(notify)
-    }
-
-    /// When the shell tells the operator what happened while they were away.
-    fn catch_up(&self, value: &Spanned<DeValue<'_>>, at: &Key) -> Result<CatchUp, ConfigError> {
-        let mut catch_up = CatchUp::default();
-        for (key, value) in in_file_order(self.table(value, at)?) {
-            let at = at.child(key.get_ref());
-            match key.get_ref().as_ref() {
-                "after" => catch_up.after = Some(self.minutes(value, &at)?),
-                "automatic" => catch_up.automatic = Some(self.boolean(value, &at)?),
-                _ => {
-                    return Err(self.invalid(
-                        &key.span(),
-                        &at,
-                        "unknown key; expected `after` or `automatic`",
-                    ));
-                }
-            }
-        }
-        Ok(catch_up)
     }
 
     /// The standing answers to permission prompts, as the shell will match
@@ -436,18 +415,6 @@ impl File<'_> {
         match value.get_ref() {
             DeValue::Boolean(on) => Ok(*on),
             _ => Err(self.wrong_type(value, at, "a boolean")),
-        }
-    }
-
-    /// A whole number of minutes, one at least: a catch-up after no time away
-    /// would be one after every key.
-    fn minutes(&self, value: &Spanned<DeValue<'_>>, at: &Key) -> Result<u64, ConfigError> {
-        let DeValue::Integer(number) = value.get_ref() else {
-            return Err(self.wrong_type(value, at, "a whole number of minutes"));
-        };
-        match u64::from_str_radix(number.as_str(), number.radix()) {
-            Ok(minutes) if minutes > 0 => Ok(minutes),
-            _ => Err(self.invalid(&value.span(), at, "expected one minute or more")),
         }
     }
 

@@ -29,7 +29,6 @@ mod arguments;
 pub mod bridge;
 mod browse;
 mod calls;
-mod catch_up;
 pub mod clock;
 pub mod desktop;
 pub mod detail;

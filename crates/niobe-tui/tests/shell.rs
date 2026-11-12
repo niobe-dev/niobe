@@ -2516,26 +2516,6 @@ fn notable_only_counts_the_routine_entries_it_leaves_out_at_both_sizes() {
     assert_eq!(screen(&mut app, 200, 60), whole, "the key shows them again");
 }
 
-/// What happened since the operator last caught up is a sheet over the
-/// session, in words: what the agent said, the files it changed and what
-/// waits on the operator, and no count that says nothing.
-#[test]
-fn what_happened_is_a_sheet_of_what_the_session_said_and_did_at_both_sizes() {
-    let mut app = running_session().with_theme(NEO);
-    app.show_catch_up();
-    for (name, width, height) in [
-        ("catch-up-neo-80x24", 80, 24),
-        ("catch-up-neo-200x60", 200, 60),
-    ] {
-        let frame = screen(&mut app, width, height);
-        assert!(frame.contains("Since you last looked"), "{frame}");
-        assert!(frame.contains("changed "), "{frame}");
-        assert!(!frame.contains("turns ended"), "{frame}");
-        assert_snapshot(name, &frame);
-    }
-    assert_snapshot("catch-up-neo-painted-80x24", &paint(&mut app, 80, 24));
-}
-
 #[test]
 fn a_turn_at_work_says_so_under_the_transcript_until_it_ends() {
     let mut app = session_at_work();
@@ -3260,15 +3240,6 @@ fn a_budget_is_in_the_usage_pane_with_what_has_been_spent_against_it() {
     );
 }
 
-/// What the operator produced, without the looks the shell records for the
-/// catch-up, which no test of what they said is about.
-fn said(app: &mut App) -> Vec<Event> {
-    app.take_produced()
-        .into_iter()
-        .filter(|event| *event != Event::Looked)
-        .collect()
-}
-
 #[test]
 fn a_cycled_mode_is_produced_for_the_backend_and_a_denied_key_is_not() {
     let mut app = running_session().attached();
@@ -3277,7 +3248,10 @@ fn a_cycled_mode_is_produced_for_the_backend_and_a_denied_key_is_not() {
         ratatui::crossterm::event::KeyModifiers::SHIFT,
     ));
 
-    assert_eq!(said(&mut app), [Event::ModeSelected { mode: Mode::Auto }]);
+    assert_eq!(
+        app.take_produced(),
+        [Event::ModeSelected { mode: Mode::Auto }]
+    );
 }
 
 #[test]
@@ -7096,7 +7070,7 @@ fn f7_lists_the_mcp_servers_while_a_turn_runs() {
     });
     app.take_produced();
     press(&mut app, KeyCode::F(7));
-    assert_eq!(said(&mut app), [], "F7 sent a turn");
+    assert_eq!(app.take_produced(), [], "F7 sent a turn");
 
     let frame = screen(&mut app, 120, 30);
     assert!(frame.contains(" MCP servers "), "{frame}");

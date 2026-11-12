@@ -3,15 +3,15 @@
 ┃                               │ Diff                 F5  Ctrl+T │            ┃
 ┃ ✗ Notion·update… {}           │ Group by agent                a │     failed ┃
 ┃   └ 404 object_not_found — the│ Notable only                  n │ation       ┃
-┃                               │ What happened…                c │            ┃
-┃ ◆ Caching the etag beside the │ Tool calls…                   d │the LRU.    ┃
-┃                               │ Just one agent…               s │            █
-┃   Edited 1 file +6 −2         │ Project overview…             o │            █
-┃                               │ Usage pane                shown │            █
-┃ ◆ Rewriting the 304 test aroun│ Changes pane              shown │            █
-┃                               │ Activity pane             shown │            █
-┃ ◆ The notebook that demonstrat│ Theme…                          │hape.       █
-┃                               └─────────────────────────────────┘            █
+┃                               │ Tool calls…                   d │            ┃
+┃ ◆ Caching the etag beside the │ Just one agent…               s │the LRU.    ┃
+┃                               │ Project overview…             o │            █
+┃   Edited 1 file +6 −2         │ Usage pane                shown │            █
+┃                               │ Changes pane              shown │            █
+┃ ◆ Rewriting the 304 test aroun│ Activity pane             shown │            █
+┃                               │ Theme…                          │            █
+┃ ◆ The notebook that demonstrat└─────────────────────────────────┘hape.       █
+┃                                                                              █
 ┃ ✗ Bash           npm test                                      exit 1 · 0.4s █
 ┃   └ 1 failing: fetch returns the cached body on a 304                        █
 ┃                                                                              █

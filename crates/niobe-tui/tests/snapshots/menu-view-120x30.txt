@@ -3,15 +3,15 @@
  ┃                              │ Diff                 F5  Ctrl+T │         ┃ │ 5h         62% ▓▓▓░░ resets 16:40     │
  ┃ ◆ Reading catalog/fetch.ts an│ Group by agent                a │, one    ┃ │ 7d         18% ▓░░░░ resets Tue 15:00 │
  ┃   test file.                 │ Notable only                  n │         █ │ ───────────────────────────────────── │
- ┃                              │ What happened…                c │         █ │ opus-5    100% ▓▓▓▓▓▓▓▓▓▓▓▓   49k     │
- ┃   Read 3 files, used Notion 2│ Tool calls…                   d │         █ │ cache hit  86% ▓▓▓▓▓▓▓▓▓▓░░   40k     │
- ┃                              │ Just one agent…               s │         █ │ ───────────────────────────────────── │
- ┃ ✗ Notion·update… {}          │ Project overview…             o │  failed █ │ context    13% ▓░░░░░░░░░░ 25k / 200k │
- ┃   └ 404 object_not_found — th│ Usage pane                shown │ration   █ └───────────────────────────────────────┘
- ┃                              │ Changes pane              shown │         █ ┌─────────────── Changes ───────────────┐
- ┃ ◆ Caching the etag beside the│ Activity pane             shown │ the     █ │ ⎇ main ↑3                             █
- ┃   LRU.                       │ Theme…                          │         █ │ ▾ Working tree  23 files  +≥977 −≥259 █
- ┃                              └─────────────────────────────────┘         █ │   .                                   █
+ ┃                              │ Tool calls…                   d │         █ │ opus-5    100% ▓▓▓▓▓▓▓▓▓▓▓▓   49k     │
+ ┃   Read 3 files, used Notion 2│ Just one agent…               s │         █ │ cache hit  86% ▓▓▓▓▓▓▓▓▓▓░░   40k     │
+ ┃                              │ Project overview…             o │         █ │ ───────────────────────────────────── │
+ ┃ ✗ Notion·update… {}          │ Usage pane                shown │  failed █ │ context    13% ▓░░░░░░░░░░ 25k / 200k │
+ ┃   └ 404 object_not_found — th│ Changes pane              shown │ration   █ └───────────────────────────────────────┘
+ ┃                              │ Activity pane             shown │         █ ┌─────────────── Changes ───────────────┐
+ ┃ ◆ Caching the etag beside the│ Theme…                          │ the     █ │ ⎇ main ↑3                             █
+ ┃   LRU.                       └─────────────────────────────────┘         █ │ ▾ Working tree  23 files  +≥977 −≥259 █
+ ┃                                                                          █ │   .                                   █
  ┃   Edited 1 file +6 −2                                                    █ │     CHANGELOG.md               +0  −0 │
  ┃                                                                          █ │   catalog/                            │
  ┃ ◆ Rewriting the 304 test around the cached body.                         █ │     fetch.ts                 +149 −12 │

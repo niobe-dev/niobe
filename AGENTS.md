@@ -82,14 +82,7 @@ reviewers that encode both, for an agent working in this tree.
   refused past the 5 MB a model takes, and the `[Image #N]` placeholder a prompt holds where it
   went; `attention.rs` is how much an event asks of the operator — it needs them, it is notable,
   or it is routine — read from the event alone, never by a model, so the shell's transcript can
-  leave the routine out and a session read back reads as it did live. `catch_up.rs` is what happened
-  since the operator last looked — the turns ended, the agent's last reply and the decisions it
-  stated, the files changed and by how much, the test runs that failed, the sub-agents started
-  and finished, the errors, the questions asked and waiting, how far the five-hour window
-  moved — as the fold now less a `Mark` of it, so every figure is the fold of
-  the events after the mark and no model sums anything up; the shell records the mark as
-  `Event::Looked` on a key pressed after something it counts, so a session taken up again
-  tells the operator what happened after they last looked. `decision.rs` reads the
+  leave the routine out and a session read back reads as it did live. `decision.rs` reads the
   decisions a reply states — each line that opens `DECISION:`, outside fenced code — which
   the binary asks the agent for and the fold keeps as the agent's own account, never as a
   fact it checked. `goal.rs` is the goal the operator set the agent with `/goal` — set, each check
@@ -121,9 +114,7 @@ reviewers that encode both, for an agent working in this tree.
   turns it off, from any file for the same reason),
   whether the agent reads cargo's output trimmed (`trim`, the same), and
   whether the shell rings the bell and sends a
-  desktop notification when it calls the operator back (`[notify]`), and how many minutes
-  with no key pressed are away and whether the first key back shows what happened
-  (`[catch_up]`). `parse.rs` walks the spanned TOML document by hand so that an
+  desktop notification when it calls the operator back (`[notify]`). `parse.rs` walks the spanned TOML document by hand so that an
   invalid file is reported as its key and line; `write.rs` splices one rule into the `allow`
   array at the byte range the parser gives it, so the operator's comments and ordering survive,
   under a lock on the file's directory so two sessions adding rules at once both keep theirs;
@@ -272,13 +263,7 @@ reviewers that encode both, for an agent working in this tree.
   the shell calls the operator back — the bell, and the `OSC 9` or `OSC 777` notification the
   binary says the terminal shows — when a question no standing rule answers comes up or a turn
   sent from this shell ends without being stopped, which the app works out after the rules have
-  answered and the loop writes after the frame that shows it. `catch_up.rs` is the sheet of what
-  happened since the operator last looked, in words — the opening of what the agent last said,
-  the decisions it stated, the files it changed, what failed, how far the window moved and each
-  question waiting by what it would run — with no count that tells someone coming back nothing,
-  and no sheet where that is all there is; the first key after minutes
-  with none opens it — that key is spent on it — and `c` in a side pane or View › What happened…
-  opens since the last one shown. `goal.rs` words the goal the operator set: where it stands on
+  answered and the loop writes after the frame that shows it. `goal.rs` words the goal the operator set: where it stands on
   the rule above the composer — the condition until a check runs, the last check's reason while it
   is not met, and how it ended until the next prompt — and the row the transcript keeps once a
   check found it met. `detail.rs` is one tool call read whole — the arguments it

@@ -1292,11 +1292,10 @@ pub enum Event {
         message: String,
     },
 
-    /// The operator pressed a key after something a catch-up counts had
-    /// happened: what the next one is counted from ([`crate::catch_up`]),
-    /// kept with the session so that one taken up again tells them what
-    /// happened after they last looked, even where the process that ran it
-    /// was ended while they were away.
+    /// The operator pressed a key after something had happened, as earlier
+    /// releases recorded for a sheet of what happened since. Nothing produces
+    /// it now and nothing reads it; it stays so that a store holding it still
+    /// reads back.
     Looked,
 
     /// What the backend reported about the goal the operator set: that one

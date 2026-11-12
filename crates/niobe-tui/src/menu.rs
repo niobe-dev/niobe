@@ -73,8 +73,6 @@ pub enum Action {
     GroupByAgent,
     /// Leaves the transcript's routine entries out, or shows them again.
     NotableOnly,
-    /// Shows what happened since the operator last caught up.
-    CatchUp,
     /// Lists the conversation's tool calls, to read one whole.
     Calls,
     /// Narrows the transcript to one sub-agent's entries, or draws them all
@@ -129,7 +127,6 @@ impl Action {
             Action::Diff => "open every cut diff and whole command, or cut them again",
             Action::GroupByAgent => "group sub-agent rows by agent",
             Action::NotableOnly => "leave routine entries out of the transcript",
-            Action::CatchUp => "what happened since you last caught up",
             Action::Calls => "read a tool call's whole input and output",
             Action::OneAgent => "show one sub-agent's entries alone, or all of them again",
             Action::Overview => "what every session here built and how it went",
@@ -262,7 +259,6 @@ pub const MENUS: [Menu; 6] = [
             item("Diff", 0, "F5  Ctrl+T", Action::Diff),
             item("Group by agent", 0, "a", Action::GroupByAgent),
             item("Notable only", 0, "n", Action::NotableOnly),
-            item("What happened…", 0, "c", Action::CatchUp),
             item("Tool calls…", 1, "d", Action::Calls),
             item("Just one agent…", 0, "s", Action::OneAgent),
             item("Project overview…", 0, "o", Action::Overview),

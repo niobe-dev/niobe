@@ -1215,8 +1215,6 @@ fn the_help_names_every_shortcut_the_shell_lists_and_the_typed_commands() {
         "titles = \"first-prompt\"",
         "[notify] bell = false",
         "leave the routine entries (reads,",
-        "[catch_up] after = 10",
-        "what happened since you last",
         "shows its whole input and output",
         "show one sub-agent's entries alone;",
         "every session recorded here: what",
