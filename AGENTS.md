@@ -311,7 +311,11 @@ reviewers that encode both, for an agent working in this tree.
   binary, writes a turn with its attached images as base64 image blocks after the text, as the
   CLI's own transcripts hold a pasted screenshot (`base64.rs` encodes them), looks, as a `Write` is asked about, whether a file is at the path it would replace, asks it with
   `initialize` what it offers — the answer is where the slash commands a
-  session starts with are listed, `commands_changed` only reports a change to them — asks it
+  session starts with are listed, `commands_changed` only reports a change to them — and,
+  once that answer has come, asks it once with `get_usage` where the plan's five-hour and
+  seven-day windows stand, which the CLI reads from the claude.ai usage endpoint with its own
+  sign-in and which becomes the `UsageWindows` a turn's `rate_limit_event` does, so a session
+  shows them before its first turn — asks it
   `mcp_status` whenever an `init` lists a server standing otherwise than it last said, and after
   `mcp_reconnect`, which it sends for the MCP view's `r` — starts it with
   `CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING` and sends each prompt with a `uuid`, which

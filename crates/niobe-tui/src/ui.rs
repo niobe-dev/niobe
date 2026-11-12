@@ -4806,8 +4806,10 @@ fn window_rows(app: &App) -> usize {
 /// been reported yet.
 const AWAITED: [&str; 2] = ["5h", "7d"];
 
-/// What the pane says under windows it has no figure for yet.
-const AWAITED_SAID: &str = "reported with the first reply";
+/// What the pane says under windows it has no figure for yet: the backend is
+/// asked for them as it starts, and a turn reports them too, so what comes
+/// first is not known in advance.
+const AWAITED_SAID: &str = "asked of the backend";
 
 /// The line under windows carried over from an earlier session: when they
 /// were recorded, since they are not a measurement of now.
@@ -9163,7 +9165,7 @@ mod tests {
             vec![
                 "5h   —".to_owned(),
                 "7d   —".to_owned(),
-                "reported with the first reply".to_owned(),
+                "asked of the backend".to_owned(),
             ]
         );
         assert_eq!(window_rows(&app), 3);

@@ -14,7 +14,26 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 /// The moment `stamp` names, where it is a UTC time in the shape the CLI
 /// writes.
 pub(crate) fn parse(stamp: &str) -> Option<SystemTime> {
-    let (date, time) = stamp.strip_suffix('Z')?.split_once('T')?;
+    utc(stamp.strip_suffix('Z')?)
+}
+
+/// The moment `stamp` names, where it is a UTC time in the CLI's shape or in
+/// that shape with the offset written out as `+00:00`, which is how the CLI
+/// passes on the reset of a plan's usage window in its answer to `get_usage`
+/// (`2026-11-17T22:59:59.788036+00:00`, recorded from Claude Code 2.1.322).
+///
+/// Any other offset is no moment, as in [`parse`]: none was recorded, and a
+/// reset read an hour out would say the window comes back when it does not.
+pub(crate) fn parse_utc(stamp: &str) -> Option<SystemTime> {
+    match stamp.strip_suffix("+00:00") {
+        Some(time) => utc(time),
+        None => parse(stamp),
+    }
+}
+
+/// The moment `stamp`, with its zone already taken off, names in UTC.
+fn utc(stamp: &str) -> Option<SystemTime> {
+    let (date, time) = stamp.split_once('T')?;
     let days = days(date)?;
     let (clock, fraction) = match time.split_once('.') {
         Some((clock, fraction)) => (clock, Some(fraction)),
@@ -150,6 +169,27 @@ mod tests {
         assert!(parse("2026-09-18T09:00:59.000Z").is_some());
         assert_eq!(parse("2026-09-18T09:00:60.000Z"), None);
         assert_eq!(parse("2026-09-18T09:59:60Z"), None);
+    }
+
+    #[test]
+    fn a_reset_with_its_utc_offset_written_out_reads_as_the_same_moment() {
+        // `date -u -d 2026-11-17T22:59:59Z +%s` is 1794956399.
+        assert_eq!(
+            parse_utc("2026-11-17T22:59:59.788036+00:00"),
+            Some(at(1_794_956_399, 788) + Duration::from_nanos(36_000))
+        );
+        assert_eq!(
+            parse_utc("2026-11-17T22:59:59Z"),
+            Some(at(1_794_956_399, 0))
+        );
+        for stamp in [
+            "2026-11-17T22:59:59.788036+01:00",
+            "2026-11-17T22:59:59.788036-00:00",
+            "2026-11-17T22:59:59.788036",
+            "2026-11-17T22:59:59.788036+00:00Z",
+        ] {
+            assert_eq!(parse_utc(stamp), None, "{stamp:?}");
+        }
     }
 
     #[test]

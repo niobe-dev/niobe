@@ -2,7 +2,7 @@
  ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━ Session ─ niobe ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓ ┌──────────────── Usage ────────────────┐
  ┃                                                                          ┃ │ 5h   —                                │
  ┃   niobe                                                                  ┃ │ 7d   —                                │
- ┃   A terminal coding agent that keeps you aware of what is                ┃ │ reported with the first reply         │
+ ┃   A terminal coding agent that keeps you aware of what is                ┃ │ asked of the backend                  │
  ┃   being built and how.                                                   ┃ │ ───────────────────────────────────── │
  ┃                                                                          ┃ │ no tokens reported yet                │
  ┃   What the agent did, decided and touched, what it is doing now          ┃ │ session — · billing not known         │

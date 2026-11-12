@@ -1,7 +1,7 @@
 ┌──────────────── Usage ────────────────┐
 │ 5h   —                                │
 │ 7d   —                                │
-│ reported with the first reply         │
+│ asked of the backend                  │
 │ ───────────────────────────────────── │
 │ no tokens reported yet                │
 │ session — · billing not known         │

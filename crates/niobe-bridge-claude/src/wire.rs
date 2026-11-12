@@ -1069,6 +1069,47 @@ pub(crate) struct ControlAnswer {
     /// the same.
     #[serde(rename = "skippedLinks")]
     pub(crate) skipped_links: Option<u64>,
+    /// How much of each of the plan's usage windows is gone, from the
+    /// claude.ai usage endpoint the CLI asks: the answer to `get_usage`.
+    /// `null` where plan limits do not apply — an API key, Bedrock, Vertex —
+    /// or the CLI could not read them. Recorded from Claude Code 2.1.322 on a
+    /// Max login, before any turn.
+    pub(crate) rate_limits: Option<PlanLimits>,
+}
+
+/// The plan's windows as the answer to `get_usage` has them.
+///
+/// The answer carries a good deal more — per-model weekly buckets, a
+/// breakdown by surface, the session's own cost — which nothing here reads:
+/// the five-hour and seven-day windows are the ones `rate_limit_event`
+/// reports during a turn, and so the ones a pane already draws.
+#[derive(Debug, Deserialize)]
+pub(crate) struct PlanLimits {
+    /// `null` where no five-hour window is open: nothing was spent in the last
+    /// five hours, and the endpoint gives no level for it.
+    pub(crate) five_hour: Option<PlanWindow>,
+    pub(crate) seven_day: Option<PlanWindow>,
+    /// Whether the plan may spend beyond its fee.
+    pub(crate) extra_usage: Option<ExtraUsage>,
+}
+
+/// One window in the answer to `get_usage`.
+#[derive(Debug, Deserialize)]
+pub(crate) struct PlanWindow {
+    /// The share used in percent, 0–100 — not the 0–1 `rate_limit_event`
+    /// carries: `12` where that event would say `0.12`.
+    pub(crate) utilization: Option<f64>,
+    /// When the window starts over, written `2026-11-17T22:59:59.788036+00:00`.
+    pub(crate) resets_at: Option<String>,
+}
+
+/// Whether a plan may spend beyond its fee, in the answer to `get_usage`.
+#[derive(Debug, Deserialize)]
+pub(crate) struct ExtraUsage {
+    pub(crate) is_enabled: Option<bool>,
+    /// Why it may not, in the words `rate_limit_event`'s
+    /// `overageDisabledReason` uses: `out_of_credits` was recorded.
+    pub(crate) disabled_reason: Option<String>,
 }
 
 /// `conversation_reset`: the CLI dropped the conversation and started a new

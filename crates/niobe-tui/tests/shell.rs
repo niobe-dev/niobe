@@ -1063,7 +1063,7 @@ fn a_fresh_attached_session_draws_every_side_pane_with_what_will_appear_there() 
     let mut app = empty_session().attached();
     let frame = screen(&mut app, 120, 30);
 
-    assert!(frame.contains("reported with the first reply"), "{frame}");
+    assert!(frame.contains("asked of the backend"), "{frame}");
     assert!(frame.contains("none spawned"), "{frame}");
     assert!(frame.contains("none called"), "{frame}");
     assert_snapshot("fresh-120x30", &frame);

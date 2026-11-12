@@ -183,6 +183,11 @@ type TitleRequests = Arc<Mutex<Vec<String>>>;
 /// about yet, for the reason [`ModelRequests`] has.
 type McpRequests = Arc<Mutex<Vec<McpRequest>>>;
 
+/// The `request_id`s of `get_usage` requests the thread reading the CLI has
+/// not been told about yet, for the reason [`ModelRequests`] has: a refusal
+/// of one would otherwise read as the refusal of a change.
+type UsageRequests = Arc<Mutex<Vec<String>>>;
+
 /// The rewinds the thread reading the CLI has not been told about yet, for
 /// the reason [`ModelRequests`] has.
 type RewindRequests = Arc<Mutex<Vec<RewindRequest>>>;
@@ -624,12 +629,17 @@ pub struct Session {
     mode_requests: ModeRequests,
     title_requests: TitleRequests,
     mcp_requests: McpRequests,
+    usage_requests: UsageRequests,
     rewind_requests: RewindRequests,
     follow_ups: FollowUps,
     /// Set by the thread reading the CLI where the MCP servers should be
     /// asked about again (see [`Translator::take_mcp_status_wanted`]), and
     /// acted on by the next drain: only this side writes to the CLI.
     mcp_status_wanted: Arc<AtomicBool>,
+    /// Set by the thread reading the CLI once it has answered `initialize`,
+    /// where the plan's windows should be asked about (see
+    /// [`Translator::take_usage_wanted`]), and acted on by the next drain.
+    usage_wanted: Arc<AtomicBool>,
     /// Set by the thread reading the CLI when it reports the conversation
     /// started over, which is a session with no title yet: it is titled from
     /// the prompts after it alone.
@@ -810,12 +820,16 @@ impl Session {
         let asked_for_title = Arc::clone(&title_requests);
         let mcp_requests: McpRequests = Arc::new(Mutex::new(Vec::new()));
         let asked_about_mcp = Arc::clone(&mcp_requests);
+        let usage_requests: UsageRequests = Arc::new(Mutex::new(Vec::new()));
+        let asked_about_usage = Arc::clone(&usage_requests);
         let rewind_requests: RewindRequests = Arc::new(Mutex::new(Vec::new()));
         let asked_to_rewind = Arc::clone(&rewind_requests);
         let follow_ups: FollowUps = Arc::new(Mutex::new(Vec::new()));
         let called_for = Arc::clone(&follow_ups);
         let mcp_status_wanted = Arc::new(AtomicBool::new(false));
         let wants_mcp_status = Arc::clone(&mcp_status_wanted);
+        let usage_wanted = Arc::new(AtomicBool::new(false));
+        let wants_usage = Arc::clone(&usage_wanted);
         let cleared = Arc::new(AtomicBool::new(false));
         let was_cleared = Arc::clone(&cleared);
         let turn_follows = Arc::new(AtomicBool::new(false));
@@ -873,6 +887,11 @@ impl Session {
                         }
                     }
                 }
+                if let Ok(mut asked) = asked_about_usage.lock() {
+                    for request_id in asked.drain(..) {
+                        translator.asked_for_usage(&request_id);
+                    }
+                }
                 if let Ok(mut asked) = asked_to_rewind.lock() {
                     for request in asked.drain(..) {
                         translator.asked_to_rewind(
@@ -889,6 +908,9 @@ impl Session {
                 }
                 if translator.take_mcp_status_wanted() {
                     wants_mcp_status.store(true, Ordering::Relaxed);
+                }
+                if translator.take_usage_wanted() {
+                    wants_usage.store(true, Ordering::Relaxed);
                 }
                 // Recorded before the events go out, never after: the shell
                 // learns of a prompt by draining the events, and an answer to
@@ -969,9 +991,11 @@ impl Session {
             mode_requests,
             title_requests,
             mcp_requests,
+            usage_requests,
             rewind_requests,
             follow_ups,
             mcp_status_wanted,
+            usage_wanted,
             cleared,
             turn_follows,
             ends_read,
@@ -1227,6 +1251,27 @@ impl Session {
         ))
     }
 
+    /// Asks the CLI where the plan's usage windows stand, so a session shows
+    /// them before its first turn reports them.
+    ///
+    /// The CLI reads them from the claude.ai usage endpoint with its own
+    /// sign-in, which is the one place they come from when no turn has run;
+    /// `skip_behaviors` spares it the scan of a week of local transcripts that
+    /// the rest of its answer would cost, which nothing here reads. An account
+    /// with no plan limits is answered with none, and a CLI that does not take
+    /// the request refuses it; neither is said, since the pane then waits for
+    /// a turn's report as it did before.
+    fn ask_usage(&mut self) -> std::io::Result<()> {
+        let id = self.next_request_id();
+        if let Ok(mut asked) = self.usage_requests.lock() {
+            asked.push(id.clone());
+        }
+        self.ask(&control_request(
+            &id,
+            serde_json::json!({ "subtype": "get_usage", "skip_behaviors": true }),
+        ))
+    }
+
     /// Asks the CLI to connect to the MCP server `server` again.
     ///
     /// Nothing is written to any configuration: the CLI drops the connection
@@ -1326,6 +1371,9 @@ impl Session {
         // A CLI whose input is closed has left, which the drain reports.
         if self.mcp_status_wanted.swap(false, Ordering::Relaxed) {
             let _ = self.ask_mcp_status();
+        }
+        if self.usage_wanted.swap(false, Ordering::Relaxed) {
+            let _ = self.ask_usage();
         }
         let called_for = self
             .follow_ups
@@ -2376,6 +2424,8 @@ mod tests {
 
     use std::cell::RefCell;
 
+    use niobe_core::event::{UsageWindow, UsageWindows};
+
     thread_local! {
         /// What [`Session::send`] does on the test's thread once the turn's
         /// line is queued, standing in for the scheduler holding that
@@ -3011,6 +3061,64 @@ mod tests {
             ),
             "{events:#?}"
         );
+    }
+
+    /// Once the CLI has answered `initialize`, it is asked where the plan's
+    /// windows stand, and its answer is the windows the session shows before
+    /// any turn has run.
+    #[cfg(unix)]
+    #[test]
+    fn the_plans_windows_are_asked_for_as_the_cli_starts_and_answered_before_any_turn() {
+        let scratch = tempfile::tempdir().expect("a scratch directory");
+        let asked = scratch.path().join("asked");
+        let initialized = r#"{"type":"control_response","response":{"subtype":"success","request_id":"niobe-1","response":{"commands":[{"name":"compact"}]}}}"#;
+        let usage = r#"{"type":"control_response","response":{"subtype":"success","request_id":"niobe-2","response":{"rate_limits_available":true,"rate_limits":{"five_hour":{"utilization":37,"resets_at":"2026-11-12T04:00:00.000000+00:00"},"seven_day":null}}}}"#;
+        let (mut session, _dir) = started(&format!(
+            "read -r initialize\nprintf '%s\\n' '{initialized}'\n\
+             read -r usage\nprintf '%s\\n' '{usage}'\n\
+             printf '%s\\n' \"$usage\" > '{asked}'\nexec sleep 30\n",
+            asked = asked.display()
+        ));
+
+        let started = Instant::now();
+        let mut events = Vec::new();
+        while !events
+            .iter()
+            .any(|event| matches!(event, Event::UsageWindows(_)))
+        {
+            assert!(
+                started.elapsed() < PATIENCE,
+                "the windows never came: {events:#?}"
+            );
+            events.extend(session.drain());
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        // `date -u -d 2026-11-12T04:00:00Z +%s` is 1794456000.
+        assert!(
+            events.contains(&Event::UsageWindows(UsageWindows {
+                five_hour: Some(UsageWindow {
+                    utilization: 0.37,
+                    resets_at: Some(1_794_456_000),
+                }),
+                ..UsageWindows::default()
+            })),
+            "{events:#?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Event::Error { .. })),
+            "{events:#?}"
+        );
+        let said = std::fs::read_to_string(&asked).expect("the stand-in wrote what it read");
+        let request: serde_json::Value =
+            serde_json::from_str(said.trim()).expect("the request is JSON");
+        assert_eq!(
+            request["request"],
+            serde_json::json!({ "subtype": "get_usage", "skip_behaviors": true })
+        );
+        assert_eq!(request["request_id"], "niobe-2");
     }
 
     /// The session is titled from the prompts that say something, asked

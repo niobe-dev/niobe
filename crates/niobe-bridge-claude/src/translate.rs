@@ -73,6 +73,9 @@
 //!   windows is gone, which is the budget on a flat-rate plan; it becomes
 //!   [`Event::UsageWindows`]. Its `status`, `rateLimitType` and `resetsAt`
 //!   restate whichever window the CLI is closest to and are not read.
+//!   The answer to `get_usage`, asked once the CLI has answered `initialize`,
+//!   carries the same two windows before any turn, as a percent rather than
+//!   a share, and becomes the same event.
 //! * `system`/`init` carries the CLI's version, its tool list and the state of
 //!   each MCP server. [`SessionMeta`] carries the model and the CLI's own
 //!   session id, and the mode it reports becomes [`Event::ModeSelected`]; the
@@ -113,6 +116,7 @@ use niobe_core::test_run;
 
 use crate::conformance;
 use crate::goal;
+use crate::stamp;
 use crate::wire;
 
 /// The names of the tool whose call is a sub-agent rather than an action.
@@ -611,6 +615,16 @@ pub struct Translator {
     /// Whether the CLI refused `mcp_status`, which no later request will
     /// change: it is not asked again.
     mcp_status_refused: bool,
+    /// Where the plan's windows stand, asked of the CLI once it has answered
+    /// `initialize`; `None` until then, and `Some(false)` once taken by
+    /// [`Translator::take_usage_wanted`], so they are asked about once a
+    /// process.
+    usage_wanted: Option<bool>,
+    /// The `request_id`s of the `get_usage` requests Niobe made that the CLI
+    /// has not answered yet: a refusal of one says only that this CLI, or
+    /// this account, cannot say, and the pane goes on waiting for a turn's
+    /// report.
+    usage_requests: BTreeSet<String>,
     /// Per-message usage since the last `result`, for the turn reconciliation.
     turn: Counts,
     /// Of the per-message cache writes since the last `result`, the ones
@@ -788,6 +802,8 @@ impl Translator {
             mcp_listed: Vec::new(),
             mcp_omitted: BTreeMap::new(),
             mcp_status_wanted: false,
+            usage_wanted: None,
+            usage_requests: BTreeSet::new(),
             mcp_status_refused: false,
             turn: Counts::default(),
             turn_1h: Some(0),
@@ -1060,6 +1076,12 @@ impl Translator {
         self.mcp_status_requests.insert(request_id.to_owned());
     }
 
+    /// Records that the control request `request_id` asks the CLI where the
+    /// plan's usage windows stand (`get_usage`).
+    pub fn asked_for_usage(&mut self, request_id: &str) {
+        self.usage_requests.insert(request_id.to_owned());
+    }
+
     /// Records that the control request `request_id` asks the CLI to
     /// reconnect the MCP server `server` (`mcp_reconnect`).
     ///
@@ -1100,6 +1122,22 @@ impl Translator {
     /// answered. Never once the CLI has refused to say.
     pub fn take_mcp_status_wanted(&mut self) -> bool {
         std::mem::take(&mut self.mcp_status_wanted) && !self.mcp_status_refused
+    }
+
+    /// Whether the plan's usage windows should be asked about, which is once
+    /// a process, after the CLI has answered `initialize`.
+    ///
+    /// A turn reports them only after its first request, and only where they
+    /// moved, so a session that has sent nothing yet would otherwise have no
+    /// figure for a plan the CLI can read at no cost to it.
+    pub fn take_usage_wanted(&mut self) -> bool {
+        match self.usage_wanted {
+            Some(true) => {
+                self.usage_wanted = Some(false);
+                true
+            }
+            Some(false) | None => false,
+        }
     }
 
     /// The model changes the CLI answered since the last call, oldest first.
@@ -1352,6 +1390,18 @@ impl Translator {
         if self.answered_of_mcp(&outcome, out) {
             return;
         }
+        if let Some(id) = outcome.request_id.as_deref()
+            && self.usage_requests.remove(id)
+        {
+            if let Some(event) = outcome
+                .response
+                .and_then(|answer| answer.rate_limits)
+                .and_then(plan_limits)
+            {
+                out.push(event);
+            }
+            return;
+        }
         if let Some(rewind) = outcome
             .request_id
             .as_deref()
@@ -1412,6 +1462,7 @@ impl Translator {
             }
             if let Some(commands) = answer.commands {
                 out.push(self.listed(commands));
+                self.usage_wanted.get_or_insert(true);
             }
             if let Some(models) = answer.models {
                 out.push(offered_models(models));
@@ -5219,6 +5270,57 @@ fn overage(status: &str, reason: &str) -> Overage {
         }),
         _ => Overage::Unreported,
     }
+}
+
+/// Where the plan's windows stand as the answer to `get_usage` has them, in
+/// the event a `rate_limit_event` becomes; nothing where the answer says
+/// nothing — no window measured and no word on extra usage — for the reason
+/// [`rate_limit`] gives.
+///
+/// A level is the endpoint's percent made a share, and kept only where it is
+/// a finite one at or above nothing. A reset is kept only where it reads as a
+/// moment; a window with a level and no reset that reads is still reported,
+/// as a `rate_limit_event` window with no `resetsAt` is.
+fn plan_limits(limits: wire::PlanLimits) -> Option<Event> {
+    let window = |window: Option<wire::PlanWindow>| {
+        let window = window?;
+        let utilization = window
+            .utilization
+            .filter(|percent| percent.is_finite() && *percent >= 0.0)?
+            / 100.0;
+        let resets_at = window
+            .resets_at
+            .as_deref()
+            .and_then(stamp::parse_utc)
+            .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|since| since.as_secs());
+        Some(UsageWindow {
+            utilization,
+            resets_at,
+        })
+    };
+    let overage = match limits.extra_usage {
+        Some(wire::ExtraUsage {
+            is_enabled: Some(true),
+            ..
+        }) => Overage::Allowed,
+        Some(wire::ExtraUsage {
+            is_enabled: Some(false),
+            disabled_reason,
+        }) => overage("rejected", disabled_reason.as_deref().unwrap_or_default()),
+        Some(wire::ExtraUsage {
+            is_enabled: None, ..
+        })
+        | None => Overage::Unreported,
+    };
+    let windows = UsageWindows {
+        five_hour: window(limits.five_hour),
+        seven_day: window(limits.seven_day),
+        using_overage: false,
+        overage,
+    };
+    (!windows.is_empty() || windows.overage != Overage::Unreported)
+        .then_some(Event::UsageWindows(windows))
 }
 
 /// One window, kept only where the CLI measured it: a level that is not a
@@ -11777,6 +11879,94 @@ error: could not compile `demo` (lib test) due to 1 previous error";
             [GoalReport::NotMet {
                 reason: "Only A so far.".to_owned()
             }]
+        );
+    }
+
+    /// The answer to `get_usage` recorded from Claude Code 2.1.322 on a Max
+    /// login before any turn, cut to the fields read and a few beside them:
+    /// no five-hour window open, 12% of the week gone, extra usage refused
+    /// for want of credits.
+    const USAGE_ANSWER: &str = r#"{"type":"control_response","response":{"subtype":"success","request_id":"niobe-2","response":{"session":{"total_cost_usd":0,"model_usage":{}},"subscription_type":"max","rate_limits_available":true,"rate_limits":{"five_hour":null,"seven_day":{"utilization":12,"resets_at":"2026-11-17T22:59:59.788036+00:00","limit_dollars":null},"seven_day_opus":null,"extra_usage":{"is_enabled":false,"monthly_limit":5000,"used_credits":0,"utilization":0,"currency":"EUR","disabled_reason":"out_of_credits"},"model_scoped":[{"display_name":"Fable","utilization":9,"resets_at":"2026-11-17T22:59:59.788188+00:00"}]},"behaviors":null}}}"#;
+
+    const INITIALIZED: &str = r#"{"type":"control_response","response":{"subtype":"success","request_id":"niobe-1","response":{"commands":[{"name":"compact"}]}}}"#;
+
+    #[test]
+    fn the_plans_windows_are_asked_about_once_the_cli_has_answered_initialize_and_once_only() {
+        let mut translator = Translator::new("max");
+        assert!(!translator.take_usage_wanted(), "nothing answered yet");
+        translator.line(INITIALIZED);
+        assert!(translator.take_usage_wanted());
+        assert!(!translator.take_usage_wanted(), "taken once");
+        translator.line(INITIALIZED);
+        assert!(!translator.take_usage_wanted(), "asked once a process");
+    }
+
+    #[test]
+    fn the_answer_to_get_usage_is_the_plans_windows_as_a_share_with_their_reset() {
+        let mut translator = Translator::new("max");
+        translator.asked_for_usage("niobe-2");
+        let events = translator.line(USAGE_ANSWER);
+        // `date -u -d 2026-11-17T22:59:59Z +%s` is 1794956399.
+        assert_eq!(
+            events,
+            [Event::UsageWindows(UsageWindows {
+                five_hour: None,
+                seven_day: Some(UsageWindow {
+                    utilization: 0.12,
+                    resets_at: Some(1_794_956_399),
+                }),
+                using_overage: false,
+                overage: Overage::Refused(OverageRefusal::OutOfCredits),
+            })]
+        );
+    }
+
+    #[test]
+    fn an_answer_to_get_usage_with_no_plan_limits_or_a_refusal_of_it_says_nothing() {
+        let mut translator = Translator::new("max");
+        translator.asked_for_usage("niobe-2");
+        translator.asked_for_usage("niobe-3");
+        let metered = translator.line(r#"{"type":"control_response","response":{"subtype":"success","request_id":"niobe-2","response":{"subscription_type":null,"rate_limits_available":false,"rate_limits":null,"behaviors":null}}}"#);
+        assert_eq!(metered, []);
+        let refused = translator.line(r#"{"type":"control_response","response":{"subtype":"error","request_id":"niobe-3","error":"Unknown control request subtype: get_usage"}}"#);
+        assert_eq!(refused, [], "an older CLI's refusal is no warning");
+    }
+
+    #[test]
+    fn a_window_the_endpoint_gave_no_level_for_or_a_level_below_nothing_is_no_window() {
+        let limits = |five_hour: serde_json::Value| -> wire::PlanLimits {
+            serde_json::from_value(serde_json::json!({
+                "five_hour": five_hour,
+                "seven_day": null,
+                "extra_usage": null,
+            }))
+            .expect("the shape is the answer's")
+        };
+        assert_eq!(plan_limits(limits(serde_json::Value::Null)), None);
+        assert_eq!(
+            plan_limits(limits(
+                serde_json::json!({"utilization": null, "resets_at": null})
+            )),
+            None
+        );
+        assert_eq!(
+            plan_limits(limits(
+                serde_json::json!({"utilization": -1, "resets_at": null})
+            )),
+            None
+        );
+        assert_eq!(
+            plan_limits(limits(
+                serde_json::json!({"utilization": 40, "resets_at": "soon"})
+            )),
+            Some(Event::UsageWindows(UsageWindows {
+                five_hour: Some(UsageWindow {
+                    utilization: 0.4,
+                    resets_at: None,
+                }),
+                ..UsageWindows::default()
+            })),
+            "a reset that is no moment leaves the level"
         );
     }
 }

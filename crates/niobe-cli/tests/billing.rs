@@ -273,7 +273,7 @@ fn a_fresh_session_on_an_empty_store_draws_the_windows_waiting_for_the_first_rep
     let mut app = fresh_on(&[], "max");
 
     let pane = usage_pane(&mut app);
-    assert!(pane.contains("reported with the first reply"), "{pane}");
+    assert!(pane.contains("asked of the backend"), "{pane}");
     assert!(!pane.contains('%'), "a share nobody reported: {pane}");
     assert_snapshot("usage-awaited-120x30", &pane);
 }
@@ -285,5 +285,5 @@ fn windows_recorded_under_another_profile_are_not_carried() {
 
     let pane = usage_pane(&mut app);
     assert!(!pane.contains("68%"), "{pane}");
-    assert!(pane.contains("reported with the first reply"), "{pane}");
+    assert!(pane.contains("asked of the backend"), "{pane}");
 }

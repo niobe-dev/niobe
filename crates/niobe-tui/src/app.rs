@@ -313,8 +313,9 @@ pub enum PlanWindows {
         /// When they were recorded.
         at: Stamp,
     },
-    /// Nothing reported and nothing recorded, on a session whose first reply
-    /// has not come in: the backend reports the windows with it.
+    /// Nothing reported and nothing recorded, on a session whose first turn
+    /// has not ended: a backend that can be asked for the windows as it
+    /// starts reports them then, and any reports them during a turn.
     Awaited,
 }
 
