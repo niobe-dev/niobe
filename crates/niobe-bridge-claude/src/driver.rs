@@ -3075,8 +3075,8 @@ mod tests {
         let usage = r#"{"type":"control_response","response":{"subtype":"success","request_id":"niobe-2","response":{"rate_limits_available":true,"rate_limits":{"five_hour":{"utilization":37,"resets_at":"2026-11-12T04:00:00.000000+00:00"},"seven_day":null}}}}"#;
         let (mut session, _dir) = started(&format!(
             "read -r initialize\nprintf '%s\\n' '{initialized}'\n\
-             read -r usage\nprintf '%s\\n' '{usage}'\n\
-             printf '%s\\n' \"$usage\" > '{asked}'\nexec sleep 30\n",
+             read -r usage\nprintf '%s\\n' \"$usage\" > '{asked}'\n\
+             printf '%s\\n' '{usage}'\nexec sleep 30\n",
             asked = asked.display()
         ));
 
