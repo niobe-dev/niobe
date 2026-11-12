@@ -4,5 +4,4 @@
 │ asked of the backend                  │
 │ ───────────────────────────────────── │
 │ no tokens reported yet                │
-│ session — · billing not known         │
 └───────────────────────────────────────┘

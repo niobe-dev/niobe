@@ -30,9 +30,7 @@ use ratatui::widgets::{
 };
 
 use niobe_core::attention::Attention;
-use niobe_core::event::{
-    Billing, Context, Overage, OverageRefusal, SlashCommand, UsageWindow, UsageWindows,
-};
+use niobe_core::event::{Billing, Context, Overage, SlashCommand, UsageWindow, UsageWindows};
 use niobe_core::goal::Goal;
 use niobe_core::session::{SessionState, ToolTotals, Totals, WorkTotals};
 
@@ -4721,7 +4719,7 @@ fn usage_figure_columns(app: &App) -> usize {
                 .max()
                 .unwrap_or(0);
             let extra =
-                extra(&windows).map_or(0, |(said, _)| text::width(NO_FIGURE) + text::width(&said));
+                extra(&windows).map_or(0, |(said, _)| text::width(NO_FIGURE) + text::width(said));
             reported.max(extra)
         }
     };
@@ -4926,9 +4924,8 @@ fn level_lines(
     // money side is an em dash. A `$0.00` there would be a figure nobody
     // measured, and the one it would be mistaken for is zero.
     //
-    // The row is absent where the backend said neither that the plan is
-    // spending extra nor whether it may: drawing `off` from silence would
-    // promise something nothing reported.
+    // The row is there only while the plan spends beyond its fee or may:
+    // see [`extra`].
     if let Some((said, spending)) = extra(windows) {
         let style = match spending {
             true => Style::new().fg(theme.hot).bold(),
@@ -4975,28 +4972,20 @@ const NO_FIGURE: &str = "—";
 const OVERAGE_ON: &str = " · on";
 
 /// What the `extra` row says after its em dash, and whether it is the plan
-/// spending beyond its fee, which is drawn hot. `None` where the backend said
-/// neither that it is spending nor whether it may, which is no row at all.
+/// spending beyond its fee, which is drawn hot. `None` where nothing beyond
+/// the fee is being spent or may be — the backend refused it, for whatever
+/// reason, or said nothing — which is no row at all: a row that only says
+/// nothing more can be charged carries no figure and nothing to act on.
 ///
 /// Spending is said first whatever else was: the CLI keeps reporting extra
 /// in use at the moment the extra itself runs out.
-fn extra(windows: &UsageWindows) -> Option<(String, bool)> {
+fn extra(windows: &UsageWindows) -> Option<(&'static str, bool)> {
     if windows.using_overage {
-        return Some((OVERAGE_ON.to_owned(), true));
+        return Some((OVERAGE_ON, true));
     }
     match windows.overage {
-        Overage::Unreported => None,
-        Overage::Allowed => Some((" · allowed".to_owned(), false)),
-        Overage::Refused(why) => {
-            let why = match why {
-                OverageRefusal::OutOfCredits => " · no credits left",
-                OverageRefusal::NotSetUp => " · not set up",
-                OverageRefusal::TurnedOff => " · turned off",
-                OverageRefusal::ZeroLimit => " · its limit is zero",
-                OverageRefusal::Unstated => "",
-            };
-            Some((format!(" · off{why}"), false))
-        }
+        Overage::Unreported | Overage::Refused(_) => None,
+        Overage::Allowed => Some((" · allowed", false)),
     }
 }
 
@@ -5411,12 +5400,12 @@ fn usage_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
     lines
 }
 
-/// How many rows the money takes: the session's cost, except on a plan, and
-/// the budget where the session runs against one.
+/// How many rows the money takes: the session's cost, where some of it is
+/// money spent, and the budget where the session runs against one.
 fn money_rows(app: &App) -> usize {
     let cost = match Billed::of(app.session()) {
-        Billed::Plan => 0,
-        Billed::Metered | Billed::Both | Billed::Unknown => 1,
+        Billed::Plan | Billed::Unknown => 0,
+        Billed::Metered | Billed::Both => 1,
     };
     cost + usize::from(app.budget().is_some())
 }
@@ -5429,9 +5418,11 @@ fn money_rows(app: &App) -> usize {
 /// the work and what runs out is the windows above, so there is no row: the
 /// figure the backend prints is what the work would have cost on the API,
 /// which tells a plan user nothing the tokens and the windows do not. Where
-/// nothing has said which it is, the row says so rather than showing a figure
-/// it cannot vouch for. A session billed both ways — resumed under a profile
-/// billed differently — shows what its metered part cost, named as a part.
+/// nothing has said which it is — a CLI says so as its first turn ends — there
+/// is no row either: the figure could be either, and a row with no figure in
+/// it tells the operator nothing. A session billed both ways — resumed under a
+/// profile billed differently — shows what its metered part cost, named as a
+/// part.
 fn money_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
     let dim = Style::new().fg(theme.dim);
     let billed = Billed::of(app.session());
@@ -5463,12 +5454,7 @@ fn money_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
             }
             lines.push(Line::from(spans));
         }
-        Billed::Plan => {}
-        Billed::Unknown => lines.push(Line::from(vec![
-            Span::styled("session ", dim),
-            Span::styled("—", Style::new().fg(theme.fg)),
-            Span::styled(" · billing not known", dim),
-        ])),
+        Billed::Plan | Billed::Unknown => {}
     }
     if let Some(budget) = app.budget() {
         lines.push(budget_line(app, budget, width, theme));
@@ -7327,7 +7313,7 @@ mod tests {
         assert!(drawn.contains("niobe saves Bash(x"), "{drawn}");
         assert!(drawn.ends_with('…'), "{drawn}");
     }
-    use niobe_core::event::{Backend, SessionMeta, Usage, UsageWindow};
+    use niobe_core::event::{Backend, OverageRefusal, SessionMeta, Usage, UsageWindow};
 
     fn priced(cost: Option<f64>) -> niobe_core::event::Event {
         niobe_core::event::Event::Usage(Usage {
@@ -8688,31 +8674,17 @@ mod tests {
         );
     }
 
-    /// What the backend said about extra usage, in the pane's words: a refusal
-    /// with its reason, an allowance, and nothing where it said nothing.
+    /// Extra usage is a row only where it may cost something: allowed, in
+    /// the pane's words, and no row where it is refused, whatever the reason,
+    /// or where the backend said nothing.
     #[test]
-    fn whether_extra_usage_is_allowed_is_said_where_the_backend_said_it() {
+    fn extra_usage_is_a_row_only_where_it_is_allowed() {
         for (overage, row) in [
-            (
-                Overage::Refused(OverageRefusal::OutOfCredits),
-                Some("extra — · off · no credits left"),
-            ),
-            (
-                Overage::Refused(OverageRefusal::NotSetUp),
-                Some("extra — · off · not set up"),
-            ),
-            (
-                Overage::Refused(OverageRefusal::TurnedOff),
-                Some("extra — · off · turned off"),
-            ),
-            (
-                Overage::Refused(OverageRefusal::ZeroLimit),
-                Some("extra — · off · its limit is zero"),
-            ),
-            (
-                Overage::Refused(OverageRefusal::Unstated),
-                Some("extra — · off"),
-            ),
+            (Overage::Refused(OverageRefusal::OutOfCredits), None),
+            (Overage::Refused(OverageRefusal::NotSetUp), None),
+            (Overage::Refused(OverageRefusal::TurnedOff), None),
+            (Overage::Refused(OverageRefusal::ZeroLimit), None),
+            (Overage::Refused(OverageRefusal::Unstated), None),
             (Overage::Allowed, Some("extra — · allowed")),
             (Overage::Unreported, None),
         ] {
@@ -8725,6 +8697,7 @@ mod tests {
             let rows = rows_of(&app, 66);
             let extra = rows.iter().find(|row| row.starts_with("extra"));
             assert_eq!(extra.map(String::as_str), row, "{overage:?}: {rows:?}");
+            assert_eq!(window_rows(&app), rows.len(), "{overage:?}");
         }
     }
 

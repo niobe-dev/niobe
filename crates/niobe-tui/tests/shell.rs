@@ -3508,12 +3508,13 @@ fn a_plan_shows_no_dollar_figure() {
 }
 
 /// A session whose billing nothing has said and the profile does not set
-/// shows no dollar figure: whether it is money spent or money not spent is
-/// the one thing the figure cannot say for itself.
+/// shows no dollar figure, and no row for one: whether it is money spent or
+/// money not spent is the one thing the figure cannot say for itself, and a
+/// row with nothing in it tells the operator nothing.
 #[test]
-fn a_session_nobody_said_the_billing_of_shows_no_dollar_figure() {
+fn a_session_nobody_said_the_billing_of_shows_no_money_row() {
     let frame = screen(&mut unmetered_session(), 120, 30);
-    assert!(frame.contains("session — · billing not known"), "{frame}");
+    assert!(!frame.contains("session "), "{frame}");
     assert!(!frame.contains("$0."), "{frame}");
 }
 
@@ -3939,9 +3940,11 @@ fn nothing_the_backends_did_not_report_appears_as_a_number() {
     assert!(pane.contains("session unpriced"), "{pane}");
     assert!(pane.contains("budget —/$5.00"), "{pane}");
 
-    // An empty session has no cost at all, and the pane says so itself.
+    // An empty session has no cost at all, and the pane says so itself
+    // rather than draw a figure for it.
     let empty = usage_pane(&screen(&mut empty_session(), 120, 30)).join("\n");
-    assert!(empty.contains('—'), "{empty}");
+    assert!(empty.contains("no tokens reported yet"), "{empty}");
+    assert!(!empty.contains('$') && !empty.contains('0'), "{empty}");
 }
 
 /// The column of desktop between the session pane and the right-hand stack,

@@ -1,9 +1,9 @@
  Niobe  Session  Context  Model  View  Help                                                             ○ not attached
  ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━ Session ─ niobe ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓ ┌──────────────── Usage ────────────────┐
  ┃  No backend attached. `niobe profiles` shows what is defined.    ﾝ ﾑ ｬ   ┃ │ no tokens reported yet                │
- ┃  ｹ   ｪ     ﾔ = ｫ ｷ ｦ .   6 ｻ           < 6     ﾃ ¦ ﾑ ﾉ ﾏ ﾀ       : ﾜ ﾕ   ┃ │ session — · billing not known         │
- ┃  ｬ   0     ｯ < 1 4 ｮ ﾌ   ﾐ   ﾖ         3 ﾖ     ｩ ﾙ ｷ ﾂ < ｰ       ｪ ﾚ ﾖ   ┃ └───────────────────────────────────────┘
- ┃  6   ｧ     7 ｳ + ｾ ﾐ ｧ   ﾆ   ﾔ       ﾐ ｲ ｽ     ｴ ｦ ﾙ ｬ ｹ :       ｻ ｽ ﾑ   ┃ ┌─────────────── Changes ───────────────┐
+ ┃  ｹ   ｪ     ﾔ = ｫ ｷ ｦ .   6 ｻ           < 6     ﾃ ¦ ﾑ ﾉ ﾏ ﾀ       : ﾜ ﾕ   ┃ └───────────────────────────────────────┘
+ ┃  ｬ   0     ｯ < 1 4 ｮ ﾌ   ﾐ   ﾖ         3 ﾖ     ｩ ﾙ ｷ ﾂ < ｰ       ｪ ﾚ ﾖ   ┃ ┌─────────────── Changes ───────────────┐
+ ┃  6   ｧ     7 ｳ + ｾ ﾐ ｧ   ﾆ   ﾔ       ﾐ ｲ ｽ     ｴ ｦ ﾙ ｬ ｹ :       ｻ ｽ ﾑ   ┃ │ ⎇ main                                │
  ┃  1 . ｦ     ﾌ ｼ ┏━━━━━━━━━━━━━━━━━━━━━━━━ Trust this repository's config? ━━━━━━━━━━━━━━━━━━━━━━━━━┓                │
  ┃  ｵ ﾋ ﾖ     * 9 ┃                                                                                  ┃                │
  ┃  ﾃ ﾊ ｨ   ｻ 2   ┃  /home/me/src/niobe/.niobe/config.toml                                           ┃                │
@@ -15,15 +15,15 @@
  ┃    ﾒ 0   ﾓ   ﾗ ┃  work             env AWS_PROFILE=work-sso, CLAUDE_CODE_USE_BEDROCK=1            ┃                │
  ┃      ﾏ   ｳ   ｭ ┃  work             auth_refresh aws sso login --profile work-sso                  ┃                │
  ┃      |   ﾌ   1 ┃  default_profile  work                                                           ┃                │
- ┃      :   0 - ﾋ ┃                                                                                  ┃                │
- ┃      ﾁ   9 ｭ ｶ ┃  Trusted, it stays in force until the file changes. Without it, none of the      ┃────────────────┘
- ┃      ｶ     ｹ : ┃  above is.                                                                       ┃ ───────────────┐
- ┃      ｩ     | " ┃                                                                                  ┃g · 0 spawned   │
- ┃        ｸ   ﾌ ｷ ┃    1. Yes, trust this config                                                     ┃                │
- ┃        ﾉ   " ｺ ┃  › 2. No, open without it                                                        ┃ent says  0     │
- ┃        Z   ﾂ ﾐ ┃                                                                                  ┃                │
- ┃        ﾀ   ｻ ｷ ┗━━━━━━━━━━ ↑↓ choose, pause, Enter answer · Esc no · Ctrl+C twice quit ━━━━━━━━━━━┛enied · 0 B out │
- ┃        ﾆ   ｱ ﾏ     ｴ       ﾎ   ｬ ｽ       . ｹ ﾜ ﾊ ｾ                   ｹ   ┃ │   none called                         │
+ ┃      :   0 - ﾋ ┃                                                                                  ┃────────────────┘
+ ┃      ﾁ   9 ｭ ｶ ┃  Trusted, it stays in force until the file changes. Without it, none of the      ┃ ───────────────┐
+ ┃      ｶ     ｹ : ┃  above is.                                                                       ┃g · 0 spawned   │
+ ┃      ｩ     | " ┃                                                                                  ┃                │
+ ┃        ｸ   ﾌ ｷ ┃    1. Yes, trust this config                                                     ┃ent says  0     │
+ ┃        ﾉ   " ｺ ┃  › 2. No, open without it                                                        ┃                │
+ ┃        Z   ﾂ ﾐ ┃                                                                                  ┃enied · 0 B out │
+ ┃        ﾀ   ｻ ｷ ┗━━━━━━━━━━ ↑↓ choose, pause, Enter answer · Esc no · Ctrl+C twice quit ━━━━━━━━━━━┛                │
+ ┃        ﾆ   ｱ ﾏ     ｴ       ﾎ   ｬ ｽ       . ｹ ﾜ ﾊ ｾ                   ｹ   ┃ │                                       │
  ┃ ──────────────────────────────────────────────────────────────────────── ┃ │                                       │
  ┃  —  >  Ask for a change · Ctrl+F find    Shift+Tab mode · Ctrl+J newline ┃ │                                       │
  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ └───────────────────────────────────────┘
