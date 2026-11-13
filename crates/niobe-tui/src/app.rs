@@ -887,6 +887,13 @@ pub struct Entry {
     /// says it is for an entry of its own. What the transcript hides, where
     /// it is asked to show only what is notable.
     pub attention: Attention,
+    /// Whether this is a prompt the operator sent while the backend was busy
+    /// — a turn running, the conversation being compacted or cleared — that
+    /// the backend has not taken in yet: sent, and not read by the model.
+    /// Drawn dim and said to be queued until the backend says it took the
+    /// prompt in ([`Event::PromptTaken`]) or the turn it waited behind ends.
+    /// `false` for every other entry.
+    pub queued: bool,
 }
 
 /// One tool call as the transcript shows it: what it does, how it ended and
@@ -1358,6 +1365,9 @@ pub struct Activity {
 /// What the working line says while the backend compacts the conversation.
 const COMPACTING: &str = "compacting context";
 
+/// What a prompt the backend has not taken in yet says beside its head.
+const QUEUED: &str = "queued — the agent has not taken it in yet";
+
 /// Whether a turn is running, and how long the session has been that way.
 ///
 /// The menu row's state segment, which is the one place the shell says the
@@ -1474,6 +1484,9 @@ pub struct App {
     /// The row of the last compaction, while the request after it has not
     /// yet said how much the conversation holds now.
     compaction: Option<usize>,
+    /// The entries of the prompts drawn queued, oldest first: sent while the
+    /// backend was busy and not yet taken in. See [`Entry::queued`].
+    queued_prompts: std::collections::VecDeque<usize>,
     /// Whether the transcript draws every tool call a row of its own, rather
     /// than the session's calls that need no reading a line a run.
     calls_full: bool,
@@ -2255,6 +2268,7 @@ impl App {
             run: None,
             reply: None,
             compaction: None,
+            queued_prompts: std::collections::VecDeque::new(),
             calls_full: false,
             by_agent: false,
             only_agent: None,
@@ -2417,6 +2431,8 @@ impl App {
     fn fold_one(&mut self, event: &Event) {
         self.before_prompt = None;
         let turns = self.session.turns().len();
+        let waits = matches!(event, Event::UserMessage { .. })
+            && (self.session.clearing() || self.session.turn_running());
         if matches!(event, Event::UserMessage { .. }) {
             match (self.session.clearing(), self.session.turn_running()) {
                 // The prompt waits behind the turn that typed a clear, which
@@ -2506,6 +2522,7 @@ impl App {
             _ => None,
         };
         self.fold_into_transcript(event, ended);
+        self.follow_queue(event, waits);
         self.raise(event, from, reply, ended);
         if let Some((id, decision, row)) = answered {
             self.settle_asked(id, answered_by_rule(decision), row);
@@ -2651,6 +2668,7 @@ impl App {
             | Event::ToolCallEnd { .. }
             | Event::TurnEnded
             | Event::TurnFollows
+            | Event::PromptTaken
             | Event::Usage(_)
             | Event::UsageWindows(_)
             | Event::Billing { .. }
@@ -2700,6 +2718,7 @@ impl App {
             .collect();
         self.cleared_prompts.extend(sent);
         self.entries.clear();
+        self.queued_prompts.clear();
         self.tool_entries.clear();
         self.cut_entries.clear();
         self.recorded.clear();
@@ -2880,6 +2899,7 @@ impl App {
             took,
         };
         self.push(Entry {
+            queued: false,
             attention: Attention::of(&Event::TurnEnded),
             kind: EntryKind::Turn(rule),
             head: String::new(),
@@ -2907,10 +2927,55 @@ impl App {
         };
     }
 
+    /// Keeps the prompts drawn queued in step with `event`. A prompt that
+    /// `waits` — sent while a turn ran or a clear was under way — is drawn
+    /// queued; the backend taking one in takes the mark off the oldest, and
+    /// the end of the turn they waited behind, or of the session, off every
+    /// one, since the backend starts what it still holds as soon as that
+    /// turn has ended and nothing will start it once the session has.
+    fn follow_queue(&mut self, event: &Event, waits: bool) {
+        if waits {
+            let at = self.entries.len().saturating_sub(1);
+            if self
+                .entries
+                .get(at)
+                .is_some_and(|entry| entry.kind == EntryKind::User)
+            {
+                self.set_queued(at, true);
+                self.queued_prompts.push_back(at);
+            }
+        }
+        if matches!(event, Event::PromptTaken)
+            && let Some(at) = self.queued_prompts.pop_front()
+        {
+            self.set_queued(at, false);
+        }
+        if matches!(
+            event,
+            Event::TurnEnded | Event::SessionLeft | Event::Error { fatal: true, .. }
+        ) {
+            while let Some(at) = self.queued_prompts.pop_front() {
+                self.set_queued(at, false);
+            }
+        }
+    }
+
+    /// Draws the prompt at `at` queued, or as a prompt the backend has.
+    fn set_queued(&mut self, at: usize, queued: bool) {
+        if let Some(entry) = self.entries.get_mut(at) {
+            entry.queued = queued;
+            entry.meta = match queued {
+                true => QUEUED.to_owned(),
+                false => String::new(),
+            };
+        }
+    }
+
     /// Puts a prompt the operator typed in the transcript.
     fn push_prompt(&mut self, text: &str) {
         self.images.seen(text);
         self.push(Entry {
+            queued: false,
             attention: Attention::Routine,
             kind: EntryKind::User,
             head: "you".to_owned(),
@@ -2946,6 +3011,7 @@ impl App {
                     let head = self.agent_name();
                     self.reply = Some(self.entries.len());
                     self.push(Entry {
+                        queued: false,
                         attention: Attention::Routine,
                         kind: EntryKind::Agent,
                         head,
@@ -2965,6 +3031,7 @@ impl App {
             } => {
                 self.agent_entries.insert(self.entries.len(), agent.clone());
                 self.push(Entry {
+                    queued: false,
                     attention: Attention::Routine,
                     kind: EntryKind::SubAgent,
                     head: self.sub_agent_label(agent),
@@ -2985,6 +3052,7 @@ impl App {
                 None => {
                     let head = self.agent_name();
                     self.push(Entry {
+                        queued: false,
                         attention: Attention::Routine,
                         kind: EntryKind::Agent,
                         head,
@@ -3041,6 +3109,7 @@ impl App {
                         }
                         let agent = agent.as_ref().map(|agent| self.sub_agent_tag(agent));
                         self.push(Entry {
+                            queued: false,
                             attention: Attention::Routine,
                             kind: EntryKind::Tool,
                             head,
@@ -3098,6 +3167,7 @@ impl App {
                         let mut call = Call::started(what_it_does(summary.as_deref(), input), None);
                         call.ended(ending, None);
                         self.push(Entry {
+                            queued: false,
                             attention: Attention::Routine,
                             kind: match call.failed() {
                                 true => EntryKind::Failure,
@@ -3206,6 +3276,7 @@ impl App {
                     self.interrupt_what_the_fold_stopped();
                 }
                 self.push(Entry {
+                    queued: false,
                     attention: Attention::Routine,
                     kind: EntryKind::Failure,
                     head: if *fatal { "fatal" } else { "error" }.to_owned(),
@@ -3235,6 +3306,7 @@ impl App {
                 GoalReport::Met { .. } => {
                     if let Some(goal) = self.session.goal() {
                         self.push(Entry {
+                            queued: false,
                             attention: Attention::Notable,
                             kind: EntryKind::Notice,
                             head: self.agent_name(),
@@ -3251,6 +3323,7 @@ impl App {
             },
 
             Event::Notice { message } | Event::LimitReached { message } => self.push(Entry {
+                queued: false,
                 attention: Attention::Routine,
                 kind: EntryKind::Notice,
                 head: self.agent_name(),
@@ -3279,6 +3352,7 @@ impl App {
                     unfinished,
                 );
                 self.push(Entry {
+                    queued: false,
                     attention: Attention::Routine,
                     kind: EntryKind::Notice,
                     head: self.agent_name(),
@@ -3298,6 +3372,7 @@ impl App {
             } => {
                 self.compaction = Some(self.entries.len());
                 self.push(Entry {
+                    queued: false,
                     attention: Attention::Routine,
                     kind: EntryKind::Compacted(CompactionRow {
                         trigger: *trigger,
@@ -3331,6 +3406,8 @@ impl App {
 
             // The turn it forecasts is drawn from what that turn does.
             Event::TurnFollows => {}
+            // Takes the mark off a queued prompt: see `follow_queue`.
+            Event::PromptTaken => {}
 
             // A look an earlier release recorded, which nothing reads now.
             Event::Looked => {}
@@ -3342,6 +3419,7 @@ impl App {
                 self.start_over();
                 self.sent_since = self.sent.len();
                 self.push(Entry {
+                    queued: false,
                     attention: Attention::Routine,
                     kind: EntryKind::Notice,
                     head: "cleared".to_owned(),
@@ -3439,6 +3517,7 @@ impl App {
                         self.agent_entries.insert(self.entries.len(), agent);
                     }
                     self.push(Entry {
+                        queued: false,
                         attention: Attention::Notable,
                         kind: EntryKind::Failure,
                         head: "denied".to_owned(),
@@ -4051,6 +4130,7 @@ impl App {
             ),
         };
         self.push(Entry {
+            queued: false,
             attention: Attention::Notable,
             kind: EntryKind::Notice,
             head: self.agent_name(),
@@ -4469,6 +4549,7 @@ impl App {
     /// the operator is not surprised when the next one opens without it.
     pub fn preference_not_kept(&mut self, preference: &Preference, error: &str) {
         self.say(Entry {
+            queued: false,
             attention: Attention::Notable,
             kind: EntryKind::Failure,
             head: "not saved".to_owned(),
@@ -4502,6 +4583,7 @@ impl App {
     /// session, so the operator is not surprised by the prompt returning.
     pub fn not_remembered(&mut self, rule: &Rule, error: &str) {
         self.say(Entry {
+            queued: false,
             attention: Attention::NeedsYou,
             kind: EntryKind::Failure,
             head: "not saved".to_owned(),
@@ -4523,6 +4605,7 @@ impl App {
     /// prompt.
     pub fn kept_until_trusted(&mut self, rule: &Rule) {
         self.say(Entry {
+            queued: false,
             attention: Attention::Notable,
             kind: EntryKind::Notice,
             head: "not kept".to_owned(),
@@ -4542,6 +4625,7 @@ impl App {
     /// turn that is still waiting is not read as one that was answered.
     pub fn not_answered(&mut self, error: &str) {
         self.say(Entry {
+            queued: false,
             attention: Attention::NeedsYou,
             kind: EntryKind::Failure,
             head: "not answered".to_owned(),
@@ -4582,6 +4666,7 @@ impl App {
             count: 1,
         });
         self.say(Entry {
+            queued: false,
             attention: Attention::NeedsYou,
             kind: EntryKind::Failure,
             head: "not saved".to_owned(),
@@ -4602,6 +4687,7 @@ impl App {
             return;
         };
         self.say(Entry {
+            queued: false,
             attention: Attention::Notable,
             kind: EntryKind::Notice,
             head: "saved again".to_owned(),
@@ -4658,6 +4744,7 @@ impl App {
     /// that moved.
     fn not_changed(&mut self, what: &str, error: &str) {
         self.say(Entry {
+            queued: false,
             attention: Attention::NeedsYou,
             kind: EntryKind::Failure,
             head: "not changed".to_owned(),
@@ -4871,6 +4958,7 @@ impl App {
             n => format!("{n} files"),
         };
         self.push(Entry {
+            queued: false,
             attention: Attention::Notable,
             kind: EntryKind::Notice,
             head: "outside the edit tools".to_owned(),
@@ -4908,6 +4996,7 @@ impl App {
             .collect();
         for spike in found {
             self.push(Entry {
+                queued: false,
                 attention: Attention::Notable,
                 kind: EntryKind::Notice,
                 head: "spike".to_owned(),
@@ -4975,6 +5064,7 @@ impl App {
         };
         self.budget_warned = true;
         self.say(Entry {
+            queued: false,
             attention: Attention::NeedsYou,
             kind: EntryKind::Notice,
             head: "budget".to_owned(),
@@ -6902,6 +6992,7 @@ impl App {
     #[must_use]
     pub fn with_notice(mut self, head: &str, meta: &str, body: &str) -> Self {
         self.push(Entry {
+            queued: false,
             attention: Attention::Notable,
             kind: EntryKind::Notice,
             head: head.to_owned(),
@@ -8322,6 +8413,7 @@ impl App {
         self.stop_asked = false;
         self.forget_stopping_hint();
         self.say(Entry {
+            queued: false,
             attention: Attention::NeedsYou,
             kind: EntryKind::Failure,
             head: "not stopped".to_owned(),
@@ -9741,6 +9833,7 @@ impl App {
     /// Says in the transcript that the prompt above it went nowhere.
     fn say_not_attached(&mut self) {
         self.push(Entry {
+            queued: false,
             attention: Attention::NeedsYou,
             kind: EntryKind::Notice,
             head: "no backend".to_owned(),
@@ -9853,14 +9946,31 @@ impl App {
                 false
             }
         };
+        self.unqueue_unsent();
         self.say_not_sent(error);
         self.scroll_to_tail();
         taken_back
     }
 
+    /// Takes the mark off the prompt just folded in, where it was drawn
+    /// queued: it never reached the backend, so nothing holds it.
+    fn unqueue_unsent(&mut self) {
+        let last_prompt = self
+            .entries
+            .iter()
+            .rposition(|entry| entry.kind == EntryKind::User);
+        if last_prompt.is_some() && self.queued_prompts.back().copied() == last_prompt {
+            self.queued_prompts.pop_back();
+            if let Some(at) = last_prompt {
+                self.set_queued(at, false);
+            }
+        }
+    }
+
     /// Puts under a prompt that it did not reach the backend, and why.
     fn say_not_sent(&mut self, error: &str) {
         self.push(Entry {
+            queued: false,
             attention: Attention::NeedsYou,
             kind: EntryKind::Failure,
             head: "not sent".to_owned(),
@@ -12000,6 +12110,112 @@ mod tests {
                 (EntryKind::User, "hello during", false),
             ]
         );
+    }
+
+    /// Which prompts the transcript draws queued, by their words.
+    fn queued(app: &App) -> Vec<&str> {
+        app.entries()
+            .iter()
+            .filter(|entry| entry.queued)
+            .map(|entry| entry.body.as_str())
+            .collect()
+    }
+
+    /// A prompt sent while a turn runs is drawn queued, and says so beside
+    /// its head, until the backend takes it in; one sent while nothing ran
+    /// never is. Two sent behind one turn are taken in the order they were
+    /// sent.
+    #[test]
+    fn a_prompt_sent_while_a_turn_runs_is_queued_until_the_backend_takes_it_in() {
+        let mut app = sent(app().attached(), "slow");
+        assert_eq!(queued(&app), Vec::<&str>::new(), "nothing ran before it");
+
+        app.apply(&start("t1", "Bash", "sleep 8", None));
+        let mut app = sent(sent(app, "kiwi"), "plum");
+        assert_eq!(queued(&app), ["kiwi", "plum"]);
+        let kiwi = app
+            .entries()
+            .iter()
+            .find(|entry| entry.body == "kiwi")
+            .expect("the prompt is in the transcript");
+        assert_eq!(kiwi.meta, QUEUED);
+
+        app.apply(&Event::PromptTaken);
+        assert_eq!(queued(&app), ["plum"], "the oldest was taken in");
+        let kiwi = app
+            .entries()
+            .iter()
+            .find(|entry| entry.body == "kiwi")
+            .expect("the prompt is in the transcript");
+        assert!(kiwi.meta.is_empty(), "{:?}", kiwi.meta);
+
+        app.apply(&Event::PromptTaken);
+        app.apply(&Event::PromptTaken);
+        assert_eq!(queued(&app), Vec::<&str>::new());
+    }
+
+    /// A compaction is a turn of its own, and the CLI holds a prompt sent
+    /// during it until it has ended: the end takes the mark off whatever
+    /// the backend did not say it took, as does the session ending.
+    #[test]
+    fn a_prompt_sent_while_compacting_is_queued_until_the_compaction_ends() {
+        let mut app = sent(offering(&["compact"]), "/compact");
+        assert_eq!(
+            app.session().user_messages(),
+            1,
+            "the compaction was asked for"
+        );
+        app.apply(&Event::CompactionStarted);
+        let mut app = sent(app, "plum");
+        assert_eq!(queued(&app), ["plum"]);
+
+        app.apply(&Event::CompactionEnded);
+        assert_eq!(queued(&app), ["plum"], "the turn has not ended");
+        app.apply(&Event::TurnEnded);
+        assert_eq!(queued(&app), Vec::<&str>::new());
+
+        let mut app = sent(sent(app, "again"), "and again");
+        assert_eq!(queued(&app), ["and again"]);
+        app.apply(&Event::SessionLeft);
+        assert_eq!(queued(&app), Vec::<&str>::new());
+    }
+
+    /// A prompt that never reached the backend is not waiting in it: the
+    /// shell says it was not sent, and draws it queued no longer. One queued
+    /// before it stays so.
+    #[test]
+    fn a_queued_prompt_the_backend_refused_is_not_drawn_queued() {
+        let app = sent(app().attached(), "slow");
+        let mut app = sent(sent(app, "first"), "second");
+        assert_eq!(queued(&app), ["first", "second"]);
+
+        app.not_sent("the pipe closed");
+        assert_eq!(queued(&app), ["first"]);
+        app.apply(&Event::PromptTaken);
+        assert_eq!(queued(&app), Vec::<&str>::new());
+    }
+
+    /// A session read back draws what it recorded: a prompt the backend took
+    /// in is drawn as one, and every prompt is once its turn has ended.
+    #[test]
+    fn a_session_read_back_draws_no_prompt_queued() {
+        let mut app = app();
+        for event in [
+            Event::UserMessage {
+                text: "slow".to_owned(),
+            },
+            Event::UserMessage {
+                text: "kiwi".to_owned(),
+            },
+            Event::PromptTaken,
+            Event::UserMessage {
+                text: "plum".to_owned(),
+            },
+            Event::TurnEnded,
+        ] {
+            app.apply(&event);
+        }
+        assert_eq!(queued(&app), Vec::<&str>::new());
     }
 
     /// A `!` command the operator runs while the reply streams is theirs, not

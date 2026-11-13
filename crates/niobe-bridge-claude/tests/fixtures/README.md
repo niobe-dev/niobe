@@ -1464,8 +1464,10 @@ session, and the budget's end is a failure that says what stopped the turn.
 
 **Written by hand, not recorded**, for two shapes Claude Code 2.1.292 sends
 and a short headless session did not: `command_lifecycle`, a top-level `type`
-carrying the `uuid` the operator's message was sent with and a `state` of
-`queued`, `started`, `completed` or `cancelled`, and `system`/
+carrying the `command_uuid` the operator's message was sent with and a `state`
+of `queued`, `started`, `completed` or `cancelled` — the key as
+`queued-prompts.jsonl` recorded it from 2.1.323, where the hand-written lines
+first said `uuid` — and `system`/
 `permission_check_status`, carrying the `tool_use_id` of the call being
 checked and a `status` of `checking` (sent when the permission classifier has
 taken more than four seconds) or `done`. The lines follow the shapes in the
@@ -1477,6 +1479,51 @@ is still wanted.
 `tests/stream.rs` folds it and asserts the session says nothing about either
 shape and still holds the one `Bash` call between them; `tests/conformance.rs`
 lists both.
+
+## `queued-prompts.jsonl`
+
+Four prompts sent to one session, two of them while the CLI was busy,
+recorded from Claude Code 2.1.323 on 13 November 2026 on Sonnet, headless with
+`--input-format stream-json`, each prompt sent with a `uuid` as the driver
+sends it:
+
+1. "Use the Bash tool to run `sleep 8`, then reply with exactly the word:
+   done", sent while the CLI was idle;
+2. "Reply with exactly the word: kiwi", sent once the `sleep` call had
+   started;
+3. `/compact`, sent once the turn had ended;
+4. "Reply with exactly the word: plum", sent once the CLI said it was
+   compacting.
+
+The lines are the CLI's own, in the order it printed them. The only edits: the
+answer to `initialize` cut to an empty `commands` list and the keys that say
+what state the session is in; `commands_changed` cut to an empty list;
+`system`/`init` cut down to the keys that say what ran, its `cwd` rewritten to
+`/repo`; the path of the CLI's transcript in the compaction's summary
+rewritten under `/home/user`; and the sign-in's expiry left out of each
+`result`.
+
+What it settles, and what `tests/stream.rs` expects of it:
+
+- **Every prompt is `queued`, then `started`, then `completed`**, each a
+  `command_lifecycle` line whose `command_uuid` is the `uuid` the prompt was
+  sent with. The line's own `uuid` is the line's.
+- **A prompt sent while the CLI is idle is never held**: its `queued` and
+  `started` are consecutive lines, before the turn's `init` (prompts 1 and 3).
+- **A prompt sent while a call runs is taken into the same turn** (prompt 2):
+  `queued` as it arrived, then nothing of it for eighteen seconds until the
+  call's `tool_result`, straight after which it is `started` and the next
+  request's `status` lists both prompts' ids under `user_message_uuids`. The
+  model answers "kiwi" in that turn, which ends with one `result` and
+  `queued_turn_count` 0.
+- **A prompt sent while compacting waits for the compaction's turn to end**
+  (prompt 4): `queued` a second after it was sent, `started` after the
+  compaction's `result` and the `/compact`'s `completed`, and answered in a
+  turn of its own.
+
+The test expects `Event::PromptTaken` twice — between the call's end and
+the "kiwi" reply, and between the compaction's turn end and the "plum"
+reply — three turn ends, and no notice or warning.
 
 ## `cut-off.jsonl`
 

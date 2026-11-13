@@ -3361,8 +3361,9 @@ fn drawn_from(entry: &Entry, width: usize, detail: Detail, theme: &Theme, named:
         calls,
         agent,
         attention: _,
+        queued,
     } = entry;
-    (kind, head, meta, streaming, at, calls, agent).hash(&mut hasher);
+    (kind, head, meta, streaming, at, calls, agent, queued).hash(&mut hasher);
     match streaming {
         true => body.hash(&mut hasher),
         false => body.len().hash(&mut hasher),
@@ -4447,7 +4448,10 @@ fn entry_lines(
         | EntryKind::Failure
         | EntryKind::Notice => {}
     }
-    let colour = entry.kind.colour(theme);
+    let colour = match entry.queued {
+        true => theme.dim,
+        false => entry.kind.colour(theme),
+    };
     let body_width = width.saturating_sub(GUTTER);
     if entry.kind == EntryKind::Agent {
         return reply_lines(entry, body_width, theme, commands);
@@ -4578,21 +4582,27 @@ fn body_lines(
         // line and have no body.
         EntryKind::Turn(_) | EntryKind::Compacted(_) => Vec::new(),
         // The operator's words keep their own colour through the body, so a
-        // prompt is found at a glance scrolling back through replies.
+        // prompt is found at a glance scrolling back through replies — all
+        // but one the backend has not taken in, which is dim throughout, so
+        // what the agent has read is told from what it has not.
         EntryKind::User => {
             let body = entry.body.trim_end();
             let named = crate::slash::named_in_prompt(body, commands);
+            let (words, command) = match entry.queued {
+                true => (theme.dim, theme.dim),
+                false => (theme.user, theme.command),
+            };
             text::wrap_marked(body, width, &named)
                 .into_iter()
                 .map(|pieces| {
                     let spans: Vec<Span<'static>> = pieces
                         .into_iter()
                         .map(|(piece, marked)| match marked {
-                            true => Span::styled(piece, Style::new().fg(theme.command)),
-                            false => Span::styled(piece, Style::new().fg(theme.user)),
+                            true => Span::styled(piece, Style::new().fg(command)),
+                            false => Span::styled(piece, Style::new().fg(words)),
                         })
                         .collect();
-                    Line::from(spans).style(Style::new().fg(theme.user))
+                    Line::from(spans).style(Style::new().fg(words))
                 })
                 .collect()
         }
@@ -9941,6 +9951,7 @@ mod tests {
     fn summed_up_each_run_of_the_sessions_calls_is_one_line_and_what_asks_to_be_read_stays() {
         use crate::app::Call;
         let entry = |kind, head: &str, calls: Vec<Call>, agent: Option<&str>| Entry {
+            queued: false,
             kind,
             head: head.to_owned(),
             meta: String::new(),

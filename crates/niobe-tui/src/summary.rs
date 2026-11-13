@@ -276,6 +276,7 @@ mod tests {
 
     fn calls(tool: &str, calls: Vec<Call>) -> Entry {
         Entry {
+            queued: false,
             kind: EntryKind::Tool,
             head: tool.to_owned(),
             meta: String::new(),

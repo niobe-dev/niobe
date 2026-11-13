@@ -802,11 +802,15 @@ impl SessionState {
     /// the end it repeats, and a call's end or an agent's exit once that
     /// call or agent has ended.
     pub fn apply(&mut self, event: &Event) {
-        // A prompt that reached no backend, the operator looking and the
-        // backend saying another turn follows are not things that happened
-        // in the session's conversation, so an end said again after any of
-        // them is still said again.
-        if let Event::PromptNotSent { .. } | Event::Looked | Event::TurnFollows = event {
+        // A prompt that reached no backend, the operator looking, the
+        // backend saying another turn follows and its taking in a queued
+        // prompt are not things that happened in the session's conversation,
+        // so an end said again after any of them is still said again.
+        if let Event::PromptNotSent { .. }
+        | Event::Looked
+        | Event::TurnFollows
+        | Event::PromptTaken = event
+        {
             return;
         }
         let was_running = self.turn_running;
@@ -1197,8 +1201,9 @@ impl SessionState {
             // numbers around it, and the transcript is where it is read.
             Event::Notice { .. } | Event::LimitReached { .. } => {}
             // Passed over in `apply`, before the fold: the turn it forecasts
-            // is counted when it comes, from what it does.
-            Event::Looked | Event::TurnFollows => {}
+            // is counted when it comes, from what it does, and the prompt
+            // taken in was counted when it was sent.
+            Event::Looked | Event::TurnFollows | Event::PromptTaken => {}
             Event::Goal { report } => self.goal = Goal::after(self.goal.take(), report),
             // Kept apart rather than added to the totals: where the backend
             // bills what its messages did not report, the turn's bill already
@@ -4860,6 +4865,28 @@ mod tests {
             .map(|turn| (turn.number, turn.tokens))
             .collect();
         assert_eq!(turns, [(1, Some(100))]);
+    }
+
+    /// A queued prompt taken in is not something that happened in the
+    /// conversation: it opens no turn, and an end said again after it is
+    /// still the same end, as after the backend's word that a turn follows.
+    #[test]
+    fn a_queued_prompt_taken_in_opens_no_turn_and_counts_nothing() {
+        let state = SessionState::replay(&[
+            prompt(),
+            usage(100, 0, None),
+            Event::TurnEnded,
+            Event::PromptTaken,
+            Event::TurnEnded,
+        ]);
+        let turns: Vec<(u64, Option<u64>)> = state
+            .turns()
+            .iter()
+            .map(|turn| (turn.number, turn.tokens))
+            .collect();
+        assert_eq!(turns, [(1, Some(100))]);
+        assert!(!state.turn_running());
+        assert_eq!(state.totals().tokens(), 100);
     }
 
     /// The same holds for an end said after a fatal error already ended the

@@ -658,6 +658,13 @@ pub struct Translator {
     /// the CLI starts as a turn straight after; `None` until a turn's end is
     /// read, and again once taken.
     turn_follows: Option<bool>,
+    /// The operator's messages the CLI said it started and has not said it
+    /// completed or cancelled, by the id each was sent with: while any is
+    /// here, the CLI is busy, and a message it queues waits.
+    commands_started: BTreeSet<String>,
+    /// The operator's messages the CLI queued while it was busy with another
+    /// and has not started: each is [`Event::PromptTaken`] when it does.
+    commands_held: BTreeSet<String>,
     /// Whether a turn of the session's own agent is under way: from the
     /// `init` the CLI starts each turn with, or the agent's first message
     /// where no `init` came, to the turn's `result`.
@@ -815,6 +822,8 @@ impl Translator {
             short: BTreeSet::new(),
             open_requests: BTreeMap::new(),
             turn_follows: None,
+            commands_started: BTreeSet::new(),
+            commands_held: BTreeSet::new(),
             turn_under_way: false,
             main_background: BTreeSet::new(),
             untaken_end: false,
@@ -1160,6 +1169,38 @@ impl Translator {
         std::mem::take(&mut self.asked)
     }
 
+    /// Where one of the operator's messages stands, which is read for one
+    /// thing: when the CLI takes in a message it held.
+    ///
+    /// A message is held where the CLI queued it while it was busy with
+    /// another — one it had started and not completed — and taken in where
+    /// it then starts it: inside the running turn, beside a call's result,
+    /// or as the turn after the one it waited behind. Recorded from 2.1.323
+    /// (`queued-prompts.jsonl`): a message sent while the CLI is idle is
+    /// queued and started on consecutive lines with nothing started before
+    /// it, and is never held.
+    fn lifecycle(&mut self, lifecycle: wire::Lifecycle, out: &mut Vec<Event>) {
+        let (Some(id), Some(state)) = (lifecycle.command_uuid, lifecycle.state) else {
+            return;
+        };
+        match state.as_str() {
+            "queued" if !self.commands_started.is_empty() => {
+                self.commands_held.insert(id);
+            }
+            "started" => {
+                if self.commands_held.remove(&id) {
+                    out.push(Event::PromptTaken);
+                }
+                self.commands_started.insert(id);
+            }
+            "completed" | "cancelled" => {
+                self.commands_started.remove(&id);
+                self.commands_held.remove(&id);
+            }
+            _ => {}
+        }
+    }
+
     /// Whether the turn whose end was read since the last call has another
     /// behind it: a prompt the operator sent while it ran, still in the CLI's
     /// queue, which the CLI starts as soon as it has written the end. `None`
@@ -1322,8 +1363,7 @@ impl Translator {
             // Passed over: see `wire::Progress` for what it carries and why
             // none of it is counted or shown.
             wire::Message::ToolProgress(_) => {}
-            // Passed over: see `wire::Lifecycle`.
-            wire::Message::CommandLifecycle(_) => {}
+            wire::Message::CommandLifecycle(lifecycle) => self.lifecycle(lifecycle, &mut out),
             // Only the line a message arrived on says what type it was, so
             // whoever read that line is the one that can report it.
             wire::Message::Unknown => {}
@@ -7269,6 +7309,42 @@ mod tests {
 
             assert!(events.is_empty(), "{line}: {events:?}");
         }
+    }
+
+    /// Only a message queued while another was started and not finished is
+    /// held. One the CLI cancels while it waits is never taken in, nor is
+    /// one queued once the message before it has completed or was cancelled
+    /// as it ran, as an interrupt cancels it; a line naming no message, as
+    /// the hand-written shape before 2.1.323 did, says nothing.
+    #[test]
+    fn only_a_message_queued_behind_one_still_running_is_taken_in_when_started() {
+        let mut translator = translator();
+        let mut taken = |line: &str| {
+            translator
+                .line(line)
+                .iter()
+                .filter(|event| matches!(event, Event::PromptTaken))
+                .count()
+        };
+        let said = |id: &str, state: &str| {
+            format!(r#"{{"type":"command_lifecycle","command_uuid":"{id}","state":"{state}"}}"#)
+        };
+
+        let lines = [
+            said("a", "queued"),
+            said("a", "started"),
+            said("b", "queued"),
+            said("b", "cancelled"),
+            said("c", "queued"),
+            said("a", "completed"),
+            said("c", "started"),
+            said("c", "cancelled"),
+            said("d", "queued"),
+            said("d", "started"),
+            r#"{"type":"command_lifecycle","uuid":"e","state":"queued"}"#.to_owned(),
+        ];
+        let counts: Vec<usize> = lines.iter().map(|line| taken(line)).collect();
+        assert_eq!(counts, [0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0]);
     }
 
     #[test]

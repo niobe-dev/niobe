@@ -93,6 +93,7 @@ impl Attention {
             | Event::Notice { .. }
             | Event::LimitReached { .. }
             | Event::TurnFollows
+            | Event::PromptTaken
             | Event::Looked => Self::Routine,
         }
     }

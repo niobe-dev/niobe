@@ -869,6 +869,16 @@ pub enum Event {
     /// which the turn that follows shows.
     TurnFollows,
 
+    /// The backend took in a prompt the operator sent while it was busy with
+    /// another — a turn running, a conversation being compacted — which it
+    /// had held until then: the oldest such prompt it had not taken yet.
+    ///
+    /// Until this, or the end of the turn the prompt waited behind, the
+    /// prompt is queued: the operator has sent it, and the model has not
+    /// read it. A prompt sent while the backend was idle is taken at once
+    /// and says nothing. It changes nothing the session counts.
+    PromptTaken,
+
     /// Tokens and, when reported, money.
     Usage(Usage),
 

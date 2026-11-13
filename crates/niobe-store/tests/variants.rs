@@ -88,6 +88,7 @@ fn one_of_each() -> Vec<Event> {
         },
         Event::TurnEnded,
         Event::TurnFollows,
+        Event::PromptTaken,
         Event::Usage(Usage {
             input: 1,
             output: 2,
@@ -293,6 +294,7 @@ fn every_variant_is_listed() {
             Event::ToolCallEnd { .. } => "tool_call_end",
             Event::TurnEnded => "turn_ended",
             Event::TurnFollows => "turn_follows",
+            Event::PromptTaken => "prompt_taken",
             Event::Usage(_) => "usage",
             Event::UsageWindows(_) => "usage_windows",
             Event::Billing { .. } => "billing",
@@ -329,7 +331,7 @@ fn every_variant_is_listed() {
         assert!(!seen.contains(&name), "{name} is listed twice");
         seen.push(name);
     }
-    assert_eq!(seen.len(), 42, "every variant has one value: {seen:?}");
+    assert_eq!(seen.len(), 43, "every variant has one value: {seen:?}");
 }
 
 #[test]

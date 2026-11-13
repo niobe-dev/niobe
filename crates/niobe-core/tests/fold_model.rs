@@ -218,10 +218,11 @@ fn event(rng: &mut Rng, kinds: &[u64]) -> Event {
                 false => ChangeScope::AgentMemory,
             },
         },
-        28 => match rng.below(4) {
+        28 => match rng.below(5) {
             0 => Event::ModeSelected { mode: Mode::Plan },
             1 => Event::ModeUnknown,
             2 => Event::TurnFollows,
+            3 => Event::PromptTaken,
             _ => Event::Looked,
         },
         29 => Event::Notice {

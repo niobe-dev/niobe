@@ -248,6 +248,56 @@ fn every_theme_draws_the_calls_dimmer_than_the_reply_and_the_prompt_apart() {
     }
 }
 
+/// A prompt sent while the agent is at work waits for the agent to take it
+/// in, and is drawn so: dim, with the head line saying it is queued. Taken
+/// in, it is drawn as every other prompt is, in the operator's colour.
+#[test]
+fn a_prompt_sent_while_the_agent_works_is_drawn_queued_until_taken_in() {
+    let waiting = "and update the docs too";
+    let queued = || {
+        let mut app = running_session();
+        assert!(app.session().turn_running(), "the agent is at work");
+        app.apply(&Event::UserMessage {
+            text: waiting.to_owned(),
+        });
+        app
+    };
+
+    let frame = screen(&mut queued(), 120, 30);
+    assert!(
+        frame.contains("> you  queued — the agent has not taken it in yet"),
+        "{frame}"
+    );
+    assert_snapshot("queued-prompt-120x30", &frame);
+
+    for theme in THEMES {
+        for depth in [Depth::Sixteen, Depth::TrueColour] {
+            let palette = theme.at(depth);
+            let name = palette.name;
+            let fg = |style: Option<ratatui::style::Style>| style.and_then(|style| style.fg);
+            let mut app = queued().with_depth(depth).with_theme(theme);
+            assert_eq!(
+                fg(style_at(&mut app, 120, 30, waiting)),
+                Some(palette.dim),
+                "{name} at {depth:?}: the queued prompt"
+            );
+            assert_eq!(
+                fg(style_at(&mut app, 120, 30, "> you")),
+                Some(palette.dim),
+                "{name} at {depth:?}: the queued prompt's head"
+            );
+            app.apply(&Event::PromptTaken);
+            assert_eq!(
+                fg(style_at(&mut app, 120, 30, waiting)),
+                Some(palette.user),
+                "{name} at {depth:?}: the prompt taken in"
+            );
+            let frame = screen(&mut app, 120, 30);
+            assert!(!frame.contains("queued"), "{name}: {frame}");
+        }
+    }
+}
+
 /// On a terminal that says it draws 24-bit colour, a designed theme is drawn
 /// in its design's own values: the committed picture is the colours the
 /// design names, cell by cell.

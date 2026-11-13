@@ -103,10 +103,11 @@ const SHAPES: &[&str] = &[
     // tokens, and the shell times a running call off its own clock.
     "tool_progress",
     // Where the operator's message stands (`queued`, `started`, `completed`,
-    // `cancelled`) and that the permission classifier is checking a call,
-    // from Claude Code 2.1.292's own source (`lifecycle.jsonl`). Each is
-    // passed over on purpose: a turn's start and end already arrive on the
-    // stream and the `result`, and the call is on screen before its check.
+    // `cancelled`), recorded from Claude Code 2.1.323 (`queued-prompts.jsonl`)
+    // and read only for when the CLI takes in a message it held; and that the
+    // permission classifier is checking a call, from Claude Code 2.1.292's own
+    // source (`lifecycle.jsonl`), passed over on purpose, since the call is on
+    // screen before its check.
     "command_lifecycle",
     "system/permission_check_status",
     // `/clear`, recorded from Claude Code 2.1.282: the conversation starts

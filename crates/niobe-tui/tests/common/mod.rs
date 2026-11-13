@@ -710,6 +710,8 @@ pub fn session_with_a_tab_indented_reply() -> App {
     app.apply(&Event::UserMessage {
         text: "How does it return?".to_owned(),
     });
+    // Sent while the first turn still runs, and taken into it.
+    app.apply(&Event::PromptTaken);
     app.apply(&Event::AssistantMessage {
         text: TAB_INDENTED_REPLY.to_owned(),
         agent: None,
@@ -723,6 +725,8 @@ pub fn session_with_a_markdown_reply() -> App {
     app.apply(&Event::UserMessage {
         text: "What changed?".to_owned(),
     });
+    // Sent while the first turn still runs, and taken into it.
+    app.apply(&Event::PromptTaken);
     app.apply(&Event::AssistantMessage {
         text: MARKDOWN_REPLY.to_owned(),
         agent: None,
@@ -756,9 +760,13 @@ pub fn session_with_two_agents_at_work() -> App {
         command: None,
         untrimmed: None,
     };
-    let mut events = vec![Event::UserMessage {
-        text: "Review fetch.py and cache.py in parallel.".to_owned(),
-    }];
+    // Sent while the first turn still runs, and taken into it.
+    let mut events = vec![
+        Event::UserMessage {
+            text: "Review fetch.py and cache.py in parallel.".to_owned(),
+        },
+        Event::PromptTaken,
+    ];
     for (id, label) in [
         ("toolu_fetch", "deep-reasoner: Review fetch.py"),
         ("toolu_cache", "deep-reasoner: Review cache.py"),

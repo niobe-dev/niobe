@@ -149,7 +149,9 @@ reviewers that encode both, for an agent working in this tree.
   including which pane has the keyboard — the one the scroll keys, the wheel and a section cursor
   go to — where the last frame drew the dialog that is open and its list's rows, so a click on a
   row moves the cursor there, a click on the cursor's row chooses it as Enter does and a click
-  outside closes the dialog, and each transcript entry's attention, the highest of the events that built it, `ui.rs`
+  outside closes the dialog, and each transcript entry's attention, the highest of the events that built it, and
+  which prompts are queued — sent while a turn ran or the conversation was being compacted, and drawn
+  dim, saying so, until the backend says it took one in or the turn they waited behind ends — `ui.rs`
   draws it, leaving the routine entries out where `n` is pressed in a side pane, each run of them
   a row that counts them, its Activity pane listing the decisions the agent's replies stated,
   newest first under a heading that says they are its own account, a sub-agent's named by its
@@ -284,7 +286,9 @@ reviewers that encode both, for an agent working in this tree.
 - **`crates/niobe-bridge-claude/`**, **`crates/niobe-bridge-codex/`** — drive the official CLIs
   and translate their output into `niobe_core::Event`. Vendor wire types stay inside the bridge.
   In the Claude bridge: `wire.rs` is the CLI's stream-json protocol and is private to the crate,
-  `translate.rs` turns one message of it into events and owns no process — and reads the CLI's
+  `translate.rs` turns one message of it into events and owns no process — and reads, off the
+  CLI's `command_lifecycle` lines, when it takes in a prompt it held because it was busy with
+  another, as `PromptTaken` — and reads the CLI's
   own mark of a call it did not run for want of permission, beside the result live and as the
   transcript's `permissionDecision`, as refused, whoever refused it — and reads an `Edit`,
   `Write`, `Bash` or `ExitPlanMode` permission prompt's arguments as what the call would do, and

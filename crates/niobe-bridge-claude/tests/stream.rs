@@ -2029,6 +2029,50 @@ fn a_message_lifecycle_and_a_permission_check_are_read_without_a_notice_or_an_er
     );
 }
 
+/// Four prompts recorded with where each stood, two sent while the CLI was
+/// busy: one while a call ran, one while the conversation was compacted. See
+/// `tests/fixtures/README.md`.
+const QUEUED_PROMPTS: &str = include_str!("fixtures/queued-prompts.jsonl");
+
+/// The CLI takes in a prompt it held at the moment it says it started it:
+/// the one sent while the call ran once the call's result was in, inside the
+/// same turn, and the one sent while compacting once the compaction's turn
+/// had ended. The two sent while it was idle were taken at once, and say
+/// nothing.
+#[test]
+fn a_prompt_the_cli_held_is_taken_in_where_it_says_it_started_it() {
+    let events = translate(QUEUED_PROMPTS);
+
+    assert!(
+        notices(&events).is_empty() && warnings(&events).is_empty(),
+        "{events:#?}"
+    );
+    let at = |wanted: &dyn Fn(&Event) -> bool| -> Vec<usize> {
+        events
+            .iter()
+            .enumerate()
+            .filter(|(_, event)| wanted(event))
+            .map(|(at, _)| at)
+            .collect()
+    };
+    let taken = at(&|event| matches!(event, Event::PromptTaken));
+    let call_ended = at(&|event| matches!(event, Event::ToolCallEnd { .. }));
+    let ends = at(&|event| matches!(event, Event::TurnEnded));
+    let replied = |word: &str| {
+        at(&|event| matches!(event, Event::AssistantMessage { text, .. } if text == word))
+    };
+    assert_eq!(taken.len(), 2, "{events:#?}");
+    assert_eq!((call_ended.len(), ends.len()), (1, 3), "{events:#?}");
+    assert!(
+        call_ended[0] < taken[0] && taken[0] < replied("kiwi")[0] && taken[0] < ends[0],
+        "the prompt sent while the call ran is taken in its turn: {events:#?}"
+    );
+    assert!(
+        ends[1] < taken[1] && taken[1] < replied("plum")[0],
+        "the prompt sent while compacting is taken after it: {events:#?}"
+    );
+}
+
 fn interrupted() -> Vec<Event> {
     translate(include_str!("fixtures/interrupted.jsonl"))
 }

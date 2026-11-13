@@ -1138,15 +1138,20 @@ pub(crate) struct Reset {}
 pub(crate) struct Progress {}
 
 /// `command_lifecycle`: where one of the operator's messages stands, by the
-/// `uuid` it was sent with and a `state` of `queued`, `started`, `completed`
-/// or `cancelled`.
+/// `uuid` it was sent with — `command_uuid`, as recorded from 2.1.323; the
+/// line's own `uuid` is the line's — and a `state` of `queued`, `started`,
+/// `completed` or `cancelled`.
 ///
-/// Sent as a top-level `type`, not as a `system` subtype, after nearly every
-/// turn. None of it is read: a turn's start and end already arrive as the
-/// stream's first event and the `result`, and a message the CLI cancelled ends
-/// its turn with an aborted `result` that is read as the operator's stop.
+/// Sent as a top-level `type`, not as a `system` subtype. Only what it says
+/// of a message the CLI held is read: a turn's start and end already arrive
+/// as the stream's first event and the `result`, and a message the CLI
+/// cancelled ends its turn with an aborted `result` that is read as the
+/// operator's stop. See [`crate::translate`] for what holding one is.
 #[derive(Debug, Deserialize)]
-pub(crate) struct Lifecycle {}
+pub(crate) struct Lifecycle {
+    pub(crate) command_uuid: Option<String>,
+    pub(crate) state: Option<String>,
+}
 
 /// The `result` line that closes a turn.
 ///
