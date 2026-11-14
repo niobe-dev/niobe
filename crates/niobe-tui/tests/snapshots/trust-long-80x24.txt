@@ -11,7 +11,7 @@
 ┃   ┃  permissions  allow Bash(script-3.sh)                                ┃   ┃
 ┃   ┃  permissions  allow Bash(script-4.sh)                                ┃   ┃
 ┃   ┃  permissions  allow Bash(script-5.sh)                                ┃░░ ┃
-┃   ┃  … and 35 more; the file has them all                                ┃░░ ┃
+┃ ░░┃  … and 35 more; the file has them all                                ┃░░ ┃
 ┃ ░░┃                                                                      ┃░░ ┃
 ┃ ░┌┃  Not all of what it sets fits here, so it is not trusted from here:  ┃░┌ ┃
 ┃ ░│┃  run `niobe trust` in this repository to read it all, or make the    ┃░│ ┃

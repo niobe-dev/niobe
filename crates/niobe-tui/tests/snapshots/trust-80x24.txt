@@ -11,7 +11,7 @@
 ┃   ┃  work             env AWS_PROFILE=work-sso, CLAUDE_CODE_USE_BEDROCK  ┃   ┃
 ┃   ┃                   =1                                                 ┃   ┃
 ┃   ┃  work             auth_refresh aws sso login --profile work-sso      ┃░░ ┃
-┃   ┃  default_profile  work                                               ┃░░ ┃
+┃ ░░┃  default_profile  work                                               ┃░░ ┃
 ┃ ░░┃                                                                      ┃░░ ┃
 ┃ ░┌┃  Trusted, it stays in force until the file changes. Without it,      ┃░┌ ┃
 ┃ ░│┃  none of the above is.                                               ┃░│ ┃

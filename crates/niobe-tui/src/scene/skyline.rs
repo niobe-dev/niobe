@@ -14,6 +14,19 @@
 //! is worked out from the seed and where it is, so the scene keeps nothing
 //! and scrolls by moving where the pane looks.
 //!
+//! A near tower is a block rather than a flat front: the pane looks at the
+//! street from its middle, so a tower left of that shows its right side and
+//! one right of it its left, deeper the further out it stands, its top edge
+//! sloping away toward the horizon. As the street slides by, each side
+//! narrows, vanishes as its tower passes the middle and opens on the other
+//! hand — the turn a passer-by sees, which is what makes the row read as
+//! depth rather than as cut-outs.
+//!
+//! Both rows step often rather than far: a whole column a second reads as a
+//! jolt, so the near row moves a column every fifth of a second, and the far
+//! row's edges, where the terminal draws 24-bit colour, move by eighths of a
+//! cell between its steps.
+//!
 //! On a terminal that draws 24-bit colour the sky fades from the pane's
 //! black to the theme's magenta at the horizon and the towers are solid
 //! silhouettes. In the sixteen names the sky stays black, the far towers are
@@ -48,7 +61,7 @@ const FAR: Row = Row {
     salt: 0xFA2,
     plot: 6,
     tall: (36, 72),
-    millis_a_column: 1_900,
+    millis_a_column: 660,
     vacant: None,
 };
 
@@ -57,7 +70,7 @@ const NEAR: Row = Row {
     salt: 0x4EA2,
     plot: 12,
     tall: (24, 80),
-    millis_a_column: 700,
+    millis_a_column: 220,
     vacant: Some(7),
 };
 
@@ -73,6 +86,13 @@ const WORDS: [&str; 9] = [
     "CAFE",
     "NIOBE",
 ];
+
+/// How many columns deep a near tower's side shows at the most: at the
+/// pane's edge, furthest from the middle it is seen from.
+const DEEPEST_SIDE: i64 = 5;
+
+/// The blocks that fill a cell from its left by one eighth to seven.
+const LEFT_EIGHTHS: [char; 7] = ['▏', '▎', '▍', '▌', '▋', '▊', '▉'];
 
 /// The half-width katakana a sign down a tower's face is written in: one
 /// cell each, without the two sound marks a terminal can join to the glyph
@@ -113,6 +133,12 @@ impl Row {
     /// How far along the street the pane looks `millis` in.
     fn offset(&self, millis: u64) -> i64 {
         i64::try_from(millis / self.millis_a_column).unwrap_or(i64::MAX / 2)
+    }
+
+    /// How far along the street the pane looks `millis` in, in eighths of a
+    /// column.
+    fn eighths(&self, millis: u64) -> i64 {
+        i64::try_from(millis.saturating_mul(8) / self.millis_a_column).unwrap_or(i64::MAX / 2)
     }
 
     /// The tower on plot `plot`, on a pane `height` rows tall; `None` for
@@ -183,6 +209,56 @@ impl Tower {
     fn sign_column(&self) -> i64 {
         self.right - 2
     }
+
+    /// The blocks it is built of, as their first column, the column after
+    /// their last and the row their top is on: its body, and the narrower
+    /// block its setback stands on that, where it has one.
+    fn blocks(&self) -> [Option<(i64, i64, i64)>; 2] {
+        [
+            Some((self.left, self.right, self.top + self.setback)),
+            (self.setback > 0).then_some((self.left + 2, self.right - 2, self.top)),
+        ]
+    }
+
+    /// How many columns deep its side shows from `view`: none straight ahead,
+    /// [`DEEPEST_SIDE`] at the pane's edge.
+    fn depth(&self, view: View) -> i64 {
+        let off = (self.middle() - view.centre).abs();
+        let width = view.width.max(1);
+        ((off * 2 * DEEPEST_SIDE + width / 2) / width).min(DEEPEST_SIDE)
+    }
+
+    /// Where its side shows at column `x` of the street, seen from `view`:
+    /// how many columns out from its front `x` is, from nought, and the
+    /// half-row the side's top edge is at there, counted from the pane's top
+    /// in halves of a row. The edge drops half a row a column away from the
+    /// front, which on a cell twice as tall as it is wide slopes it at the
+    /// angle a roof's edge recedes at.
+    fn side(&self, x: i64, view: View) -> Option<(i64, i64)> {
+        let depth = self.depth(view);
+        let rightward = self.middle() < view.centre;
+        self.blocks()
+            .into_iter()
+            .flatten()
+            .filter_map(|(left, right, top)| {
+                let out = match rightward {
+                    true => x - right,
+                    false => left - 1 - x,
+                };
+                (0..depth)
+                    .contains(&out)
+                    .then_some((out, 2 * top + out + 1))
+            })
+            .min_by_key(|(_, top)| *top)
+    }
+}
+
+/// Where the pane looks at the near row from: the street column at its
+/// middle, and how wide it is.
+#[derive(Debug, Clone, Copy)]
+struct View {
+    centre: i64,
+    width: i64,
 }
 
 /// The colours the city is drawn in.
@@ -192,8 +268,17 @@ struct Ink {
     /// The neon colours a window or sign is lit in.
     neon: [Color; 4],
     far: Style,
+    /// The far haze's colour where the terminal draws 24-bit colour, which
+    /// an edge between two eighths of a cell is drawn in.
+    far_colour: Color,
     far_window: Option<Style>,
     near: Color,
+    /// A near tower's side in the sixteen names: a grey stipple.
+    stipple: Style,
+    /// A near tower's side where the terminal draws 24-bit colour, by the
+    /// neon colour the tower is lit in: dark, washed with the glow of its own
+    /// signs, so that it reads as a face turned another way from the front.
+    sides: [Color; 4],
     dark_window: Option<Style>,
     stars: Style,
     /// A mast and its light, over whatever sky is behind them.
@@ -207,7 +292,7 @@ impl Ink {
         let pane = theme.pane_bg;
         let deep = rgb(pane).is_some();
         let far = faded(theme.title, pane, 14, Color::Magenta);
-        let near = faded(theme.tool, pane, 7, pane);
+        let near = faded(theme.tool, pane, 12, pane);
         let paper = Style::new().bg(pane);
         Self {
             deep,
@@ -217,8 +302,12 @@ impl Ink {
                 true => Style::new().bg(far),
                 false => paper.fg(Color::Magenta),
             },
+            far_colour: far,
             far_window: deep.then(|| Style::new().bg(far).fg(faded(theme.warn, far, 45, far))),
             near,
+            stipple: paper.fg(Color::DarkGray),
+            sides: [theme.warn, theme.command, theme.title, theme.fg]
+                .map(|neon| faded(neon, pane, 9, Color::DarkGray)),
             dark_window: deep.then(|| Style::new().bg(near).fg(faded(theme.fg, near, 12, near))),
             stars: paper.fg(faded(theme.fg, pane, 55, darker(theme.fg))),
             mast: Style::new().fg(faded(theme.fg, pane, 30, Color::DarkGray)),
@@ -257,33 +346,105 @@ pub(super) fn draw(buffer: &mut Buffer, area: Rect, millis: u64, seed: u64, them
     }
     let ink = Ink::of(theme);
     let height = i64::from(area.height);
-    let (far, near) = (FAR.offset(millis), NEAR.offset(millis));
-    for x in 0..i64::from(area.width) {
+    let width = i64::from(area.width);
+    let (far, near) = (FAR.eighths(millis), NEAR.offset(millis));
+    for x in 0..width {
         for y in 0..height {
             let sky = ink.sky(theme, y, height);
             let (glyph, style) =
                 star(seed, x, y, height, millis, &ink).unwrap_or((' ', Style::new().bg(sky)));
             put(buffer, area, x, y, glyph, style.bg(sky));
         }
-        if let Some(tower) = FAR.at(seed, x + far, height) {
-            for y in tower.top..height {
-                let (glyph, style) = far_cell(&tower, x + far, y, &ink);
+        far_column(buffer, area, (seed, x, far), theme, &ink);
+    }
+    craft(buffer, area, seed, millis, &ink);
+    let view = View {
+        centre: near + width / 2,
+        width,
+    };
+    for x in 0..width {
+        let street = x + near;
+        let plot = street.div_euclid(NEAR.plot);
+        let [before, here, after] =
+            [plot - 1, plot, plot + 1].map(|plot| NEAR.tower(seed, plot, height));
+        for y in 0..height {
+            let front = here
+                .as_ref()
+                .and_then(|tower| near_cell(tower, street, y, millis, &ink));
+            let drawn = front.or_else(|| {
+                let behind = buffer_bg(buffer, area, x, y);
+                [before, here, after]
+                    .iter()
+                    .flatten()
+                    .filter_map(|tower| tower.side(street, view).map(|side| (tower, side)))
+                    .min_by_key(|(_, (out, _))| *out)
+                    .and_then(|(tower, side)| {
+                        side_cell(tower, (street, y), side, millis, &ink, behind)
+                    })
+            });
+            if let Some((glyph, style)) = drawn {
                 put(buffer, area, x, y, glyph, style);
             }
         }
     }
-    craft(buffer, area, seed, millis, &ink);
-    for x in 0..i64::from(area.width) {
-        let street = x + near;
-        let plot = street.div_euclid(NEAR.plot);
-        let Some(tower) = NEAR.tower(seed, plot, height) else {
-            continue;
-        };
-        for y in 0..height {
-            if let Some((glyph, style)) = near_cell(&tower, street, y, millis, &ink) {
+}
+
+/// The far towers at column `x` of the pane, with the row `far` eighths of a
+/// column along the street.
+///
+/// Where the terminal draws 24-bit colour a cell an edge crosses is filled
+/// from its left by as many eighths as lie on the one side of it, so the
+/// edges glide between the row's steps; in the sixteen names a cell is a
+/// tower's or the sky's whole, and the row steps a column at a time.
+fn far_column(
+    buffer: &mut Buffer,
+    area: Rect,
+    (seed, x, far): (u64, i64, i64),
+    theme: &Theme,
+    ink: &Ink,
+) {
+    let height = i64::from(area.height);
+    let (along, part) = (far.div_euclid(8), far.rem_euclid(8));
+    let here = FAR.at(seed, x + along, height);
+    if !ink.deep || part == 0 {
+        if let Some(tower) = here {
+            for y in tower.top..height {
+                let (glyph, style) = far_cell(&tower, x + along, y, ink);
                 put(buffer, area, x, y, glyph, style);
             }
         }
+        return;
+    }
+    let next = FAR.at(seed, x + along + 1, height);
+    // The cell holds the last `8 - part` eighths of the column it starts in
+    // and the first `part` of the one after.
+    let first = LEFT_EIGHTHS[usize::try_from(7 - part).unwrap_or(0)];
+    for y in 0..height {
+        let stands = |tower: &Option<Tower>| tower.as_ref().is_some_and(|tower| y >= tower.top);
+        let sky = ink.sky(theme, y, height);
+        let haze = ink.far_colour;
+        let (glyph, style) = match (stands(&here), stands(&next)) {
+            (false, false) => continue,
+            (true, true) => {
+                let (tower, at) = match part < 4 {
+                    true => (here, x + along),
+                    false => (next, x + along + 1),
+                };
+                match tower {
+                    Some(tower) => far_cell(&tower, at, y, ink),
+                    None => continue,
+                }
+            }
+            (true, false) => (first, Style::new().fg(haze).bg(sky)),
+            (false, true) => (first, Style::new().fg(sky).bg(haze)),
+        };
+        // A glow that has reached the haze's own shade leaves no edge to
+        // draw, and a glyph in the colour it stands on is one nobody sees.
+        let (glyph, style) = match style.fg.is_some() && style.fg == style.bg {
+            true => (' ', Style::new().bg(haze)),
+            false => (glyph, style),
+        };
+        put(buffer, area, x, y, glyph, style);
     }
 }
 
@@ -372,6 +533,15 @@ fn edge(tower: &Tower, x: i64, y: i64) -> Option<char> {
 /// A window at `(x, y)`: lit in the tower's colour mostly, going on and off
 /// at its own slow pace, or dark where the terminal can draw a dark one.
 fn window(tower: &Tower, x: i64, y: i64, millis: u64, ink: &Ink) -> Option<(char, Style)> {
+    match lit(tower, x, y, millis, ink) {
+        Some(colour) => Some(('▪', Style::new().bg(ink.near).fg(colour))),
+        None => ink.dark_window.map(|style| ('▪', style)),
+    }
+}
+
+/// The colour the window at `(x, y)` is lit in at `millis`, or `None` while
+/// it is dark.
+fn lit(tower: &Tower, x: i64, y: i64, millis: u64, ink: &Ink) -> Option<Color> {
     let key = key(
         tower.key,
         0x317D,
@@ -381,13 +551,49 @@ fn window(tower: &Tower, x: i64, y: i64, millis: u64, ink: &Ink) -> Option<(char
     let spell = (millis + (key >> 24) % pace) / pace;
     let roll = mix(key ^ spell);
     if roll % 100 >= tower.lit {
-        return ink.dark_window.map(|style| ('▪', style));
+        return None;
     }
     let tint = match (roll >> 8) % 10 {
         0..=6 => tower.tint,
         other => usize::try_from(other).unwrap_or(0) % ink.neon.len(),
     };
-    Some(('▪', Style::new().bg(ink.near).fg(ink.neon[tint])))
+    Some(ink.neon[tint])
+}
+
+/// What a near tower's side shows at `(x, y)` of the street, where
+/// [`Tower::side`] put it `out` columns from the front with its top edge at
+/// half-row `top`, over `behind`, the colour already drawn there: the upper
+/// half of a cell the edge halves, its shade below, and a window lit now and
+/// then on every other column, dimmer than the front's for facing away.
+fn side_cell(
+    tower: &Tower,
+    (x, y): (i64, i64),
+    (out, top): (i64, i64),
+    millis: u64,
+    ink: &Ink,
+    behind: Color,
+) -> Option<(char, Style)> {
+    if 2 * y + 1 < top {
+        return None;
+    }
+    let shade = ink.sides[tower.tint % ink.sides.len()];
+    if 2 * y + 1 == top {
+        // The sixteen names have nothing to fill half a cell with that would
+        // not read as a block of its own, so the edge steps there instead.
+        return (ink.deep && behind != shade).then(|| ('▄', Style::new().fg(shade).bg(behind)));
+    }
+    if !ink.deep {
+        return Some(('░', ink.stipple));
+    }
+    let face = Style::new().bg(shade);
+    let row = y - tower.top;
+    let window = (out % 2 == 1 && row >= 2 && row % 2 == 0)
+        .then(|| lit(tower, x.wrapping_add(0x51DE), y, millis, ink))
+        .flatten();
+    Some(match window {
+        Some(colour) => ('▪', face.fg(faded(colour, shade, 45, colour))),
+        None => (' ', face),
+    })
 }
 
 /// The sign running down a tower's face at `(x, y)`, if it has one there:
@@ -541,12 +747,141 @@ mod tests {
         }
     }
 
+    /// A column a second reads as a jolt rather than as motion, and a pane
+    /// crossed in a few seconds as a rush.
+    #[test]
+    fn the_near_row_steps_several_times_a_second_and_takes_its_time_crossing() {
+        let steps = NEAR.offset(61_000) - NEAR.offset(60_000);
+        assert!((4..=6).contains(&steps), "{steps} columns a second");
+        let crossing = 120 * NEAR.millis_a_column;
+        assert!(
+            crossing >= 20_000,
+            "an 120-column pane crossed in {crossing} ms"
+        );
+    }
+
+    /// Between two of the far row's steps its edges move by eighths of a
+    /// cell, where the terminal draws 24-bit colour; in the sixteen names a
+    /// cell is the sky's or a tower's whole.
+    #[test]
+    fn the_far_edges_glide_by_eighths_between_the_rows_steps() {
+        let eighth = |glyph: &str| {
+            glyph
+                .chars()
+                .next()
+                .is_some_and(|c| LEFT_EIGHTHS.contains(&c))
+        };
+        let deep = CYBER.at(Depth::TrueColour);
+        let step = FAR.millis_a_column;
+        let (between, on) = (60 * step + step * 3 / 8, 60 * step);
+        assert_eq!(FAR.offset(between), FAR.offset(on));
+        let glides = city(&deep, between);
+        assert!(glides.content().iter().any(|cell| eighth(cell.symbol())));
+        assert_ne!(glides, city(&deep, on), "nothing moved between the steps");
+        assert!(
+            !city(&deep, on)
+                .content()
+                .iter()
+                .any(|cell| eighth(cell.symbol()))
+        );
+        assert!(
+            !city(&CYBER, between)
+                .content()
+                .iter()
+                .any(|cell| eighth(cell.symbol()))
+        );
+    }
+
+    /// The pane looks from its middle: a tower left of it shows its right
+    /// side, one right of it its left, deeper the further out it stands, and
+    /// one straight ahead none.
+    #[test]
+    fn a_tower_shows_the_side_that_faces_the_middle_deeper_toward_the_edge() {
+        let at = |left: i64| Tower {
+            key: 5,
+            left,
+            right: left + 8,
+            top: 10,
+            setback: 0,
+            roof: Roof::Flat,
+            tint: 0,
+            lit: 50,
+            sign: None,
+        };
+        let view = View {
+            centre: 60,
+            width: 120,
+        };
+        let far_left = at(0);
+        assert_eq!(far_left.side(8, view), Some((0, 21)));
+        assert_eq!(far_left.side(-1, view), None, "the left side faces away");
+        assert_eq!(far_left.depth(view), DEEPEST_SIDE);
+        let near_left = at(36);
+        assert!(near_left.depth(view) < far_left.depth(view));
+        assert_eq!(at(56).side(64, view), None, "straight ahead");
+        let right = at(100);
+        assert_eq!(right.side(99, view), Some((0, 21)));
+        assert_eq!(right.side(108, view), None);
+        // The top edge drops half a row for each column away from the front.
+        assert_eq!(far_left.side(10, view), Some((2, 23)));
+    }
+
+    /// A side shows where no tower's front stands, and the front of the
+    /// tower beside it hides what of it would reach that far.
+    #[test]
+    fn a_side_shows_in_the_gap_beside_its_tower_and_never_over_a_front() {
+        let deep = CYBER.at(Depth::TrueColour);
+        let buffer = city(&deep, 33_000);
+        let ink = Ink::of(&deep);
+        let shaded = buffer
+            .content()
+            .iter()
+            .filter(|cell| ink.sides.contains(&cell.bg))
+            .count();
+        assert!(shaded > 30, "{shaded} cells of side");
+        let near = NEAR.offset(33_000);
+        let view = View {
+            centre: near + 60,
+            width: 120,
+        };
+        for x in 0..120 {
+            let street = x + near;
+            let Some(tower) = NEAR.at(7, street, 30) else {
+                continue;
+            };
+            for y in (tower.top + tower.setback)..30 {
+                let cell = &buffer[(
+                    u16::try_from(x).expect("on the pane"),
+                    u16::try_from(y).expect("on the pane"),
+                )];
+                assert!(
+                    !ink.sides.contains(&cell.bg) || tower.side(street, view).is_some(),
+                    "({x}, {y})"
+                );
+            }
+        }
+    }
+
     #[test]
     fn the_street_is_built_up_with_only_a_few_gaps_between_the_towers() {
         for millis in [0, 50_000, 3_600_000] {
             let (far, near) = (FAR.offset(millis), NEAR.offset(millis));
+            let view = View {
+                centre: near + 100,
+                width: 200,
+            };
+            let side = |street: i64| {
+                let plot = street.div_euclid(NEAR.plot);
+                (plot - 1..=plot + 1)
+                    .filter_map(|plot| NEAR.tower(7, plot, 30))
+                    .any(|tower| tower.side(street, view).is_some())
+            };
             let open = (0..200)
-                .filter(|x| FAR.at(7, x + far, 30).is_none() && NEAR.at(7, x + near, 30).is_none())
+                .filter(|x| {
+                    FAR.at(7, x + far, 30).is_none()
+                        && NEAR.at(7, x + near, 30).is_none()
+                        && !side(x + near)
+                })
                 .count();
             assert!(open < 20, "{open} columns of 200 with no tower");
         }

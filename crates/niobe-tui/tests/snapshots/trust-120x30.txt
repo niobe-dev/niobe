@@ -14,16 +14,16 @@
 ┃ .      ░░░░░    ┃                   cargo test)                                                    ┃     │        ░░ ┃
 ┃        ░░░░░    ┃  work             env AWS_PROFILE=work-sso, CLAUDE_CODE_USE_BEDROCK=1            ┃ ▪ ▪ │        ░░ ┃
 ┃        ░░░░░    ┃  work             auth_refresh aws sso login --profile work-sso                  ┃     │        ░░ ┃
-┃        ░░░░░  ┌─┃  default_profile  work                                                           ┃     │        ░░ ┃
-┃        ░░░░░ ░│ ┃                                                                                  ┃     │░ ░░░░░ ░░ ┃
+┃ ░░     ░░░░░  ┌─┃  default_profile  work                                                           ┃     │        ░░ ┃
+┃ ░░░    ░░░░░ ░│ ┃                                                                                  ┃     │░ ░░░░░ ░░ ┃
 ┃ ░░░░░  ░░░░░ ░│ ┃  Trusted, it stays in force until the file changes. Without it, none of the      ┃ ▪   │░ ░░░░░ ░░ ┃
 ┃ ░┌───────┐░░ ░│ ┃  above is.                                                                       ┃     │░ ░░░░░ ░░ ┃
 ┃ ░│       │░░ ░│ ┃                                                                                  ┃ ▪ ▪ │░ ░░░░░ ░░ ┃
-┃ ░│       │░░ ░│ ┃    1. Yes, trust this config                                                     ┃     │░ ░░░░░ ░░ ┃
-┃ ░│       │░░ ░│ ┃  › 2. No, open without it                                                        ┃     │░ ░░░░░ ░░ ┃
-┃ ░│   ▪   │░░ ░│ ┃                                                                                  ┃     │░ ░░░░░ ░░ ┃
-┃ ░│       │░░ ░│ ┗━━━━━━━━━━ ↑↓ choose, pause, Enter answer · Esc no · Ctrl+C twice quit ━━━━━━━━━━━┛ ▪ ▪ │░ ░░░░░ ░░ ┃
-┃ ░│     ▪ │░░ ░│       │  ░░│     │░ ░░│ ▪ ▪   ▪│░░░░░░░░░░░ ░░│     ▪│░░░░░│ ▪     ││         │░ ░░│     │░ ░░░░░ ░░ ┃
+┃ ░│       │░░░░│ ┃    1. Yes, trust this config                                                     ┃     │░ ░░░░░ ░░ ┃
+┃ ░│       │░░░░│ ┃  › 2. No, open without it                                                        ┃     │░ ░░░░░ ░░ ┃
+┃ ░│   ▪   │░░░░│ ┃                                                                                  ┃     │░ ░░░░░ ░░ ┃
+┃ ░│       │░░░░│ ┗━━━━━━━━━━ ↑↓ choose, pause, Enter answer · Esc no · Ctrl+C twice quit ━━━━━━━━━━━┛ ▪ ▪ │░ ░░░░░ ░░ ┃
+┃ ░│     ▪ │░░░░│       │░░░░│     │░░░░│ ▪ ▪   ▪│░░░░░░░░░░░ ░░│     ▪│░░░░░│ ▪     ││         │░░░░│     │░ ░░░░░ ░░ ┃
 ┃ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ┃
 ┃  —  >  Ask for a change · Ctrl+F find                                                Shift+Tab mode · Ctrl+J newline ┃
 ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛

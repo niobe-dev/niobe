@@ -266,7 +266,8 @@ reviewers that encode both, for an agent working in this tree.
   one per theme as `Theme::scene` names it and a user's theme keeps its base's — `scene/rain.rs`
   `neo`'s glyph rain, katakana, digits and marks written by falling heads and fading behind them
   in the accent; `scene/skyline.rs` `cyber`'s night city, two rows of towers sliding past at
-  their own depths with lit windows, flickering neon signs, blinking masts and craft crossing;
+  their own depths, a column several times a second and the far row's edges by eighths of a
+  cell between, each near tower showing the side that faces the pane's middle, with lit windows, flickering neon signs, blinking masts and craft crossing;
   `scene/starfield.rs` `classic`'s DOS warp, stars flying out of the middle and brightening on
   their way out; `scene/plexus.rs` `modern`'s drifting points joined by braille lines that fade
   as they part — each worked out from a seed and the wall clock the loop last read, so two draws
