@@ -421,7 +421,8 @@ pub const NEO: Theme = Theme {
 ///
 /// The design is two accents on a black desk — a green that carries the
 /// chrome and everything the session did, and a magenta that carries the
-/// operator and the keys they can press. Both survive the reduction intact,
+/// titles, with the keys the operator can press in its darker, purple half.
+/// Both survive the reduction intact,
 /// because both are on the bright half of the sixteen. What does not survive
 /// is the design's third colour, a pale lavender for tool calls: there is no
 /// lavender in sixteen colours, so a tool call takes the bright blue, which is
@@ -459,7 +460,9 @@ pub const CYBER: Theme = Theme {
     menu_cursor_fg: Color::Black,
     keybar_bg: Color::Black,
     keybar_fg: Color::LightGreen,
-    fkey_bg: Color::LightMagenta,
+    // The plain magenta, which most schemes draw purple, where the bright one
+    // the titles take is drawn pink.
+    fkey_bg: Color::Magenta,
     fkey_fg: Color::Black,
 
     add: Color::LightGreen,
@@ -688,7 +691,9 @@ pub const CYBER_TRUE: Theme = Theme {
     menu_cursor_fg: hex(0x07060d),
     keybar_bg: hex(0x0d0b16),
     keybar_fg: hex(0x39ff7a),
-    fkey_bg: hex(0xff2bd6),
+    // A neon violet, not the titles' magenta: the keys are the operator's
+    // controls, and a pink row under the pane titles read as more titles.
+    fkey_bg: hex(0xa259ff),
     fkey_fg: hex(0x07060d),
 
     add: hex(0x39ff7a),
@@ -855,9 +860,6 @@ impl Theme {
             (t.dim, t.pane_bg, "secondary text"),
             (t.frame, t.pane_bg, "a pane border"),
             (t.frame_focus, t.pane_bg, "the focused pane's border"),
-            // The focused pane's title is inverted: the pane background
-            // on the title colour.
-            (t.pane_bg, t.title, "the focused pane's title"),
             (t.title, t.pane_bg, "a pane title"),
             (t.hot, t.pane_bg, "the accent"),
             (t.warn, t.pane_bg, "a usage window running low"),

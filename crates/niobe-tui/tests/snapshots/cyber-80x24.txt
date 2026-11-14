@@ -11,8 +11,8 @@
   k  LightGreen on Black, bold
   l  Black on LightGreen, bold
   m  Black on LightGreen
-  n  Black on LightMagenta, dim
-  o  Black on LightMagenta
+  n  Black on Magenta, dim
+  o  Black on Magenta
 
 abaaaaaabaaaaaaaabaaaaaaaabaaaaaabaaaaabaaaaaaaaaaaaaaccccccaaddddddddddddddddaa
 eeeeefffgggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggeeeee

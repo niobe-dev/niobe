@@ -19,8 +19,8 @@
   s  Rgb(10, 15, 12) on Rgb(57, 255, 122), bold
   t  Rgb(10, 15, 12) on Rgb(57, 255, 122)
   u  Rgb(57, 255, 122) on Rgb(13, 11, 22), bold
-  v  Rgb(7, 6, 13) on Rgb(255, 43, 214), dim
-  w  Rgb(7, 6, 13) on Rgb(255, 43, 214)
+  v  Rgb(7, 6, 13) on Rgb(162, 89, 255), dim
+  w  Rgb(7, 6, 13) on Rgb(162, 89, 255)
 
 abaaaaaabaaaaaaaabaaaaaaaabaaaaaabaaaaabaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaccccccaaddddddddddddddddaaeeeeeeeeeeeeeeaadddddaa
 fggghhhiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiggggfjjjjjjjjjjjjjjjjkkkkkkkjjjjjjjjjjjjjjjjjf
