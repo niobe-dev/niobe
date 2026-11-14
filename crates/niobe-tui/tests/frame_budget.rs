@@ -71,7 +71,9 @@ fn a_resize_redraws_inside_a_frame_budget() {
 /// which a model can write.
 /// The scene an empty session pane shows — each theme's own — is drawn on
 /// every tick of a loop that ticks thirty times a second while it plays, each frame a different
-/// moment of it, in every theme at the depth a truecolour terminal draws.
+/// moment of it, in every theme at the depth a truecolour terminal draws. The moments are
+/// the last seconds of the Game of Life's era, the generations furthest from the soup
+/// they are worked out from, which cost the most.
 #[test]
 #[cfg_attr(debug_assertions, ignore = "a frame is timed in an optimised build")]
 fn the_scene_in_an_empty_session_pane_plays_inside_a_frame_budget() {
@@ -86,7 +88,7 @@ fn the_scene_in_an_empty_session_pane_plays_inside_a_frame_budget() {
         let _ = screen(&mut app, 200, 60);
         let mut frames: Vec<Duration> = (0..FRAMES)
             .map(|frame| {
-                let at = std::time::UNIX_EPOCH + Duration::from_millis(33 * frame as u64);
+                let at = std::time::UNIX_EPOCH + Duration::from_millis(46_900 + 33 * frame as u64);
                 app.tick(Instant::now(), Some(niobe_tui::clock::Stamp::new(at, None)));
                 frame_time(&mut app)
             })

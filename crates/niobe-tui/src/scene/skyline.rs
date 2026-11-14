@@ -2,30 +2,29 @@
 // Copyright (c) Viacheslav Shynkarenko
 
 //! The night city `cyber` shows in the session pane before anything has
-//! happened in it: two rows of towers sliding past at their own depths under
-//! a sky that glows toward the horizon, lit windows going on and off, neon
-//! signs that flicker, red lights blinking on the masts and craft crossing
-//! between the towers.
+//! happened in it: two rows of towers standing still under a sky that glows
+//! toward the horizon, lit windows going on and off, neon signs that
+//! flicker, red lights blinking on the masts, stars twinkling and craft
+//! crossing between the towers.
 //!
-//! The far row is a haze of towers that drifts by slowly; the near row
-//! passes faster, each tower drawn in a line of its own colour with a grid of
-//! windows, some carrying a sign down their face or a word on their roof.
-//! The city is laid out along a street that never ends: every stretch of it
-//! is worked out from the seed and where it is, so the scene keeps nothing
-//! and scrolls by moving where the pane looks.
+//! The far row is a haze of towers; the near row is drawn in front of it,
+//! each tower in a line of its own colour with a grid of windows, some
+//! carrying a sign down their face or a word on their roof. The city is laid
+//! out along a street that never ends: every stretch of it is worked out from
+//! the seed and where it is, and the seed picks the stretch the pane looks at,
+//! so each session opens on a block of its own.
+//!
+//! The towers stand still. A terminal moves a drawing by whole cells, so a
+//! row of towers sliding past jumps a column at a time however often it is
+//! drawn, and every step rewrites every cell a tower covers — a frame the
+//! terminal takes longer to show than the step lasts, which is the stutter a
+//! scrolling skyline had. Only small things move: a window, a sign, a mast's
+//! light, a star and a craft change a few cells a frame each.
 //!
 //! A near tower is a block rather than a flat front: the pane looks at the
 //! street from its middle, so a tower left of that shows its right side and
 //! one right of it its left, deeper the further out it stands, its top edge
-//! sloping away toward the horizon. As the street slides by, each side
-//! narrows, vanishes as its tower passes the middle and opens on the other
-//! hand — the turn a passer-by sees, which is what makes the row read as
-//! depth rather than as cut-outs.
-//!
-//! Both rows step often rather than far: a whole column a second reads as a
-//! jolt, so the near row moves a column every fifth of a second, and the far
-//! row's edges, where the terminal draws 24-bit colour, move by eighths of a
-//! cell between its steps.
+//! sloping away toward the horizon.
 //!
 //! On a terminal that draws 24-bit colour the sky fades from the pane's
 //! black to the theme's magenta at the horizon and the towers are solid
@@ -49,30 +48,30 @@ struct Row {
     /// How tall a tower is, as a share of the pane in percent, at the least
     /// and the most.
     tall: (i64, i64),
-    /// How long the row takes to slide one column, in milliseconds.
-    millis_a_column: u64,
     /// One plot in how many is left empty, where any is: a gap the row
     /// behind shows through.
     vacant: Option<u64>,
 }
 
-/// The towers far off: narrow, a haze, sliding by slowly.
+/// The towers far off: narrow, a haze.
 const FAR: Row = Row {
     salt: 0xFA2,
     plot: 6,
     tall: (36, 72),
-    millis_a_column: 660,
     vacant: None,
 };
 
-/// The towers near: wider, outlined and lit, passing faster.
+/// The towers near: wider, outlined and lit.
 const NEAR: Row = Row {
     salt: 0x4EA2,
     plot: 12,
     tall: (24, 80),
-    millis_a_column: 220,
     vacant: Some(7),
 };
+
+/// How many columns of the street the seed can start the pane at: enough
+/// that two sessions seldom open on the same block.
+const STRETCH: u64 = 1 << 16;
 
 /// The words a roof's sign can carry.
 const WORDS: [&str; 9] = [
@@ -90,9 +89,6 @@ const WORDS: [&str; 9] = [
 /// How many columns deep a near tower's side shows at the most: at the
 /// pane's edge, furthest from the middle it is seen from.
 const DEEPEST_SIDE: i64 = 5;
-
-/// The blocks that fill a cell from its left by one eighth to seven.
-const LEFT_EIGHTHS: [char; 7] = ['▏', '▎', '▍', '▌', '▋', '▊', '▉'];
 
 /// The half-width katakana a sign down a tower's face is written in: one
 /// cell each, without the two sound marks a terminal can join to the glyph
@@ -129,18 +125,13 @@ struct Tower {
     sign: Option<i64>,
 }
 
+/// The column of the street at the pane's left edge, which the seed picks
+/// and nothing moves.
+fn start(seed: u64) -> i64 {
+    i64::try_from(mix(seed ^ 0x5742) % STRETCH).unwrap_or(0)
+}
+
 impl Row {
-    /// How far along the street the pane looks `millis` in.
-    fn offset(&self, millis: u64) -> i64 {
-        i64::try_from(millis / self.millis_a_column).unwrap_or(i64::MAX / 2)
-    }
-
-    /// How far along the street the pane looks `millis` in, in eighths of a
-    /// column.
-    fn eighths(&self, millis: u64) -> i64 {
-        i64::try_from(millis.saturating_mul(8) / self.millis_a_column).unwrap_or(i64::MAX / 2)
-    }
-
     /// The tower on plot `plot`, on a pane `height` rows tall; `None` for
     /// an empty plot.
     fn tower(&self, seed: u64, plot: i64, height: i64) -> Option<Tower> {
@@ -268,9 +259,6 @@ struct Ink {
     /// The neon colours a window or sign is lit in.
     neon: [Color; 4],
     far: Style,
-    /// The far haze's colour where the terminal draws 24-bit colour, which
-    /// an edge between two eighths of a cell is drawn in.
-    far_colour: Color,
     far_window: Option<Style>,
     near: Color,
     /// A near tower's side in the sixteen names: a grey stipple.
@@ -302,7 +290,6 @@ impl Ink {
                 true => Style::new().bg(far),
                 false => paper.fg(Color::Magenta),
             },
-            far_colour: far,
             far_window: deep.then(|| Style::new().bg(far).fg(faded(theme.warn, far, 45, far))),
             near,
             stipple: paper.fg(Color::DarkGray),
@@ -347,7 +334,10 @@ pub(super) fn draw(buffer: &mut Buffer, area: Rect, millis: u64, seed: u64, them
     let ink = Ink::of(theme);
     let height = i64::from(area.height);
     let width = i64::from(area.width);
-    let (far, near) = (FAR.eighths(millis), NEAR.offset(millis));
+    let near = start(seed);
+    // The far row is further off, so the same stretch of street shows less
+    // of it: half as many columns, any block of it as good as another.
+    let far = near / 2;
     for x in 0..width {
         for y in 0..height {
             let sky = ink.sky(theme, y, height);
@@ -355,7 +345,12 @@ pub(super) fn draw(buffer: &mut Buffer, area: Rect, millis: u64, seed: u64, them
                 star(seed, x, y, height, millis, &ink).unwrap_or((' ', Style::new().bg(sky)));
             put(buffer, area, x, y, glyph, style.bg(sky));
         }
-        far_column(buffer, area, (seed, x, far), theme, &ink);
+        if let Some(tower) = FAR.at(seed, x + far, height) {
+            for y in tower.top..height {
+                let (glyph, style) = far_cell(&tower, x + far, y, &ink);
+                put(buffer, area, x, y, glyph, style);
+            }
+        }
     }
     craft(buffer, area, seed, millis, &ink);
     let view = View {
@@ -386,65 +381,6 @@ pub(super) fn draw(buffer: &mut Buffer, area: Rect, millis: u64, seed: u64, them
                 put(buffer, area, x, y, glyph, style);
             }
         }
-    }
-}
-
-/// The far towers at column `x` of the pane, with the row `far` eighths of a
-/// column along the street.
-///
-/// Where the terminal draws 24-bit colour a cell an edge crosses is filled
-/// from its left by as many eighths as lie on the one side of it, so the
-/// edges glide between the row's steps; in the sixteen names a cell is a
-/// tower's or the sky's whole, and the row steps a column at a time.
-fn far_column(
-    buffer: &mut Buffer,
-    area: Rect,
-    (seed, x, far): (u64, i64, i64),
-    theme: &Theme,
-    ink: &Ink,
-) {
-    let height = i64::from(area.height);
-    let (along, part) = (far.div_euclid(8), far.rem_euclid(8));
-    let here = FAR.at(seed, x + along, height);
-    if !ink.deep || part == 0 {
-        if let Some(tower) = here {
-            for y in tower.top..height {
-                let (glyph, style) = far_cell(&tower, x + along, y, ink);
-                put(buffer, area, x, y, glyph, style);
-            }
-        }
-        return;
-    }
-    let next = FAR.at(seed, x + along + 1, height);
-    // The cell holds the last `8 - part` eighths of the column it starts in
-    // and the first `part` of the one after.
-    let first = LEFT_EIGHTHS[usize::try_from(7 - part).unwrap_or(0)];
-    for y in 0..height {
-        let stands = |tower: &Option<Tower>| tower.as_ref().is_some_and(|tower| y >= tower.top);
-        let sky = ink.sky(theme, y, height);
-        let haze = ink.far_colour;
-        let (glyph, style) = match (stands(&here), stands(&next)) {
-            (false, false) => continue,
-            (true, true) => {
-                let (tower, at) = match part < 4 {
-                    true => (here, x + along),
-                    false => (next, x + along + 1),
-                };
-                match tower {
-                    Some(tower) => far_cell(&tower, at, y, ink),
-                    None => continue,
-                }
-            }
-            (true, false) => (first, Style::new().fg(haze).bg(sky)),
-            (false, true) => (first, Style::new().fg(sky).bg(haze)),
-        };
-        // A glow that has reached the haze's own shade leaves no edge to
-        // draw, and a glyph in the colour it stands on is one nobody sees.
-        let (glyph, style) = match style.fg.is_some() && style.fg == style.bg {
-            true => (' ', Style::new().bg(haze)),
-            false => (glyph, style),
-        };
-        put(buffer, area, x, y, glyph, style);
     }
 }
 
@@ -736,60 +672,52 @@ mod tests {
             .collect()
     }
 
+    /// The outline of a tower is what a scrolling city rewrote whole every
+    /// step; standing still, it is the same at every moment, and a frame
+    /// changes only the few cells its lights and craft are in.
     #[test]
-    fn the_near_towers_pass_faster_than_the_far_ones_and_both_keep_moving() {
-        for millis in [0, 10_000, 3_600_000] {
-            let later = millis + 60_000;
-            let far = FAR.offset(later) - FAR.offset(millis);
-            let near = NEAR.offset(later) - NEAR.offset(millis);
-            assert!(far > 0, "the far towers stood still");
-            assert!(near > far * 2, "{near} columns near against {far} far");
+    fn the_towers_stand_still_while_their_lights_and_the_craft_move() {
+        let outline = |buffer: &Buffer| -> Vec<(usize, String)> {
+            buffer
+                .content()
+                .iter()
+                .enumerate()
+                .filter(|(_, cell)| "┌┐─│┘└".contains(cell.symbol()))
+                .map(|(at, cell)| (at, cell.symbol().to_owned()))
+                .collect()
+        };
+        for theme in [CYBER, CYBER.at(Depth::TrueColour)] {
+            for millis in [0, 33_000, 3_600_000] {
+                let now = city(&theme, millis);
+                assert!(
+                    outline(&now).len() > 100,
+                    "{} outline cells",
+                    outline(&now).len()
+                );
+                let later = city(&theme, millis + 7_000);
+                assert_eq!(outline(&now), outline(&later), "{}", theme.name);
+                assert_ne!(now, later, "{}: nothing moved in seven seconds", theme.name);
+                let next = city(&theme, millis + 33);
+                let changed = now
+                    .content()
+                    .iter()
+                    .zip(next.content())
+                    .filter(|(was, is)| was != is)
+                    .count();
+                assert!(
+                    changed < 120 * 30 / 20,
+                    "{}: {changed} cells changed in one frame",
+                    theme.name
+                );
+            }
         }
     }
 
-    /// A column a second reads as a jolt rather than as motion, and a pane
-    /// crossed in a few seconds as a rush.
     #[test]
-    fn the_near_row_steps_several_times_a_second_and_takes_its_time_crossing() {
-        let steps = NEAR.offset(61_000) - NEAR.offset(60_000);
-        assert!((4..=6).contains(&steps), "{steps} columns a second");
-        let crossing = 120 * NEAR.millis_a_column;
-        assert!(
-            crossing >= 20_000,
-            "an 120-column pane crossed in {crossing} ms"
-        );
-    }
-
-    /// Between two of the far row's steps its edges move by eighths of a
-    /// cell, where the terminal draws 24-bit colour; in the sixteen names a
-    /// cell is the sky's or a tower's whole.
-    #[test]
-    fn the_far_edges_glide_by_eighths_between_the_rows_steps() {
-        let eighth = |glyph: &str| {
-            glyph
-                .chars()
-                .next()
-                .is_some_and(|c| LEFT_EIGHTHS.contains(&c))
-        };
-        let deep = CYBER.at(Depth::TrueColour);
-        let step = FAR.millis_a_column;
-        let (between, on) = (60 * step + step * 3 / 8, 60 * step);
-        assert_eq!(FAR.offset(between), FAR.offset(on));
-        let glides = city(&deep, between);
-        assert!(glides.content().iter().any(|cell| eighth(cell.symbol())));
-        assert_ne!(glides, city(&deep, on), "nothing moved between the steps");
-        assert!(
-            !city(&deep, on)
-                .content()
-                .iter()
-                .any(|cell| eighth(cell.symbol()))
-        );
-        assert!(
-            !city(&CYBER, between)
-                .content()
-                .iter()
-                .any(|cell| eighth(cell.symbol()))
-        );
+    fn each_seed_opens_on_a_stretch_of_the_street_of_its_own() {
+        let starts: std::collections::HashSet<i64> = (0..50).map(start).collect();
+        assert!(starts.len() > 45, "{} stretches for 50 seeds", starts.len());
+        assert!(starts.iter().all(|at| (0..1 << 16).contains(at)));
     }
 
     /// The pane looks from its middle: a tower left of it shows its right
@@ -839,7 +767,7 @@ mod tests {
             .filter(|cell| ink.sides.contains(&cell.bg))
             .count();
         assert!(shaded > 30, "{shaded} cells of side");
-        let near = NEAR.offset(33_000);
+        let near = start(7);
         let view = View {
             centre: near + 60,
             width: 120,
@@ -864,8 +792,8 @@ mod tests {
 
     #[test]
     fn the_street_is_built_up_with_only_a_few_gaps_between_the_towers() {
-        for millis in [0, 50_000, 3_600_000] {
-            let (far, near) = (FAR.offset(millis), NEAR.offset(millis));
+        for seed in [7, 8, 1_000] {
+            let (far, near) = (start(seed) / 2, start(seed));
             let view = View {
                 centre: near + 100,
                 width: 200,
@@ -873,13 +801,13 @@ mod tests {
             let side = |street: i64| {
                 let plot = street.div_euclid(NEAR.plot);
                 (plot - 1..=plot + 1)
-                    .filter_map(|plot| NEAR.tower(7, plot, 30))
+                    .filter_map(|plot| NEAR.tower(seed, plot, 30))
                     .any(|tower| tower.side(street, view).is_some())
             };
             let open = (0..200)
                 .filter(|x| {
-                    FAR.at(7, x + far, 30).is_none()
-                        && NEAR.at(7, x + near, 30).is_none()
+                    FAR.at(seed, x + far, 30).is_none()
+                        && NEAR.at(seed, x + near, 30).is_none()
                         && !side(x + near)
                 })
                 .count();

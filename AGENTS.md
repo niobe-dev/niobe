@@ -264,12 +264,18 @@ reviewers that encode both, for an agent working in this tree.
   has just opened, a greeting over its top-left corner in every theme —
   one per theme as `Theme::scene` names it and a user's theme keeps its base's — `scene/rain.rs`
   `neo`'s glyph rain, katakana, digits and marks written by falling heads and fading behind them
-  in the accent; `scene/skyline.rs` `cyber`'s night city, two rows of towers sliding past at
-  their own depths, a column several times a second and the far row's edges by eighths of a
-  cell between, each near tower showing the side that faces the pane's middle, with lit windows, flickering neon signs, blinking masts and craft crossing;
-  `scene/starfield.rs` `classic`'s DOS warp, stars flying out of the middle and brightening on
-  their way out; `scene/plexus.rs` `modern`'s drifting points joined by braille lines that fade
-  as they part — each worked out from a seed and the wall clock the loop last read, so two draws
+  in the accent; `scene/skyline.rs` `cyber`'s night city, two rows of towers standing still on
+  a block of the street the seed picks — a terminal moves a drawing by whole cells, so a sliding
+  row jumps and rewrites every cell it covers — each near tower showing the side that faces the
+  pane's middle, with lit windows, flickering neon signs, blinking masts, twinkling stars and
+  craft crossing, a few cells a frame;
+  `scene/life.rs` `classic`'s Game of Life on a torus held 64 cells to a word, two board cells
+  to a terminal cell in half blocks, the newborn white and the dead a ghost for a generation,
+  sown again from a random soup every era, the last generation reached kept on the thread only
+  so the next frame steps on from it; `scene/cyborg.rs` `modern`'s cyborg head, ellipsoids met by
+  a ray from every cell and shaded in an ASCII ramp at a few steps of light, half plated round a
+  red eye, turning from side to side, grinning and winking — each worked out from a seed and the
+  wall clock the loop last read, so two draws
   at one moment draw one frame, drawn in the theme's values or its sixteen names with no shade a
   terminal could not draw, and drawn every 33 ms by the loop while it shows — and `spike.rs` finds a turn that spent more than three times the tokens the session's earlier
   turns averaged, which the loop, never the fold, calls out by the turn's number; the loop also

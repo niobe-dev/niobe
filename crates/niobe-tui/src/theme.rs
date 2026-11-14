@@ -98,15 +98,15 @@ pub enum Scene {
     /// Glyphs falling down the pane in the accent, as on the terminal of a
     /// film about a simulated world.
     Rain,
-    /// A night city at street level: two rows of towers sliding past at
-    /// their own depths, lit windows, neon signs and craft crossing between.
+    /// A night city at street level: two rows of towers standing still,
+    /// lit windows, neon signs, blinking masts and craft crossing between.
     Skyline,
-    /// Stars rushing out of the middle of the pane, as the screen savers of
-    /// the DOS years flew through them.
-    Starfield,
-    /// Points drifting about the pane, each joined to the ones near it by a
-    /// line that fades as they part.
-    Plexus,
+    /// Conway's Game of Life: cells living, dying and being born, from a
+    /// random soup sown again every so often.
+    Life,
+    /// A cyborg's head in three dimensions, drawn in ASCII, turning from
+    /// side to side, grinning and winking.
+    Cyborg,
 }
 
 /// Every colour the shell draws with.
@@ -271,7 +271,7 @@ pub struct Theme {
 /// no dialog here asks before something that cannot be undone.
 pub const CLASSIC: Theme = Theme {
     name: "CLASSIC",
-    scene: Scene::Starfield,
+    scene: Scene::Life,
     border: BorderType::Plain,
     border_focus: BorderType::Double,
 
@@ -512,7 +512,7 @@ pub const CYBER: Theme = Theme {
 /// panes are framed as `cyber`'s are.
 pub const MODERN: Theme = Theme {
     name: "MODERN",
-    scene: Scene::Plexus,
+    scene: Scene::Cyborg,
     border: BorderType::Plain,
     border_focus: BorderType::Thick,
 

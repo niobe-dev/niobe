@@ -5,16 +5,18 @@
 //! animation of each theme's own, which [`Theme::scene`] names.
 //!
 //! Every scene is worked out whole from the seed, the moment it is drawn at
-//! and where each cell is, and nothing is kept between frames: a resize needs
-//! nothing redone, and two draws at one moment draw one frame. Every scene is
+//! and where each cell is, and nothing a frame shows depends on the frames
+//! before it: a resize needs nothing redone, and two draws at one moment draw
+//! one frame. The Game of Life keeps the last generation it worked out, only
+//! so as not to work it out again, which is the same however it is reached. Every scene is
 //! drawn in its theme's colours — values where the theme has them, the
 //! sixteen names where it does not, with no shade between two of the sixteen
 //! that a terminal could not draw.
 
-mod plexus;
+mod cyborg;
+mod life;
 mod rain;
 mod skyline;
-mod starfield;
 
 use std::time::Duration;
 
@@ -34,8 +36,8 @@ pub(crate) fn draw(buffer: &mut Buffer, area: Rect, clock: Duration, seed: u64, 
     match theme.scene {
         Scene::Rain => rain::draw(buffer, area, millis, seed, theme),
         Scene::Skyline => skyline::draw(buffer, area, millis, seed, theme),
-        Scene::Starfield => starfield::draw(buffer, area, millis, seed, theme),
-        Scene::Plexus => plexus::draw(buffer, area, millis, seed, theme),
+        Scene::Life => life::draw(buffer, area, millis, seed, theme),
+        Scene::Cyborg => cyborg::draw(buffer, area, millis, seed, theme),
     }
 }
 
@@ -139,7 +141,7 @@ mod tests {
     #[test]
     fn every_built_in_theme_has_a_scene_of_its_own() {
         let scenes: Vec<Scene> = THEMES.iter().map(|theme| theme.scene).collect();
-        for scene in [Scene::Rain, Scene::Skyline, Scene::Starfield, Scene::Plexus] {
+        for scene in [Scene::Rain, Scene::Skyline, Scene::Life, Scene::Cyborg] {
             assert_eq!(
                 scenes.iter().filter(|drawn| **drawn == scene).count(),
                 1,
