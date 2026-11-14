@@ -775,6 +775,19 @@ pub enum Event {
         agent: Option<AgentId>,
     },
 
+    /// What the model said about what it is doing as it works, apart from
+    /// its reply: the words of a thinking block the backend carries in full,
+    /// as a line saying what it will look at next. Never the reply, so
+    /// nothing that reads the reply — what a headless run prints, the
+    /// decisions a reply states — reads it.
+    Narration {
+        /// The words, as the backend gave them.
+        text: String,
+        /// The sub-agent that said them, or `None` for the session's own.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent: Option<AgentId>,
+    },
+
     /// A tool call started.
     ToolCallStart {
         /// Correlates with the matching [`Event::ToolCallEnd`].

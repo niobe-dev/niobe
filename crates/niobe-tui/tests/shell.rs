@@ -8245,3 +8245,62 @@ fn a_directory_of_the_working_tree_folds_under_the_cursor() {
     press(&mut app, KeyCode::Enter);
     assert!(screen(&mut app, 200, 60).contains("lru.ts"));
 }
+
+/// What the agent says of its work as it goes — the line the backend carries
+/// apart from its reply — is drawn where it said it, dim and slanted under
+/// its own mark, and the calls either side of it are summed up apart.
+#[test]
+fn what_the_agent_says_of_its_work_stands_between_the_calls_it_splits() {
+    use ratatui::style::Modifier;
+
+    let mut app = empty_session().attached();
+    app.apply(&Event::UserMessage {
+        text: "Make the skyline still".to_owned(),
+    });
+    let read = |app: &mut App, id: &str, path: &str| {
+        app.apply(&Event::ToolCallStart {
+            id: id.into(),
+            name: "Read".to_owned(),
+            input: path.to_owned(),
+            summary: Some(path.to_owned()),
+            agent: None,
+        });
+        app.apply(&Event::ToolCallEnd {
+            id: id.into(),
+            name: "Read".to_owned(),
+            input: path.to_owned(),
+            output: String::new(),
+            bytes: 10,
+            outcome: niobe_core::event::ToolOutcome::Ok,
+            summary: Some(path.to_owned()),
+            command: None,
+            untrimmed: None,
+            exit_code: None,
+            error: None,
+        });
+    };
+    read(&mut app, "r1", "src/scene.rs");
+    read(&mut app, "r2", "src/theme.rs");
+    app.apply(&Event::Narration {
+        text: "Reading the scene code next: the skyline stands still.".to_owned(),
+        agent: None,
+    });
+    read(&mut app, "r3", "src/skyline.rs");
+
+    let frame = screen(&mut app, 120, 30);
+    let rows: Vec<&str> = frame.lines().collect();
+    let at = |words: &str| {
+        rows.iter()
+            .position(|row| row.contains(words))
+            .unwrap_or_else(|| panic!("{words:?} is not drawn:\n{frame}"))
+    };
+    let (before, said, after) = (
+        at("Read 2 files"),
+        at("∴ Reading the scene code next"),
+        at("Read 1 file"),
+    );
+    assert!(before < said && said < after, "{frame}");
+    let style = style_at(&mut app, 120, 30, "Reading the scene code").expect("it is drawn");
+    assert!(style.add_modifier.contains(Modifier::ITALIC), "{style:?}");
+    assert_eq!(style.fg, Some(empty_session().theme().dim), "{style:?}");
+}

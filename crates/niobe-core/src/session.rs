@@ -849,7 +849,9 @@ impl SessionState {
     fn opens_a_turn(&self, event: &Event) -> bool {
         let answers = matches!(
             event,
-            Event::AssistantDelta { .. } | Event::AssistantMessage { agent: None, .. }
+            Event::AssistantDelta { .. }
+                | Event::AssistantMessage { agent: None, .. }
+                | Event::Narration { agent: None, .. }
         ) || matches!(
             event,
             Event::ToolCallStart { agent: None, name, .. } if name != OPERATOR_SHELL
@@ -1221,7 +1223,9 @@ impl SessionState {
             // Passed over in `apply`, before the fold: the turn it forecasts
             // is counted when it comes, from what it does, and the prompt
             // taken in was counted when it was sent.
-            Event::Looked | Event::TurnFollows | Event::PromptTaken => {}
+            // What the agent says of its work is words on the screen, and
+            // no figure or state of the session's.
+            Event::Looked | Event::TurnFollows | Event::PromptTaken | Event::Narration { .. } => {}
             Event::Goal { report } => self.goal = Goal::after(self.goal.take(), report),
             // Kept apart rather than added to the totals: where the backend
             // bills what its messages did not report, the turn's bill already

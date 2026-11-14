@@ -66,6 +66,10 @@ fn one_of_each() -> Vec<Event> {
             text: text("hello"),
             agent: agent(),
         },
+        Event::Narration {
+            text: text("Reading the tests next."),
+            agent: agent(),
+        },
         Event::ToolCallStart {
             id: ToolCallId::new("t1"),
             name: text("Bash"),
@@ -296,6 +300,7 @@ fn every_variant_is_listed() {
             Event::Titled { .. } => "titled",
             Event::AssistantDelta { .. } => "assistant_delta",
             Event::AssistantMessage { .. } => "assistant_message",
+            Event::Narration { .. } => "narration",
             Event::ToolCallStart { .. } => "tool_call_start",
             Event::ToolCallEnd { .. } => "tool_call_end",
             Event::TurnEnded => "turn_ended",
@@ -339,7 +344,7 @@ fn every_variant_is_listed() {
         assert!(!seen.contains(&name), "{name} is listed twice");
         seen.push(name);
     }
-    assert_eq!(seen.len(), 45, "every variant has one value: {seen:?}");
+    assert_eq!(seen.len(), 46, "every variant has one value: {seen:?}");
 }
 
 #[test]

@@ -3036,6 +3036,7 @@ fn said_in(entry: &Entry) -> Vec<String> {
             said.extend(crate::markdown::unbroken(entry.body.trim_end()));
         }
         EntryKind::User
+        | EntryKind::Narration
         | EntryKind::Tool
         | EntryKind::Failure
         | EntryKind::Notice
@@ -3385,6 +3386,7 @@ fn is_row(entry: &Entry) -> bool {
         EntryKind::User
         | EntryKind::SubAgent
         | EntryKind::Agent
+        | EntryKind::Narration
         | EntryKind::Tool
         | EntryKind::Failure
         | EntryKind::Notice
@@ -4619,14 +4621,22 @@ fn entry_lines(
             let words = body_lines(entry, crate::bubble::room(width), theme, commands);
             return crate::bubble::lines(&entry.head, words, &entry.meta, width, theme);
         }
-        EntryKind::Agent | EntryKind::Tool | EntryKind::Failure | EntryKind::Notice => {}
+        EntryKind::Agent
+        | EntryKind::Narration
+        | EntryKind::Tool
+        | EntryKind::Failure
+        | EntryKind::Notice => {}
     }
     let colour = match entry.queued {
         true => theme.dim,
         false => entry.kind.colour(theme),
     };
     let body_width = width.saturating_sub(GUTTER);
-    if entry.kind == EntryKind::Agent || entry.kind == EntryKind::Notice && entry.head.is_empty() {
+    // What an agent says of its work is drawn as its reply is, under its
+    // own mark and in a voice of its own, and names no one.
+    if matches!(entry.kind, EntryKind::Agent | EntryKind::Narration)
+        || entry.kind == EntryKind::Notice && entry.head.is_empty()
+    {
         return reply_lines(entry, body_width, theme, commands);
     }
 
@@ -4779,6 +4789,17 @@ fn body_lines(
                 })
                 .collect()
         }
+        // Dim and slanted, as an aside: the agent saying what it is about to
+        // do, which the reply it ends with is read over.
+        EntryKind::Narration => text::wrap(entry.body.trim_end(), width)
+            .into_iter()
+            .map(|wrapped| {
+                Line::from(Span::styled(
+                    wrapped,
+                    Style::new().fg(theme.dim).add_modifier(Modifier::ITALIC),
+                ))
+            })
+            .collect(),
         EntryKind::Tool | EntryKind::Failure | EntryKind::Notice => {
             plain_lines(&entry.body, width, theme.fg)
         }

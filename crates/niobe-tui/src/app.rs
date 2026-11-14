@@ -738,6 +738,9 @@ pub enum EntryKind {
     /// A sub-agent the session spawned, speaking: its words are its own
     /// conversation with the session, not the session's reply.
     SubAgent,
+    /// What an agent said of what it is doing as it works — a line such as
+    /// the one saying what it will look at next — which is not its reply.
+    Narration,
     /// A tool call.
     Tool,
     /// An error the backend reported.
@@ -816,6 +819,7 @@ impl EntryKind {
             Self::User => ">",
             Self::Agent => "◆",
             Self::SubAgent => "↳",
+            Self::Narration => "∴",
             Self::Tool => "⚙",
             Self::Failure => "!",
             Self::Notice => "·",
@@ -831,7 +835,7 @@ impl EntryKind {
             Self::Agent | Self::SubAgent => theme.agent,
             Self::Tool => theme.tool,
             Self::Failure => theme.del,
-            Self::Notice | Self::Turn(_) | Self::Compacted(_) => theme.dim,
+            Self::Narration | Self::Notice | Self::Turn(_) | Self::Compacted(_) => theme.dim,
         }
     }
 }
@@ -2708,6 +2712,7 @@ impl App {
             | Event::Titled { .. }
             | Event::AssistantDelta { .. }
             | Event::AssistantMessage { agent: Some(_), .. }
+            | Event::Narration { .. }
             | Event::ToolCallStart { .. }
             | Event::ToolCallEnd { .. }
             | Event::TurnEnded
@@ -3112,6 +3117,8 @@ impl App {
                     agent: Some(self.sub_agent_tag(agent)),
                 });
             }
+
+            Event::Narration { text, agent } => self.push_narration(text, agent.as_ref()),
 
             Event::AssistantMessage { text, agent: None } => match self.finish_reply() {
                 Some(entry) => {
@@ -3801,6 +3808,35 @@ impl App {
                     .get(at)
                     .is_some_and(|entry| entry.head == head && !entry.calls.is_empty())
         })
+    }
+
+    /// What an agent said of what it is doing, as an entry of its own: it
+    /// ends a run of calls as a reply would, so the calls before it and after
+    /// it are summed up apart, either side of what it said it would do.
+    fn push_narration(&mut self, text: &str, agent: Option<&AgentId>) {
+        let text = text.trim();
+        if text.is_empty() {
+            return;
+        }
+        let (head, tag) = match agent {
+            Some(agent) => {
+                self.agent_entries.insert(self.entries.len(), agent.clone());
+                (self.sub_agent_label(agent), Some(self.sub_agent_tag(agent)))
+            }
+            None => (self.agent_name(), None),
+        };
+        self.push(Entry {
+            queued: false,
+            attention: Attention::Routine,
+            kind: EntryKind::Narration,
+            head,
+            meta: String::new(),
+            body: text.to_owned(),
+            streaming: false,
+            at: self.at,
+            calls: Vec::new(),
+            agent: tag,
+        });
     }
 
     /// What sub-agent `id` is called where its words are drawn: the name the

@@ -776,6 +776,7 @@ fn send_produced(
             | SessionEvent::Titled { .. }
             | SessionEvent::AssistantDelta { .. }
             | SessionEvent::AssistantMessage { .. }
+            | SessionEvent::Narration { .. }
             | SessionEvent::ToolCallStart { .. }
             | SessionEvent::ToolCallEnd { .. }
             | SessionEvent::TurnEnded

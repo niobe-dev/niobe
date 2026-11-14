@@ -383,7 +383,10 @@ impl Envelope {
         };
         blocks.iter().any(|block| match block {
             Block::Text { text } => is_interrupt_note(text),
-            Block::ToolUse { .. } | Block::ToolResult { .. } | Block::Other => false,
+            Block::ToolUse { .. }
+            | Block::ToolResult { .. }
+            | Block::Thinking { .. }
+            | Block::Other => false,
         })
     }
 
@@ -404,7 +407,10 @@ impl Envelope {
         };
         let text = blocks.iter().find_map(|block| match block {
             Block::Text { text } => Some(text.clone()),
-            Block::ToolUse { .. } | Block::ToolResult { .. } | Block::Other => None,
+            Block::ToolUse { .. }
+            | Block::ToolResult { .. }
+            | Block::Thinking { .. }
+            | Block::Other => None,
         })?;
         let named = self.api_error.as_deref() == Some("usage_limit_reached");
         let written_by_the_cli =
@@ -573,9 +579,16 @@ pub(crate) enum Block {
         content: Option<Content>,
         is_error: Option<bool>,
     },
-    /// Thinking, redacted thinking, images: blocks with no place in the
-    /// transcript, kept as a variant so that they parse rather than failing the
-    /// message they are in.
+    /// The model's thinking, where the CLI carries its words: empty where it
+    /// carries only the signature, and otherwise a line such as the one
+    /// saying what the model will look at next, which the CLI shows.
+    Thinking {
+        #[serde(default)]
+        thinking: String,
+    },
+    /// Redacted thinking, images: blocks with no place in the transcript,
+    /// kept as a variant so that they parse rather than failing the message
+    /// they are in.
     #[serde(other)]
     Other,
 }

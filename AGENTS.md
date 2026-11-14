@@ -226,7 +226,8 @@ reviewers that encode both, for an agent working in this tree.
   leaves a row only to a call that failed or was refused, one a question waits on, one the
   operator ran and a hand-off to a sub-agent, whose own words and calls are left to the view
   narrowed to it; Ctrl+O draws every call, and the session's replies and its notices carry
-  their glyph and no head line naming them. `bubble.rs` draws the operator's prompt as a
+  their glyph and no head line naming them; what an agent says of its work as it goes — a
+  `Narration`, never its reply — is one of the things it said, drawn dim and slanted under `∴`. `bubble.rs` draws the operator's prompt as a
   messenger draws what one sends — on the right, in a bubble of the theme's `user_bg` with
   half-cell rounded ends, no name over it, what became of it under it — and so each answer the
   operator gave a question the agent put, the question quoted at the bubble's top. `calls.rs` draws a tool call, in that full view, as a row of a table — its name, the tag of the sub-agent that made
@@ -309,7 +310,9 @@ reviewers that encode both, for an agent working in this tree.
   In the Claude bridge: `wire.rs` is the CLI's stream-json protocol and is private to the crate,
   `translate.rs` turns one message of it into events and owns no process — and reads, off the
   CLI's `command_lifecycle` lines, when it takes in a prompt it held because it was busy with
-  another, as `PromptTaken` — and reads the CLI's
+  another, as `PromptTaken` — and reads the words of a thinking block, where the CLI carries
+  any, as the model's `Narration` of what it is doing, which the CLI shows and which is not its
+  reply, said before the call it led to — and reads the CLI's
   own mark of a call it did not run for want of permission, beside the result live and as the
   transcript's `permissionDecision`, as refused, whoever refused it — and reads an `Edit`,
   `Write`, `Bash` or `ExitPlanMode` permission prompt's arguments as what the call would do, and

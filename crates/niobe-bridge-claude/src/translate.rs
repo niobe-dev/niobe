@@ -2299,9 +2299,19 @@ impl Translator {
         };
 
         let mut text = String::new();
+        let mut narration = Vec::new();
         let mut calls = Vec::new();
         for block in blocks {
             match block {
+                wire::Block::Thinking { thinking } => {
+                    let words = thinking.trim();
+                    if !words.is_empty() {
+                        narration.push(Event::Narration {
+                            text: words.to_owned(),
+                            agent: agent.clone(),
+                        });
+                    }
+                }
                 wire::Block::Text { text: fragment } => {
                     if !text.is_empty() {
                         text.push('\n');
@@ -2340,14 +2350,15 @@ impl Translator {
                     });
                 }
                 // A tool result never rides on an assistant message, and
-                // thinking has nowhere to go in a transcript that shows what
-                // the session did.
+                // redacted thinking has no words to show.
                 wire::Block::ToolResult { .. } | wire::Block::Other => {}
             }
         }
 
-        // The text first: it is what the model said before it acted, and the
+        // What the model said of its work comes before it, as the CLI shows
+        // it; then the text, which is what it said before it acted, and the
         // transcript reads in that order.
+        out.append(&mut narration);
         if !text.is_empty() {
             if written_by_cli && agent.is_none() {
                 self.goal_replied(&text, out);
@@ -2388,6 +2399,7 @@ impl Translator {
                     wire::Block::Text { text } => goal::not_met(text, condition),
                     wire::Block::ToolUse { .. }
                     | wire::Block::ToolResult { .. }
+                    | wire::Block::Thinking { .. }
                     | wire::Block::Other => None,
                 })
                 .collect(),
@@ -4857,6 +4869,7 @@ fn render_content(content: wire::Content) -> String {
                 wire::Block::Text { text } => Some(text),
                 wire::Block::ToolUse { .. }
                 | wire::Block::ToolResult { .. }
+                | wire::Block::Thinking { .. }
                 | wire::Block::Other => None,
             })
             .collect::<Vec<_>>()
@@ -9113,6 +9126,50 @@ mod tests {
             ["API Error: 529 Overloaded. · gave up"],
             "{events:?}"
         );
+    }
+
+    /// The CLI carries what the model says of its work as a thinking block
+    /// with words in it — as recorded from 2.1.322, beside the empty ones that
+    /// carry only a signature — and shows it; the bridge says it before the
+    /// call it led to, and says nothing for a block with no words.
+    #[test]
+    fn a_thinking_block_with_words_is_said_as_narration_before_the_call() {
+        let mut translator = translator();
+
+        let events = translator.line(
+            r#"{"type":"assistant","message":{"model":"opus-5","id":"msg_n","content":[{"type":"thinking","thinking":"","signature":"c2ln"},{"type":"thinking","thinking":"Reading the scene code next.\n\n","signature":"c2ln"},{"type":"tool_use","id":"toolu_n","name":"Read","input":{"file_path":"/repo/scene.rs"}}]}}"#,
+        );
+
+        let [
+            Event::Narration { text, agent: None },
+            Event::ToolCallStart { name, .. },
+        ] = events.as_slice()
+        else {
+            panic!("the narration, then the call: {events:?}");
+        };
+        assert_eq!(text, "Reading the scene code next.");
+        assert_eq!(name, "Read");
+    }
+
+    #[test]
+    fn a_sub_agents_narration_is_its_own_and_never_its_reply() {
+        let mut translator = translator();
+
+        let events = translator.line(
+            r#"{"type":"assistant","parent_tool_use_id":"toolu_task","message":{"model":"opus-5","id":"msg_s","content":[{"type":"thinking","thinking":"Checking the tests.","signature":"c2ln"}]}}"#,
+        );
+
+        let [
+            Event::Narration {
+                text,
+                agent: Some(agent),
+            },
+        ] = events.as_slice()
+        else {
+            panic!("the agent's narration alone: {events:?}");
+        };
+        assert_eq!(text, "Checking the tests.");
+        assert_eq!(agent, &AgentId::new("toolu_task"));
     }
 
     #[test]

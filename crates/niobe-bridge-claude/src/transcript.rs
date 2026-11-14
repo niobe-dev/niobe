@@ -2146,7 +2146,7 @@ fn said(content: &wire::Content) -> Option<String> {
             .filter_map(|block| match block {
                 wire::Block::Text { text } => Some(text.as_str()),
                 wire::Block::ToolUse { .. } | wire::Block::ToolResult { .. } => None,
-                wire::Block::Other => None,
+                wire::Block::Thinking { .. } | wire::Block::Other => None,
             })
             .collect::<Vec<_>>()
             .join("\n"),
@@ -2347,7 +2347,10 @@ impl User {
         };
         let mut results = blocks.iter().filter_map(|block| match block {
             wire::Block::ToolResult { tool_use_id, .. } => Some(tool_use_id.clone()),
-            wire::Block::Text { .. } | wire::Block::ToolUse { .. } | wire::Block::Other => None,
+            wire::Block::Text { .. }
+            | wire::Block::ToolUse { .. }
+            | wire::Block::Thinking { .. }
+            | wire::Block::Other => None,
         });
         match (results.next(), results.next()) {
             (Some(id), None) => vec![wire::ResultMeta {

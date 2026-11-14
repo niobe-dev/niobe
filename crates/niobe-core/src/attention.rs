@@ -67,7 +67,9 @@ impl Attention {
                 }
             },
 
+            // What the agent says of the calls it makes is read with them.
             Event::SessionMeta(_)
+            | Event::Narration { .. }
             | Event::Titled { .. }
             | Event::AssistantDelta { .. }
             | Event::ToolCallStart { .. }
