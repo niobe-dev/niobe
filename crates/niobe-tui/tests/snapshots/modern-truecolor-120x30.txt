@@ -3,57 +3,59 @@
   c  Rgb(204, 204, 204) on Rgb(50, 50, 51), bold
   d  Rgb(204, 204, 204) on Rgb(50, 50, 51), dim
   e  Rgb(79, 193, 255) on Rgb(50, 50, 51)
-  f  Rgb(212, 212, 212) on Rgb(37, 37, 38)
-  g  Rgb(0, 122, 204) on Rgb(37, 37, 38)
-  h  Rgb(220, 220, 170) on Rgb(37, 37, 38), bold | reversed
-  i  Rgb(220, 220, 170) on Rgb(37, 37, 38), reversed
-  j  Rgb(60, 60, 60) on Rgb(37, 37, 38)
-  k  Rgb(220, 220, 170) on Rgb(37, 37, 38), bold
-  l  Rgb(133, 133, 133) on Rgb(37, 37, 38)
-  m  Rgb(204, 167, 0) on Rgb(37, 37, 38), bold
-  n  Rgb(204, 167, 0) on Rgb(37, 37, 38)
-  o  Rgb(79, 193, 255) on Rgb(37, 37, 38), bold
-  p  Rgb(212, 212, 212) on Rgb(37, 37, 38), bold
-  q  Rgb(79, 193, 255) on Rgb(37, 37, 38)
-  r  Rgb(78, 201, 176) on Rgb(37, 37, 38), bold
-  s  Rgb(78, 201, 176) on Rgb(37, 37, 38)
-  t  Rgb(241, 76, 76) on Rgb(37, 37, 38), bold
-  u  Rgb(241, 76, 76) on Rgb(37, 37, 38)
-  v  Rgb(197, 134, 192) on Rgb(37, 37, 38)
-  w  Rgb(37, 37, 38) on Rgb(79, 193, 255), bold
-  x  Rgb(37, 37, 38) on Rgb(79, 193, 255)
-  y  Rgb(79, 193, 255) on Rgb(50, 50, 51), bold
-  z  Rgb(255, 255, 255) on Rgb(14, 99, 156), dim
-  A  Rgb(212, 212, 212) on Rgb(50, 50, 51)
-  B  Rgb(255, 255, 255) on Rgb(14, 99, 156)
+  f  Rgb(0, 122, 204) on Rgb(37, 37, 38)
+  g  Rgb(220, 220, 170) on Rgb(37, 37, 38), bold | reversed
+  h  Rgb(220, 220, 170) on Rgb(37, 37, 38), reversed
+  i  Rgb(212, 212, 212) on Rgb(37, 37, 38)
+  j  Rgb(220, 220, 170) on Rgb(37, 37, 38), bold
+  k  Rgb(60, 60, 60) on Rgb(37, 37, 38)
+  l  Rgb(220, 220, 170) on Rgb(37, 37, 38)
+  m  Rgb(133, 133, 133) on Rgb(37, 37, 38)
+  n  Rgb(204, 167, 0) on Rgb(37, 37, 38), bold
+  o  Rgb(204, 167, 0) on Rgb(37, 37, 38)
+  p  Rgb(85, 85, 85) on Rgb(0, 0, 0)
+  q  Rgb(212, 212, 212) on Rgb(37, 37, 38), bold
+  r  Rgb(79, 193, 255) on Rgb(37, 37, 38), bold
+  s  Rgb(78, 201, 176) on Rgb(37, 37, 38), bold
+  t  Rgb(78, 201, 176) on Rgb(37, 37, 38)
+  u  Rgb(241, 76, 76) on Rgb(37, 37, 38), bold
+  v  Rgb(241, 76, 76) on Rgb(37, 37, 38)
+  w  Rgb(197, 134, 192) on Rgb(37, 37, 38)
+  x  Rgb(79, 193, 255) on Rgb(37, 37, 38)
+  y  Rgb(37, 37, 38) on Rgb(79, 193, 255), bold
+  z  Rgb(37, 37, 38) on Rgb(79, 193, 255)
+  A  Rgb(79, 193, 255) on Rgb(50, 50, 51), bold
+  B  Rgb(255, 255, 255) on Rgb(14, 99, 156), dim
+  C  Rgb(212, 212, 212) on Rgb(50, 50, 51)
+  D  Rgb(255, 255, 255) on Rgb(14, 99, 156)
 
 abaaaaaabaaaaaaaabaaaaaaaabaaaaaabaaaaabaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaccccccaaddddddddddddddddaaeeeeeeeeeeeeeeaadddddaa
-fgghhhiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiggggfjjjjjjjjjjjjjjjjjkkkkkkkjjjjjjjjjjjjjjjjjf
-fgffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffgfjfllllllllllmmmmfnnnlllllllllllllllfffffjf
-fgfoofffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffgfjfllllllllllppppfflllllllllllllllllllllfjf
-fgffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffqfjfjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjfjf
-fgffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffqfjfllllllllllppppfffffffffffffllllllfffffjf
-fgffflllllllllllllllllllllllllllllllllffffffffffffffffffffffffffffffffffffffqfjfllllllllllrrrrfssssssssssllllllllfffffjf
-fgffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffqfjfjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjfjf
-fgfttuuuuuuuuuuuuuufllfffffffffffffffffffffffffffffffffffffffffffffffuuuuuufqfjfllllllllllppppfflllllllllllllllllllllfjf
-fgfffllfffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffqfjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjf
-fgffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffqfjjjjjjjjjjjjjjjjkkkkkkkkkjjjjjjjjjjjjjjjjf
-fgfoofffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffqfjfvvvvvvlllfffffffffffffffffffffffffffffqf
-fgffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffqfjfkkkkkkkkkkkkkkffffffffffffsssssfuuuuufqf
-fgffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffqfjflllfffffffffffffffffffffffffffffffffffqf
-fgffflllllllllllllllllllffffffffffffffffffffffffffffffffffffffffffffffffffffqfjffffffffffffffffffffffffffffffffssffuufjf
-fgffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffqfjfllllllllllffffffffffffffffffffffffffffjf
-fgfoofffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffqfjffffffffffffffffffffffffffffffssssfuuufjf
-fgffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffqfjfffffffffffffffffffffffffffffffsssfuuufjf
-fgfoofffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffqfjfffffffffffffffffffffffffffffffsssffuufjf
-fgffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffqfjfffffffffffffffffffffffffffffffsssffuufjf
-fgfttuuuuuuuuuuuuuufllllllllffffffffffffffffffffffffffffffffffuuuuuulllllllfqfjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjf
-fgfffllfffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffqfjjjjjjjjjjjjjjjkkkkkkkkkkjjjjjjjjjjjjjjjjf
-fgffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffqfjfkkkkkkkkkkkkffffffffffflllllllllllffffqf
-fgfoofffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffqfjfooqqqqffffffffffffffffflllllllqqqqqqqfqf
-fgffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffqfjflllllllllllllllllllllllllllfffffffffffqf
-fgffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffqfjfkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkffffffffjf
-fgfjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjfgfjflllllllllllllllllfffffffffffffffffffffjf
-fgfwwwwwoooxlllllllllllllllllllllllllllllllllllllllffffffffffllllllllllllllfgfjfkkkkkkkffffffffffuuulllllllllllfffffffjf
-fggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggfjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjf
-yyyzzzzAyBBBBBBBBAyzzzzzzzzzzzAyzzzzzzzzzAyzzzzzzzzzAyBBBBBBBBAyzzzzzzzzzzAyBBBBBBBAyBBBBBBBBBBAyBBBBBBBBBBBBAyBBBBBBBBA
+ffggghhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhfffffffffffffffffffffffffffff
+fijjjjjiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiikkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkiiif
+fiiillllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllkimmmmmmmmmmnnnniooooooommmmmmmmmmmmmmmmmmiiiiikppif
+fiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiikimmmmmmmmmmqqqqiiimmmmmmmmmmmmmmmmmmmmmmmmmmmikppif
+firriiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiikikkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkikppif
+fiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiikimmmmmmmmmmqqqqiiiiiiiiiiiiimmmmmmiiiiiiiiiiiikppif
+fiiimmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiikimmmmmmmmmmssssittttttttttmmmmmmmmiiiiiiiiiiiikppif
+fiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiikikkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkikppif
+fiuuvvvvvvvvvvvvvvimmiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiikimmmmmmmmmmqqqqiiimmmmmmmmmmmmmmmmmmmmmiiiiiiikppif
+fiiimmiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiikikkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkikppif
+fiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiikiwwwwwwmmmiiiiiiiiiiiiiiiiiiiiiiiitttttivvvvvikppif
+firriiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiikikkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkikppif
+fiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiikirrxxxxiiiiiiiiiiiiiiiiiiiiiiiimmmmmmmxxxxxxxikppif
+fiiimmmmmmmmmmmmmmmmmmmiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiikimmmmmmmmmmmmmmmmmmmmmmmmmmmiiiiiiiiiiiiiiiiiikppif
+fiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiikkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkppif
+firriiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiippppppppppppppppppppppppppppppppppppppppppppppppif
+fiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiif
+firriiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiif
+fiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiif
+fiuuvvvvvvvvvvvvvvimmmmmmmmiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiivvvvvvmmmmmmmif
+fiiimmiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiif
+fiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiif
+firriiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiif
+fiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiif
+fiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiif
+fikkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkif
+fiyyyyyrrrzmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiimmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmif
+ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+AAABBBBCADDDDDDDDCABBBBBBBBBBBCABBBBBBBBBCABBBBBBBBBCADDDDDDDDCABBBBBBBBBBCADDDDDDDCADDDDDDDDDDCADDDDDDDDDDDDCADDDDDDDDC

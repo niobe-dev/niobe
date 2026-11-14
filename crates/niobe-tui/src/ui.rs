@@ -3,6 +3,10 @@
 
 //! Drawing the three regions: menu bar, panes, F-key bar.
 //!
+//! The main view gives the session pane the whole body, with the info panel
+//! over its top-right corner ([`crate::info`]); the Usage, Changes and
+//! Activity panes are drawn beside it where the View menu shows them.
+//!
 //! There is no status line. What one carried is spread across the menu row —
 //! the session's identity, what it is doing and the time of day — and the
 //! panes that own each figure, so the body has the rows back.
@@ -51,9 +55,11 @@ use crate::usage;
 /// Smallest terminal the shell draws in, as (columns, rows).
 pub const MIN_SIZE: (u16, u16) = (80, 24);
 
-/// The width at which the right stack fits beside the session pane. Below it
-/// the session pane takes the whole body: three more panes squeezed into forty
-/// columns each is less readable than the transcript they were taken from.
+/// The width at which the right stack fits beside the session pane, and the
+/// info panel over its corner. Below it the session pane takes the whole body
+/// with nothing beside it or over it: three more panes squeezed into forty
+/// columns each, or a panel of forty over a transcript of eighty, is less
+/// readable than the transcript they were taken from.
 pub const WIDE_COLUMNS: u16 = 100;
 
 /// Columns of desktop the wide layout leaves at each edge of the body and
@@ -812,7 +818,7 @@ pub(crate) fn dialog(
 /// column, so the border of whatever is drawn over `area` — a dialog, an open
 /// menu, a completion list — would be missing on that row; the half left
 /// outside reads as a blank instead.
-fn uncover_left_edge(buffer: &mut ratatui::buffer::Buffer, area: Rect) {
+pub(crate) fn uncover_left_edge(buffer: &mut ratatui::buffer::Buffer, area: Rect) {
     let Some(left) = area.x.checked_sub(1) else {
         return;
     };
@@ -834,7 +840,7 @@ fn uncover_left_edge(buffer: &mut ratatui::buffer::Buffer, area: Rect) {
 /// recedes and still reads. Nothing is drawn over a blank: a shading glyph
 /// there would join the words around it into one, and where the shadow is
 /// the panes' own colour the dialog's face is what marks its edge.
-fn cast_shadow(frame: &mut Frame, area: Rect, bounds: Rect, theme: &Theme) {
+pub(crate) fn cast_shadow(frame: &mut Frame, area: Rect, bounds: Rect, theme: &Theme) {
     let right = Rect::new(area.right(), area.y.saturating_add(1), 2, area.height);
     let below = Rect::new(area.x.saturating_add(2), area.bottom(), area.width, 1);
     let buffer = frame.buffer_mut();
@@ -1083,7 +1089,7 @@ fn segment_spans(segments: Vec<Segment>) -> Vec<Span<'static>> {
 fn draw_body(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
     use crate::menu::SidePane;
 
-    let shown: Vec<SidePane> = [SidePane::Usage, SidePane::Changes, SidePane::Activity]
+    let shown: Vec<SidePane> = SidePane::ALL
         .into_iter()
         .filter(|pane| app.shows(*pane))
         .collect();
@@ -1182,6 +1188,12 @@ impl Border {
             focused,
         }
     }
+}
+
+/// The frame of a pane that does not have the keyboard, with nothing on its
+/// edges: what the info panel is drawn in.
+pub(crate) fn plain_frame(theme: &Theme) -> Block<'static> {
+    frame_of(Border::of(false, theme), theme)
 }
 
 /// The pane frame every pane shares: the border [`Border`] says, the title
@@ -1323,6 +1335,12 @@ fn draw_session(frame: &mut Frame, area: Rect, panes: bool, app: &mut App, theme
         app,
         theme,
     );
+    // The Usage pane says what the panel would, beside the session, where
+    // the right-hand stack is drawn.
+    match !panes && area.width >= WIDE_COLUMNS {
+        true => crate::info::draw(frame, transcript, app, theme),
+        false => app.drew_info(None),
+    }
 
     frame.render_widget(
         Paragraph::new(divider_line(
@@ -2213,7 +2231,7 @@ fn draw_transcript(
     let (cut, call) = (question.cut, question.call.clone());
     let question = question.lines;
 
-    if app.entries().is_empty() && question.is_empty() {
+    if app.showing_scene() {
         app.drew_transcript(area, 0);
         app.measured(0, height);
         crate::scene::draw(
@@ -2223,6 +2241,7 @@ fn draw_transcript(
             app.scene_seed(),
             theme,
         );
+        draw_under_scene(frame, area, app, theme);
         if !app.is_attached() {
             let notice = unattached(theme);
             let width = u16::try_from(notice.width())
@@ -3507,6 +3526,42 @@ fn working_line(activity: &Activity, width: usize, theme: &Theme) -> Line<'stati
         ),
         Span::styled(clock, Style::new().fg(theme.dim)),
     ])
+}
+
+/// The rows a cleared conversation opens with, over the foot of the idle
+/// scene: at the foot rather than the top, where the transcript's newest
+/// line is read and where the info panel over the top-right corner cannot
+/// hide them.
+fn draw_under_scene(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+    let width = usize::from(area.width);
+    let mut lines: Vec<Line<'static>> = app
+        .entries()
+        .iter()
+        .flat_map(|entry| entry_lines(entry, width, transcript_detail(app), theme, &[]))
+        .collect();
+    // Each entry's lines end in the blank row that parts it from the next.
+    while lines.last().is_some_and(|line| line.width() == 0) {
+        lines.pop();
+    }
+    let rows = lines.len().min(usize::from(area.height));
+    let top = area.bottom() - u16::try_from(rows).unwrap_or(area.height);
+    for (y, line) in (top..area.bottom()).zip(lines) {
+        let row = Rect::new(
+            area.x,
+            y,
+            u16::try_from(line.width())
+                .unwrap_or(u16::MAX)
+                .min(area.width),
+            1,
+        );
+        // Cleared first: a style laid over a cell keeps the modifiers it
+        // had, and a scene's faint glyphs are dim.
+        frame.render_widget(Clear, row);
+        frame.render_widget(
+            Paragraph::new(line).style(Style::new().bg(theme.pane_bg)),
+            row,
+        );
+    }
 }
 
 /// What the session pane says, over its idle scene, where no backend is attached
@@ -5373,39 +5428,107 @@ fn draw_usage(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
 /// The pane is sized from [`usage_height`] before it is drawn, so the two have
 /// to agree exactly; a test holds them together.
 fn usage_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
-    let money = money_lines(app, width, theme);
-    let windows = window_lines(app, width, theme);
-    let spend = spend_lines(app, width, theme);
+    arranged(
+        app,
+        UsageBlocks {
+            money: money_lines(app, width, theme),
+            windows: window_lines(app, width, theme),
+            spend: spend_lines(app, width, theme),
+            context: context_lines(app, width, theme),
+        },
+        width,
+        theme,
+    )
+}
 
-    // What runs out comes first. On a flat-rate plan that is the windows, and
-    // the money is a row under the tokens; on a metered account it is the
-    // money, and a window — which such an account reports only where its
-    // provider has one — follows it.
-    let mut lines = Vec::new();
-    match metered(app) {
+/// What the Usage pane says, less every row that stands where a figure has
+/// not come yet: the windows still asked of the backend, the line that says
+/// no tokens were reported, the context a compaction left unmeasured. What
+/// the info panel draws, which shows only what there is.
+pub(crate) fn usage_available(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    let windows = match app.plan_windows() {
+        PlanWindows::Awaited => Vec::new(),
+        PlanWindows::None | PlanWindows::Reported(_) | PlanWindows::Carried { .. } => {
+            window_lines(app, width, theme)
+        }
+    };
+    let spend = match models(app).is_empty() {
         true => {
-            lines.extend(money);
-            lines.extend(windows);
-            lines.push(divider(width, theme));
-            lines.extend(spend);
+            let beyond = beyond_messages(app);
+            (beyond > 0)
+                .then(|| beyond_messages_line(beyond, width, theme))
+                .into_iter()
+                .collect()
+        }
+        false => spend_lines(app, width, theme),
+    };
+    let context = match app.session().context() {
+        Some(_) => context_lines(app, width, theme),
+        None => Vec::new(),
+    };
+    arranged(
+        app,
+        UsageBlocks {
+            money: money_lines(app, width, theme),
+            windows,
+            spend,
+            context,
+        },
+        width,
+        theme,
+    )
+}
+
+/// The blocks of rows usage is told in, before they are put in order.
+struct UsageBlocks {
+    money: Vec<Line<'static>>,
+    windows: Vec<Line<'static>>,
+    spend: Vec<Line<'static>>,
+    context: Vec<Line<'static>>,
+}
+
+/// `blocks` in the order they are read in, a rule between each two groups
+/// that have rows.
+///
+/// What runs out comes first. On a flat-rate plan that is the windows, and
+/// the money is a row under the tokens; on a metered account it is the
+/// money, and a window — which such an account reports only where its
+/// provider has one — follows it. Last, under a rule: how full the context
+/// is answers a question about the next request rather than about what has
+/// been spent.
+fn arranged(app: &App, blocks: UsageBlocks, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    let UsageBlocks {
+        mut money,
+        mut windows,
+        mut spend,
+        context,
+    } = blocks;
+    let groups = match metered(app) {
+        true => {
+            money.append(&mut windows);
+            [money, spend]
         }
         false => {
-            let ruled = !windows.is_empty() && !spend.is_empty();
-            lines.extend(windows);
-            if ruled {
-                lines.push(divider(width, theme));
-            }
-            lines.extend(spend);
-            lines.extend(money);
+            spend.append(&mut money);
+            [windows, spend]
         }
-    }
+    };
+    ruled(groups.into_iter().chain([context]), width, theme)
+}
 
-    // Last, under a rule: how full the context is answers a question about
-    // the next request rather than about what has been spent.
-    let context = context_lines(app, width, theme);
-    if !context.is_empty() {
-        lines.push(divider(width, theme));
-        lines.extend(context);
+/// The groups that have rows, one after another, a rule `width` wide
+/// between each two.
+pub(crate) fn ruled(
+    groups: impl IntoIterator<Item = Vec<Line<'static>>>,
+    width: usize,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    for group in groups.into_iter().filter(|group| !group.is_empty()) {
+        if !lines.is_empty() {
+            lines.push(divider(width, theme));
+        }
+        lines.extend(group);
     }
     lines
 }
@@ -5730,7 +5853,14 @@ fn agent_rows(
         rows.push(Line::from("  none spawned").style(Style::new().fg(theme.dim)));
         return rows;
     }
+    rows.extend(running_agent_lines(app, width, theme));
+    rows
+}
 
+/// A row for each sub-agent running now, and under it what it is doing
+/// where something said: see [`agent_rows`]. Nothing where none is running.
+pub(crate) fn running_agent_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    let mut rows = Vec::new();
     // Tagged among every agent the session spawned, so that an agent keeps
     // the tag the transcript names it by when another one stops.
     let (running, tags): (Vec<&SubAgent>, Vec<String>) = app
@@ -6082,20 +6212,7 @@ const IN_SYNC: &str = " · in sync with upstream";
 /// A branch with no upstream carries neither figure: it is not zero commits
 /// ahead of anything, it is ahead of nothing.
 fn branch_row(branch: &str, repo: &crate::app::Repo, width: usize, theme: &Theme) -> Line<'static> {
-    let drift: String = [(repo.ahead, '↑'), (repo.behind, '↓')]
-        .into_iter()
-        .filter_map(|(count, arrow)| match count {
-            Some(0) | None => None,
-            Some(count) => Some(format!(" {arrow}{count}")),
-        })
-        .collect();
-
-    // Zero in both directions is a count, so it is said; no upstream is not.
-    let drift = match (repo.ahead, repo.behind) {
-        (Some(0), Some(0)) => IN_SYNC.to_owned(),
-        _ => drift,
-    };
-
+    let drift = drift(repo);
     Line::from(vec![
         Span::styled(
             format!(
@@ -6106,6 +6223,22 @@ fn branch_row(branch: &str, repo: &crate::app::Repo, width: usize, theme: &Theme
         ),
         Span::styled(drift, Style::new().fg(theme.dim)),
     ])
+}
+
+/// ` ↑3 ↓1`, or ` · in sync with upstream`: how far the branch has drifted
+/// from its upstream, as the branch row says it.
+fn drift(repo: &crate::app::Repo) -> String {
+    // Zero in both directions is a count, so it is said; no upstream is not.
+    if let (Some(0), Some(0)) = (repo.ahead, repo.behind) {
+        return IN_SYNC.to_owned();
+    }
+    [(repo.ahead, '↑'), (repo.behind, '↓')]
+        .into_iter()
+        .filter_map(|(count, arrow)| match count {
+            Some(0) | None => None,
+            Some(count) => Some(format!(" {arrow}{count}")),
+        })
+        .collect()
 }
 
 /// One figure in a section header's summary — `✗ 2`, `+977`, `4s ago` — and
@@ -6239,23 +6372,7 @@ fn working_tree_rows(
     width: usize,
     theme: &Theme,
 ) -> Vec<PaneRow> {
-    // Git gives a binary file no line counts, and the header marks that the
-    // way a file's own row does: a floor where some file had none, and a dash
-    // where no file had any, never a zero standing in for the count.
-    let side = |count_of: fn(&crate::app::WorkingFile) -> Option<u64>, sign: char| {
-        let lines = repo
-            .working
-            .iter()
-            .filter_map(count_of)
-            .fold(0u64, u64::saturating_add);
-        count(
-            sign,
-            lines,
-            repo.working.iter().all(|file| count_of(file).is_some()),
-        )
-    };
-    let added = side(|file| file.added, '+');
-    let removed = side(|file| file.removed, '−');
+    let (added, removed) = working_counts(repo);
     let summary = match repo.read {
         false => vec![Figure::lead(
             0,
@@ -6312,6 +6429,79 @@ fn working_tree_rows(
     }
     rows
 }
+
+/// The lines the working tree adds and removes across its files, as
+/// `+977` and `−259`.
+///
+/// Git gives a binary file no line counts, and each side marks that the way
+/// a file's own row does: a floor where some file had none, and a dash where
+/// no file had any, never a zero standing in for the count.
+fn working_counts(repo: &crate::app::Repo) -> (String, String) {
+    let side = |count_of: fn(&crate::app::WorkingFile) -> Option<u64>, sign: char| {
+        let lines = repo
+            .working
+            .iter()
+            .filter_map(count_of)
+            .fold(0u64, u64::saturating_add);
+        count(
+            sign,
+            lines,
+            repo.working.iter().all(|file| count_of(file).is_some()),
+        )
+    };
+    (side(|file| file.added, '+'), side(|file| file.removed, '−'))
+}
+
+/// `⎇ main ↑3  +977 −259`: the branch, how far it has drifted from its
+/// upstream, and the lines the working tree changes, `width` columns wide.
+/// `None` outside a repository.
+///
+/// The counts are left off until the repository has been read and while it
+/// has nothing uncommitted: a dash or `+0 −0` there would be a row reporting
+/// nothing. Where the row is too narrow for them, the branch's name is what
+/// is cut, and a count is kept whole or not drawn.
+pub(crate) fn branch_and_changes(app: &App, width: usize, theme: &Theme) -> Option<Line<'static>> {
+    let repo = app.repo();
+    let branch = repo.branch.as_deref()?;
+    let counts = branch_counts(repo);
+    let room = counts.as_ref().map_or(0, counts_columns);
+    let Some((added, removed)) = counts.filter(|_| room < width) else {
+        return Some(branch_row(branch, repo, width, theme));
+    };
+    let mut row = branch_row(branch, repo, width - room, theme);
+    let pad = (width - room).saturating_sub(row.width());
+    row.spans.push(Span::raw(" ".repeat(pad) + BRANCH_GAP));
+    row.spans
+        .push(Span::styled(added, Style::new().fg(theme.add)));
+    row.spans.push(Span::raw(" "));
+    row.spans
+        .push(Span::styled(removed, Style::new().fg(theme.del)));
+    Some(row)
+}
+
+/// How wide [`branch_and_changes`] is with nothing cut, or `None` outside a
+/// repository.
+pub(crate) fn branch_and_changes_columns(app: &App) -> Option<usize> {
+    let repo = app.repo();
+    let branch = repo.branch.as_deref()?;
+    let row = text::width("⎇ ") + text::width(branch) + text::width(&drift(repo));
+    Some(row + branch_counts(repo).as_ref().map_or(0, counts_columns))
+}
+
+/// The working tree's counts the branch row carries: none until the
+/// repository has been read, and none while nothing is uncommitted.
+fn branch_counts(repo: &crate::app::Repo) -> Option<(String, String)> {
+    (repo.read && !repo.working.is_empty()).then(|| working_counts(repo))
+}
+
+/// The columns the counts take on the branch row, the gap before them
+/// included.
+fn counts_columns((added, removed): &(String, String)) -> usize {
+    text::width(BRANCH_GAP) + text::width(added) + 1 + text::width(removed)
+}
+
+/// What stands between the branch and the working tree's counts.
+const BRANCH_GAP: &str = "  ";
 
 /// A working-tree file's row, its path less the `under` bytes the directory
 /// row above it already said.

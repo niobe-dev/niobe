@@ -1,30 +1,30 @@
  Niobe  Session  Context  Model  View  Help                            opus-5  claude · default  ○ not attached  13:41
- ┏━ > add etag support to the catalog fetcher so we stop re-downloading… ━━━┓ ┌──────────────── Usage ────────────────┐
- ┃ > you                                                                    ┃ │ 5h         62% ▓▓▓░░ resets 16:40     │
- ┃   Review fetch.py and cache.py in parallel.                              ┃ │ 7d         18% ▓░░░░ resets Tue 15:00 │
- ┃                                                                          ┃ │ ───────────────────────────────────── │
- ┃ ▾ Agent ×2       deep-reasoner: Review fetch.py, deep-reasoner: …  240 B ┃ │ opus-5    100% ▓▓▓▓▓▓▓▓▓▓▓▓   49k     │
- ┃   ├ deep-reasoner: Review fetch.py                                 120 B ┃ │ cache hit  86% ▓▓▓▓▓▓▓▓▓▓░░   40k     │
- ┃   └ deep-reasoner: Review cache.py                                 120 B ┃ │ ───────────────────────────────────── │
- ┃                                                                          ┃ │ context    13% ▓░░░░░░░░░░ 25k / 200k │
- ┃ ◆ Both reviewers are working.                                            ┃ └───────────────────────────────────────┘
- ┃                                                                          ┃ ┌─────────────── Changes ───────────────┐
- ┃ ! denied  deep1 › Bash · curl -sI localhost:8080                         ┃ │ ⎇ main ↑3                             █
- ┃                                                                          ┃ │ ▾ Working tree  23 files  +≥977 −≥259 █
- ┃   ┌─ ? deep2 asks ────────────────────────────────────── blocks turn 2 ┐ ┃ │   .                                   █
- ┃   │ to run Bash                                                        │ █ │     CHANGELOG.md               +0  −0 │
- ┃   │ python3 probe.py                                                   │ █ │   catalog/                            │
- ┃   │                                                                    │ █ │     fetch.ts                 +149 −12 │
- ┃   │ ▶ 1. Allow once                                     this call only │ █ │     etag.ts                   +88 −41 │
- ┃   │   2. Always allow Bash                            niobe saves Bash │ █ │     cache/lru.ts              +31  −9 │
- ┃   │   3. Always allow this target   niobe saves Bash(python3 probe.py) │ █ │     cache/index.ts            +12  −0 │
- ┃   │   4. Deny                                    the call does not run │ █ └───────────────────────────────────────┘
- ┃   │                                                                    │ █ ┌────────────── Activity ───────────────┐
- ┃   │ ↑↓ move · 1-4 jump · Enter confirm · Tab type your own             │ █ │ ▾ Sub-agents  3 running · 1 failed    █
- ┃   │ Esc decide later                                                   │ █ │ ◆ test  Cover tests/fe… sonnet 1m 42s █
- ┃   └────────────────────────────────────────────────────────────────────┘ █ │   └ Reading tests/stream.rs           │
- ┃                                                                          █ │ ◆ deep1 Review fetch.py            0s │
- ┃ ──────────────────────────────────────────────────────────────────────── ┃ │ ◆ deep2 Review cache.py            0s │
- ┃  ask  >  Ask for a change · @ file · Ctrl+F find          Ctrl+J newline ┃ │ ▾ Decisions, as the agent says  0     │
- ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ └───────────────────────────────────────┘
+┏━ > add etag support to the catalog fetcher so we stop re-downloading unchanged manifests ━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ > you                                                                                                                ┃
+┃   Review fetch.py and cache.py in parallel.                                                                          ┃
+┃                                                                                                                      ┃
+┃ ▾ Agent ×2       deep-reasoner: Review fetch.py, deep-reasoner: Review cache.py                                240 B ┃
+┃   ├ deep-reasoner: Review fetch.py                                                                             120 B ┃
+┃   └ deep-reasoner: Review cache.py                                                                             120 B ┃
+┃                                                                                                                      ┃
+┃ ◆ Both reviewers are working.                                                                                        ┃
+┃                                                                                                                      ┃
+┃ ! denied  deep1 › Bash · curl -sI localhost:8080                                                                     ┃
+┃                                                                                                                      ┃
+┃   ┌─ ? deep2 asks ──────────────────────────────────────── blocks turn 2 ┐                                           ┃
+┃   │ to run Bash                                                          │                                           █
+┃   │ python3 probe.py                                                     │                                           █
+┃   │                                                                      │                                           █
+┃   │ ▶ 1. Allow once                                       this call only │                                           █
+┃   │   2. Always allow Bash                              niobe saves Bash │                                           █
+┃   │   3. Always allow this target     niobe saves Bash(python3 probe.py) │                                           █
+┃   │   4. Deny                                      the call does not run │                                           █
+┃   │                                                                      │                                           █
+┃   │ ↑↓ move · 1-4 jump · Enter confirm · Tab type your own               │                                           █
+┃   │ Esc decide later                                                     │                                           █
+┃   └──────────────────────────────────────────────────────────────────────┘                                           █
+┃                                                                                                                      █
+┃ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ┃
+┃  ask  >  Ask for a change · @ file · Ctrl+F find                                   Shift+Tab cycles · Ctrl+J newline ┃
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 EscStop 1Help     2Compact     3Clear     4Model     5Diff     6Rewind     7MCP     8Memory     9Settings     0Quit

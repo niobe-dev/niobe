@@ -6,9 +6,9 @@
 ┃                               │ Tool calls…                   d │            ┃
 ┃ ◆ Caching the etag beside the │ Just one agent…               s │the LRU.    ┃
 ┃                               │ Project overview…             o │            █
-┃   Edited 1 file +6 −2         │ Usage pane                shown │            █
-┃                               │ Changes pane              shown │            █
-┃ ◆ Rewriting the 304 test aroun│ Activity pane             shown │            █
+┃   Edited 1 file +6 −2         │ Usage pane               hidden │            █
+┃                               │ Changes pane             hidden │            █
+┃ ◆ Rewriting the 304 test aroun│ Activity pane            hidden │            █
 ┃                               │ Theme…                          │            █
 ┃ ◆ The notebook that demonstrat└─────────────────────────────────┘hape.       █
 ┃                                                                              █

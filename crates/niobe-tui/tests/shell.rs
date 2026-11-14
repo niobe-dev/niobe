@@ -31,7 +31,7 @@ use common::{
     at_work, metered_session, paint, running_session, screen, session_whose_turn_total_differs,
     session_with_a_long_write, session_with_a_markdown_reply, session_with_a_tab_indented_reply,
     session_with_finished_turns, session_with_test_records, session_with_two_agents_at_work,
-    style_at, styles, styles_at, svg, unmetered_session,
+    style_at, styles, styles_at, svg, unmetered_session, with_side_panes,
 };
 use niobe_core::event::{
     AgentId, Backend, CompactTrigger, Event, Mode, PermissionDecision, Usage, UsageWindow,
@@ -481,7 +481,10 @@ fn a_cleared_conversation_is_drawn_as_a_new_session() {
     app.apply(&Event::Cleared);
     app.apply(&Event::TurnEnded);
     let between = screen(&mut app, 120, 30);
-    assert!(between.contains("no tokens reported yet"), "{between}");
+    assert!(
+        !between.contains("cache hit"),
+        "no token is counted:\n{between}"
+    );
     assert!(!between.contains("haiku-4-5"), "{between}");
     assert_snapshot("cleared-before-a-request-120x30", &between);
 
@@ -569,7 +572,7 @@ fn summed_up_the_sub_agents_work_is_left_to_their_hand_off_rows() {
 #[test]
 fn grouped_by_agent_each_agents_rows_stand_under_its_heading() {
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    let mut app = session_with_two_agents_at_work();
+    let mut app = with_side_panes(session_with_two_agents_at_work());
     screen(&mut app, 120, 30);
     let press = |app: &mut App, code| app.on_key(KeyEvent::new(code, KeyModifiers::NONE));
     press(&mut app, KeyCode::Tab);
@@ -956,7 +959,7 @@ fn a_terminal_resized_while_scrolled_back_keeps_the_lines_being_read_in_view() {
 
 #[test]
 fn a_line_read_part_way_through_a_paragraph_stays_in_view_when_the_pane_widens() {
-    let mut app = session_with_a_long_wrapping_reply();
+    let mut app = with_side_panes(session_with_a_long_wrapping_reply());
     let before = scroll_until_first(&mut app, "closes as paragraph 20", 120);
     assert_eq!(
         first_row_with(&before, "closes as paragraph 20").map(|(at, _)| at),
@@ -1110,7 +1113,7 @@ fn an_empty_session_renders_at_both_sizes() {
 /// the first reply rather than left out.
 #[test]
 fn a_fresh_attached_session_draws_every_side_pane_with_what_will_appear_there() {
-    let mut app = empty_session().attached();
+    let mut app = with_side_panes(empty_session().attached());
     let frame = screen(&mut app, 120, 30);
 
     assert!(frame.contains("asked of the backend"), "{frame}");
@@ -1349,7 +1352,7 @@ fn a_call_whose_arguments_are_cut_at_their_rows_is_not_allowed_unread() {
     app.tick(shown, None);
     let frame = screen(&mut app, 100, 40);
     assert!(frame.contains("more lines"), "{frame}");
-    assert!(!frame.contains("DROP TABLE"), "{frame}");
+    assert!(!frame.contains("users;"), "{frame}");
 
     app.on_key_read(key(KeyCode::Enter), alone(shown + ASK_QUIET * 2));
     assert!(
@@ -1359,7 +1362,7 @@ fn a_call_whose_arguments_are_cut_at_their_rows_is_not_allowed_unread() {
 
     app.on_key_read(ctrl_t, alone(shown + ASK_QUIET * 4));
     let frame = screen(&mut app, 100, 40);
-    assert!(frame.contains("DROP TABLE"), "{frame}");
+    assert!(frame.contains("users;"), "{frame}");
     app.on_key_read(ctrl_t, alone(shown + ASK_QUIET * 6));
     screen(&mut app, 100, 40);
     app.on_key_read(key(KeyCode::Enter), alone(shown + ASK_QUIET * 8));
@@ -1625,7 +1628,7 @@ fn a_question_the_agent_asks_is_drawn_as_its_question_and_answers() {
     use std::time::Instant;
 
     let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
-    let mut app = session_asking_questions().attached();
+    let mut app = with_side_panes(session_asking_questions()).attached();
     let shown = Instant::now();
     app.tick(shown, None);
     let frame = screen(&mut app, 100, 30);
@@ -1699,7 +1702,7 @@ fn question_cells(frame: &str) -> Vec<String> {
 fn the_question_shows_what_would_run_and_every_way_to_answer_it() {
     use niobe_tui::app::Answer;
 
-    let mut app = session_waiting_on_a_prompt().attached();
+    let mut app = with_side_panes(session_waiting_on_a_prompt().attached());
     let frame = screen(&mut app, 120, 30);
 
     assert!(frame.contains("? claude asks"), "{frame}");
@@ -1742,7 +1745,7 @@ fn the_question_shows_what_would_run_and_every_way_to_answer_it() {
     app.answer(Answer::Once);
     assert_eq!(
         screen(&mut app, 120, 30),
-        screen(&mut running_session().attached(), 120, 30),
+        screen(&mut with_side_panes(running_session()).attached(), 120, 30),
         "the question left something behind on the frame"
     );
 }
@@ -2444,7 +2447,7 @@ fn an_answer_being_written_is_shown_in_the_question_with_where_it_goes() {
 fn a_question_arriving_while_scrolled_back_does_not_move_the_view() {
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-    let mut app = running_session();
+    let mut app = with_side_panes(running_session());
     screen(&mut app, 120, 30);
     app.on_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
     let before = screen(&mut app, 120, 30);
@@ -3359,7 +3362,7 @@ impl niobe_tui::Prices for OnlyOpus {
 /// nothing reported its cost and no price covers it.
 #[test]
 fn a_metered_profile_leads_the_usage_pane_with_money_and_prices_each_model() {
-    let mut app = metered_session().with_prices(Box::new(OnlyOpus));
+    let mut app = with_side_panes(metered_session().with_prices(Box::new(OnlyOpus)));
     let frame = screen(&mut app, 120, 30);
 
     assert!(!frame.contains("5h"), "{frame}");
@@ -3618,7 +3621,7 @@ fn session_on_three_models() -> App {
 /// something, the share it spent, and how much.
 #[test]
 fn the_usage_pane_splits_the_sessions_tokens_by_the_model_that_spent_them() {
-    let mut app = session_on_three_models();
+    let mut app = with_side_panes(session_on_three_models());
     let frame = screen(&mut app, 120, 30);
 
     // Worked out from the fixture by hand: opus has 2,100+180+18,400+900 and
@@ -3720,7 +3723,7 @@ fn the_cache_row_is_a_hit_rate_and_says_so() {
 /// not a cache that missed. Nor does it get a row per model it never ran.
 #[test]
 fn a_session_with_nothing_reported_yet_draws_no_share_and_no_rate() {
-    let mut app = empty_session();
+    let mut app = with_side_panes(empty_session());
     let frame = screen(&mut app, 120, 30);
 
     assert!(!frame.contains("cache hit   0%"), "{frame}");
@@ -3733,8 +3736,8 @@ fn a_session_with_nothing_reported_yet_draws_no_share_and_no_rate() {
 
 #[test]
 fn the_right_stack_collapses_below_a_hundred_columns() {
-    let narrow = screen(&mut running_session(), 99, 30);
-    let wide = screen(&mut running_session(), 100, 30);
+    let narrow = screen(&mut with_side_panes(running_session()), 99, 30);
+    let wide = screen(&mut with_side_panes(running_session()), 100, 30);
 
     // Matched on the border the title sits in, so the menu bar's own `Usage`
     // and `Files` entries cannot stand in for a pane. None of them has the
@@ -3810,7 +3813,7 @@ fn pane_tops(frame: &str, from: usize) -> Vec<usize> {
 
 #[test]
 fn the_body_is_cut_in_the_proportions_the_layout_is_drawn_to() {
-    let frame = screen(&mut running_session(), 200, 60);
+    let frame = screen(&mut with_side_panes(running_session()), 200, 60);
     let first = frame.lines().nth(1).unwrap_or_default();
 
     // The session pane, a column of desktop, then the right-hand stack.
@@ -3933,12 +3936,12 @@ fn usage_pane(frame: &str) -> Vec<String> {
 fn nothing_the_backends_did_not_report_appears_as_a_number() {
     // Two usage records, one of them without a cost: the pane must show the sum
     // as a floor rather than as the session's bill.
-    let floor = usage_pane(&screen(&mut metered_session(), 120, 30)).join("\n");
+    let floor = usage_pane(&screen(&mut with_side_panes(metered_session()), 120, 30)).join("\n");
     assert!(floor.contains("≥$0.04"), "{floor}");
 
     // A metered session with a budget, whose only record carries no cost:
     // nothing in the pane may read as money that was measured.
-    let mut unreported = empty_session().with_budget(5.0);
+    let mut unreported = with_side_panes(empty_session().with_budget(5.0));
     unreported.apply(&Event::Billing {
         billing: niobe_core::Billing::Metered,
     });
@@ -3966,7 +3969,7 @@ fn nothing_the_backends_did_not_report_appears_as_a_number() {
 
     // An empty session has no cost at all, and the pane says so itself
     // rather than draw a figure for it.
-    let empty = usage_pane(&screen(&mut empty_session(), 120, 30)).join("\n");
+    let empty = usage_pane(&screen(&mut with_side_panes(empty_session()), 120, 30)).join("\n");
     assert!(empty.contains("no tokens reported yet"), "{empty}");
     assert!(!empty.contains('$') && !empty.contains('0'), "{empty}");
 }
@@ -4004,7 +4007,10 @@ fn the_desktop_stays_empty_while_a_turn_runs() {
     use std::time::Duration;
 
     for theme in THEMES {
-        let mut app = at_work(running_session().with_theme(theme), Duration::from_secs(5));
+        let mut app = at_work(
+            with_side_panes(running_session().with_theme(theme)),
+            Duration::from_secs(5),
+        );
         let frame = screen(&mut app, 120, 30);
         let desk = gutter(&frame);
         assert!(
@@ -4034,7 +4040,7 @@ fn borders(row: &str) -> Vec<usize> {
 #[test]
 fn no_pane_draws_its_text_against_its_border() {
     for (width, height) in [(80, 24), (120, 30), (200, 60)] {
-        let frame = screen(&mut running_session(), width, height);
+        let frame = screen(&mut with_side_panes(running_session()), width, height);
         let rows: Vec<Vec<char>> = frame.lines().map(|row| row.chars().collect()).collect();
 
         for (at, row) in frame.lines().enumerate() {
@@ -4061,7 +4067,7 @@ fn no_pane_draws_its_text_against_its_border() {
 /// without colour and on a terminal that draws neither in bold.
 #[test]
 fn the_changes_pane_folds_a_section_away() {
-    let mut app = running_session();
+    let mut app = with_side_panes(running_session());
     app.fold(Section::WorkingTree);
     let frame = screen(&mut app, 200, 60);
 
@@ -4080,7 +4086,7 @@ fn the_changes_pane_folds_a_section_away() {
 /// is below the pane's foot, and it is reachable.
 #[test]
 fn the_changes_pane_scrolls_to_the_last_of_the_files() {
-    let mut app = running_session();
+    let mut app = with_side_panes(running_session());
     // Draw once so the pane knows how tall it is and how much it holds; the
     // event loop has always drawn before a wheel notch can arrive.
     let _ = screen(&mut app, 200, 60);
@@ -4137,11 +4143,11 @@ fn a_test_run_is_drawn_under_its_call_with_a_bar_of_its_counts() {
 /// there, and an empty box says nothing at all.
 #[test]
 fn a_session_outside_a_repository_draws_no_branch_and_no_working_tree() {
-    let mut app = App::new(Repo {
+    let mut app = with_side_panes(App::new(Repo {
         name: "scratch".to_owned(),
         branch: None,
         ..Repo::default()
-    });
+    }));
     let frame = screen(&mut app, 120, 30);
 
     assert!(!frame.contains('⎇'), "there is no branch to name");
@@ -4153,7 +4159,7 @@ fn a_session_outside_a_repository_draws_no_branch_and_no_working_tree() {
 /// notch over one of them must not move the other.
 #[test]
 fn a_wheel_notch_over_the_changes_pane_leaves_the_transcript_where_it_was() {
-    let mut app = session_with_a_markdown_reply();
+    let mut app = with_side_panes(session_with_a_markdown_reply());
     let _ = screen(&mut app, 200, 60);
     app.scroll_to_head();
     let transcript = app.scroll();
@@ -4186,7 +4192,7 @@ fn wheel_at(column: u16, row: u16) -> ratatui::crossterm::event::MouseEvent {
 /// reads it by.
 #[test]
 fn the_activity_pane_holds_the_sub_agents_and_the_tools() {
-    let frame = screen(&mut running_session(), 200, 60);
+    let frame = screen(&mut with_side_panes(running_session()), 200, 60);
 
     assert!(frame.contains("─ Activity "), "{frame}");
     for section in ["▾ Sub-agents", "▾ Tools"] {
@@ -4211,7 +4217,7 @@ const DOCS_TASK: &str = "Write docs/etags.md";
 /// making is drawn as cut short, not as still running.
 #[test]
 fn a_session_that_ended_draws_nothing_as_still_running() {
-    let mut app = running_session();
+    let mut app = with_side_panes(running_session());
     app.apply(&Event::ToolCallStart {
         id: "toolu_cut".into(),
         name: "Bash".to_owned(),
@@ -4253,7 +4259,7 @@ fn a_session_that_ended_draws_nothing_as_still_running() {
 /// the ones that stopped.
 #[test]
 fn only_a_running_agent_is_listed_and_a_finished_one_is_counted() {
-    let frame = screen(&mut running_session(), 200, 60);
+    let frame = screen(&mut with_side_panes(running_session()), 200, 60);
 
     assert!(frame.contains("◆ test "), "running:\n{frame}");
     for finished in [REVIEW_TASK, DOCS_TASK] {
@@ -4272,7 +4278,7 @@ fn only_a_running_agent_is_listed_and_a_finished_one_is_counted() {
 /// moment it was spawned against the moment the shell is drawing at.
 #[test]
 fn a_running_agent_is_timed() {
-    let frame = screen(&mut running_session(), 200, 60);
+    let frame = screen(&mut with_side_panes(running_session()), 200, 60);
 
     let running = frame
         .lines()
@@ -4306,7 +4312,7 @@ const PLAN_TASK: &str = "Plan the etag rollout";
 /// backend named none is drawn with none.
 #[test]
 fn a_sub_agents_model_is_drawn_beside_what_it_was_spawned_to_do() {
-    let frame = screen(&mut session_with_a_silent_agent(), 200, 60);
+    let frame = screen(&mut with_side_panes(session_with_a_silent_agent()), 200, 60);
     let row = |label: &str| {
         frame
             .lines()
@@ -4326,7 +4332,7 @@ fn a_sub_agents_model_is_drawn_beside_what_it_was_spawned_to_do() {
 /// nothing there is nothing — not an empty `└`.
 #[test]
 fn under_each_agent_is_the_last_thing_it_was_seen_doing() {
-    let frame = screen(&mut session_with_a_silent_agent(), 200, 60);
+    let frame = screen(&mut with_side_panes(session_with_a_silent_agent()), 200, 60);
     let lines: Vec<&str> = frame.lines().collect();
     let under = |label: &str| {
         let at = lines
@@ -4358,7 +4364,7 @@ fn under_each_agent_is_the_last_thing_it_was_seen_doing() {
 /// server. A backend's own tools are already the family they belong to.
 #[test]
 fn the_tools_of_one_mcp_server_are_counted_as_one_family() {
-    let mut app = running_session();
+    let mut app = with_side_panes(running_session());
     app.count_tools_by_name();
     let frame = screen(&mut app, 200, 60);
 
@@ -4392,7 +4398,7 @@ fn the_tools_of_one_mcp_server_are_counted_as_one_family() {
 /// reading `Write 2` where both were refused would be two files written.
 #[test]
 fn a_refused_call_is_marked_on_its_tools_row_as_on_its_kind_of_work() {
-    let mut app = running_session();
+    let mut app = with_side_panes(running_session());
     for id in ["w1", "w2"] {
         app.apply(&Event::ToolCallStart {
             id: id.into(),
@@ -4445,7 +4451,7 @@ fn a_refused_call_is_marked_on_its_tools_row_as_on_its_kind_of_work() {
 /// beside it, where both were stopped, reads as two files written.
 #[test]
 fn a_stopped_call_is_marked_in_the_tools_header_and_on_its_rows() {
-    let mut app = running_session();
+    let mut app = with_side_panes(running_session());
     for id in ["w1", "w2"] {
         app.apply(&Event::ToolCallStart {
             id: id.into(),
@@ -4502,7 +4508,7 @@ fn a_stopped_call_is_marked_in_the_tools_header_and_on_its_rows() {
 /// the tools' own names and back.
 #[test]
 fn the_tools_are_counted_by_kind_of_work_and_t_turns_them_to_tool_names() {
-    let mut app = running_session();
+    let mut app = with_side_panes(running_session());
     let wide = screen(&mut app, 200, 60);
     assert!(!wide.contains("Notion·*"), "{wide}");
     let notion = wide
@@ -4543,7 +4549,7 @@ fn the_tools_are_counted_by_kind_of_work_and_t_turns_them_to_tool_names() {
 /// of zero, and not as a bar drawn for a tool that never ran.
 #[test]
 fn an_untouched_activity_pane_draws_no_zeroed_bar() {
-    let frame = screen(&mut empty_session(), 120, 30);
+    let frame = screen(&mut with_side_panes(empty_session()), 120, 30);
 
     assert!(frame.contains("none spawned"), "{frame}");
     assert!(frame.contains("none called"), "{frame}");
@@ -4564,7 +4570,7 @@ fn an_untouched_activity_pane_draws_no_zeroed_bar() {
 /// sub-agents, and they are reachable.
 #[test]
 fn the_activity_pane_scrolls_to_what_is_below_the_agents() {
-    let mut app = running_session();
+    let mut app = with_side_panes(running_session());
     // Draw once so the pane knows how tall it is and how much it holds. At
     // 200x60 it holds everything it has; a terminal half that tall is where the
     // pane has to scroll.
@@ -4590,7 +4596,7 @@ fn the_activity_pane_scrolls_to_what_is_below_the_agents() {
 /// the Changes pane where it was.
 #[test]
 fn the_activity_pane_folds_a_section_away() {
-    let mut app = running_session();
+    let mut app = with_side_panes(running_session());
     app.fold(Section::SubAgents);
     let frame = screen(&mut app, 200, 60);
 
@@ -4613,7 +4619,7 @@ fn the_activity_pane_folds_a_section_away() {
 /// a notch over the Activity pane must move neither of the other two.
 #[test]
 fn a_wheel_notch_over_the_activity_pane_moves_only_that_pane() {
-    let mut app = running_session();
+    let mut app = with_side_panes(running_session());
     let _ = screen(&mut app, 120, 30);
     app.scroll_to_head();
     let transcript = app.scroll();
@@ -5205,7 +5211,7 @@ fn a_reply_too_long_for_the_bar_wraps_in_it_rather_than_being_cut() {
 fn a_run_of_calls_is_one_line_until_ctrl_o_draws_every_call() {
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-    let mut app = running_session();
+    let mut app = with_side_panes(running_session());
     let summed = screen(&mut app, 200, 60);
     assert!(
         summed.contains("Read 3 files, used Notion 2 times"),
@@ -5258,7 +5264,7 @@ fn the_pane_with_the_keyboard_is_the_one_drawn_in_the_focus_line() {
     use ratatui::crossterm::event::KeyCode;
     use ratatui::style::Modifier;
 
-    let mut app = running_session();
+    let mut app = with_side_panes(running_session());
     let _ = screen(&mut app, 120, 30);
     press(&mut app, KeyCode::Tab);
     press(&mut app, KeyCode::Tab);
@@ -5312,7 +5318,7 @@ fn the_focused_border_is_in_the_colour_the_theme_keeps_for_it() {
 /// under the cursor, leaving the transcript and the composer alone.
 #[test]
 fn work_the_agent_says_it_left_out_of_scope_is_a_decision_in_the_activity_pane() {
-    let mut app = running_session();
+    let mut app = with_side_panes(running_session());
     app.apply(&Event::AssistantMessage {
         text: "The etag path is done.\n\
                DECISION: left the CSV exporter alone; it was not part of the request."
@@ -5333,7 +5339,7 @@ fn work_the_agent_says_it_left_out_of_scope_is_a_decision_in_the_activity_pane()
 fn a_focused_pane_folds_the_section_under_its_cursor() {
     use ratatui::crossterm::event::KeyCode;
 
-    let mut app = running_session();
+    let mut app = with_side_panes(running_session());
     let _ = screen(&mut app, 200, 60);
     press(&mut app, KeyCode::Tab);
     press(&mut app, KeyCode::Tab);
@@ -5359,7 +5365,7 @@ fn a_session_alone_on_screen_keeps_the_keyboard() {
     use niobe_tui::app::Focus;
     use ratatui::crossterm::event::KeyCode;
 
-    let mut app = running_session();
+    let mut app = with_side_panes(running_session());
     let frame = screen(&mut app, 80, 24);
     press(&mut app, KeyCode::Tab);
 
@@ -5381,7 +5387,8 @@ fn a_session_alone_on_screen_keeps_the_keyboard() {
 fn the_way_back_down_is_a_button_that_returns_to_the_newest_line() {
     use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
-    let mut app = running_session();
+    // Beside the panes, where the session is too long for its pane.
+    let mut app = with_side_panes(running_session());
     let tail = screen(&mut app, 120, 30);
     app.scroll_to_head();
     let head = screen(&mut app, 120, 30);
@@ -6468,7 +6475,7 @@ fn bang_on_a_composer_of_spaces_opens_what_it_opens_on_nothing() {
 
 #[test]
 fn a_command_that_failed_shows_its_status_and_what_it_printed_rather_than_a_made_up_reason() {
-    let mut app = session_that_runs_commands();
+    let mut app = with_side_panes(session_that_runs_commands());
     let id = run_command(&mut app, "ls nowhere");
     app.ran(niobe_tui::Ran {
         id,
@@ -6807,7 +6814,7 @@ fn new_files_are_in_the_working_tree_marked_new_and_counted_where_read() {
         removed: Some(0),
         new,
     };
-    let mut app = App::new(Repo {
+    let mut app = with_side_panes(App::new(Repo {
         name: "niobe".to_owned(),
         branch: Some("main".to_owned()),
         read: true,
@@ -6817,7 +6824,7 @@ fn new_files_are_in_the_working_tree_marked_new_and_counted_where_read() {
             working("sub/dir/inner.txt", Some(3), true),
         ],
         ..Repo::default()
-    });
+    }));
 
     let frame = screen(&mut app, 120, 30);
 
@@ -6842,7 +6849,7 @@ fn the_working_tree_counts_line_up_in_a_column_for_each_side() {
             new,
         }
     };
-    let mut app = App::new(Repo {
+    let mut app = with_side_panes(App::new(Repo {
         name: "niobe".to_owned(),
         branch: Some("main".to_owned()),
         read: true,
@@ -6854,7 +6861,7 @@ fn the_working_tree_counts_line_up_in_a_column_for_each_side() {
             working("diagram.png", None, None, false),
         ],
         ..Repo::default()
-    });
+    }));
 
     let frame = screen(&mut app, 120, 30);
 
@@ -6915,7 +6922,7 @@ fn the_working_tree_counts_line_up_in_a_column_for_each_side() {
 /// is one has no figure to add up: its header says so rather than `+0 −0`.
 #[test]
 fn a_working_tree_of_nothing_but_a_binary_file_has_no_line_counts() {
-    let mut app = App::new(Repo {
+    let mut app = with_side_panes(App::new(Repo {
         name: "niobe".to_owned(),
         branch: Some("main".to_owned()),
         read: true,
@@ -6926,7 +6933,7 @@ fn a_working_tree_of_nothing_but_a_binary_file_has_no_line_counts() {
             new: false,
         }],
         ..Repo::default()
-    });
+    }));
 
     let frame = screen(&mut app, 120, 30);
     let header = frame
@@ -6955,7 +6962,7 @@ fn an_open_menu_hangs_from_its_name_with_the_keys_that_do_each_item() {
         assert!(frame.contains("Group by agent"), "{frame}");
         assert!(frame.contains("F5  Ctrl+T"), "{frame}");
         assert!(
-            frame.contains("shown"),
+            frame.contains("hidden"),
             "a pane says whether it is: {frame}"
         );
         assert_snapshot(&format!("menu-view-{width}x{height}"), &frame);
@@ -7204,7 +7211,7 @@ fn a_dialogs_secondary_text_is_drawn_in_a_colour_its_face_is_not() {
 
 #[test]
 fn a_pane_hidden_from_the_view_menu_gives_its_rows_to_the_others() {
-    let mut app = running_session();
+    let mut app = with_side_panes(running_session());
     app.perform(niobe_tui::menu::Action::Pane(
         niobe_tui::menu::SidePane::Changes,
     ));
@@ -7425,13 +7432,13 @@ fn a_new_file_leaves_its_removed_column_blank_and_a_tracked_one_keeps_it() {
         removed: Some(0),
         new,
     };
-    let mut app = App::new(Repo {
+    let mut app = with_side_panes(App::new(Repo {
         name: "niobe".to_owned(),
         branch: Some("main".to_owned()),
         read: true,
         working: vec![working("kept.txt", false), working("fresh.txt", true)],
         ..Repo::default()
-    });
+    }));
 
     let frame = screen(&mut app, 120, 30);
     let row = |name: &str| {

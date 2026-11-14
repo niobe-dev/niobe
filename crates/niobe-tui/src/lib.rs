@@ -37,6 +37,7 @@ mod goal;
 pub mod history;
 mod hunks;
 pub mod images;
+mod info;
 mod input;
 pub mod journal;
 // The shell reads the terminal itself only where `poll(2)` can see it, which

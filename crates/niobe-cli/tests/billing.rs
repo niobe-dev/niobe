@@ -77,6 +77,13 @@ impl niobe_tui::Prices for Bundled {
 /// The shell is read at a moment with no timezone, so a window's reset time —
 /// which names a time of day — is left off.
 fn usage_pane(app: &mut App) -> String {
+    use niobe_tui::menu::{Action, SidePane};
+
+    // The main view draws the pane's figures in the info panel; the pane
+    // itself is drawn where the View menu shows it.
+    if !app.shows(SidePane::Usage) {
+        app.perform(Action::Pane(SidePane::Usage));
+    }
     let mut terminal =
         Terminal::new(TestBackend::new(120, 30)).expect("a test backend cannot fail");
     terminal

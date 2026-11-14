@@ -1,30 +1,30 @@
  Niobe  Session  Context  Model  View  Help                                                             ○ not attached
- ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━ Session ─ niobe ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓ ┌──────────────── Usage ────────────────┐
- ┃  No backend attached. `niobe profiles` shows what is defined.            ┃ │ no tokens reported yet                │
- ┃      +  .                                                                ┃ └───────────────────────────────────────┘
- ┃                         .                                                ┃ ┌─────────────── Changes ───────────────┐
- ┃    -=>                             .                 +                   ┃ │ ⎇ main                                │
- ┃                ┏━━━━━━━━━━━━━━━━━━━━━━━━ Trust this repository's config? ━━━━━━━━━━━━━━━━━━━━━━━━━┓                │
- ┃                ┃                                                                                  ┃                │
- ┃                ┃  /home/me/src/niobe/.niobe/config.toml                                           ┃                │
- ┃                ┃                                                                                  ┃                │
- ┃                ┃  It sets what only a config you trust may:                                       ┃                │
- ┃        ░░░░░   ┃                                                                                  ┃                │
- ┃        ░░░░░   ┃  permissions      allow Edit, Bash, mcp__claude_ai_Notion__notion-search, Bash(  ┃                │
- ┃ .      ░░░░░   ┃                   cargo test)                                                    ┃                │
- ┃        ░░░░░   ┃  work             env AWS_PROFILE=work-sso, CLAUDE_CODE_USE_BEDROCK=1            ┃                │
- ┃        ░░░░░   ┃  work             auth_refresh aws sso login --profile work-sso                  ┃                │
- ┃        ░░░░░  ┌┃  default_profile  work                                                           ┃                │
- ┃        ░░░░░ ░│┃                                                                                  ┃────────────────┘
- ┃ ░░░░░  ░░░░░ ░│┃  Trusted, it stays in force until the file changes. Without it, none of the      ┃ ───────────────┐
- ┃ ░┌───────┐░░ ░│┃  above is.                                                                       ┃g · 0 spawned   │
- ┃ ░│       │░░ ░│┃                                                                                  ┃                │
- ┃ ░│       │░░ ░│┃    1. Yes, trust this config                                                     ┃ent says  0     │
- ┃ ░│       │░░ ░│┃  › 2. No, open without it                                                        ┃                │
- ┃ ░│   ▪   │░░ ░│┃                                                                                  ┃enied · 0 B out │
- ┃ ░│       │░░ ░│┗━━━━━━━━━━ ↑↓ choose, pause, Enter answer · Esc no · Ctrl+C twice quit ━━━━━━━━━━━┛                │
- ┃ ░│     ▪ │░░ ░│       │  ░░│     │░ ░░│ ▪ ▪   ▪│░░░░░░░░░░░ ░░│     ▪│░░ ┃ │                                       │
- ┃ ──────────────────────────────────────────────────────────────────────── ┃ │                                       │
- ┃  —  >  Ask for a change · Ctrl+F find    Shift+Tab mode · Ctrl+J newline ┃ │                                       │
- ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ └───────────────────────────────────────┘
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ Session ─ niobe ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃  No backend attached. `niobe profiles` shows what is defined.                                           ┌────────┐   ┃
+┃      +  .                                                                                               │ ⎇ main │   ┃
+┃                         .                                                                             * └────────┘   ┃
+┃                                    .                 +                                 -=>            │      .       ┃
+┃                 ┏━━━━━━━━━━━━━━━━━━━━━━━━ Trust this repository's config? ━━━━━━━━━━━━━━━━━━━━━━━━━┓  │              ┃
+┃                 ┃                                                                                  ┃  │              ┃
+┃                 ┃  /home/me/src/niobe/.niobe/config.toml                                           ┃─────┐           ┃
+┃                 ┃                                                                                  ┃     │           ┃
+┃                 ┃  It sets what only a config you trust may:                                       ┃ ▪   │        ░░ ┃
+┃        ░░░░░    ┃                                                                                  ┃     │        ░░ ┃
+┃        ░░░░░    ┃  permissions      allow Edit, Bash, mcp__claude_ai_Notion__notion-search, Bash(  ┃     │        ░░ ┃
+┃ .      ░░░░░    ┃                   cargo test)                                                    ┃     │        ░░ ┃
+┃        ░░░░░    ┃  work             env AWS_PROFILE=work-sso, CLAUDE_CODE_USE_BEDROCK=1            ┃ ▪ ▪ │        ░░ ┃
+┃        ░░░░░    ┃  work             auth_refresh aws sso login --profile work-sso                  ┃     │        ░░ ┃
+┃        ░░░░░  ┌─┃  default_profile  work                                                           ┃     │        ░░ ┃
+┃        ░░░░░ ░│ ┃                                                                                  ┃     │░ ░░░░░ ░░ ┃
+┃ ░░░░░  ░░░░░ ░│ ┃  Trusted, it stays in force until the file changes. Without it, none of the      ┃ ▪   │░ ░░░░░ ░░ ┃
+┃ ░┌───────┐░░ ░│ ┃  above is.                                                                       ┃     │░ ░░░░░ ░░ ┃
+┃ ░│       │░░ ░│ ┃                                                                                  ┃ ▪ ▪ │░ ░░░░░ ░░ ┃
+┃ ░│       │░░ ░│ ┃    1. Yes, trust this config                                                     ┃     │░ ░░░░░ ░░ ┃
+┃ ░│       │░░ ░│ ┃  › 2. No, open without it                                                        ┃     │░ ░░░░░ ░░ ┃
+┃ ░│   ▪   │░░ ░│ ┃                                                                                  ┃     │░ ░░░░░ ░░ ┃
+┃ ░│       │░░ ░│ ┗━━━━━━━━━━ ↑↓ choose, pause, Enter answer · Esc no · Ctrl+C twice quit ━━━━━━━━━━━┛ ▪ ▪ │░ ░░░░░ ░░ ┃
+┃ ░│     ▪ │░░ ░│       │  ░░│     │░ ░░│ ▪ ▪   ▪│░░░░░░░░░░░ ░░│     ▪│░░░░░│ ▪     ││         │░ ░░│     │░ ░░░░░ ░░ ┃
+┃ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ┃
+┃  —  >  Ask for a change · Ctrl+F find                                                Shift+Tab mode · Ctrl+J newline ┃
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 EscStop 1Help     2Compact     3Clear     4Model     5Diff     6Rewind     7MCP     8Memory     9Settings     0Quit

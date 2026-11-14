@@ -1748,7 +1748,10 @@ pub struct App {
     /// The hint said while a rewind is waiting on the backend's answer, which
     /// the answer replaces where no key has already.
     rewinding: Option<String>,
-    /// The panes of the right-hand stack the operator hid.
+    /// The panes of the right-hand stack that are not drawn: every one of
+    /// them until the View menu shows it, since the main view gives the
+    /// session the whole width and puts what the session stands at in the
+    /// info panel over its corner.
     hidden: BTreeSet<crate::menu::SidePane>,
     /// The files outside the session the shell can name or have opened.
     places: Places,
@@ -1806,6 +1809,13 @@ pub struct App {
     /// What the idle scene is drawn from: a fixed one, so a test draws the
     /// same scene, until the event loop gives the shell one of its own.
     scene_seed: u64,
+    /// Whether the transcript's first entry is the row a cleared
+    /// conversation opens with, which the idle scene is drawn behind until
+    /// something else happens.
+    cleared: bool,
+    /// Where the last frame drew the info panel over the transcript, so a
+    /// click on it does not land on the line it hides.
+    info_drawn: Option<ratatui::layout::Rect>,
     /// The wall clock the same tick read, which is what every event folded in
     /// now is stamped with. `None` until the loop has ticked, which is also
     /// what a fold with no clock behind it — a JSON Lines log — leaves behind:
@@ -2358,7 +2368,7 @@ impl App {
             rewinding: None,
             unlisted_held: None,
             reconnecting: None,
-            hidden: BTreeSet::new(),
+            hidden: BTreeSet::from(crate::menu::SidePane::ALL),
             places: Places::default(),
             trusting: None,
             trusted: None,
@@ -2376,6 +2386,8 @@ impl App {
             clock: None,
             now: None,
             scene_seed: 0,
+            cleared: false,
+            info_drawn: None,
             at: None,
             unsaved: None,
             asides: BTreeSet::new(),
@@ -2717,6 +2729,7 @@ impl App {
             .collect();
         self.cleared_prompts.extend(sent);
         self.entries.clear();
+        self.cleared = false;
         self.queued_prompts.clear();
         self.tool_entries.clear();
         self.cut_entries.clear();
@@ -3416,6 +3429,7 @@ impl App {
             // says where that went.
             Event::Cleared => {
                 self.start_over();
+                self.cleared = true;
                 self.sent_since = self.sent.len();
                 self.push(Entry {
                     queued: false,
@@ -7018,10 +7032,13 @@ impl App {
     }
 
     /// Whether the session pane shows the theme's idle scene: nothing has
-    /// happened in it, and no question waits there. The loop draws faster
-    /// while it does.
+    /// happened in it since it started or was cleared, and no question waits
+    /// there. The loop draws faster while it does.
+    ///
+    /// A cleared conversation is a new session, and opens as one does; the
+    /// row saying what was cleared is drawn over the scene's foot.
     pub fn showing_scene(&self) -> bool {
-        self.entries.is_empty() && self.asks.is_empty()
+        self.entries.len() == usize::from(self.cleared) && self.asks.is_empty()
     }
 
     /// The moment the idle scene is drawn at: the wall clock the last tick
@@ -7514,6 +7531,40 @@ impl App {
     /// finished alike.
     pub fn agents(&self) -> &[SubAgent] {
         &self.agents
+    }
+
+    /// What each shell command running now runs: the operator's `!`
+    /// commands that have not ended, oldest first, then the commands the
+    /// backend moved to the background, each by what its call says it does.
+    ///
+    /// A background command whose call this shell never saw — one the
+    /// conversation started before a clear — has nothing to be named by and
+    /// is left out rather than drawn as a blank.
+    pub fn shells(&self) -> Vec<&str> {
+        let background = self.session.background_commands().iter().filter_map(|id| {
+            self.recorded
+                .iter()
+                .rev()
+                .find(|(recorded, _)| recorded == id)
+                .map(|(_, call)| call.what.as_str())
+        });
+        self.running_commands
+            .iter()
+            .map(|(_, command)| command.as_str())
+            .chain(background)
+            .collect()
+    }
+
+    /// Where the last frame drew the info panel, or `None` where it drew
+    /// none.
+    pub(crate) fn drew_info(&mut self, at: Option<ratatui::layout::Rect>) {
+        self.info_drawn = at;
+    }
+
+    /// Where the last frame drew the info panel.
+    #[cfg(test)]
+    pub(crate) fn info_drawn(&self) -> Option<ratatui::layout::Rect> {
+        self.info_drawn
     }
 
     /// What a sub-agent was spawned to do.
@@ -8620,7 +8671,10 @@ impl App {
     /// last frame drew none of the session's lines there.
     fn transcript_point(&self, column: u16, row: u16) -> Option<crate::select::Point> {
         let (area, lines) = self.transcript_drawn?;
-        if !area.contains((column, row).into()) {
+        let on_info = self
+            .info_drawn
+            .is_some_and(|info| info.contains((column, row).into()));
+        if !area.contains((column, row).into()) || on_info {
             return None;
         }
         let line = self.scroll() + usize::from(row - area.y);
@@ -22264,17 +22318,17 @@ mod tests {
         use crate::menu::SidePane;
 
         let mut app = app();
-        assert!(app.shows(SidePane::Changes));
+        assert!(!app.shows(SidePane::Changes));
         app.on_key(alt('v'));
         app.on_key(key(KeyCode::Char('c')));
         app.on_key(key(KeyCode::Enter));
-        assert!(!app.shows(SidePane::Changes));
-        assert!(app.shows(SidePane::Activity));
+        assert!(app.shows(SidePane::Changes));
+        assert!(!app.shows(SidePane::Activity));
 
         app.on_key(alt('v'));
         app.on_key(key(KeyCode::Char('c')));
         app.on_key(key(KeyCode::Enter));
-        assert!(app.shows(SidePane::Changes), "and shown again");
+        assert!(!app.shows(SidePane::Changes), "and hidden again");
     }
 
     #[test]
@@ -23766,5 +23820,66 @@ mod tests {
                 assert_eq!(glyph_around(line, col), walked, "{line:?} at {col}");
             }
         }
+    }
+
+    /// The main view gives the session the whole width: the right-hand stack
+    /// is not drawn until the View menu shows one of its panes.
+    #[test]
+    fn the_right_hand_stack_is_hidden_until_the_view_menu_shows_a_pane() {
+        use crate::menu::{Action, SidePane};
+
+        let mut app = app();
+        for pane in [SidePane::Usage, SidePane::Changes, SidePane::Activity] {
+            assert!(!app.shows(pane), "{pane:?} starts hidden");
+        }
+
+        app.perform(Action::Pane(SidePane::Changes));
+
+        assert!(app.shows(SidePane::Changes));
+        assert!(!app.shows(SidePane::Usage));
+    }
+
+    /// A conversation cleared is a new session, and it opens as one does: on
+    /// the idle scene, with the row that says what was cleared kept. The
+    /// first thing that happens after it takes the scene away again.
+    #[test]
+    fn the_idle_scene_comes_back_when_the_conversation_is_cleared() {
+        let mut app = app().attached();
+        assert!(app.showing_scene(), "a session nothing happened in");
+
+        app.apply(&Event::UserMessage {
+            text: "explain the parser".to_owned(),
+        });
+        assert!(!app.showing_scene());
+
+        app.apply(&Event::Cleared);
+        assert!(app.showing_scene(), "cleared, the session starts over");
+        assert_eq!(app.entries().len(), 1, "the cleared row is kept");
+
+        app.apply(&Event::UserMessage {
+            text: "format it".to_owned(),
+        });
+        assert!(!app.showing_scene());
+    }
+
+    /// The shells at work are the operator's `!` commands that have not
+    /// ended and the commands the backend moved to the background, each by
+    /// what it runs; one that ended leaves the list.
+    #[test]
+    fn the_shells_running_are_the_operators_commands_and_the_backends_background_ones() {
+        let mut app = app().attached().runs_commands();
+        assert!(app.shells().is_empty());
+
+        app.apply(&start("b1", "Bash", "{}", Some("npm run dev")));
+        app.apply(&end("b1", "Bash"));
+        app.apply(&Event::BackgroundCommandStarted { id: "b1".into() });
+        typed(&mut app, "!tail -f log/dev.log");
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(app.take_commands().len(), 1, "the command was run");
+
+        assert_eq!(app.shells(), vec!["tail -f log/dev.log", "npm run dev"]);
+
+        app.apply(&Event::BackgroundCommandEnded { id: "b1".into() });
+        assert_eq!(app.shells(), vec!["tail -f log/dev.log"]);
     }
 }

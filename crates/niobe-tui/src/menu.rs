@@ -140,15 +140,21 @@ impl Action {
     }
 }
 
-/// A pane of the right-hand stack, which the View menu shows and hides.
+/// A pane of the right-hand stack, which the View menu shows and hides. The
+/// main view draws none of them until it is asked to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum SidePane {
     /// The plan's windows, the tokens and the context.
     Usage,
-    /// The working tree, the commits and the tests.
+    /// The branch and the working tree.
     Changes,
-    /// The sub-agents and the tools.
+    /// The sub-agents, the decisions the agent stated and the tools.
     Activity,
+}
+
+impl SidePane {
+    /// Every pane of the stack, top to bottom.
+    pub const ALL: [SidePane; 3] = [SidePane::Usage, SidePane::Changes, SidePane::Activity];
 }
 
 /// One line of a menu.

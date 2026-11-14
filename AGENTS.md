@@ -249,11 +249,20 @@ reviewers that encode both, for an agent working in this tree.
   finished turn with what that turn did and spent — its sub-agents and calls, its tokens, how far
   it moved the five-hour window and how long it took — giving up whole figures where the pane is narrow,
   and names a turn that compacted the conversation as one, under the row that says what the
-  compaction shrank the context from and to. `usage.rs` is the arithmetic under the Usage
+  compaction shrank the context from and to. `info.rs` is the main view's info panel: the
+  session takes the whole width, the Usage, Changes and Activity panes are drawn beside it only
+  where the View menu shows them, and over the transcript's top-right corner, on a terminal at
+  least 100 columns wide, a panel with a shadow holds the Usage pane's figures less every row
+  standing where a figure has not come yet, the branch with the lines the working tree adds and
+  removes, and the sub-agents and shell commands — the operator's `!` commands and the backend's
+  background ones — running now; a part with nothing in it takes no row, the panel is as wide as
+  its widest row up to fifty columns, it is not drawn over a question waiting on the operator,
+  and a click on it reaches nothing under it. `usage.rs` is the arithmetic under the Usage
   pane's breakdown — each model's share in whole percent that add up to 100, what each model
   is called in a row and what the cache saved — `meter.rs` the two-tone bar every share in that
   pane is drawn with, `tree.rs` groups the working tree's files under the directories they
-  share, `scene.rs` is the animation the session pane shows while nothing has happened in it,
+  share, `scene.rs` is the animation the session pane shows while nothing has happened in it since it
+  started or was cleared — the row a clear leaves drawn over its foot —
   one per theme as `Theme::scene` names it and a user's theme keeps its base's — `scene/rain.rs`
   `neo`'s glyph rain, katakana, digits and marks written by falling heads and fading behind them
   in the accent; `scene/skyline.rs` `cyber`'s night city, two rows of towers sliding past at
