@@ -274,8 +274,9 @@ reviewers that encode both, for an agent working in this tree.
   to a terminal cell in half blocks, the newborn white and the dead a ghost for a generation,
   sown again from a random soup every era, the last generation reached kept on the thread only
   so the next frame steps on from it; `scene/cyborg.rs` `modern`'s cyborg head, ellipsoids met by
-  a ray from every cell and shaded in an ASCII ramp at a few steps of light, half plated round a
-  red eye, turning from side to side, grinning and winking — each worked out from a seed and the
+  a ray from every pixel — two to a cell, in half blocks — and lit as skin or metal by a key
+  light, an accent rim light and the red eye's glow, each light rounded to a few steps, half
+  plated round that eye, turning from side to side, grinning and winking — each worked out from a seed and the
   wall clock the loop last read, so two draws
   at one moment draw one frame, drawn in the theme's values or its sixteen names with no shade a
   terminal could not draw, and drawn every 33 ms by the loop while it shows — and `spike.rs` finds a turn that spent more than three times the tokens the session's earlier

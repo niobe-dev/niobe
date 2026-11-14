@@ -2,23 +2,27 @@
 // Copyright (c) Viacheslav Shynkarenko
 
 //! The cyborg `modern` shows in the session pane before anything has
-//! happened in it: a head in three dimensions drawn in ASCII, half of it
-//! plated in metal round a glowing red eye, turning gently from side to side,
-//! breaking into a grin and winking its human eye while it does.
+//! happened in it: a head in three dimensions, half of it plated in metal
+//! round a glowing red eye, turning gently from side to side, breaking into a
+//! grin and winking its human eye while it does.
 //!
 //! The head is a handful of ellipsoids — skull, jaw, nose, ears, eyes — and
-//! a neck, each met by a ray cast from every cell of the pane straight into
-//! it, so the picture is worked out whole for the moment drawn. Where a ray
-//! meets the head, the light falling on that point picks a character from a
-//! ramp of denser ones and a shade of the part's colour; the face's features
-//! — the seams of the plate, the brow, the lips, the line a closing lid
-//! leaves — are painted on the surface where the ray meets it. A cell is
-//! about twice as tall as it is wide, so the head is laid out two columns to
-//! a row.
+//! a neck, each met by a ray cast from every pixel of the pane straight into
+//! it, so the picture is worked out whole for the moment drawn. A pixel is
+//! half a terminal cell, the upper or lower half block, so the pixels are
+//! about square and the head is drawn in shaded colour rather than in
+//! characters. Where a ray meets the head, the surface is lit as its
+//! material is — skin softly, with the light wrapping a little round it;
+//! metal hard, with a sharp highlight — by a warm light from the upper left,
+//! a cold rim light in the theme's accent from behind on the right, and the
+//! red eye's own glow on the plate round it. The face's features — the
+//! seams of the plate, the brow, the lips, the iris, the line a closing lid
+//! leaves — are painted on the surface where the ray meets it.
 //!
-//! Every shade is one of a few steps of light rather than a value of its
-//! own, so a cell is rewritten only when the turn of the head moves it to
-//! another step, not every frame.
+//! Every light is one of a few steps rather than a value of its own, so a
+//! cell is rewritten only when the turn of the head moves it to another step,
+//! not every frame. In the sixteen names each material has three shades —
+//! its colour, its darker and the darker of that — and a highlight is white.
 
 use std::f32::consts::TAU;
 
@@ -26,11 +30,8 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 
-use super::{darker, faded, key, rgb};
+use super::{darker, key, rgb};
 use crate::theme::Theme;
-
-/// The characters a lit surface is drawn in, darkest first.
-const RAMP: [char; 9] = ['.', ':', '-', '=', '+', '*', '#', '%', '@'];
 
 /// How tall the pane's picture is, in the units the head is built in: from
 /// above the antenna's tip to the neck under the jaw.
@@ -45,10 +46,10 @@ const MIDDLE: f32 = -0.05;
 
 /// How long the head takes to turn from one side to the other and back,
 /// in milliseconds.
-const TURN: u64 = 7_000;
+const TURN: u64 = 9_000;
 
 /// How long a nod takes, in milliseconds.
-const NOD: u64 = 9_000;
+const NOD: u64 = 11_000;
 
 /// How long the face takes to go from straight to a grin, wink and back,
 /// in milliseconds.
@@ -60,6 +61,10 @@ const PULSE: u64 = 1_500;
 /// How long the antenna's light takes to blink, in milliseconds.
 const BLINK: u64 = 1_000;
 
+/// How many steps a light is rounded to: enough that the shading reads as
+/// smooth, few enough that a slow turn moves only the cells at a step's edge.
+const STEPS: f32 = 14.0;
+
 /// Where the human eye is, on the head's right; the red eye is its mirror.
 const EYE: [f32; 3] = [0.27, 0.2, 0.6];
 
@@ -70,9 +75,13 @@ const EYE_RADIUS: f32 = 0.14;
 /// covers it as it closes.
 const LID_RADIUS: f32 = 0.155;
 
+/// How far from where an eye looks its pupil and its iris reach.
+const PUPIL: f32 = 0.035;
+const IRIS: f32 = 0.08;
+
 /// Where the mouth's middle is, how wide it is at its straightest and how
-/// thick its line is drawn.
-const MOUTH: (f32, f32, f32) = (-0.4, 0.2, 0.028);
+/// thick its lips are drawn.
+const MOUTH: (f32, f32, f32) = (-0.4, 0.2, 0.045);
 
 /// What a ray met.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,10 +107,10 @@ enum Paint {
     Metal,
     /// A ridge of the neck's metal.
     Rib,
-    /// A seam of the plate, the ring round the red eye or the brow.
-    Line(char),
-    /// The lips.
-    Lips(char),
+    /// A seam of the plate, or the socket round the red eye.
+    Seam,
+    Brow,
+    Lips,
     Teeth,
     /// The dark of an open mouth.
     Gap,
@@ -109,6 +118,7 @@ enum Paint {
         core: bool,
     },
     White,
+    Iris,
     Pupil,
     Lash,
     Tip,
@@ -138,6 +148,11 @@ fn unit(a: Vector) -> Vector {
         true => scale(a, 1.0 / length),
         false => [0.0, 0.0, 1.0],
     }
+}
+
+/// `a` and `b` mixed, `share` of the way from `a` to `b`.
+fn lerp(a: Vector, b: Vector, share: f32) -> Vector {
+    add(scale(a, 1.0 - share), scale(b, share))
 }
 
 /// A part of the head shaped as an ellipsoid: its centre, its three radii
@@ -350,15 +365,15 @@ fn paint(part: Part, at: Vector, toward: Vector, pose: &Pose) -> Paint {
             false => Paint::Metal,
         },
         Part::Metal => Paint::Metal,
-        Part::Lens => match off_axis(at, [-EYE[0], EYE[1], EYE[2]], toward) < 0.065 {
-            true => Paint::Lens { core: true },
-            false => Paint::Lens { core: false },
+        Part::Lens => Paint::Lens {
+            core: off_axis(at, [-EYE[0], EYE[1], EYE[2]], toward) < 0.065,
         },
-        Part::Eye => match off_axis(at, EYE, toward) < 0.06 {
-            true => Paint::Pupil,
-            false => Paint::White,
+        Part::Eye => match off_axis(at, EYE, toward) {
+            off if off < PUPIL => Paint::Pupil,
+            off if off < IRIS => Paint::Iris,
+            _ => Paint::White,
         },
-        Part::Lid => match (y - lid_edges(pose.wink).0).abs() < 0.035 {
+        Part::Lid => match (y - lid_edges(pose.wink).0).abs() < 0.04 {
             true => Paint::Lash,
             false => Paint::Skin,
         },
@@ -375,7 +390,7 @@ fn off_axis(at: Vector, centre: Vector, toward: Vector) -> f32 {
 }
 
 /// What the skin of the face shows at `at`: the plate on its left, its
-/// seams and the ring round the red eye, the brow over the human eye, and
+/// seams and the socket round the red eye, the brow over the human eye, and
 /// the mouth.
 fn face(at: Vector, pose: &Pose) -> Paint {
     let [x, y, z] = at;
@@ -385,35 +400,29 @@ fn face(at: Vector, pose: &Pose) -> Paint {
         return mouth;
     }
     let plated = x < -0.03 && y > -0.12;
-    let lens = [-EYE[0], EYE[1]];
-    let ring = (x - lens[0]).hypot(y - lens[1]);
-    if plated && z > 0.3 && (0.16..0.21).contains(&ring) {
-        return Paint::Line(match (x - lens[0]).abs() > (y - lens[1]).abs() * 1.4 {
-            true if x < lens[0] => '(',
-            true => ')',
-            false => '-',
-        });
+    let ring = (x + EYE[0]).hypot(y - EYE[1]);
+    if plated && z > 0.3 && (0.15..0.2).contains(&ring) {
+        return Paint::Seam;
     }
-    let seam = ((x + 0.03).abs() < 0.018 && y > -0.12)
-        || ((y + 0.12).abs() < 0.02 && x < -0.03)
+    let seam = ((x + 0.03).abs() < 0.02 && y > -0.12)
+        || ((y + 0.12).abs() < 0.022 && x < -0.03)
         || ((y - 0.44).abs() < 0.02 && (-0.46..-0.08).contains(&x));
     if seam {
-        let upright = (x + 0.03).abs() < 0.018;
-        return Paint::Line(if upright { '|' } else { '-' });
+        return Paint::Seam;
     }
     if plated {
         return Paint::Metal;
     }
     let brow = EYE[1] + 0.27 - 1.2 * (x - EYE[0]).powi(2) - 0.05 * pose.wink;
-    if z > 0.3 && (x - EYE[0]).abs() < 0.17 && (y - brow).abs() < 0.028 {
-        return Paint::Line(slope(-2.4 * (x - EYE[0]), '-'));
+    if z > 0.3 && (x - EYE[0]).abs() < 0.17 && (y - brow).abs() < 0.035 {
+        return Paint::Brow;
     }
     Paint::Skin
 }
 
-/// What the mouth shows at `(x, y)` on the face, if it is there: the upper
-/// lip's line, curving up at its corners the wider the grin, and once the
-/// grin is wide, teeth and the dark of the open mouth under it.
+/// What the mouth shows at `(x, y)` on the face, if it is there: the lips,
+/// curving up at their corners the wider the grin, and once the grin is
+/// wide, teeth and the dark of the open mouth under the upper lip.
 fn mouth(x: f32, y: f32, grin: f32) -> Option<Paint> {
     let (middle, half, thick) = MOUTH;
     let half = half + 0.08 * grin;
@@ -424,9 +433,11 @@ fn mouth(x: f32, y: f32, grin: f32) -> Option<Paint> {
     let lip = middle + curve * x * x;
     let rise = 2.0 * curve * x;
     // Measured across the line rather than straight down, so a corner
-    // curling up steeply is drawn as unbroken as the middle.
-    if (y - lip).abs() < thick * rise.hypot(1.0) {
-        return Some(Paint::Lips(slope(rise, '_')));
+    // curling up steeply is drawn as thick as the middle; the lips thin
+    // toward the corners.
+    let taper = 1.0 - 0.5 * (x / half).powi(2);
+    if (y - lip).abs() < thick * taper * rise.hypot(1.0) {
+        return Some(Paint::Lips);
     }
     let open = (grin - 0.45).max(0.0) * 0.26 * (1.0 - (x / half).powi(2));
     let below = lip - y;
@@ -437,112 +448,272 @@ fn mouth(x: f32, y: f32, grin: f32) -> Option<Paint> {
     }
 }
 
-/// The line that runs most nearly at `rise`, up over across in the head's
-/// units, a cell being twice as tall as it is wide: `flat` where it is near
-/// level.
-fn slope(rise: f32, flat: char) -> char {
-    match rise / 2.0 {
-        cells if cells > 0.3 => '/',
-        cells if cells < -0.3 => '\\',
-        _ => flat,
+/// How the light falls on a point: from the key light, the rim light behind
+/// it and its highlight, each rounded to one of [`STEPS`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Light {
+    /// The diffuse light and the ambient under it, from nought to one.
+    body: f32,
+    /// The highlight, from nought to one.
+    shine: f32,
+    /// The accent's rim light, from nought to one.
+    rim: f32,
+}
+
+/// `light` rounded to one of [`STEPS`], so a slow turn changes a point's
+/// light only where it crosses a step.
+fn stepped(light: f32) -> f32 {
+    (light.clamp(0.0, 1.0) * STEPS).round() / STEPS
+}
+
+/// The directions a point is lit from and seen from, in the head's frame.
+struct Lamps {
+    key: Vector,
+    back: Vector,
+    toward: Vector,
+}
+
+/// How a surface facing `normal`, painted `paint`, is lit by `lamps`.
+fn light(normal: Vector, paint: Paint, lamps: &Lamps) -> Light {
+    let facing = dot(normal, lamps.key);
+    let (wrap, hardness, strength) = match paint {
+        Paint::Metal | Paint::Rib | Paint::Seam => (0.0, 48, 0.9),
+        Paint::White | Paint::Iris | Paint::Pupil | Paint::Lens { .. } => (0.1, 90, 1.0),
+        Paint::Teeth => (0.2, 24, 0.4),
+        Paint::Lips => (0.35, 16, 0.25),
+        Paint::Skin | Paint::Brow | Paint::Lash | Paint::Gap | Paint::Tip => (0.35, 12, 0.12),
+    };
+    // Skin lets the light wrap a little past where it faces away, which is
+    // what keeps a face from looking carved out of plaster.
+    let diffuse = ((facing + wrap) / (1.0 + wrap)).max(0.0);
+    let ambient = 0.2 + 0.08 * normal[1];
+    let half = unit(add(lamps.key, lamps.toward));
+    let shine = strength * dot(normal, half).max(0.0).powi(hardness);
+    let edge = (1.0 - dot(normal, lamps.toward).max(0.0)).powi(3);
+    let rim = edge * (dot(normal, lamps.back) + 0.25).max(0.0);
+    Light {
+        body: stepped(ambient + 0.85 * diffuse),
+        shine: stepped(shine),
+        rim: stepped(0.9 * rim),
     }
 }
 
-/// The colours the head is drawn in.
-struct Ink {
-    deep: bool,
+/// The colours the head is drawn in: values where the terminal draws them,
+/// the sixteen names where it does not.
+enum Ink {
+    Deep(Box<Deep>),
+    Sixteen(Sixteen),
+}
+
+/// The head's colours as values, each a share of full red, green and blue.
+struct Deep {
+    pane: Vector,
+    skin: Vector,
+    metal: Vector,
+    lips: Vector,
+    lens: Vector,
+    iris: Vector,
+    rim: Vector,
+    white: Vector,
+}
+
+/// The head's colours in the sixteen names.
+struct Sixteen {
     pane: Color,
     skin: Color,
     metal: Color,
-    line: Color,
-    lips: Color,
     lens: Color,
     iris: Color,
-    white: Color,
+}
+
+/// A colour as shares of full red, green and blue, where it is a value.
+fn shares(colour: Color) -> Option<Vector> {
+    rgb(colour).map(|(r, g, b)| [r, g, b].map(|channel| f32::from(channel) / 255.0))
+}
+
+/// Shares of full red, green and blue as a value.
+fn value(colour: Vector) -> Color {
+    // Clamped to a share of one first, so the product is within a byte.
+    let [r, g, b] = colour.map(|share| (share.clamp(0.0, 1.0) * 255.0).round() as u8);
+    Color::Rgb(r, g, b)
 }
 
 impl Ink {
     fn of(theme: &Theme) -> Self {
-        let deep = rgb(theme.pane_bg).is_some();
-        Self {
-            deep,
-            pane: theme.pane_bg,
-            skin: theme.fg,
-            metal: theme.hot,
-            line: theme.dim,
-            lips: theme.tool,
-            lens: theme.del,
-            iris: theme.add,
-            white: match deep {
-                true => Color::Rgb(255, 255, 255),
-                false => Color::White,
-            },
-        }
-    }
-
-    /// `colour` at `step` of the ramp's light, darkest first: a share of it
-    /// over the pane where the terminal draws values, and in the sixteen
-    /// names the colour, its darker, or the darker of that.
-    fn lit(&self, colour: Color, step: usize) -> Color {
-        let step = u32::try_from(step).unwrap_or(0);
-        let last = u32::try_from(RAMP.len() - 1).unwrap_or(1);
-        match self.deep {
-            true => faded(colour, self.pane, 30 + 70 * step / last, colour),
-            false if step * 3 >= last * 2 => colour,
-            false if step * 3 >= last => darker(colour),
-            false => darker(darker(colour)),
-        }
-    }
-
-    /// The glyph and style a cell is drawn in, for what is painted there at
-    /// `step` of the ramp's light.
-    fn cell(&self, paint: Paint, step: usize, pose: &Pose) -> (char, Style) {
-        let paper = Style::new().bg(self.pane);
-        let ramp = RAMP.get(step).copied().unwrap_or('.');
-        match paint {
-            Paint::Skin => (ramp, paper.fg(self.lit(self.skin, step))),
-            Paint::Metal if step == RAMP.len() - 1 => ('@', paper.fg(self.white).bold()),
-            Paint::Metal => (ramp, paper.fg(self.lit(self.metal, step))),
-            Paint::Rib => ('=', paper.fg(self.lit(self.metal, step / 2))),
-            Paint::Line(glyph) => (glyph, paper.fg(self.line)),
-            Paint::Lips(glyph) => (glyph, paper.fg(self.lips).bold()),
-            Paint::Teeth => ('=', paper.fg(self.white)),
-            Paint::Gap => ('.', paper.fg(darker(self.line))),
-            Paint::Lens { core: true } => ('@', paper.fg(self.lens).bold()),
-            Paint::Lens { core: false } => {
-                let bright = pose.glow > 0.5;
-                let colour = match (self.deep, bright) {
-                    (_, true) => self.lens,
-                    (true, false) => faded(self.lens, self.pane, 60, self.lens),
-                    (false, false) => darker(self.lens),
-                };
-                (if bright { 'O' } else { 'o' }, paper.fg(colour))
+        let values = [
+            theme.pane_bg,
+            theme.title,
+            theme.del,
+            theme.hot,
+            theme.dim,
+            theme.add,
+        ]
+        .map(shares);
+        match values {
+            [
+                Some(pane),
+                Some(title),
+                Some(del),
+                Some(hot),
+                Some(dim),
+                Some(add),
+            ] => {
+                // The theme's warm yellow, flushed a little with its red: a
+                // skin tone drawn from the palette rather than beside it.
+                let skin = lerp(title, del, 0.2);
+                Self::Deep(Box::new(Deep {
+                    pane,
+                    skin,
+                    // Steel: the theme's grey with a cast of its accent.
+                    metal: lerp(dim, hot, 0.3),
+                    lips: scale(lerp(skin, del, 0.4), 0.8),
+                    lens: del,
+                    iris: add,
+                    rim: hot,
+                    white: [0.93, 0.93, 0.95],
+                }))
             }
-            Paint::White => (ramp, paper.fg(self.lit(self.white, step))),
-            Paint::Pupil => ('@', paper.fg(self.iris).bold()),
-            Paint::Lash => ('-', paper.fg(self.line).bold()),
-            Paint::Tip if pose.tip => ('*', paper.fg(self.lens).bold()),
-            Paint::Tip => ('.', paper.fg(darker(self.lens))),
+            _ => Self::Sixteen(Sixteen {
+                pane: theme.pane_bg,
+                skin: theme.fg,
+                metal: theme.hot,
+                lens: theme.del,
+                iris: theme.add,
+            }),
+        }
+    }
+
+    /// The colour of a point painted `paint` and lit by `light`, which
+    /// `glow` of the red eye's light falls on.
+    fn colour(&self, paint: Paint, light: Light, glow: f32, pose: &Pose) -> Color {
+        match self {
+            Self::Deep(deep) => value(deep.colour(paint, light, glow, pose)),
+            Self::Sixteen(sixteen) => sixteen.colour(paint, light, pose),
+        }
+    }
+
+    fn pane(&self) -> Color {
+        match self {
+            Self::Deep(deep) => value(deep.pane),
+            Self::Sixteen(sixteen) => sixteen.pane,
         }
     }
 }
 
-/// The step of the ramp a surface facing `normal` is lit to, with the light
-/// coming from `light` and the operator looking from `toward`: metal shines
-/// where the light glances off it toward them.
-fn step(normal: Vector, light: Vector, toward: Vector, shiny: bool) -> usize {
-    let diffuse = dot(normal, light).max(0.0);
-    let shine = match shiny {
-        true => {
-            let bounce = sub(scale(normal, 2.0 * dot(normal, light)), light);
-            dot(bounce, toward).max(0.0).powi(16) * 0.5
+impl Deep {
+    fn colour(&self, paint: Paint, light: Light, glow: f32, pose: &Pose) -> Vector {
+        let dark = scale(self.pane, 0.5);
+        let (albedo, emits) = match paint {
+            Paint::Skin => (self.skin, None),
+            Paint::Brow | Paint::Lash => (scale(self.skin, 0.35), None),
+            Paint::Metal => (self.metal, None),
+            Paint::Rib => (scale(self.metal, 0.6), None),
+            Paint::Seam => (scale(self.metal, 0.3), None),
+            Paint::Lips => (self.lips, None),
+            Paint::Teeth => (self.white, None),
+            Paint::Gap => (dark, None),
+            Paint::White => (self.white, None),
+            Paint::Iris => (self.iris, None),
+            Paint::Pupil => (dark, None),
+            Paint::Lens { core: true } => (self.white, Some(lerp(self.lens, self.white, 0.5))),
+            Paint::Lens { core: false } => {
+                let bright = 0.55 + 0.45 * stepped(pose.glow);
+                (self.lens, Some(scale(self.lens, bright)))
+            }
+            Paint::Tip => match pose.tip {
+                true => (self.lens, Some(self.lens)),
+                false => (scale(self.lens, 0.35), None),
+            },
+        };
+        if let Some(emits) = emits {
+            return add(emits, scale([1.0, 1.0, 1.0], 0.5 * light.shine));
         }
-        false => 0.0,
+        let lit = scale(albedo, light.body);
+        let shine = scale(lerp(self.white, albedo, 0.3), light.shine);
+        let rim = scale(self.rim, 0.7 * light.rim);
+        let red = scale(self.lens, 0.6 * glow);
+        add(add(lit, shine), add(rim, red))
+    }
+}
+
+impl Sixteen {
+    fn colour(&self, paint: Paint, light: Light, pose: &Pose) -> Color {
+        let shade = |colour: Color| match light.body {
+            body if body >= 0.66 => colour,
+            body if body >= 0.33 => darker(colour),
+            _ => darker(darker(colour)),
+        };
+        let shiny = light.shine >= 0.5;
+        match paint {
+            Paint::Skin => shade(self.skin),
+            Paint::Brow | Paint::Lash | Paint::Seam => Color::DarkGray,
+            Paint::Metal | Paint::Rib if shiny => Color::White,
+            Paint::Metal => shade(self.metal),
+            Paint::Rib => darker(self.metal),
+            Paint::Lips => darker(self.lens),
+            Paint::Teeth | Paint::White => Color::White,
+            Paint::Gap | Paint::Pupil => Color::Black,
+            Paint::Iris => self.iris,
+            Paint::Lens { core: true } => Color::White,
+            Paint::Lens { core: false } if pose.glow > 0.5 => self.lens,
+            Paint::Lens { core: false } => darker(self.lens),
+            Paint::Tip if pose.tip => self.lens,
+            Paint::Tip => darker(self.lens),
+        }
+    }
+}
+
+/// How much of the red eye's light falls on the face at `at`: the plate and
+/// the cheek round the socket blush with it as it brightens.
+fn glow(at: Vector, paint: Paint, pose: &Pose) -> f32 {
+    if !matches!(paint, Paint::Skin | Paint::Metal | Paint::Seam) || at[2] < 0.3 {
+        return 0.0;
+    }
+    let from = (at[0] + EYE[0]).hypot(at[1] - EYE[1]);
+    let near = (1.0 - (from - EYE_RADIUS) / 0.22).clamp(0.0, 1.0);
+    stepped(near * near * (0.4 + 0.6 * pose.glow))
+}
+
+/// What a pixel at `across` and `up`, in the head's units, shows: what is
+/// painted there and how it is lit, or nothing where the ray misses the head.
+fn pixel(across: f32, up: f32, pose: &Pose, lamps: &Lamps) -> Option<(Paint, Vector, Light)> {
+    if across.abs() > 1.2 || up > 1.2 {
+        return None;
+    }
+    let from = pose.seen_from_head([across, up, 4.0]);
+    let way = scale(lamps.toward, -1.0);
+    let (at, part, normal) = cast(from, way, pose)?;
+    let paint = paint(part, at, lamps.toward, pose);
+    Some((paint, at, light(normal, paint, lamps)))
+}
+
+/// The picture of the head in a pane `width` columns by `height` rows, two
+/// pixels to a cell one over the other, as what each pixel shows, a row of
+/// pixels at a time.
+fn picture(width: u16, height: u16, pose: &Pose) -> Vec<Vec<Option<(Paint, Vector, Light)>>> {
+    let (columns, rows) = (f32::from(width), 2.0 * f32::from(height));
+    // Pixels to a unit of the head, as many as fit it whole; a pixel is
+    // about square.
+    let per = (rows / TALL).min(columns / WIDE);
+    if per <= 0.0 {
+        return Vec::new();
+    }
+    let lamps = Lamps {
+        key: pose.seen_from_head(unit([-0.45, 0.5, 0.75])),
+        back: pose.seen_from_head(unit([0.85, 0.25, -0.45])),
+        toward: pose.seen_from_head([0.0, 0.0, 1.0]),
     };
-    let light = (0.1 + 0.8 * diffuse + shine).clamp(0.0, 1.0);
-    let last = RAMP.len() - 1;
-    // Rounded to the nearest step, which is between nought and the last.
-    ((light * last as f32).round() as usize).min(last)
+    (0..2 * height)
+        .map(|row| {
+            let up = MIDDLE - (f32::from(row) + 0.5 - rows / 2.0) / per;
+            (0..width)
+                .map(|column| {
+                    let across = (f32::from(column) + 0.5 - columns / 2.0) / per;
+                    pixel(across, up, pose, &lamps)
+                })
+                .collect()
+        })
+        .collect()
 }
 
 /// Draws the head into `area` of `buffer`, cleared to the pane's colour, as
@@ -553,31 +724,26 @@ pub(super) fn draw(buffer: &mut Buffer, area: Rect, millis: u64, seed: u64, them
     }
     let pose = Pose::at(seed, millis);
     let ink = Ink::of(theme);
-    let (width, height) = (f32::from(area.width), f32::from(area.height));
-    // Rows to a unit of the head, as many as fit it whole; a column is half
-    // as tall, so two to a row.
-    let rows = (height / TALL).min(width / (2.0 * WIDE));
-    if rows <= 0.0 {
-        return;
-    }
-    let way = pose.seen_from_head([0.0, 0.0, -1.0]);
-    let toward = scale(way, -1.0);
-    let light = pose.seen_from_head(unit([-0.4, 0.45, 0.8]));
+    let pane = ink.pane();
+    let shown = picture(area.width, area.height, &pose);
+    let colour = |row: usize, column: usize| {
+        shown
+            .get(row)
+            .and_then(|pixels| pixels.get(column))
+            .copied()
+            .flatten()
+            .map_or(pane, |(paint, at, light)| {
+                ink.colour(paint, light, glow(at, paint, &pose), &pose)
+            })
+    };
     for row in 0..area.height {
-        let up = MIDDLE - (f32::from(row) + 0.5 - height / 2.0) / rows;
         for column in 0..area.width {
-            let across = (f32::from(column) + 0.5 - width / 2.0) / (2.0 * rows);
-            if across.abs() > 1.2 || up > 1.2 {
-                continue;
-            }
-            let from = pose.seen_from_head([across, up, 4.0]);
-            let Some((at, part, normal)) = cast(from, way, &pose) else {
-                continue;
+            let (y, x) = (usize::from(row) * 2, usize::from(column));
+            let (upper, lower) = (colour(y, x), colour(y + 1, x));
+            let (glyph, style) = match upper == lower {
+                true => (' ', Style::new().bg(upper)),
+                false => ('▀', Style::new().fg(upper).bg(lower)),
             };
-            let paint = paint(part, at, toward, &pose);
-            let shiny = matches!(paint, Paint::Metal | Paint::Rib);
-            let lit = step(normal, light, toward, shiny);
-            let (glyph, style) = ink.cell(paint, lit, &pose);
             buffer[(area.x + column, area.y + row)]
                 .set_char(glyph)
                 .set_style(style);
@@ -606,15 +772,30 @@ mod tests {
         buffer
     }
 
-    fn text(buffer: &Buffer) -> String {
-        (0..buffer.area.height)
-            .map(|y| {
-                (0..buffer.area.width)
-                    .map(|x| buffer[(x, y)].symbol())
-                    .collect::<String>()
+    /// Whether the cell at `(x, y)` shows any of the head.
+    fn drawn_at(buffer: &Buffer, theme: &Theme, x: u16, y: u16) -> bool {
+        let cell = &buffer[(x, y)];
+        cell.symbol() != " " || cell.bg != theme.pane_bg
+    }
+
+    /// What every pixel of a 90 by 30 pane shows at `millis` from `seed`.
+    fn painted(millis: u64, seed: u64) -> Vec<Vec<Option<Paint>>> {
+        picture(90, 30, &Pose::at(seed, millis))
+            .into_iter()
+            .map(|row| {
+                row.into_iter()
+                    .map(|pixel| pixel.map(|(paint, _, _)| paint))
+                    .collect()
             })
-            .collect::<Vec<_>>()
-            .join("\n")
+            .collect()
+    }
+
+    fn count(pixels: &[Vec<Option<Paint>>], paint: Paint) -> usize {
+        pixels
+            .iter()
+            .flatten()
+            .filter(|p| **p == Some(paint))
+            .count()
     }
 
     /// The moment `share` of the way into the face's cycle, for `seed`.
@@ -626,68 +807,98 @@ mod tests {
 
     #[test]
     fn the_head_stands_in_the_middle_of_the_pane_and_fills_most_of_its_height() {
-        let drawn = head(&MODERN, 0, 7);
-        let rows: Vec<u16> = (0..30)
-            .filter(|y| (0..90).any(|x| drawn[(x, *y)].symbol() != " "))
-            .collect();
-        assert!(
-            rows.len() >= 26,
-            "{} rows of head\n{}",
-            rows.len(),
-            text(&drawn)
-        );
-        let columns: Vec<u16> = (0..90)
-            .filter(|x| (0..30).any(|y| drawn[(*x, y)].symbol() != " "))
-            .collect();
-        let (left, right) = (columns[0], columns[columns.len() - 1]);
-        assert!(left > 10 && right < 80, "{left}..{right}\n{}", text(&drawn));
-        assert!((i32::from(left) + i32::from(right) - 90).abs() < 16);
+        for theme in [MODERN, MODERN.at(Depth::TrueColour)] {
+            let drawn = head(&theme, 0, 7);
+            let rows = (0..30)
+                .filter(|y| (0..90).any(|x| drawn_at(&drawn, &theme, x, *y)))
+                .count();
+            assert!(rows >= 27, "{rows} rows of head");
+            let columns: Vec<u16> = (0..90)
+                .filter(|x| (0..30).any(|y| drawn_at(&drawn, &theme, *x, y)))
+                .collect();
+            let (left, right) = (columns[0], columns[columns.len() - 1]);
+            assert!(left > 10 && right < 80, "{left}..{right}");
+            assert!((i32::from(left) + i32::from(right) - 90).abs() < 16);
+        }
+    }
+
+    /// No character stands for a shade: every cell is a blank or the upper
+    /// half block, two pixels of colour one over the other.
+    #[test]
+    fn the_head_is_drawn_in_pixels_of_colour_rather_than_characters() {
+        for theme in [MODERN, MODERN.at(Depth::TrueColour)] {
+            for millis in [0, 2_500, 40_000] {
+                let drawn = head(&theme, millis, 7);
+                for cell in drawn.content() {
+                    assert!(
+                        [" ", "▀"].contains(&cell.symbol()),
+                        "{}: {:?}",
+                        theme.name,
+                        cell.symbol()
+                    );
+                }
+                let pixels: std::collections::HashSet<Color> = drawn
+                    .content()
+                    .iter()
+                    .flat_map(|cell| [cell.fg, cell.bg])
+                    .collect();
+                assert!(pixels.len() >= 8, "{} colours", pixels.len());
+            }
+        }
     }
 
     #[test]
     fn the_face_grins_and_winks_while_the_red_eye_keeps_glowing() {
-        let pupils = |buffer: &Buffer| {
-            buffer
-                .content()
-                .iter()
-                .filter(|cell| cell.symbol() == "@" && cell.fg == MODERN.add)
-                .count()
-        };
-        let lens = |buffer: &Buffer| {
-            buffer
-                .content()
-                .iter()
-                .filter(|cell| cell.fg == MODERN.del || cell.fg == Color::Red)
-                .count()
-        };
-        let lips = |buffer: &Buffer| -> String {
-            buffer
-                .content()
-                .iter()
-                .filter(|cell| cell.fg == MODERN.tool)
-                .map(|cell| cell.symbol())
-                .collect()
-        };
         for seed in [1, 7, 40] {
-            let straight = head(&MODERN, into_mood(seed, 0.05), seed);
-            let grinning = head(&MODERN, into_mood(seed, 0.35), seed);
-            let winking = head(&MODERN, into_mood(seed, 0.45), seed);
-            assert!(pupils(&straight) > 0, "{}", text(&straight));
-            assert!(pupils(&grinning) > 0, "{}", text(&grinning));
-            assert_eq!(pupils(&winking), 0, "{}", text(&winking));
-            assert!(lens(&winking) > 0, "{}", text(&winking));
-            assert!(!lips(&straight).contains('/'), "{}", text(&straight));
-            assert!(lips(&grinning).contains('/'), "{}", text(&grinning));
-            assert!(lips(&grinning).contains('\\'), "{}", text(&grinning));
-            assert!(
-                grinning
-                    .content()
-                    .iter()
-                    .any(|cell| cell.symbol() == "=" && cell.fg == Color::White),
-                "no teeth\n{}",
-                text(&grinning)
-            );
+            let straight = painted(into_mood(seed, 0.05), seed);
+            let grinning = painted(into_mood(seed, 0.35), seed);
+            let winking = painted(into_mood(seed, 0.45), seed);
+            for open in [&straight, &grinning] {
+                assert!(count(open, Paint::Iris) > 0, "seed {seed}: no iris");
+                assert!(count(open, Paint::Pupil) > 0, "seed {seed}: no pupil");
+            }
+            for paint in [Paint::Iris, Paint::Pupil, Paint::White] {
+                assert_eq!(count(&winking, paint), 0, "seed {seed}: {paint:?}");
+            }
+            assert!(count(&winking, Paint::Lens { core: false }) > 0);
+            assert_eq!(count(&straight, Paint::Teeth), 0, "seed {seed}");
+            assert!(count(&grinning, Paint::Teeth) > 0, "seed {seed}: no teeth");
         }
+    }
+
+    /// Grinning, the lips' corners rise above their middle; straight, they
+    /// hardly do.
+    #[test]
+    fn the_lips_curl_up_at_their_corners_into_a_grin() {
+        let rise = |pixels: &[Vec<Option<Paint>>]| {
+            let lips: Vec<(usize, usize)> = pixels
+                .iter()
+                .enumerate()
+                .flat_map(|(y, row)| {
+                    row.iter()
+                        .enumerate()
+                        .filter(|(_, p)| **p == Some(Paint::Lips))
+                        .map(move |(x, _)| (x, y))
+                })
+                .collect();
+            let (least, most) = lips
+                .iter()
+                .fold((usize::MAX, 0), |(lo, hi), (x, _)| (lo.min(*x), hi.max(*x)));
+            let middle = (least + most) / 2;
+            let lowest_at = |x: usize| {
+                lips.iter()
+                    .filter(|(at, _)| *at == x)
+                    .map(|(_, y)| *y)
+                    .max()
+            };
+            let corners = lowest_at(least).max(lowest_at(most)).unwrap_or(0);
+            lowest_at(middle).unwrap_or(0).saturating_sub(corners)
+        };
+        let seed = 7;
+        let straight = rise(&painted(into_mood(seed, 0.05), seed));
+        let grinning = rise(&painted(into_mood(seed, 0.35), seed));
+        assert!(straight <= 1, "straight lips rise {straight} pixels");
+        assert!(grinning >= 2, "a grin rises only {grinning} pixels");
     }
 
     #[test]
@@ -705,7 +916,7 @@ mod tests {
 
     #[test]
     fn the_head_turns_from_side_to_side_without_leaving_the_pane() {
-        let yaws: Vec<f32> = (0..70).map(|n| Pose::at(3, n * TURN / 70).yaw).collect();
+        let yaws: Vec<f32> = (0..90).map(|n| Pose::at(3, n * TURN / 90).yaw).collect();
         let (least, most) = yaws.iter().fold((f32::MAX, f32::MIN), |(lo, hi), yaw| {
             (lo.min(*yaw), hi.max(*yaw))
         });
@@ -714,24 +925,23 @@ mod tests {
             let drawn = head(&MODERN, millis, 3);
             for y in 0..30 {
                 for x in [0, 89] {
-                    assert_eq!(drawn[(x, y)].symbol(), " ", "{millis} ms\n{}", text(&drawn));
+                    assert!(!drawn_at(&drawn, &MODERN, x, y), "{millis} ms ({x}, {y})");
                 }
             }
         }
     }
 
-    /// Every shade is one of the ramp's steps, so a frame rewrites only the
-    /// cells the turn moved to another step rather than the whole head.
+    /// Every light is one of a few steps, so a frame rewrites only the cells
+    /// the turn moved to another step rather than the whole head.
     #[test]
     fn a_frame_changes_only_a_few_of_the_heads_cells() {
         for theme in [MODERN, MODERN.at(Depth::TrueColour)] {
             for millis in [0, 1_750, 30_000, 3_600_000] {
                 let now = head(&theme, millis, 7);
                 let next = head(&theme, millis + 33, 7);
-                let drawn = now
-                    .content()
-                    .iter()
-                    .filter(|cell| cell.symbol() != " ")
+                let drawn = (0..30)
+                    .flat_map(|y| (0..90).map(move |x| (x, y)))
+                    .filter(|(x, y)| drawn_at(&now, &theme, *x, *y))
                     .count();
                 let changed = now
                     .content()
@@ -740,7 +950,7 @@ mod tests {
                     .filter(|(was, is)| was != is)
                     .count();
                 assert!(
-                    changed * 5 < drawn,
+                    changed * 4 < drawn,
                     "{}: {changed} of {drawn} cells changed at {millis} ms",
                     theme.name
                 );
@@ -748,20 +958,39 @@ mod tests {
         }
     }
 
+    /// In the sixteen names the head is drawn in the theme's own; where the
+    /// terminal draws values, in values mixed from the theme's.
     #[test]
     fn the_head_is_drawn_in_the_themes_own_colours() {
-        let drawn = head(&MODERN, 2_000, 7);
-        let colours: Vec<Color> = drawn.content().iter().map(|cell| cell.fg).collect();
-        for colour in [MODERN.fg, MODERN.hot, MODERN.tool] {
-            assert!(colours.contains(&colour), "{colour:?}\n{}", text(&drawn));
+        let sixteen = head(&MODERN, 2_000, 7);
+        let colours: Vec<Color> = sixteen
+            .content()
+            .iter()
+            .flat_map(|cell| [cell.fg, cell.bg])
+            .collect();
+        for colour in [MODERN.fg, MODERN.hot, MODERN.pane_bg] {
+            assert!(colours.contains(&colour), "{colour:?}");
         }
-        assert!(drawn.content().iter().all(|cell| cell.bg == MODERN.pane_bg));
+        assert!(
+            !colours
+                .iter()
+                .any(|colour| matches!(colour, Color::Rgb(..)))
+        );
+        let deep = MODERN.at(Depth::TrueColour);
+        let values = head(&deep, 2_000, 7);
+        assert!(
+            values
+                .content()
+                .iter()
+                .all(|cell| matches!(cell.bg, Color::Rgb(..)))
+        );
     }
 
     #[test]
-    fn a_line_leans_the_way_it_rises() {
-        assert_eq!(slope(0.0, '_'), '_');
-        assert_eq!(slope(1.0, '_'), '/');
-        assert_eq!(slope(-1.0, '-'), '\\');
+    fn a_light_is_rounded_to_one_of_a_few_steps() {
+        assert_eq!(stepped(0.0), 0.0);
+        assert_eq!(stepped(1.7), 1.0);
+        assert_eq!(stepped(0.5 + 0.2 / STEPS), stepped(0.5));
+        assert!(stepped(0.5 + 0.8 / STEPS) > stepped(0.5));
     }
 }

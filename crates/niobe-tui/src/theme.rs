@@ -104,8 +104,8 @@ pub enum Scene {
     /// Conway's Game of Life: cells living, dying and being born, from a
     /// random soup sown again every so often.
     Life,
-    /// A cyborg's head in three dimensions, drawn in ASCII, turning from
-    /// side to side, grinning and winking.
+    /// A cyborg's head in three dimensions, shaded in half-block pixels,
+    /// turning from side to side, grinning and winking.
     Cyborg,
 }
 
