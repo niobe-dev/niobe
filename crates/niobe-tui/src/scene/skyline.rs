@@ -125,11 +125,28 @@ struct Tower {
     sign: Option<i64>,
 }
 
-/// The column of the street at the pane's left edge, which the seed picks
-/// and nothing moves.
-fn start(seed: u64) -> i64 {
-    i64::try_from(mix(seed ^ 0x5742) % STRETCH).unwrap_or(0)
+/// The column of the street at the pane's left edge, on a pane `width`
+/// columns wide, which the seed picks and nothing moves.
+///
+/// The seed picks a stretch, and the pane opens on the first block of it
+/// with a near tower standing at both of its edges: a block that opened on
+/// an empty plot left a strip of haze down one side and the towers crowded
+/// to the other, and read as a picture shifted off the middle.
+fn start(seed: u64, width: i64) -> i64 {
+    let stretch = i64::try_from(mix(seed ^ 0x5742) % STRETCH).unwrap_or(0);
+    let framed = |at: &i64| {
+        let built = |street: i64| NEAR.at(seed, street, 1).is_some();
+        built(*at) && built(at + width.max(1) - 1)
+    };
+    (stretch..stretch + NEAR.plot * FRAMING)
+        .find(framed)
+        .unwrap_or(stretch)
 }
+
+/// How many plots along from where the seed starts a pane is looked for
+/// with a tower at both its edges: far more than a street a seventh empty
+/// ever needs.
+const FRAMING: i64 = 64;
 
 impl Row {
     /// The tower on plot `plot`, on a pane `height` rows tall; `None` for
@@ -334,7 +351,7 @@ pub(super) fn draw(buffer: &mut Buffer, area: Rect, millis: u64, seed: u64, them
     let ink = Ink::of(theme);
     let height = i64::from(area.height);
     let width = i64::from(area.width);
-    let near = start(seed);
+    let near = start(seed, width);
     // The far row is further off, so the same stretch of street shows less
     // of it: half as many columns, any block of it as good as another.
     let far = near / 2;
@@ -715,9 +732,30 @@ mod tests {
 
     #[test]
     fn each_seed_opens_on_a_stretch_of_the_street_of_its_own() {
-        let starts: std::collections::HashSet<i64> = (0..50).map(start).collect();
+        let starts: std::collections::HashSet<i64> = (0..50).map(|seed| start(seed, 120)).collect();
         assert!(starts.len() > 45, "{} stretches for 50 seeds", starts.len());
-        assert!(starts.iter().all(|at| (0..1 << 16).contains(at)));
+        let street = 0..(1 << 16) + NEAR.plot * FRAMING;
+        assert!(starts.iter().all(|at| street.contains(at)));
+    }
+
+    /// A pane that opened on an empty plot showed a strip of haze down one
+    /// side with the towers crowded to the other; every pane opens with a
+    /// near tower standing at its left edge and at its right.
+    #[test]
+    fn the_pane_opens_on_a_block_with_a_tower_at_either_edge() {
+        for seed in 0..200 {
+            for width in [40, 80, 120, 157, 200] {
+                let at = start(seed, width);
+                assert!(
+                    NEAR.at(seed, at, 30).is_some(),
+                    "seed {seed}, width {width}: nothing at the left edge"
+                );
+                assert!(
+                    NEAR.at(seed, at + width - 1, 30).is_some(),
+                    "seed {seed}, width {width}: nothing at the right edge"
+                );
+            }
+        }
     }
 
     /// The pane looks from its middle: a tower left of it shows its right
@@ -767,7 +805,7 @@ mod tests {
             .filter(|cell| ink.sides.contains(&cell.bg))
             .count();
         assert!(shaded > 30, "{shaded} cells of side");
-        let near = start(7);
+        let near = start(7, 120);
         let view = View {
             centre: near + 60,
             width: 120,
@@ -793,7 +831,7 @@ mod tests {
     #[test]
     fn the_street_is_built_up_with_only_a_few_gaps_between_the_towers() {
         for seed in [7, 8, 1_000] {
-            let (far, near) = (start(seed) / 2, start(seed));
+            let (far, near) = (start(seed, 200) / 2, start(seed, 200));
             let view = View {
                 centre: near + 100,
                 width: 200,
