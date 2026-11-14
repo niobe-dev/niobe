@@ -1,7 +1,7 @@
  Niobe  Session  Context  Model  View  Help                            opus-5  claude · default  ○ not attached  13:41
  ┏━ > add etag support to the catalog fetcher so we stop re-downloading… ━━━━┓ ┌─────────────── Usage ────────────────┐
- ┃   unchanged manifests                                                     ┃ │ opus-5    100% ▓▓▓▓▓▓▓▓▓▓▓▓   49k    │
- ┃                                                                           █ │ cache hit  86% ▓▓▓▓▓▓▓▓▓▓░░   40k    │
+ ┃                      ▝▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▘ ┃ │ opus-5    100% ▓▓▓▓▓▓▓▓▓▓▓▓   49k    │
+ ┃                                                                           ┃ │ cache hit  86% ▓▓▓▓▓▓▓▓▓▓░░   40k    │
  ┃ ◆ Reading catalog/fetch.ts and its callers first. Two call sites, one     █ │ ──────────────────────────────────── │
  ┃   test file.                                                              █ │ context    13% ▓░░░░░░░░░ 25k / 200k │
  ┃                                                                           █ └──────────────────────────────────────┘

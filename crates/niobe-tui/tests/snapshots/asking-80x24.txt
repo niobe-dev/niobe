@@ -9,7 +9,7 @@
 ┃   │ to run Read                                                          │   ┃
 ┃   │ /repo/notes.txt                                                      │   ┃
 ┃   │                                                                      │   ┃
-┃   │ ▶ 1. Allow once                                       this call only │   █
+┃   │ ▶ 1. Allow once                                       this call only │   ┃
 ┃   │   2. Always allow Read                              niobe saves Read │   █
 ┃   │   3. Always allow this target      niobe saves Read(/repo/notes.txt) │   █
 ┃   │   4. Deny                                      the call does not run │   █

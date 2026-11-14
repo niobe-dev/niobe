@@ -2478,6 +2478,17 @@ pub struct DrawnEntries {
     detail: Detail,
 }
 
+/// How a copy reads a drawn line.
+#[derive(Debug, Clone, Copy)]
+enum Copied {
+    /// As the terminal shows it.
+    AsShown,
+    /// With the reply's glyph in its gutter read as a blank.
+    Marked,
+    /// As a line of a prompt's bubble: its rounded ends as nothing.
+    InBubble,
+}
+
 /// One thing the transcript draws, in the order it is drawn: an entry, or
 /// the heading a sub-agent's rows are grouped under.
 #[derive(Debug)]
@@ -2498,6 +2509,9 @@ struct Drawn {
     /// which is a mark rather than part of what the agent said: a copy
     /// reads it as the blank gutter it stands in.
     marked: bool,
+    /// Whether the lines are a prompt's bubble, whose rounded ends are
+    /// drawing rather than text: a copy reads them as blank lines.
+    bubble: bool,
     lines: Vec<Line<'static>>,
     /// Where [`DrawnEntries::searched`] is in `lines`, counted from their
     /// first, once they have been searched. Kept with the lines, so a search
@@ -2616,6 +2630,12 @@ impl DrawnEntries {
                     .is_some_and(|entry| entry.kind == EntryKind::Agent && entry.calls.is_empty()),
                 Slot::Heading { .. } | Slot::Hidden { .. } | Slot::Summary { .. } => false,
             };
+            let bubble = match *slot {
+                Slot::Entry(index) => entries
+                    .get(index)
+                    .is_some_and(|entry| entry.kind == EntryKind::User),
+                Slot::Heading { .. } | Slot::Hidden { .. } | Slot::Summary { .. } => false,
+            };
             let draw = || match *slot {
                 Slot::Entry(index) => {
                     let Some(entry) = entries.get(index) else {
@@ -2654,6 +2674,7 @@ impl DrawnEntries {
                     drawn.hidden = counted;
                     drawn.summed = summed;
                     drawn.marked = marked;
+                    drawn.bubble = bubble;
                 }
                 Some(drawn) => {
                     self.moved = true;
@@ -2664,6 +2685,7 @@ impl DrawnEntries {
                         hidden: counted,
                         summed,
                         marked,
+                        bubble,
                         lines: draw(),
                         found: None,
                         read: None,
@@ -2678,6 +2700,7 @@ impl DrawnEntries {
                         hidden: counted,
                         summed,
                         marked,
+                        bubble,
                         lines: draw(),
                         found: None,
                         read: None,
@@ -2877,49 +2900,53 @@ impl DrawnEntries {
 
     /// Line `line` of the whole transcript as the terminal shows it: see
     /// [`crate::select::shown`]. It walks every entry above the line, so
-    /// what reads many lines reads them with [`DrawnEntries::plain_lines`];
-    /// the tests hold that walk to what this says of each line.
+    /// what reads many lines reads them with
+    /// [`DrawnEntries::copied_lines_from`].
     #[cfg(test)]
     pub(crate) fn plain_line(&self, line: usize) -> Option<String> {
         self.lines(line, 1).first().map(crate::select::shown)
     }
 
-    /// Every line of the whole transcript as the terminal shows it, top to
-    /// bottom: [`DrawnEntries::plain_line`] of each in turn, in one walk,
-    /// where asking for each by its number walks every entry above it.
-    pub(crate) fn plain_lines(&self) -> impl Iterator<Item = String> + '_ {
-        self.plain_lines_from(0)
-    }
-
-    /// [`DrawnEntries::plain_lines`] from line `start` of the whole
-    /// transcript on.
-    pub(crate) fn plain_lines_from(&self, start: usize) -> impl Iterator<Item = String> + '_ {
-        self.drawn
-            .iter()
-            .flat_map(|drawn| &drawn.lines)
-            .skip(start)
-            .map(crate::select::shown)
-    }
-
-    /// [`DrawnEntries::plain_lines_from`] as a copy of them reads: the
-    /// glyph in a reply's gutter read as the blank it stands in, so that the
-    /// gutter the reply's lines share is taken off them all.
-    pub(crate) fn copied_lines_from(&self, start: usize) -> impl Iterator<Item = String> + '_ {
+    /// The lines of the whole transcript from line `start` on, top to
+    /// bottom in one walk, as a copy of them reads — `None` for a line a copy
+    /// leaves out: the glyph in a reply's gutter read as the blank it stands
+    /// in, so that the gutter the reply's lines share is
+    /// taken off them all; a bubble's rounded ends as no line at all, being
+    /// drawing and not words; and a bubble's rows, but for those `cut` says a
+    /// copy takes only some cells of, as their words behind the gutter a
+    /// reply's are drawn behind, rather than behind the cells that set the
+    /// bubble against the right edge, which a cut row keeps so that its
+    /// cells are the ones drawn.
+    pub(crate) fn copied_lines_from<'a>(
+        &'a self,
+        start: usize,
+        cut: impl Fn(usize) -> bool + 'a,
+    ) -> impl Iterator<Item = Option<String>> + 'a {
         self.drawn
             .iter()
             .flat_map(|drawn| {
-                drawn
-                    .lines
-                    .iter()
-                    .enumerate()
-                    .map(move |(at, line)| (drawn.marked && at == 0, line))
+                drawn.lines.iter().enumerate().map(move |(at, line)| {
+                    let read = match (drawn.marked && at == 0, drawn.bubble) {
+                        (true, _) => Copied::Marked,
+                        (false, true) => Copied::InBubble,
+                        (false, false) => Copied::AsShown,
+                    };
+                    (read, line)
+                })
             })
+            .enumerate()
             .skip(start)
-            .map(|(marked, line)| {
-                let shown = crate::select::shown(line);
-                match marked {
-                    true => unmarked(shown),
-                    false => shown,
+            .map(move |(number, (read, line))| match read {
+                Copied::AsShown => Some(crate::select::shown(line)),
+                Copied::Marked => Some(unmarked(crate::select::shown(line))),
+                Copied::InBubble if crate::bubble::is_end(line) => None,
+                Copied::InBubble if cut(number) => Some(crate::select::shown(line)),
+                Copied::InBubble => {
+                    let words = crate::select::shown_spans(crate::bubble::words(line));
+                    Some(match words.trim_end() {
+                        "" => String::new(),
+                        words => format!("{}{words}", " ".repeat(GUTTER)),
+                    })
                 }
             })
     }
@@ -3058,7 +3085,7 @@ pub(crate) struct Arrangement<'a> {
 /// words, its calls and its refused calls, and nothing of the session's.
 ///
 /// As they happened, unless `grouped`: then within each turn — between one
-/// prompt or turn's rule and the next — every sub-agent's entries are drawn
+/// prompt or turn's end and the next — every sub-agent's entries are drawn
 /// together under a heading, at the place that agent first did something:
 /// its words, its calls — an edit with its diff among them — and the calls
 /// refused it. The session's own entries and the turn's boundaries stay
@@ -3083,10 +3110,17 @@ pub(crate) fn order(
             .collect(),
         None => by_agent(entries, grouped),
     };
-    let order = match compact && !grouped && only.is_none() {
+    let mut order = match compact && !grouped && only.is_none() {
         true => compacted(entries, order),
         false => order,
     };
+    // A turn's end draws nothing, and is not counted among what a view of the
+    // notable entries leaves out: it still bounds a turn's group and a run
+    // of summed calls, which is why it is dropped only here.
+    order.retain(|slot| {
+        !matches!(slot, Slot::Entry(at)
+            if matches!(entries.get(*at).map(|entry| &entry.kind), Some(EntryKind::Turn(_))))
+    });
     match notable_only {
         true => notable(entries, order, grouped && only.is_none()),
         false => order,
@@ -4577,7 +4611,9 @@ fn key_rows(keys: &[(String, &str)], width: usize, theme: &Theme) -> Vec<Line<'s
     rows.into_iter().map(Line::from).collect()
 }
 
-/// One transcript entry, wrapped to the pane: a head line and its body.
+/// One transcript entry, wrapped to the pane: a head line and its body, or a
+/// reply or notice with its glyph beside its first line, or a prompt in its
+/// bubble.
 fn entry_lines(
     entry: &Entry,
     width: usize,
@@ -4589,21 +4625,23 @@ fn entry_lines(
         return crate::calls::lines(entry, width, detail, theme);
     }
     match &entry.kind {
-        EntryKind::Turn(rule) => return crate::turns::lines(rule, width, theme),
-        EntryKind::Compacted(row) => return crate::turns::compacted(row, width, theme),
+        // The end of a turn is where the next prompt starts, and the prompt's
+        // bubble already says so: see [`order`].
+        EntryKind::Turn(_) => return Vec::new(),
+        EntryKind::Compacted(row) => return crate::compaction::compacted(row, width, theme),
         EntryKind::SubAgent => return crate::calls::said(entry, width, detail, theme),
-        EntryKind::User
-        | EntryKind::Agent
-        | EntryKind::Tool
-        | EntryKind::Failure
-        | EntryKind::Notice => {}
+        EntryKind::User => {
+            let words = body_lines(entry, crate::bubble::room(width), theme, commands);
+            return crate::bubble::lines(&entry.head, words, &entry.meta, width, theme);
+        }
+        EntryKind::Agent | EntryKind::Tool | EntryKind::Failure | EntryKind::Notice => {}
     }
     let colour = match entry.queued {
         true => theme.dim,
         false => entry.kind.colour(theme),
     };
     let body_width = width.saturating_sub(GUTTER);
-    if entry.kind == EntryKind::Agent {
+    if entry.kind == EntryKind::Agent || entry.kind == EntryKind::Notice && entry.head.is_empty() {
         return reply_lines(entry, body_width, theme, commands);
     }
 
@@ -4664,13 +4702,13 @@ fn unmarked(line: String) -> String {
     }
 }
 
-/// The session's own reply: its words, with the agent's glyph in the gutter
-/// of their first line and no head line naming it. The session has one
-/// agent, and its words are most of what the transcript is read for, so a
-/// line a reply saying whose it is would be read over and over to no end;
-/// the glyph and the colour tell it from the operator's words and the
-/// sub-agents', which keep their heads. What became of the reply — cut off
-/// where the session stopped — is said dim under it.
+/// The session's own reply, or a notice of its own: its words, with the
+/// entry's glyph in the gutter of their first line and no head line naming
+/// it. The session has one agent, and its words are most of what the
+/// transcript is read for, so a line a reply saying whose it is would be read
+/// over and over to no end; the glyph and the colour tell it from the
+/// operator's words and the sub-agents', which keep their heads. What became
+/// of the reply — cut off where the session stopped — is said dim under it.
 fn reply_lines(
     entry: &Entry,
     width: usize,
@@ -10408,13 +10446,15 @@ mod tests {
                 .collect()
         };
 
+        // The prompt's bubble is three rows: its top end, its words and its
+        // bottom end.
         let interleaved = drawn_as(&mut app);
-        assert!(interleaved[2].contains("explore a1.rs"), "{interleaved:?}");
-        assert!(interleaved[3].contains("general b1.rs"), "{interleaved:?}");
+        assert!(interleaved[3].contains("explore a1.rs"), "{interleaved:?}");
+        assert!(interleaved[4].contains("general b1.rs"), "{interleaved:?}");
 
         app.group_by_agent();
         let grouped = drawn_as(&mut app);
-        let rows: Vec<&str> = grouped.iter().skip(2).map(String::as_str).collect();
+        let rows: Vec<&str> = grouped.iter().skip(3).map(String::as_str).collect();
         assert!(
             rows[0].starts_with("▾ explore") && rows[0].contains("look at toolu_a"),
             "{grouped:?}"

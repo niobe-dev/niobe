@@ -5,7 +5,7 @@
 ┃   ┃  filter ▏type to filter                                              ┃   ┃
 ┃   ┃                                                                      ┃   ┃
 ┃ ◆ ┃    1m  this session     add etag support to the catalog fetcher so…  ┃   ┃
-┃   ┃    1h  #12              and a test for the 304 path                  ┃   █
+┃   ┃    1h  #12              and a test for the 304 path                  ┃   ┃
 ┃   ┃    1h  #12              add etag support to the static handler ⏎…    ┃   █
 ┃   ┃    3d  #11              why does the resume test hang?               ┃   █
 ┃ ◆ ┃                                                                      ┃   █

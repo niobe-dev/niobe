@@ -1,18 +1,18 @@
  Niobe  Session  Context  Model  View  Help                            opus-5  claude · default  ○ not attached  13:41
  ┏━ > what does the fetcher do with a 304? ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓ ┌─────────────── Usage ────────────────┐
- ┃ > you                                                                     ┃ │ 5h         15% ▓░░░░░░░ resets 16:40 │
- ┃   what does the fetcher do with a 304?                                    ┃ │ ──────────────────────────────────── │
- ┃                                                                           ┃ │ opus-5    100% ▓▓▓▓▓▓▓▓▓▓▓▓   28k    │
- ┃ ◆ It treats it as an error and downloads the manifest again.              ┃ │ cache hit  85% ▓▓▓▓▓▓▓▓▓▓░░   23k    │
- ┃                                                                           ┃ └──────────────────────────────────────┘
- ┃ ── turn 1 13:36 · 6400 tok · 22s ──────────────────────────────────────── ┃ ┌────────────── Changes ───────────────┐
- ┃                                                                           ┃ │ ⎇ main ↑3                            █
- ┃ > you                                                                     ┃ │ ▾ Working tree  +≥977 −≥259          █
- ┃   keep the cached copy on a 304 instead                                   ┃ │   ▾ catalog/                         █
+ ┃                                    ▗▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▖ ┃ │ 5h         15% ▓░░░░░░░ resets 16:40 │
+ ┃                                     what does the fetcher do with a 304?  ┃ │ ──────────────────────────────────── │
+ ┃                                    ▝▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▘ ┃ │ opus-5    100% ▓▓▓▓▓▓▓▓▓▓▓▓   28k    │
+ ┃                                                                           ┃ │ cache hit  85% ▓▓▓▓▓▓▓▓▓▓░░   23k    │
+ ┃ ◆ It treats it as an error and downloads the manifest again.              ┃ └──────────────────────────────────────┘
+ ┃                                                                           ┃ ┌────────────── Changes ───────────────┐
+ ┃                                   ▗▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▖ ┃ │ ⎇ main ↑3                            █
+ ┃                                    keep the cached copy on a 304 instead  ┃ │ ▾ Working tree  +≥977 −≥259          █
+ ┃                                   ▝▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▘ ┃ │   ▾ catalog/                         █
  ┃                                                                           ┃ │     ▾ cache/                         █
  ┃ ◆ Done: a 304 now returns the cached manifest.                            ┃ │       lru.ts                 +31  −9 █
  ┃                                                                           ┃ │       index.ts               +12  −0 █
- ┃ ── turn 2 13:37 · 22k tok · 1% of 5h · 38s ────────────────────────────── ┃ │     fetch.ts                +149 −12 █
+ ┃                                                                           ┃ │     fetch.ts                +149 −12 █
  ┃                                                                           ┃ │     etag.ts                  +88 −41 █
  ┃                                                                           ┃ │   ▾ docs/                            █
  ┃                                                                           ┃ │     ▾ adr/                           █

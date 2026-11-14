@@ -80,8 +80,8 @@ Dependencies point one way, and `cargo xtask layering` fails the build when they
 - A replayed session folds to the same `SessionState` as the live one did. `niobe replay`,
   `--resume` and the live shell are three readers of one fold, so a figure fixed in one is fixed
   in all three — and a figure that differs between them is a bug in the fold, not in a reader.
-- Per-turn figures come from the same fold as whole-session ones (`session.rs`): a turn's rule
-  under the transcript and the Usage pane cannot disagree.
+- Per-turn figures come from the same fold as whole-session ones (`session.rs`): `niobe cost
+  --by-turn` and the Usage pane cannot disagree.
 
 ### 2.2 The store keeps everything, forever (MUST)
 

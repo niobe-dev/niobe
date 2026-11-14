@@ -5,7 +5,7 @@
 ┃   ┃  filter ▏type to filter                                              ┃   ┃
 ┃   ┃                                                                      ┃   ┃
 ┃ ◆ ┃    1m  this session      1 prompt  add etag support to the catalog…  ┃   ┃
-┃   ┃   58m  #12              2 prompts  add etag support to the static …  ┃   █
+┃   ┃   58m  #12              2 prompts  add etag support to the static …  ┃   ┃
 ┃   ┃    2d  claude 2f6c1e10          —  rename the crate                  ┃   █
 ┃   ┃    3d  #11 in use        1 prompt  why does the resume test hang?    ┃   █
 ┃ ◆ ┃                                                                      ┃   █

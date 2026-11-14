@@ -248,9 +248,86 @@ fn every_theme_draws_the_calls_dimmer_than_the_reply_and_the_prompt_apart() {
     }
 }
 
+/// The operator's prompt is drawn as a messenger draws the message one sends:
+/// on the right, in a bubble of a colour of its own with rounded ends, the
+/// words in the operator's colour, and no name over it — whose words they are
+/// is what the bubble says.
+#[test]
+fn a_prompt_is_drawn_as_a_message_bubble_on_the_right() {
+    let prompt = "and update the docs too";
+    let sent = || {
+        let mut app = running_session();
+        app.apply(&Event::TurnEnded);
+        app.apply(&Event::UserMessage {
+            text: prompt.to_owned(),
+        });
+        app
+    };
+
+    let frame = screen(&mut sent(), 120, 30);
+    assert!(!frame.contains("> you"), "{frame}");
+    let rows: Vec<&str> = frame.lines().collect();
+    let at = rows
+        .iter()
+        .position(|row| row.contains(prompt))
+        .expect("the prompt is on screen");
+    // One cell of the bubble on either side of the words, and the bubble's
+    // right end against the transcript's right edge, by the pane's border
+    // or the scrollbar on it.
+    assert!(ends_at_the_edge(rows[at], &format!("{prompt} ")), "{frame}");
+    let column = rows[at].find(prompt).expect("the prompt's row holds it");
+    let top = rows[at - 1];
+    let bottom = rows[at + 1];
+    assert_eq!(top.get(column - 1..column + 2), Some("▗"), "{frame}");
+    assert!(top.contains("▄▖"), "{frame}");
+    assert_eq!(bottom.get(column - 1..column + 2), Some("▝"), "{frame}");
+    assert!(bottom.contains("▀▘"), "{frame}");
+    assert_snapshot("prompt-bubble-120x30", &frame);
+
+    for theme in THEMES {
+        for depth in [Depth::Sixteen, Depth::TrueColour] {
+            let palette = theme.at(depth);
+            let name = palette.name;
+            let mut app = sent().with_depth(depth).with_theme(theme);
+            let style = style_at(&mut app, 120, 30, prompt).expect("the prompt is drawn");
+            assert_eq!(style.fg, Some(palette.user), "{name} at {depth:?}");
+            assert_eq!(style.bg, Some(palette.user_bg), "{name} at {depth:?}");
+            assert_eq!(
+                style_at(&mut app, 120, 30, "▗").and_then(|style| style.fg),
+                Some(palette.user_bg),
+                "{name} at {depth:?}: the bubble's rounded end"
+            );
+        }
+    }
+}
+
+/// Whether `row` has `said` against the transcript's right edge: followed by
+/// the one cell of margin the session pane keeps inside its border, and then
+/// that border, or the scrollbar drawn on it.
+fn ends_at_the_edge(row: &str, said: &str) -> bool {
+    row.split_once(said)
+        .is_some_and(|(_, after)| after.starts_with(" ┃") || after.starts_with(" █"))
+}
+
+/// A notice the backend sends — a background command that finished — is the
+/// session's own, and is drawn with its mark and no name over it, as the
+/// session's replies are.
+#[test]
+fn a_notice_is_drawn_with_no_name_over_it() {
+    let said = "the background command `cargo test` finished with exit code 0";
+    let mut app = running_session();
+    app.apply(&Event::Notice {
+        message: said.to_owned(),
+    });
+    let frame = screen(&mut app, 120, 30);
+    assert!(frame.contains(&format!("· {said}")), "{frame}");
+    assert!(!frame.contains("· claude"), "{frame}");
+}
+
 /// A prompt sent while the agent is at work waits for the agent to take it
-/// in, and is drawn so: dim, with the head line saying it is queued. Taken
-/// in, it is drawn as every other prompt is, in the operator's colour.
+/// in, and is drawn so: dim, with a line under its bubble saying it is
+/// queued. Taken in, it is drawn as every other prompt is, in the operator's
+/// colour.
 #[test]
 fn a_prompt_sent_while_the_agent_works_is_drawn_queued_until_taken_in() {
     let waiting = "and update the docs too";
@@ -265,9 +342,12 @@ fn a_prompt_sent_while_the_agent_works_is_drawn_queued_until_taken_in() {
 
     let frame = screen(&mut queued(), 120, 30);
     assert!(
-        frame.contains("> you  queued — the agent has not taken it in yet"),
+        frame
+            .lines()
+            .any(|row| ends_at_the_edge(row, "queued — the agent has not taken it in yet")),
         "{frame}"
     );
+    assert!(!frame.contains("> you"), "{frame}");
     assert_snapshot("queued-prompt-120x30", &frame);
 
     for theme in THEMES {
@@ -282,9 +362,9 @@ fn a_prompt_sent_while_the_agent_works_is_drawn_queued_until_taken_in() {
                 "{name} at {depth:?}: the queued prompt"
             );
             assert_eq!(
-                fg(style_at(&mut app, 120, 30, "> you")),
+                fg(style_at(&mut app, 120, 30, "queued — ")),
                 Some(palette.dim),
-                "{name} at {depth:?}: the queued prompt's head"
+                "{name} at {depth:?}: what the queued prompt waits on"
             );
             app.apply(&Event::PromptTaken);
             assert_eq!(
@@ -413,29 +493,16 @@ fn a_price_sheet_puts_a_running_figure_in_the_cost_pane() {
     );
 }
 
-/// A reply's markdown is drawn, not shown: no asterisks, backticks or pipes
-/// reach the screen, and the picture in each theme is the committed one.
-/// Each finished turn is ruled off with what it spent. The first has no
-/// window share, because nothing was reported before it, and says nothing in
-/// its place; at 80 columns the pane is too narrow for every figure, and the
-/// ones that give way go whole.
+/// A finished turn draws no rule under it: the conversation reads on from
+/// one prompt to the next, and what a turn spent is the Usage pane's to say.
 #[test]
-fn a_finished_turn_is_ruled_off_with_what_it_spent() {
-    let frame = screen(&mut session_with_finished_turns(), 120, 30);
-    assert!(
-        frame.contains("── turn 1 13:36 · 6400 tok · 22s ──"),
-        "{frame}"
-    );
-    assert!(
-        frame.contains("── turn 2 13:37 · 22k tok · 1% of 5h · 38s ──"),
-        "{frame}"
-    );
-    assert_snapshot("turns-120x30", &frame);
-
-    let frame = screen(&mut session_with_finished_turns(), 80, 24);
-    assert!(frame.contains("── turn 2"), "{frame}");
-    assert!(!frame.contains("0% of 5h"), "{frame}");
-    assert_snapshot("turns-80x24", &frame);
+fn a_finished_turn_draws_no_rule_under_it() {
+    for (width, height, name) in [(120, 30, "turns-120x30"), (80, 24, "turns-80x24")] {
+        let frame = screen(&mut session_with_finished_turns(), width, height);
+        assert!(!frame.contains("── turn"), "{frame}");
+        assert!(!frame.contains(" tok · "), "{frame}");
+        assert_snapshot(name, &frame);
+    }
 }
 
 /// A conversation started over is a new session: the frame after the clear
@@ -502,8 +569,11 @@ fn a_cleared_conversation_is_drawn_as_a_new_session() {
         app.apply(&event);
     }
     let after = screen(&mut app, 120, 30);
-    assert!(after.contains("turn 1"), "{after}");
-    assert!(!after.contains("turn 2"), "{after}");
+    assert_eq!(
+        app.session().turns().len(),
+        1,
+        "the new session counts its turns from the clear"
+    );
     assert!(!after.contains("Cached manifests"), "{after}");
     assert!(!after.contains("keep the cached copy"), "{after}");
     assert!(!after.contains("haiku-4-5"), "{after}");
@@ -1712,6 +1782,36 @@ fn a_question_the_agent_asks_is_drawn_as_its_question_and_answers() {
     assert_snapshot("questions-several-100x30", &frame);
 }
 
+/// Once answered, the question box goes, and each answer stays in the
+/// transcript as the operator's own message, with the question it answers
+/// quoted in its bubble, as a messenger quotes the message a reply is to.
+#[test]
+fn the_answers_to_the_agents_questions_stay_in_the_transcript() {
+    use niobe_tui::app::ASK_QUIET;
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use std::time::Instant;
+
+    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+    let mut app = session_asking_questions().attached();
+    let shown = Instant::now();
+    app.tick(shown, None);
+    let _ = screen(&mut app, 100, 30);
+    app.on_key_read(key(KeyCode::Down), alone(shown + ASK_QUIET * 2));
+    app.on_key_read(key(KeyCode::Enter), alone(shown + ASK_QUIET * 3));
+    let _ = screen(&mut app, 100, 30);
+    app.on_key_read(key(KeyCode::Char(' ')), alone(shown + ASK_QUIET * 5));
+    app.on_key_read(key(KeyCode::Down), alone(shown + ASK_QUIET * 6));
+    app.on_key_read(key(KeyCode::Char(' ')), alone(shown + ASK_QUIET * 7));
+    app.on_key_read(key(KeyCode::Enter), alone(shown + ASK_QUIET * 8));
+    assert!(app.asking().is_none(), "both questions are answered");
+
+    let frame = screen(&mut app, 100, 30);
+    assert!(frame.contains("Also cut a release now"), "{frame}");
+    assert!(frame.contains("▎ Which platforms?"), "{frame}");
+    assert!(frame.contains("macOS, Linux"), "{frame}");
+    assert_snapshot("questions-answered-100x30", &frame);
+}
+
 /// The rows of the question box, with its borders and the pane's taken off.
 fn question_rows(frame: &str) -> Vec<String> {
     frame
@@ -2678,7 +2778,6 @@ fn a_compaction_is_shown_as_one_while_it_runs_and_after() {
         frame.contains("⇣ context compacted · 192k → ≥4282 tokens"),
         "{frame}"
     );
-    assert!(frame.contains("── compact"), "{frame}");
     assert!(!frame.contains("compacting context"), "{frame}");
     let wide = screen(&mut app, 120, 30);
     assert!(wide.contains("≥4282 / 1.0M"), "{wide}");

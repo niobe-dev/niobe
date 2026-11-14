@@ -198,6 +198,13 @@ pub struct Theme {
 
     /// The operator's own messages.
     pub user: Color,
+    /// Behind the operator's own messages: the bubble a sent prompt is drawn
+    /// in, as a messenger draws the messages one sends, and the colour of
+    /// its rounded ends. A wash of [`Theme::user`] over the panes where the
+    /// theme is drawn in 24-bit colour; in the sixteen names, a grey or a
+    /// black that sets the bubble off from the panes and keeps the
+    /// operator's colour legible on it.
+    pub user_bg: Color,
     /// The assistant's messages.
     pub agent: Color,
     /// A tool call's glyph and name: an accent of their own, never the
@@ -301,6 +308,9 @@ pub const CLASSIC: Theme = Theme {
     del_bg: Color::Black,
 
     user: Color::LightYellow,
+    // The navy a bubble would want is not one of the sixteen: black sets it
+    // off from the blue panes, as it does a diff.
+    user_bg: Color::Black,
     agent: Color::LightCyan,
     tool: Color::LightMagenta,
     // The body text is Far's light cyan, so code is the white Far's editor
@@ -372,6 +382,7 @@ pub const NEO: Theme = Theme {
     del_bg: Color::Black,
 
     user: Color::White,
+    user_bg: Color::DarkGray,
     agent: Color::LightGreen,
     // Not the plain green: that is what is secondary, which is what a call's
     // own words are drawn in, and its name has to stand off them. Cyan is the
@@ -458,6 +469,7 @@ pub const CYBER: Theme = Theme {
     del_bg: Color::Black,
 
     user: Color::LightMagenta,
+    user_bg: Color::DarkGray,
     agent: Color::LightGreen,
     tool: Color::LightBlue,
     code: Color::LightCyan,
@@ -533,6 +545,7 @@ pub const MODERN: Theme = Theme {
     del_bg: Color::Black,
 
     user: Color::LightYellow,
+    user_bg: Color::DarkGray,
     agent: Color::LightBlue,
     tool: Color::LightMagenta,
     code: Color::LightCyan,
@@ -580,6 +593,11 @@ const fn mix(ink: u8, paper: u8, percent: u32) -> u8 {
 /// on it stays the loudest thing in the row.
 const WASH: u32 = 14;
 
+/// How much of the operator's colour the bubble behind their messages
+/// carries over the panes: enough to read as a bubble of their colour, little
+/// enough that their words in that colour stay the loudest thing on it.
+const BUBBLE: u32 = 16;
+
 /// How much of the body text a cell under a dialog's shadow keeps, over the
 /// shadow's black: about the grey Far redraws a shadowed cell in, tinted by
 /// the theme's own text so the shade belongs to the design.
@@ -621,6 +639,7 @@ pub const NEO_TRUE: Theme = Theme {
     del_bg: wash(0xff3b3b, 0x010f05, WASH),
 
     user: hex(0xffffff),
+    user_bg: wash(0xffffff, 0x020803, BUBBLE),
     agent: hex(0x00ff41),
     tool: hex(0x7cff9e),
     code: hex(0xd4ff00),
@@ -677,6 +696,7 @@ pub const CYBER_TRUE: Theme = Theme {
     del_bg: wash(0xff4d6d, 0x080c0a, WASH),
 
     user: hex(0xff2bd6),
+    user_bg: wash(0xff2bd6, 0x0a0f0c, BUBBLE),
     agent: hex(0x39ff7a),
     tool: hex(0xb9c1ff),
     code: hex(0xffd23f),
@@ -729,6 +749,7 @@ pub const MODERN_TRUE: Theme = Theme {
     del_bg: wash(0xf14c4c, 0x1e1e1e, WASH),
 
     user: hex(0xdcdcaa),
+    user_bg: wash(0xdcdcaa, 0x252526, BUBBLE),
     agent: hex(0x4fc1ff),
     tool: hex(0xc586c0),
     code: hex(0x9cdcfe),
@@ -845,6 +866,14 @@ impl Theme {
             (t.add, t.add_bg, "a diff's added line"),
             (t.del, t.del_bg, "a diff's removed line"),
             (t.user, t.pane_bg, "the operator's own message"),
+            (t.user, t.user_bg, "the operator's message in its bubble"),
+            (t.user_bg, t.pane_bg, "the bubble of the operator's message"),
+            (t.command, t.user_bg, "a command named in a sent prompt"),
+            (
+                t.dim,
+                t.user_bg,
+                "a queued prompt, or the question an answer quotes",
+            ),
             (t.agent, t.pane_bg, "an assistant message"),
             (t.tool, t.pane_bg, "a tool call"),
             (t.code, t.pane_bg, "code in a reply"),
@@ -905,6 +934,8 @@ impl Theme {
             (t.add, t.pane_bg, "an added line"),
             (t.del, t.pane_bg, "a removed line"),
             (t.user, t.pane_bg, "the operator's own message"),
+            (t.user, t.user_bg, "the operator's message in its bubble"),
+            (t.command, t.user_bg, "a command named in a sent prompt"),
             (t.agent, t.pane_bg, "an assistant message"),
             (t.tool, t.pane_bg, "a tool call"),
             (t.code, t.pane_bg, "code in a reply"),
@@ -1010,7 +1041,7 @@ pub fn register_user(themes: Vec<UserTheme>) -> bool {
 
 impl Theme {
     /// The colours a theme file may set, by the key it spells them with.
-    pub const COLOUR_KEYS: [&'static str; 38] = [
+    pub const COLOUR_KEYS: [&'static str; 39] = [
         "pane_bg",
         "frame",
         "frame_focus",
@@ -1036,6 +1067,7 @@ impl Theme {
         "add_bg",
         "del_bg",
         "user",
+        "user_bg",
         "agent",
         "tool",
         "code",
@@ -1084,6 +1116,7 @@ impl Theme {
             "add_bg" => &mut self.add_bg,
             "del_bg" => &mut self.del_bg,
             "user" => &mut self.user,
+            "user_bg" => &mut self.user_bg,
             "agent" => &mut self.agent,
             "tool" => &mut self.tool,
             "code" => &mut self.code,
@@ -1201,7 +1234,7 @@ mod tests {
 
     /// Every colour of one theme, so that a field added to [`Theme`] and left
     /// out of a check here is a field the checks below do not cover.
-    fn colours(t: &Theme) -> [Color; 38] {
+    fn colours(t: &Theme) -> [Color; 39] {
         [
             t.pane_bg,
             t.frame,
@@ -1228,6 +1261,7 @@ mod tests {
             t.add_bg,
             t.del_bg,
             t.user,
+            t.user_bg,
             t.agent,
             t.tool,
             t.code,

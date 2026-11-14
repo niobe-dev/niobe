@@ -225,8 +225,11 @@ reviewers that encode both, for an agent working in this tree.
   they did — `Read 3 files, edited 1 file +6 −2, ran 2 shell commands, 41 tests passed` — and
   leaves a row only to a call that failed or was refused, one a question waits on, one the
   operator ran and a hand-off to a sub-agent, whose own words and calls are left to the view
-  narrowed to it; Ctrl+O draws every call, and the session's replies carry the agent's glyph
-  and no head line naming it. `calls.rs` draws a tool call, in that full view, as a row of a table — its name, the tag of the sub-agent that made
+  narrowed to it; Ctrl+O draws every call, and the session's replies and its notices carry
+  their glyph and no head line naming them. `bubble.rs` draws the operator's prompt as a
+  messenger draws what one sends — on the right, in a bubble of the theme's `user_bg` with
+  half-cell rounded ends, no name over it, what became of it under it — and so each answer the
+  operator gave a question the agent put, the question quoted at the bubble's top. `calls.rs` draws a tool call, in that full view, as a row of a table — its name, the tag of the sub-agent that made
   it where one did, each in a column as wide as the transcript's widest, what it does, and on the
   right what it cost, by what the backend reported and the shell's own clock — the whole row dim
   but for a failure, so the agents' words in the body colour are what the eye finds, and a shell
@@ -249,11 +252,9 @@ reviewers that encode both, for an agent working in this tree.
   puts to the operator are drawn in the question's frame instead of the tool, one at a time, each
   with its answers and what each means, ticked with Space where several may be chosen, Tab
   writing an answer of the operator's own, and go back with the leave to go ahead, `tags.rs` names each sub-agent by one short word of the kind of agent
-  it was asked to be, numbered where two would read alike, `turns.rs` draws the rule under a
-  finished turn with what that turn did and spent — its sub-agents and calls, its tokens, how far
-  it moved the five-hour window and how long it took — giving up whole figures where the pane is narrow,
-  and names a turn that compacted the conversation as one, under the row that says what the
-  compaction shrank the context from and to. `usage.rs` is the arithmetic under the Usage
+  it was asked to be, numbered where two would read alike, `compaction.rs` draws the row a
+  compaction leaves, with what it shrank the context from and to; the end of a turn draws
+  nothing, the next prompt's bubble being where the next turn starts. `usage.rs` is the arithmetic under the Usage
   pane's breakdown — each model's share in whole percent that add up to 100, what each model
   is called in a row and what the cache saved — `meter.rs` the two-tone bar every share in that
   pane is drawn with, `tree.rs` hangs the working tree's files in a tree of their

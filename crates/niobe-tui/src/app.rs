@@ -744,7 +744,11 @@ pub enum EntryKind {
     Failure,
     /// The shell itself, explaining something.
     Notice,
-    /// The rule drawn where a turn ended, with what the turn spent on it.
+    /// Where a turn ended, with what the turn did and spent. Drawn as
+    /// nothing: the next prompt's bubble is where the next turn is seen to
+    /// start, and what a turn spent is the Usage pane's to show. It is kept
+    /// because it bounds a turn's entries, which grouping the rows by agent
+    /// and summing up the calls go by.
     Turn(TurnRule),
     /// The row drawn where the backend compacted the conversation, with how
     /// much it held before and after.
@@ -772,11 +776,10 @@ pub struct CompactionRow {
     pub after: Option<u64>,
 }
 
-/// What the rule under a finished turn says about it.
+/// What a finished turn did and spent, as the entry where it ended keeps it.
 ///
 /// Every figure is one the session fold or this shell's clock measured, and
-/// each is `None` where neither did; the rule leaves an absent figure out
-/// rather than standing a zero in for it.
+/// each is `None` where neither did, never a zero standing in for it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TurnRule {
     /// Which turn it was, counted from one.
@@ -838,7 +841,12 @@ impl EntryKind {
 pub struct Entry {
     /// Decides the glyph and the colour.
     pub kind: EntryKind,
-    /// The bold label: `you`, the backend's name, a tool's name.
+    /// The bold label: the backend's name, a tool's name, what a notice is
+    /// about. Empty where nothing is drawn over the entry: a prompt, which
+    /// its bubble says is the operator's, and a notice of the session's own,
+    /// which its mark says is the session's. On an answer the operator gave
+    /// a question the agent put to them, the question it answers, which its
+    /// bubble quotes.
     pub head: String,
     /// The dim detail beside the head: what a refused call was about. Empty
     /// on a tool call's own entry, whose figures are its [`Entry::calls`].
@@ -1853,7 +1861,7 @@ pub struct App {
     /// How many sub-agents had been spawned, and how many entries the
     /// transcript held, when the running turn's first prompt was folded in —
     /// or, for a turn the fold did not see a prompt open, when the last turn
-    /// ended: what the turn's rule counts its agents and calls from.
+    /// ended: what the turn's end counts its agents and calls from.
     turn_began_with: (usize, usize),
     /// Whether a prompt was sent while the running turn ran. The CLI can
     /// queue one as a turn of its own, which then begins where this one
@@ -2489,7 +2497,7 @@ impl App {
         }
         // An end said again for a call already ended changes nothing in the
         // fold, so it puts nothing in the transcript: a second row for it
-        // would be a call the fold does not count, and the turn's rule would
+        // would be a call the fold does not count, and the turn's end would
         // count it too.
         let repeated_end =
             matches!(event, Event::ToolCallEnd { id, .. } if self.session.call_ended(id));
@@ -2902,8 +2910,8 @@ impl App {
         self.last_folded_at.map(Stamp::at)
     }
 
-    /// Draws the rule under the turn the fold has just ended, below whatever
-    /// the event that ended it put in the transcript, as ended `at`.
+    /// Marks the end of the turn the fold has just ended, below whatever the
+    /// event that ended it put in the transcript, as ended `at`.
     fn rule_turn(&mut self, at: Option<Stamp>) {
         let began = self.turn_began_at.take();
         let Some(turn) = self.session.turns().last() else {
@@ -3017,9 +3025,31 @@ impl App {
             queued: false,
             attention: Attention::Routine,
             kind: EntryKind::User,
-            head: "you".to_owned(),
+            head: String::new(),
             meta: String::new(),
             body: text.to_owned(),
+            streaming: false,
+            at: self.at,
+            calls: Vec::new(),
+            agent: None,
+        });
+    }
+
+    /// Puts the operator's answer to a question the agent put to them in the
+    /// transcript, as their own message under the question it answers: the
+    /// question box goes once it is answered, and the conversation read back
+    /// would otherwise hold the agent asking and nothing of what it was told.
+    /// It is notable as the prompt it stands in for is.
+    fn push_answer(&mut self, answered: &niobe_core::Answered) {
+        self.push(Entry {
+            queued: false,
+            attention: Attention::of(&Event::UserMessage {
+                text: String::new(),
+            }),
+            kind: EntryKind::User,
+            head: answered.question.clone(),
+            meta: String::new(),
+            body: answered.answer.clone(),
             streaming: false,
             at: self.at,
             calls: Vec::new(),
@@ -3362,7 +3392,7 @@ impl App {
                             queued: false,
                             attention: Attention::Notable,
                             kind: EntryKind::Notice,
-                            head: self.agent_name(),
+                            head: String::new(),
                             meta: String::new(),
                             body: crate::goal::met(goal),
                             streaming: false,
@@ -3379,7 +3409,7 @@ impl App {
                 queued: false,
                 attention: Attention::Routine,
                 kind: EntryKind::Notice,
-                head: self.agent_name(),
+                head: String::new(),
                 meta: String::new(),
                 body: message.clone(),
                 streaming: false,
@@ -3408,7 +3438,7 @@ impl App {
                     queued: false,
                     attention: Attention::Routine,
                     kind: EntryKind::Notice,
-                    head: self.agent_name(),
+                    head: String::new(),
                     meta: String::new(),
                     body,
                     streaming: false,
@@ -3533,8 +3563,11 @@ impl App {
                 id,
                 decision,
                 message,
-                answers: _,
+                answers,
             } => {
+                for answered in answers {
+                    self.push_answer(answered);
+                }
                 let asked = self.forget_ask(id);
                 if decision.allowed() {
                     self.answered.insert(id.clone(), *decision);
@@ -4194,7 +4227,7 @@ impl App {
             queued: false,
             attention: Attention::Notable,
             kind: EntryKind::Notice,
-            head: self.agent_name(),
+            head: String::new(),
             meta: String::new(),
             body,
             streaming: false,
@@ -6054,17 +6087,16 @@ impl App {
     }
 
     /// Copies the transcript, as the last frame laid it out, to the
-    /// clipboard.
+    /// clipboard, read as a copy of the whole of it reads: see
+    /// [`crate::ui::DrawnEntries::copied_lines_from`].
     fn export(&mut self) {
         let lines = self.transcript_drawn.map_or(0, |(_, lines)| lines);
         if lines == 0 {
             self.hint = Some("There is no transcript to export yet".to_owned());
             return;
         }
-        let mut shown = self.drawn.plain_lines();
-        let text: Vec<String> = (0..lines)
-            .map(|_| shown.next().unwrap_or_default())
-            .collect();
+        let mut copied = self.drawn.copied_lines_from(0, |_| false);
+        let text: Vec<String> = (0..lines).filter_map(|_| copied.next().flatten()).collect();
         self.handoffs
             .push(crate::desktop::Handoff::Copy(text.join("\n")));
     }
@@ -8806,15 +8838,19 @@ impl App {
     /// across a long transcript is seconds' worth of frames.
     fn selected_text(&self, selection: crate::select::Selection) -> String {
         let covered = selection.lines();
-        let first = *covered.start();
-        let mut lines: Vec<String> = self
+        let (first, last) = (*covered.start(), *covered.end());
+        let mut lines: Vec<Option<String>> = self
             .drawn
-            .copied_lines_from(first)
+            .copied_lines_from(first, |line| line == first || line == last)
             .take(covered.count())
             .collect();
         // Each line is asked for once, in order, so it is handed over rather
         // than copied.
-        selection.text(|line| lines.get_mut(line.checked_sub(first)?).map(std::mem::take))
+        selection.text(|line| {
+            lines
+                .get_mut(line.checked_sub(first)?)
+                .and_then(Option::take)
+        })
     }
 
     /// Opens the call drawn on transcript line `line` whole, where a call is
@@ -22558,14 +22594,27 @@ mod tests {
             "the transcript is longer than the screen: {lines}"
         );
         let each: Vec<String> = (0..lines)
-            .map(|line| app.drawn.plain_line(line).unwrap_or_default())
+            .filter_map(|line| {
+                app.drawn
+                    .copied_lines_from(line, |_| false)
+                    .next()
+                    .flatten()
+            })
             .collect();
 
         app.perform(crate::menu::Action::Export);
 
+        let exported = each.join("\n");
+        // A prompt reads as its words behind the replies' gutter, without
+        // the bubble's ends or the cells that set it against the right edge.
+        assert!(
+            exported.contains("\n  Prompt 1: what changed in"),
+            "{exported}"
+        );
+        assert!(!exported.contains(['▗', '▝']), "{exported}");
         assert_eq!(
             app.take_handoffs(),
-            vec![crate::desktop::Handoff::Copy(each.join("\n"))]
+            vec![crate::desktop::Handoff::Copy(exported)]
         );
     }
 
@@ -22591,17 +22640,29 @@ mod tests {
             .expect("drawing never fails on a test backend");
         let (_, lines) = app.transcript_drawn.expect("the transcript was drawn");
         let at = |line, column| crate::select::Point { line, column };
+        // A line from the middle on with something drawn in its cells 4 to
+        // 30, which a prompt's bubble on the right leaves blank.
+        let middle = (lines / 2..lines)
+            .find(|&line| {
+                app.drawn
+                    .plain_line(line)
+                    .is_some_and(|drawn| drawn.chars().skip(4).take(27).any(|c| c != ' '))
+            })
+            .expect("a line in the second half has words on its left");
         for selection in [
             // Most of the transcript, from part way along its second line to
             // part way along its last but one, dragged upwards.
             crate::select::Selection::new(at(lines - 2, 17), at(1, 3)),
             // Part of one line in the middle.
-            crate::select::Selection::new(at(lines / 2, 4), at(lines / 2, 30)),
+            crate::select::Selection::new(at(middle, 4), at(middle, 30)),
             // Running on past the transcript's end.
             crate::select::Selection::new(at(lines - 3, 0), at(lines + 5, 80)),
         ] {
             let drawn = &app.drawn;
-            let each = selection.text(|line| drawn.copied_lines_from(line).next());
+            let ends = *selection.lines().start()..=*selection.lines().end();
+            let cut = move |line: usize| line == *ends.start() || line == *ends.end();
+            let each =
+                selection.text(|line| drawn.copied_lines_from(line, cut.clone()).next().flatten());
             assert!(!each.is_empty(), "{selection:?} covers something");
 
             assert_eq!(app.selected_text(selection), each, "{selection:?}");

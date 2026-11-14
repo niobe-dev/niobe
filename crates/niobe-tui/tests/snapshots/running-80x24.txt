@@ -5,7 +5,7 @@
 ┃   └ 404 object_not_found — the page is not shared with the integration       ┃
 ┃                                                                              ┃
 ┃ ◆ Caching the etag beside the body so a 304 can be answered from the LRU.    ┃
-┃                                                                              █
+┃                                                                              ┃
 ┃   Edited 1 file +6 −2                                                        █
 ┃                                                                              █
 ┃ ◆ Rewriting the 304 test around the cached body.                             █

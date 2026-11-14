@@ -9,7 +9,7 @@
   i  Rgb(255, 43, 214) on Rgb(10, 15, 12), reversed
   j  Rgb(28, 122, 63) on Rgb(10, 15, 12)
   k  Rgb(255, 43, 214) on Rgb(10, 15, 12), bold
-  l  Rgb(255, 43, 214) on Rgb(10, 15, 12)
+  l  Rgb(49, 19, 44) on Rgb(10, 15, 12)
   m  Rgb(107, 154, 124) on Rgb(10, 15, 12)
   n  Rgb(255, 210, 63) on Rgb(10, 15, 12), bold
   o  Rgb(255, 210, 63) on Rgb(10, 15, 12)
@@ -26,7 +26,7 @@
 
 abaaaaaabaaaaaaaabaaaaaaaabaaaaaabaaaaabaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaccccccaaddddddddddddddddaaeeeeeeeeeeeeeeaadddddaa
 fgghhhiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiigggggfjjjjjjjjjjjjjjjjkkkkkkkjjjjjjjjjjjjjjjjjf
-fgffflllllllllllllllllllfffffffffffffffffffffffffffffffffffffffffffffffffffffgfjfmmmmmmmmmmnnnnfoommmmmmmmmmmmmmmfffffjf
+fgffffffffffffffffffffffllllllllllllllllllllllllllllllllllllllllllllllllllllfgfjfmmmmmmmmmmnnnnfoommmmmmmmmmmmmmmfffffjf
 fgfffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffgfjfmmmmmmmmmmppppffmmmmmmmmmmmmmmmmmmmmfjf
 fgfqqffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffgfjfjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjfjf
 fgfffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffgfjfmmmmmmmmmmppppfffffffffffffmmmmmmffffjf

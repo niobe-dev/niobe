@@ -1,6 +1,6 @@
  Niobe  Session  Context  Model  View  Help                   ● working 1m 15s
 ┏━ > fix the etag test ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-┃   fix the etag test                                                          █
+┃                                                          ▝▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▘ ┃
 ┃                                                                              █
 ┃ ⠋ Bash npm test                                                      running █
 ┃                                                                              █

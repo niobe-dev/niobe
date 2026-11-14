@@ -10,7 +10,7 @@
 ┃   │ +     if cached and cached.etag:                                     │   ┃
 ┃   │ … 2 more lines · Ctrl+T shows the whole call                         │   ┃
 ┃   │                                                                      │   ┃
-┃   │ ▶ 1. Allow once                                       this call only │   █
+┃   │ ▶ 1. Allow once                                       this call only │   ┃
 ┃   │   2. Always allow Edit                              niobe saves Edit │   █
 ┃   │   3. Always allow this target  niobe saves Edit(/repo/catalog/fetch… │   █
 ┃   │   4. Deny                                      the call does not run │   █

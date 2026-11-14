@@ -1,8 +1,8 @@
  Niobe  Session  Context  Model  View  Help                      ● working 38s
 ┏━ > /compact ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-┃ > you                                                                        ┃
-┃   /compact                                                                   ┃
-┃                                                                              ┃
+┃                                                                   ▗▄▄▄▄▄▄▄▄▖ ┃
+┃                                                                    /compact  ┃
+┃                                                                   ▝▀▀▀▀▀▀▀▀▘ ┃
 ┃                                                                              ┃
 ┃                                                                              ┃
 ┃                                                                              ┃

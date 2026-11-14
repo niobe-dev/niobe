@@ -5,7 +5,7 @@
 ║   ║  # What has been built in catalog                                    ║   ║
 ║   ║                                                                      ║   ║
 ║ ◆ ║  2 sessions recorded, the first started 2026-09-18 12:00 UTC and     ║   ║
-║   ║  the last 2026-09-18 12:00 UTC.                                      ║   █
+║   ║  the last 2026-09-18 12:00 UTC.                                      ║   ║
 ║   ║                                                                      ║   █
 ║   ║  ## Highlights                                                       ║   █
 ║ ◆ ║                                                                      ║   █

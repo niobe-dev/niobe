@@ -5,7 +5,7 @@
 ║   └ 404 object_not_found — the page is not shared with the integration       ║
 ║                                                                              ║
 ║ ◆ ╔═════════════════════════════ Tool calls ═════════════════════════════╗   ║
-║   ║                                                                      ║   █
+║   ║                                                                      ║   ║
 ║   ║    Read                   catalog/fetch.ts · 7.2 kB                  ║   █
 ║   ║    Read                   catalog/cache.ts · 3.1 kB                  ║   █
 ║ ◆ ║    Read                   tests/fetch.test.ts · 4.9 kB               ║   █

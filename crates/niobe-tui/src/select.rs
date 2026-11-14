@@ -100,7 +100,7 @@ impl Selection {
             .filter_map(|line| {
                 let drawn = line_at(line)?;
                 let (from, to) = self.columns_on(line)?;
-                Some(cells(&drawn, from, to).trim_end().to_owned())
+                Some(covered(drawn, from, to))
             })
             .collect();
         let shares_indent =
@@ -146,9 +146,14 @@ pub(crate) fn plain(line: &Line<'_>) -> String {
 /// dropped here draws in no cell, so the columns of what is left are the
 /// columns it was drawn in.
 pub(crate) fn shown(line: &Line<'_>) -> String {
+    shown_spans(&line.spans)
+}
+
+/// [`shown`] of a run of a line's spans.
+pub(crate) fn shown_spans(spans: &[ratatui::text::Span<'_>]) -> String {
     let drawn = |c: char| !c.is_control() && !crate::ui::is_direction_mark(c);
     let mut shown = String::new();
-    for span in &line.spans {
+    for span in spans {
         // Most spans hold nothing to drop, and are copied whole rather than
         // a character at a time.
         if span.content.chars().all(|c| drawn(c) && !text::is_tag(c)) {
@@ -166,6 +171,19 @@ pub(crate) fn shown(line: &Line<'_>) -> String {
         }
     }
     shown
+}
+
+/// [`cells`] of `drawn` without its trailing blanks, kept in `drawn`'s own
+/// buffer where it is the whole line, as every line but a selection's first
+/// and last is: a long selection is otherwise each line copied a second time.
+fn covered(mut drawn: String, from: usize, to: usize) -> String {
+    let kept = cells(&drawn, from, to);
+    let whole = matches!(kept, std::borrow::Cow::Borrowed(kept) if kept.len() == drawn.len());
+    if !whole {
+        return kept.trim_end().to_owned();
+    }
+    drawn.truncate(drawn.trim_end().len());
+    drawn
 }
 
 /// The part of `drawn` in the cells from `from` up to `to`. A character two

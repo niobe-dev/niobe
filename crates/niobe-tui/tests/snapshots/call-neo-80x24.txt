@@ -5,7 +5,7 @@
 ║   └ 404 object_not_found — the page is not shared with the integration       ║
 ║                                                                              ║
 ║ ◆ Caching the etag beside the body so a 304 can be answered from the LRU.    ║
-║                                                                              █
+║                                                                              ║
 ║   ╔══════════════════════ Bash · npm test -- fetch ══════════════════════╗   █
 ║   ║                                                                      ║   █
 ║ ◆ ║  input · 17 bytes                                                    ║   █

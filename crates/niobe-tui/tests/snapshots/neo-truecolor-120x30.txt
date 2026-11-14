@@ -8,7 +8,7 @@
   h  Rgb(255, 255, 255) on Rgb(2, 8, 3), reversed
   i  Rgb(15, 107, 39) on Rgb(2, 8, 3)
   j  Rgb(0, 255, 65) on Rgb(2, 8, 3), bold
-  k  Rgb(255, 255, 255) on Rgb(2, 8, 3)
+  k  Rgb(42, 48, 43) on Rgb(2, 8, 3)
   l  Rgb(46, 139, 68) on Rgb(2, 8, 3)
   m  Rgb(255, 176, 0) on Rgb(2, 8, 3), bold
   n  Rgb(255, 176, 0) on Rgb(2, 8, 3)
@@ -24,7 +24,7 @@
 
 abaaaaaabaaaaaaaabaaaaaaaabaaaaaabaaaaabaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaccccccaaddddddddddddddddaaaaaaaaaaaaaaaaaadddddaa
 effggghhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhfffffeiiiiiiiiiiiiiiiijjjjjjjiiiiiiiiiiiiiiiiie
-efeeekkkkkkkkkkkkkkkkkkkeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeefeiellllllllllmmmmennllllllllllllllleeeeeie
+efeeeeeeeeeeeeeeeeeeeeeekkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkefeiellllllllllmmmmennllllllllllllllleeeeeie
 efeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeefeiellllllllllooooeelllllllllllllllllllleie
 efejjeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeefeieiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiieie
 efeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeefeiellllllllllooooeeeeeeeeeeeeelllllleeeeie

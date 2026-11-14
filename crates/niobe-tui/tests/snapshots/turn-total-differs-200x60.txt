@@ -1,24 +1,24 @@
  Niobe  Session  Context  Model  View  Help                                                                                                            opus-5  claude · default  ○ not attached  13:51
  ┏━ > write the six pages ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓ ┌───────────────────── Usage ──────────────────────┐
- ┃ > you                                                                                                                                         ┃ │ opus-5    100% ▓▓▓▓▓▓▓▓▓▓▓▓  369k                │
- ┃   write the six pages                                                                                                                         ┃ │ cache hit  98% ▓▓▓▓▓▓▓▓▓▓▓░  352k                │
- ┃                                                                                                                                               ┃ │ +121k reported by the CLI, not per message       │
- ┃ ◆ Writing the six tasks now.                                                                                                                  ┃ └──────────────────────────────────────────────────┘
- ┃                                                                                                                                               ┃ ┌──────────────────── Changes ─────────────────────┐
- ┃ · claude                                                                                                                                      ┃ │ ⎇ main ↑3                                        │
- ┃   The reply above was cut off before the CLI said it was finished, and the CLI is carrying the turn on from where it stopped. The CLI         ┃ │ ▾ Working tree  23 files  +≥977 −≥259            │
+ ┃                                                                                                                         ▗▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▖ ┃ │ opus-5    100% ▓▓▓▓▓▓▓▓▓▓▓▓  369k                │
+ ┃                                                                                                                          write the six pages  ┃ │ cache hit  98% ▓▓▓▓▓▓▓▓▓▓▓░  352k                │
+ ┃                                                                                                                         ▝▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▘ ┃ │ +121k reported by the CLI, not per message       │
+ ┃                                                                                                                                               ┃ └──────────────────────────────────────────────────┘
+ ┃ ◆ Writing the six tasks now.                                                                                                                  ┃ ┌──────────────────── Changes ─────────────────────┐
+ ┃                                                                                                                                               ┃ │ ⎇ main ↑3                                        │
+ ┃ · The reply above was cut off before the CLI said it was finished, and the CLI is carrying the turn on from where it stopped. The CLI         ┃ │ ▾ Working tree  23 files  +≥977 −≥259            │
  ┃   recorded no count for it, so its tokens are not counted. Message msg_011Cfh9DZarQmXXnvywwTKDD (request req_011Cfh9DZCJ19ME3Je89LBSJ).       ┃ │   ▾ catalog/                                     │
  ┃                                                                                                                                               ┃ │     ▾ cache/                                     │
  ┃ ◆ The six pages are written.                                                                                                                  ┃ │       lru.ts                             +31  −9 │
  ┃                                                                                                                                               ┃ │       index.ts                           +12  −0 │
- ┃ · claude                                                                                                                                      ┃ │     fetch.ts                            +149 −12 │
- ┃   The CLI counted 120891 tokens for this turn beyond what its messages reported. The session's totals hold them where the CLI's bill carried  ┃ │     etag.ts                              +88 −41 │
- ┃   them; no message accounts for them.                                                                                                         ┃ │   ▾ docs/                                        │
- ┃   turn 1 · 13:49 · CLI session 506fa4fd-8719-4564-8c62-5c6ae4b1a471 · no final count: msg_011Cfh9DZarQmXXnvywwTKDD (request                   ┃ │     ▾ adr/                                       │
- ┃   req_011Cfh9DZCJ19ME3Je89LBSJ) · per message 6 in, 9167 out, 234375 cache read, 4685 cache write · reported 8 in, 9175 out, 352445 cache     ┃ │       0004-etags.md                      +34  −1 │
- ┃   read, 7496 cache write                                                                                                                      ┃ │     ▾ diagrams/                                  │
+ ┃ · The CLI counted 120891 tokens for this turn beyond what its messages reported. The session's totals hold them where the CLI's bill carried  ┃ │     fetch.ts                            +149 −12 │
+ ┃   them; no message accounts for them.                                                                                                         ┃ │     etag.ts                              +88 −41 │
+ ┃   turn 1 · 13:49 · CLI session 506fa4fd-8719-4564-8c62-5c6ae4b1a471 · no final count: msg_011Cfh9DZarQmXXnvywwTKDD (request                   ┃ │   ▾ docs/                                        │
+ ┃   req_011Cfh9DZCJ19ME3Je89LBSJ) · per message 6 in, 9167 out, 234375 cache read, 4685 cache write · reported 8 in, 9175 out, 352445 cache     ┃ │     ▾ adr/                                       │
+ ┃   read, 7496 cache write                                                                                                                      ┃ │       0004-etags.md                      +34  −1 │
+ ┃                                                                                                                                               ┃ │     ▾ diagrams/                                  │
  ┃                                                                                                                                               ┃ │       cache.png                            —   — │
- ┃ ── turn 1 13:49 · 369k tok · 13m 12s ──────────────────────────────────────────────────────────────────────────────────────────────────────── ┃ │     caching.md                           +64 −22 │
+ ┃                                                                                                                                               ┃ │     caching.md                           +64 −22 │
  ┃                                                                                                                                               ┃ │   ▾ server/                                      │
  ┃                                                                                                                                               ┃ │     ▾ handlers/                                  │
  ┃                                                                                                                                               ┃ │       manifest.ts                        +97  −4 │

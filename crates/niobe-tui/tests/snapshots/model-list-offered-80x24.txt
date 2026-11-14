@@ -5,7 +5,7 @@
 ┃   ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ Model ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓   ┃
 ┃   ┃                                                                      ┃   ┃
 ┃ ◆ ┃  › Default (recommended)  default            Sonnet 5.5 · Efficien…  ┃   ┃
-┃   ┃    Opus 5.5               opus               For complex work and …  ┃   █
+┃   ┃    Opus 5.5               opus               For complex work and …  ┃   ┃
 ┃   ┃    Fable 5.1              fable              For your toughest cha…  ┃   █
 ┃   ┃    Sonnet 5.5             sonnet             Most efficient for si…  ┃   █
 ┃ ◆ ┃    Haiku 4.5              haiku              Fastest for quick ans…  ┃   █

@@ -55,10 +55,10 @@
 <rect x="0" y="36" width="9" height="18" fill="#4682ee"/>
 <rect x="9" y="36" width="9" height="18" fill="#4682ee"/>
 <text x="9" y="49" textLength="9" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#ffffff">║</text>
-<rect x="18" y="36" width="27" height="18" fill="#4682ee"/>
-<rect x="45" y="36" width="171" height="18" fill="#4682ee"/>
-<text x="45" y="49" textLength="171" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#ffff00">unchanged manifests</text>
-<rect x="216" y="36" width="477" height="18" fill="#4682ee"/>
+<rect x="18" y="36" width="198" height="18" fill="#4682ee"/>
+<rect x="216" y="36" width="468" height="18" fill="#4682ee"/>
+<text x="216" y="49" textLength="468" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#000000">▝▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▘</text>
+<rect x="684" y="36" width="9" height="18" fill="#4682ee"/>
 <rect x="693" y="36" width="9" height="18" fill="#4682ee"/>
 <text x="693" y="49" textLength="9" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#ffffff">║</text>
 <rect x="702" y="36" width="27" height="18" fill="#4682ee"/>
@@ -79,7 +79,7 @@
 <text x="9" y="67" textLength="9" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#ffffff">║</text>
 <rect x="18" y="54" width="675" height="18" fill="#4682ee"/>
 <rect x="693" y="54" width="9" height="18" fill="#4682ee"/>
-<text x="693" y="67" textLength="9" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#ffff00">█</text>
+<text x="693" y="67" textLength="9" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#ffffff">║</text>
 <rect x="702" y="54" width="27" height="18" fill="#4682ee"/>
 <text x="702" y="67" textLength="27" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#00ffff"> │ </text>
 <rect x="729" y="54" width="90" height="18" fill="#4682ee"/>

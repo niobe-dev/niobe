@@ -57,10 +57,10 @@
 <rect x="0" y="36" width="9" height="18" fill="#0a0f0c"/>
 <rect x="9" y="36" width="9" height="18" fill="#0a0f0c"/>
 <text x="9" y="49" textLength="9" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#39ff7a">┃</text>
-<rect x="18" y="36" width="27" height="18" fill="#0a0f0c"/>
-<rect x="45" y="36" width="171" height="18" fill="#0a0f0c"/>
-<text x="45" y="49" textLength="171" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#ff2bd6">unchanged manifests</text>
-<rect x="216" y="36" width="477" height="18" fill="#0a0f0c"/>
+<rect x="18" y="36" width="198" height="18" fill="#0a0f0c"/>
+<rect x="216" y="36" width="468" height="18" fill="#0a0f0c"/>
+<text x="216" y="49" textLength="468" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#31132c">▝▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▘</text>
+<rect x="684" y="36" width="9" height="18" fill="#0a0f0c"/>
 <rect x="693" y="36" width="9" height="18" fill="#0a0f0c"/>
 <text x="693" y="49" textLength="9" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#39ff7a">┃</text>
 <rect x="702" y="36" width="9" height="18" fill="#0a0f0c"/>
@@ -85,7 +85,7 @@
 <text x="9" y="67" textLength="9" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#39ff7a">┃</text>
 <rect x="18" y="54" width="675" height="18" fill="#0a0f0c"/>
 <rect x="693" y="54" width="9" height="18" fill="#0a0f0c"/>
-<text x="693" y="67" textLength="9" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#39ff7a">█</text>
+<text x="693" y="67" textLength="9" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#39ff7a">┃</text>
 <rect x="702" y="54" width="9" height="18" fill="#0a0f0c"/>
 <rect x="711" y="54" width="9" height="18" fill="#0a0f0c"/>
 <text x="711" y="67" textLength="9" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#1c7a3f">│</text>

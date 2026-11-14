@@ -69,7 +69,9 @@ You need the [`claude` CLI](https://code.claude.com/docs/en/setup) installed and
 ## Use
 
 Run `niobe` in a repository. Type a prompt and press Enter; Shift+Enter (or Ctrl+J) opens a new
-line, F1 lists the keys, Shift+Tab changes the permission mode and Ctrl+Q quits.
+line, F1 lists the keys, Shift+Tab changes the permission mode and Ctrl+Q quits. The session
+draws what you send as a messenger does, on the right in a bubble of its own, and an answer you
+give a question the agent asks stays there the same way, with the question quoted in it.
 
 On a terminal at least 100 columns wide, a column beside the session shows what it stands at.
 Usage has the plan's windows or the money, the tokens by model and the context. Changes has the

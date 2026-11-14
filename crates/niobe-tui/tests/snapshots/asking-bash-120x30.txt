@@ -10,7 +10,7 @@
  ┃   ┌─ ? claude asks ────────────────────────────────────── blocks turn 1 ┐ ┃ └──────────────────────────────────────┘
  ┃   │ to run Bash                                                         │ ┃ ┌────────────── Changes ───────────────┐
  ┃   │ cargo test -p catalog                                               │ ┃ │ ⎇ main ↑3                            █
- ┃   │                                                                     │ █ │ ▾ Working tree  +≥977 −≥259          █
+ ┃   │                                                                     │ ┃ │ ▾ Working tree  +≥977 −≥259          █
  ┃   │ description: Run the catalog tests                                  │ █ │   ▾ catalog/                         │
  ┃   │                                                                     │ █ │     ▾ cache/                         │
  ┃   │ ▶ 1. Allow once                                      this call only │ █ │       lru.ts                 +31  −9 │
