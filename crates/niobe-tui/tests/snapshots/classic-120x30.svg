@@ -38,14 +38,14 @@
 <text x="1017" y="13" textLength="45" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#000000" opacity="0.6">13:41</text>
 <rect x="1062" y="0" width="18" height="18" fill="#00cdcd"/>
 <rect x="0" y="18" width="9" height="18" fill="#4682ee"/>
-<rect x="9" y="18" width="18" height="18" fill="#4682ee"/>
-<text x="9" y="31" textLength="18" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#ffffff">╔═</text>
-<rect x="27" y="18" width="27" height="18" fill="#ffff00"/>
-<text x="27" y="31" textLength="27" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#4682ee" font-weight="bold"> &gt; </text>
-<rect x="54" y="18" width="603" height="18" fill="#ffff00"/>
-<text x="54" y="31" textLength="603" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#4682ee">add etag support to the catalog fetcher so we stop re-downloading… </text>
-<rect x="657" y="18" width="45" height="18" fill="#4682ee"/>
-<text x="657" y="31" textLength="45" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#ffffff">════╗</text>
+<rect x="9" y="18" width="27" height="18" fill="#4682ee"/>
+<text x="9" y="31" textLength="27" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#ffffff">╔══</text>
+<rect x="36" y="18" width="27" height="18" fill="#4682ee"/>
+<text x="36" y="31" textLength="27" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#ffff00" font-weight="bold"> &gt; </text>
+<rect x="63" y="18" width="603" height="18" fill="#4682ee"/>
+<text x="63" y="31" textLength="603" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#ffff00">add etag support to the catalog fetcher so we stop re-downloading… </text>
+<rect x="666" y="18" width="36" height="18" fill="#4682ee"/>
+<text x="666" y="31" textLength="36" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#ffffff">═══╗</text>
 <rect x="702" y="18" width="153" height="18" fill="#4682ee"/>
 <text x="702" y="31" textLength="153" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#00ffff"> ┌───────────────</text>
 <rect x="855" y="18" width="63" height="18" fill="#4682ee"/>

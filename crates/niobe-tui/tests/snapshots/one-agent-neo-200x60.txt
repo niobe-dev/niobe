@@ -1,5 +1,5 @@
  Niobe  Session  Context  Model  View  Help                                                                                                            opus-5  claude · default  ○ not attached  13:41
- ╔═ only deep2's entries · s in a side pane shows all ═══════════════════════════════════════════════════════════════════════════════════════════╗ ┌───────────────────── Usage ──────────────────────┐
+ ╔══════════════════════════════════════════════ only deep2's entries · s in a side pane shows all ══════════════════════════════════════════════╗ ┌───────────────────── Usage ──────────────────────┐
  ║ ↳ deep2  deep-reasoner: Review cache.py                                                                                                       ║ │ 5h         62% ▓▓▓▓▓▓▓░░░░░ resets 16:40         │
  ║   Let me check how eviction is triggered.                                                                                                     ║ │ 7d         18% ▓▓░░░░░░░░░░ resets Tue 15:00     │
  ║                                                                                                                                               ║ │ ──────────────────────────────────────────────── │

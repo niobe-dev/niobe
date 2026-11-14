@@ -1190,11 +1190,12 @@ const STACK_MOST: u16 = 52;
 /// focus line and colour, every other pane in its plain line and the frame
 /// colour.
 ///
-/// Three marks say which pane has the keyboard — the line, the colour and the
-/// inverted title — and the line is the one that survives a monochrome
-/// terminal, the way the window with the keyboard in Turbo Vision was the one
-/// with the double frame. The design's glow has no cell to be drawn in, and
-/// the three marks carry what it said.
+/// Two marks say which pane has the keyboard — the line and the colour — and
+/// the line is the one that survives a monochrome terminal, the way the
+/// window with the keyboard in Turbo Vision was the one with the double
+/// frame. The design's glow has no cell to be drawn in, and the two marks
+/// carry what it said. The title is drawn alike on every pane: a bar on the
+/// one with the keyboard read as a highlight on its name.
 #[derive(Debug, Clone, Copy)]
 struct Border {
     kind: BorderType,
@@ -1202,7 +1203,6 @@ struct Border {
     /// as the same line.
     track: &'static str,
     style: Style,
-    focused: bool,
 }
 
 impl Border {
@@ -1215,7 +1215,6 @@ impl Border {
             kind,
             track: kind.to_border_set().vertical_right,
             style: Style::new().fg(colour),
-            focused,
         }
     }
 }
@@ -1230,7 +1229,7 @@ impl Border {
 fn pane(title: impl Into<String>, border: Border, theme: &Theme) -> Block<'static> {
     frame_of(border, theme).title_top(
         Line::from(format!(" {} ", title.into()))
-            .style(title_style(theme.title, border, theme))
+            .style(title_style(theme.title))
             .centered(),
     )
 }
@@ -1244,22 +1243,16 @@ fn frame_of(border: Border, theme: &Theme) -> Block<'static> {
         .padding(Padding::horizontal(1))
 }
 
-/// A title in `colour`. Reversed rather than painted when the pane has the
-/// keyboard, so that a terminal with no colour still draws it as a solid bar.
-fn title_style(colour: Color, border: Border, theme: &Theme) -> Style {
-    match border.focused {
-        true => Style::new()
-            .fg(colour)
-            .bg(theme.pane_bg)
-            .add_modifier(Modifier::REVERSED)
-            .bold(),
-        false => Style::new().fg(colour).bold(),
-    }
+/// A title in `colour`, the same whether or not the pane has the keyboard:
+/// the frame says which one does, by its line and its colour, and a title
+/// drawn as a solid bar read as a highlight on whatever it named.
+fn title_style(colour: Color) -> Style {
+    Style::new().fg(colour).bold()
 }
 
-/// The session pane's frame: what the session is about at the left of the
-/// top edge, where a caption is known, and the repository's name centred, as
-/// every other pane's title is, where it is not.
+/// The session pane's frame: what the session is about, or the repository's
+/// name where nothing is known yet, centred on the top edge as every other
+/// pane's title is.
 ///
 /// The prompt that began the session is written the way the operator typed
 /// it — a bold `> ` and the user's colour. A title the backend made is not
@@ -1276,29 +1269,21 @@ fn session_frame(
     let Some(caption) = caption else {
         return pane(session_caption(None, repo, width), border, theme);
     };
-    let edge = border.kind.to_border_set().horizontal_top;
     let text = text::truncate_words(
         &caption,
         usize::from(width.saturating_sub(TITLE_MARGIN + 2)),
     );
     let line = match titled {
-        true => {
-            let style = title_style(theme.title, border, theme);
-            vec![
-                Span::styled(edge, border.style),
-                Span::styled(format!(" {text} "), style.remove_modifier(Modifier::BOLD)),
-            ]
-        }
+        true => vec![Span::styled(format!(" {text} "), title_style(theme.title))],
         false => {
-            let style = title_style(theme.user, border, theme);
+            let style = title_style(theme.user);
             vec![
-                Span::styled(edge, border.style),
                 Span::styled(" > ", style),
                 Span::styled(format!("{text} "), style.remove_modifier(Modifier::BOLD)),
             ]
         }
     };
-    frame_of(border, theme).title_top(Line::from(line))
+    frame_of(border, theme).title_top(Line::from(line).centered())
 }
 
 /// The session pane: the transcript, and the composer under it. `panes` is
@@ -6391,7 +6376,7 @@ impl PaneRow {
 /// Draws the section cursor: the header's marker and name as a solid bar.
 /// `shown` are the rows on screen, the first of them the pane's row `from`.
 ///
-/// Reversed rather than painted, like the focused pane's title, so the cursor
+/// Reversed rather than painted, so the cursor
 /// is there on a terminal with no colour.
 fn mark_cursor(
     shown: &mut [Line<'static>],

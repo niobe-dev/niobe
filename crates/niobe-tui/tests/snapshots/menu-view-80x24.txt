@@ -1,5 +1,5 @@
  Niobe  Session  Context  Model  View  Help           opus-5  claude · default
-┏━ > add etag support to the cat┌─────────────────────────────────┐ing… ━━━━━━━┓
+┏━━━━ > add etag support to the ┌─────────────────────────────────┐oading… ━━━━┓
 ┃                               │ Diff                 F5  Ctrl+T │            ┃
 ┃ ✗ Notion·update… {}           │ Group by agent                a │     failed ┃
 ┃   └ 404 object_not_found — the│ Notable only                  n │ation       ┃

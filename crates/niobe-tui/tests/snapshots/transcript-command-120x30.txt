@@ -1,14 +1,14 @@
   a  White on Black
   b  LightGreen on Black, bold | underlined
   c  LightGreen on Black
-  d  LightMagenta on Black, bold | reversed
-  e  LightMagenta on Black, reversed
+  d  LightYellow on Black, bold
+  e  LightYellow on Black
   f  Green on Black
   g  LightMagenta on Black, bold
   h  DarkGray on Black
   i  White on DarkGray
   j  LightCyan on DarkGray
-  k  LightMagenta on DarkGray
+  k  LightYellow on DarkGray
   l  LightBlue on Black
   m  LightGreen on Black, bold
   n  Black on LightGreen, bold
@@ -17,7 +17,7 @@
   q  Black on LightMagenta, dim
 
 abaaaaaabaaaaaaaabaaaaaaaabaaaaaabaaaaabaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaacccccccccaa
-accdddeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeccccccccccccccccccccccccccccccccccccccccccaffffffffffffffffgggggggfffffffffffffffffa
+accccccccccccccccccccccdddeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeccccccccccccccccccccccaffffffffffffffffgggggggfffffffffffffffffa
 acaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaahhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhacafaffffffaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaafa
 acaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaijjjjjjjjkkkkkkkkkkkkkkkkkkkkkiacafaffffffaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaafa
 acaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaahhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhacafaffffffffffffffffffffaaaaaaaaaaaaaaaaafa

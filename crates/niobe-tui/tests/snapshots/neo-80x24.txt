@@ -3,8 +3,8 @@
   c  Green on Black, bold
   d  Green on Black, dim
   e  LightGreen on Black
-  f  White on Black, bold | reversed
-  g  White on Black, reversed
+  f  White on Black, bold
+  g  White on Black
   h  LightRed on Black, bold
   i  LightRed on Black
   j  LightGreen on Black, bold
@@ -14,7 +14,7 @@
   n  Black on Green
 
 abaaaaaabaaaaaaaabaaaaaaaabaaaaaabaaaaabaaaaaaaaaaaaaaccccccaaddddddddddddddddaa
-eefffgggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggeeeeeeee
+eeeeefffgggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggeeeee
 eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
 eehhiiiiiiiiiiiiiieaaeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeiiiiiiee
 eeeeaaeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee

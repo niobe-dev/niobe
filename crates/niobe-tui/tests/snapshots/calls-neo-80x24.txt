@@ -1,5 +1,5 @@
  Niobe  Session  Context  Model  View  Help           opus-5  claude · default
-╔═ > add etag support to the catalog fetcher so we stop re-downloading… ═══════╗
+╔════ > add etag support to the catalog fetcher so we stop re-downloading… ════╗
 ║                                                                              ║
 ║ ✗ Notion·update… {}                                                   failed ║
 ║   └ 404 object_not_found — the page is not shared with the integration       ║

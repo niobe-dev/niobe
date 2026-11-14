@@ -5387,9 +5387,10 @@ fn title_row<'a>(frame: &'a str, title: &str) -> &'a str {
         .unwrap_or_default()
 }
 
-/// Exactly one pane has the keyboard, and it says so three ways: the theme's
-/// focus line where the others are single, its own colour on that border, and
-/// an inverted title. The border is the one a monochrome terminal keeps.
+/// Exactly one pane has the keyboard, and it says so by its frame: the
+/// theme's focus line where the others are single, and its own colour on that
+/// border. Its title is drawn as every other pane's is, not as a bar. The
+/// border is the one a monochrome terminal keeps.
 #[test]
 fn the_pane_with_the_keyboard_is_the_one_drawn_in_the_focus_line() {
     use ratatui::crossterm::event::KeyCode;
@@ -5409,15 +5410,12 @@ fn the_pane_with_the_keyboard_is_the_one_drawn_in_the_focus_line() {
     assert_eq!(focused, ["Activity"], "{frame}");
 
     let title = style_at(&mut app, 120, 30, " Activity ").expect("the title is drawn");
-    assert!(
-        title.add_modifier.contains(Modifier::REVERSED),
-        "the focused title is not inverted: {title:?}"
-    );
     let other = style_at(&mut app, 120, 30, " Changes ").expect("the title is drawn");
     assert!(
-        !other.add_modifier.contains(Modifier::REVERSED),
-        "{other:?}"
+        !title.add_modifier.contains(Modifier::REVERSED),
+        "the focused title is a bar: {title:?}"
     );
+    assert_eq!(title, other);
 
     // The section cursor is on the pane's first header, drawn the same way,
     // and nowhere in the pane that does not have the keyboard.
@@ -7590,8 +7588,12 @@ fn a_branch_level_with_its_upstream_says_so_and_one_without_an_upstream_says_not
     assert!(!branch_row(None, None).contains("in sync"));
 }
 
+/// The session pane's caption is centred on its top edge, as every other
+/// pane's title is, and drawn as they are rather than as a highlighted bar.
 #[test]
-fn the_session_caption_is_the_prompt_at_the_left_of_the_top_edge() {
+fn the_session_caption_is_the_prompt_centred_on_the_top_edge() {
+    use ratatui::style::Modifier;
+
     let mut app = empty_session();
     app.apply(&Event::UserMessage {
         text: "Price the replayed sessions".to_owned(),
@@ -7600,12 +7602,22 @@ fn the_session_caption_is_the_prompt_at_the_left_of_the_top_edge() {
     let frame = screen(&mut app, 120, 24);
     let top = frame.lines().nth(1).unwrap_or_default();
     let corner = top.find(FOCUS_TOP_LEFT).expect("the session pane's corner");
-
+    let edge = &top[corner..];
+    let caption = " > Price the replayed sessions ";
+    let at = edge.find(caption).expect("the caption is on the top edge");
+    let before = edge[..at].chars().skip(1).count();
+    let after = edge[at + caption.len()..]
+        .chars()
+        .take_while(|glyph| *glyph == FOCUS_EDGE)
+        .count();
     assert!(
-        top[corner..].starts_with(&format!(
-            "{FOCUS_TOP_LEFT}{FOCUS_EDGE} > Price the replayed sessions "
-        )),
-        "{top}"
+        before.abs_diff(after) <= 2,
+        "{before} before, {after} after: {top}"
+    );
+    let style = style_at(&mut app, 120, 24, "Price the replayed").expect("the caption is drawn");
+    assert!(
+        !style.add_modifier.contains(Modifier::REVERSED),
+        "{style:?}"
     );
 }
 

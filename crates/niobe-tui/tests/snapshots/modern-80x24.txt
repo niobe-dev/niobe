@@ -3,8 +3,8 @@
   c  White on DarkGray, bold
   d  White on DarkGray, dim
   e  LightBlue on Black
-  f  LightYellow on Black, bold | reversed
-  g  LightYellow on Black, reversed
+  f  LightYellow on Black, bold
+  g  LightYellow on Black
   h  White on Black
   i  LightRed on Black, bold
   j  LightRed on Black
@@ -18,7 +18,7 @@
   r  White on Blue
 
 abaaaaaabaaaaaaaabaaaaaaaabaaaaaabaaaaabaaaaaaaaaaaaaaccccccaaddddddddddddddddaa
-eefffgggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggeeeeeeee
+eeeeefffgggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggeeeee
 ehhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhe
 ehiijjjjjjjjjjjjjjhkkhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhjjjjjjhe
 ehhhkkhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhe

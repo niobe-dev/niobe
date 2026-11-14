@@ -1,5 +1,5 @@
  Niobe  Session  Context  Model  View  Help                    opus-5  claude · default  ○ idle 0s
- ┏━ > add etag support to the catalog fetcher so we stop… ━━━━━┓ ┌──────────── Usage ─────────────┐
+ ┏━━━ > add etag support to the catalog fetcher so we stop… ━━━┓ ┌──────────── Usage ─────────────┐
  ┃                                                             ┃ │ 5h          —                  │
  ┃ ◆ Rewriting the 304 test around the cached body.            ┃ │ 7d          —                  │
  ┃                                                             ┃ │ ────────────────────────────── │

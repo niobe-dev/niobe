@@ -38,14 +38,14 @@
 <text x="1017" y="13" textLength="45" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#e6e9ff" opacity="0.6">13:41</text>
 <rect x="1062" y="0" width="18" height="18" fill="#0d0b16"/>
 <rect x="0" y="18" width="9" height="18" fill="#0a0f0c"/>
-<rect x="9" y="18" width="18" height="18" fill="#0a0f0c"/>
-<text x="9" y="31" textLength="18" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#39ff7a">┏━</text>
-<rect x="27" y="18" width="27" height="18" fill="#ff2bd6"/>
-<text x="27" y="31" textLength="27" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#0a0f0c" font-weight="bold"> &gt; </text>
-<rect x="54" y="18" width="603" height="18" fill="#ff2bd6"/>
-<text x="54" y="31" textLength="603" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#0a0f0c">add etag support to the catalog fetcher so we stop re-downloading… </text>
-<rect x="657" y="18" width="45" height="18" fill="#0a0f0c"/>
-<text x="657" y="31" textLength="45" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#39ff7a">━━━━┓</text>
+<rect x="9" y="18" width="27" height="18" fill="#0a0f0c"/>
+<text x="9" y="31" textLength="27" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#39ff7a">┏━━</text>
+<rect x="36" y="18" width="27" height="18" fill="#0a0f0c"/>
+<text x="36" y="31" textLength="27" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#ffd23f" font-weight="bold"> &gt; </text>
+<rect x="63" y="18" width="603" height="18" fill="#0a0f0c"/>
+<text x="63" y="31" textLength="603" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#ffd23f">add etag support to the catalog fetcher so we stop re-downloading… </text>
+<rect x="666" y="18" width="36" height="18" fill="#0a0f0c"/>
+<text x="666" y="31" textLength="36" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#39ff7a">━━━┓</text>
 <rect x="702" y="18" width="9" height="18" fill="#0a0f0c"/>
 <rect x="711" y="18" width="144" height="18" fill="#0a0f0c"/>
 <text x="711" y="31" textLength="144" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#1c7a3f">┌───────────────</text>
@@ -59,7 +59,7 @@
 <text x="9" y="49" textLength="9" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#39ff7a">┃</text>
 <rect x="18" y="36" width="198" height="18" fill="#0a0f0c"/>
 <rect x="216" y="36" width="468" height="18" fill="#0a0f0c"/>
-<text x="216" y="49" textLength="468" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#31132c">▝▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▘</text>
+<text x="216" y="49" textLength="468" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#312e14">▝▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▘</text>
 <rect x="684" y="36" width="9" height="18" fill="#0a0f0c"/>
 <rect x="693" y="36" width="9" height="18" fill="#0a0f0c"/>
 <text x="693" y="49" textLength="9" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#39ff7a">┃</text>

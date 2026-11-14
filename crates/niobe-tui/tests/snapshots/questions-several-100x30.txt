@@ -1,5 +1,5 @@
  Niobe  Session  Context  Model  View  Help                    opus-5  claude · default  ○ idle 0s
- ┏━ > add etag support to the catalog fetcher so we stop… ━━━━━┓ ┌──────────── Usage ─────────────┐
+ ┏━━━ > add etag support to the catalog fetcher so we stop… ━━━┓ ┌──────────── Usage ─────────────┐
  ┃                                                             ┃ │ 5h          —                  │
  ┃ ◆ The notebook that demonstrates the fetcher needs the new  ┃ │ 7d          —                  │
  ┃   call shape.                                               ┃ │ ────────────────────────────── │

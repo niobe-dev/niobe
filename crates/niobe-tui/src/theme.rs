@@ -468,13 +468,15 @@ pub const CYBER: Theme = Theme {
     add_bg: Color::Black,
     del_bg: Color::Black,
 
-    user: Color::LightMagenta,
+    // The neon's yellow, so the operator's words stand apart from the
+    // magenta of the titles and the green of the agent's.
+    user: Color::LightYellow,
     user_bg: Color::DarkGray,
     agent: Color::LightGreen,
     tool: Color::LightBlue,
     code: Color::LightCyan,
-    // Not the operator's magenta: a command is drawn inside a sent prompt,
-    // which is magenta, so it takes the cyan code is drawn in — it is a name
+    // Not the operator's yellow: a command is drawn inside a sent prompt,
+    // which is yellow, so it takes the cyan code is drawn in — it is a name
     // the backend runs, and the two are never on the same row.
     command: Color::LightCyan,
 
@@ -695,8 +697,8 @@ pub const CYBER_TRUE: Theme = Theme {
     add_bg: wash(0x39ff7a, 0x080c0a, WASH),
     del_bg: wash(0xff4d6d, 0x080c0a, WASH),
 
-    user: hex(0xff2bd6),
-    user_bg: wash(0xff2bd6, 0x0a0f0c, BUBBLE),
+    user: hex(0xffd23f),
+    user_bg: wash(0xffd23f, 0x0a0f0c, BUBBLE),
     agent: hex(0x39ff7a),
     tool: hex(0xb9c1ff),
     code: hex(0xffd23f),
