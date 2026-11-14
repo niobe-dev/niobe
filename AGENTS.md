@@ -153,9 +153,13 @@ reviewers that encode both, for an agent working in this tree.
   which prompts are queued — sent while a turn ran or the conversation was being compacted, and drawn
   dim, saying so, until the backend says it took one in or the turn they waited behind ends — `ui.rs`
   draws it, leaving the routine entries out where `n` is pressed in a side pane, each run of them
-  a row that counts them, its Activity pane listing the decisions the agent's replies stated,
-  newest first under a heading that says they are its own account, a sub-agent's named by its
-  tag, and counting tool calls by kind of work with what did each under it, and by the tools' own names where `t` is pressed in that pane, `run.rs` is the event loop, `journal.rs` is the trait the loop hands the
+  a row that counts them, beside the session a stack a third of the body wide, between 34 and
+  52 columns, of the Usage pane, the Changes pane and — only while it has something in it — the
+  Activity pane: the sub-agents running, the shell commands running — the agent's calls the
+  session waits on, the operator's `!` commands and the backend's background ones — each with how
+  long it has run and, where the same command ran to the end earlier, a bar of this run against
+  that one marked as an estimate, and the tool calls counted by kind of work, or by the tools'
+  own names where `t` is pressed in that pane, `run.rs` is the event loop, `journal.rs` is the trait the loop hands the
   operator's events to and `rules.rs` the one it hands their standing answers to, `preferences.rs`
   the one it hands the theme, model and effort they pick to, kept for the next session, `bridge.rs`
   the one it sends turns to and takes events from, `watch.rs` the one it asks what the
@@ -249,19 +253,12 @@ reviewers that encode both, for an agent working in this tree.
   finished turn with what that turn did and spent — its sub-agents and calls, its tokens, how far
   it moved the five-hour window and how long it took — giving up whole figures where the pane is narrow,
   and names a turn that compacted the conversation as one, under the row that says what the
-  compaction shrank the context from and to. `info.rs` is the main view's info panel: the
-  session takes the whole width, the Usage, Changes and Activity panes are drawn beside it only
-  where the View menu shows them, and over the transcript's top-right corner, on a terminal at
-  least 100 columns wide, a panel with a shadow holds the Usage pane's figures less every row
-  standing where a figure has not come yet, the branch with the lines the working tree adds and
-  removes, and the sub-agents and shell commands — the operator's `!` commands and the backend's
-  background ones — running now; a part with nothing in it takes no row, the panel is as wide as
-  its widest row up to fifty columns, it is not drawn over a question waiting on the operator,
-  and a click on it reaches nothing under it. `usage.rs` is the arithmetic under the Usage
+  compaction shrank the context from and to. `usage.rs` is the arithmetic under the Usage
   pane's breakdown — each model's share in whole percent that add up to 100, what each model
   is called in a row and what the cache saved — `meter.rs` the two-tone bar every share in that
-  pane is drawn with, `tree.rs` groups the working tree's files under the directories they
-  share, `scene.rs` is the animation the session pane shows while nothing has happened in it since it
+  pane is drawn with, `tree.rs` hangs the working tree's files in a tree of their
+  directories, a directory holding nothing but another joined with it into one node, each a
+  section the cursor walks to and Enter folds to a row of its files' count and lines, `scene.rs` is the animation the session pane shows while nothing has happened in it since it
   started or was cleared — the row a clear leaves drawn over its foot, and, on a session that
   has just opened, a greeting over its top-left corner in every theme —
   one per theme as `Theme::scene` names it and a user's theme keeps its base's — `scene/rain.rs`

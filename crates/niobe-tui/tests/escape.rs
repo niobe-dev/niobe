@@ -18,7 +18,7 @@
 
 mod common;
 
-use common::{hunk, running_session, with_side_panes};
+use common::{hunk, running_session};
 use niobe_core::event::{AgentId, Event, SlashCommand, ToolOutcome};
 use niobe_core::{Action, Proposal};
 use niobe_tui::app::{App, Repo, WorkingFile};
@@ -553,23 +553,7 @@ fn call_detail(p: &str) -> App {
     app
 }
 
-fn decision_stated(p: &str) -> App {
-    with_side_panes(with(vec![Event::AssistantMessage {
-        text: format!("DECISION: kept {p} out of scope"),
-        agent: None,
-    }]))
-}
-
-/// A decision a sub-agent stated, under an agent id the backend never
-/// spawned, which the row names it by.
-fn decision_by_agent(p: &str) -> App {
-    with_side_panes(with(vec![Event::AssistantMessage {
-        text: "DECISION: kept the parser as it was".to_owned(),
-        agent: Some(p.into()),
-    }]))
-}
-
-/// What the info panel lists as at work: a sub-agent spawned to do the
+/// What the Activity pane lists as at work: a sub-agent spawned to do the
 /// payload, and a command in the background the backend reads as it.
 fn at_work(p: &str) -> App {
     let mut app = running_session();
@@ -720,9 +704,7 @@ const SITES: &[Site] = &[
     ("proposed-command-open", command_open, "echo"),
     ("call-detail", call_detail, "output"),
     ("overview", overview_page, "built"),
-    ("decision", decision_stated, "Decisions, as the agent says"),
-    ("decision-by-agent", decision_by_agent, "kept the parser"),
-    ("info-at-work", at_work, "$ tail "),
+    ("activity-at-work", at_work, "& tail "),
 ];
 
 #[test]

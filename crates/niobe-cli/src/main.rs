@@ -2237,9 +2237,9 @@ PROFILES:
     decisions = false, at the top of a config, stops asking each new
     conversation to state the choices it makes — work left out of scope, one
     approach taken over another — each on a line that opens DECISION:. On by
-    default. The Activity pane lists them under Decisions, as the agent says:
-    the agent's own account of its reasoning, which it may have wrong. A
-    run with -p never asks.
+    default. The project overview — niobe overview, or o in a side pane —
+    lists them as the agent's own account of its reasoning, which it may
+    have wrong. A run with -p never asks.
 
     trim = true, at the top of a config, has the agent read a cargo command's
     output without cargo's build progress and the tests that passed; every

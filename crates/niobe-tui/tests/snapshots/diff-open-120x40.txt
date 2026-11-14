@@ -1,40 +1,40 @@
  Niobe  Session  Context  Model  View  Help                            opus-5  claude · default  ○ not attached  13:41
-┏━ > add etag support to the catalog fetcher so we stop re-downloading unchanged manifests ━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-┃                                                                   ┌──────────────────────────────────────────────┐   ┃
-┃ ⚙ Write          catalog/fixtures.ts                              │ 5h         62% ▓▓▓▓▓▓▓░░░░░ resets 16:40     │−0 ┃
-┃    1 + export const etag01 = "W/\"0001\"";                        │ 7d         18% ▓▓░░░░░░░░░░ resets Tue 15:00 │   ┃
-┃    2 + export const etag02 = "W/\"0002\"";                        │ ──────────────────────────────────────────── │   ┃
-┃    3 + export const etag03 = "W/\"0003\"";                        │ opus-5    100% ▓▓▓▓▓▓▓▓▓▓▓▓   49k            │   ┃
-┃    4 + export const etag04 = "W/\"0004\"";                        │ cache hit  86% ▓▓▓▓▓▓▓▓▓▓░░   40k            │   ┃
-┃    5 + export const etag05 = "W/\"0005\"";                        │ ──────────────────────────────────────────── │   ┃
-┃    6 + export const etag06 = "W/\"0006\"";                        │ context    13% ▓▓░░░░░░░░░░ 25k / 200k       │   ┃
-┃    7 + export const etag07 = "W/\"0007\"";                        │ ──────────────────────────────────────────── │   ┃
-┃    8 + export const etag08 = "W/\"0008\"";                        │ ⎇ main ↑3                        +≥977 −≥259 │   ┃
-┃    9 + export const etag09 = "W/\"0009\"";                        │ ──────────────────────────────────────────── │   ┃
-┃   10 + export const etag10 = "W/\"0010\"";                        │ ◆ test Cover tests/fetch.test… sonnet 1m 42s │   ┃
-┃   11 + export const etag11 = "W/\"0011\"";                        │   └ Reading tests/stream.rs                  │   ┃
-┃   12 + export const etag12 = "W/\"0012\"";                        └──────────────────────────────────────────────┘   ┃
-┃   13 + export const etag13 = "W/\"0013\"";                                                                           ┃
-┃   14 + export const etag14 = "W/\"0014\"";                                                                           ┃
-┃   15 + export const etag15 = "W/\"0015\"";                                                                           ┃
-┃   16 + export const etag16 = "W/\"0016\"";                                                                           ┃
-┃   17 + export const etag17 = "W/\"0017\"";                                                                           ┃
-┃   18 + export const etag18 = "W/\"0018\"";                                                                           █
-┃   19 + export const etag19 = "W/\"0019\"";                                                                           █
-┃   20 + export const etag20 = "W/\"0020\"";                                                                           █
-┃   21 + export const etag21 = "W/\"0021\"";                                                                           █
-┃   22 + export const etag22 = "W/\"0022\"";                                                                           █
-┃   23 + export const etag23 = "W/\"0023\"";                                                                           █
-┃   24 + export const etag24 = "W/\"0024\"";                                                                           █
-┃   25 + export const etag25 = "W/\"0025\"";                                                                           █
-┃   26 + export const etag26 = "W/\"0026\"";                                                                           █
-┃   27 + export const etag27 = "W/\"0027\"";                                                                           █
-┃   28 + export const etag28 = "W/\"0028\"";                                                                           █
-┃   29 + export const etag29 = "W/\"0029\"";                                                                           █
-┃   30 + export const etag30 = "W/\"0030\"";                                                                           █
-┃   ▴ the last 10 rows are shown · Ctrl+T hides them                                                                   █
-┃                                                                                                                      █
-┃ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ┃
-┃  ask  >  Ask for a change · @ file · Ctrl+F find                                   Shift+Tab cycles · Ctrl+J newline ┃
-┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+ ┏━ > add etag support to the catalog fetcher so we stop re-downloading… ━━━━┓ ┌─────────────── Usage ────────────────┐
+ ┃                                                                           ┃ │ 5h         62% ▓▓░░ resets 16:40     │
+ ┃ ⚙ Write          catalog/fixtures.ts                               +30 −0 ┃ │ 7d         18% ▓░░░ resets Tue 15:00 │
+ ┃    1 + export const etag01 = "W/\"0001\"";                                ┃ │ ──────────────────────────────────── │
+ ┃    2 + export const etag02 = "W/\"0002\"";                                ┃ │ opus-5    100% ▓▓▓▓▓▓▓▓▓▓▓▓   49k    │
+ ┃    3 + export const etag03 = "W/\"0003\"";                                ┃ │ cache hit  86% ▓▓▓▓▓▓▓▓▓▓░░   40k    │
+ ┃    4 + export const etag04 = "W/\"0004\"";                                ┃ │ ──────────────────────────────────── │
+ ┃    5 + export const etag05 = "W/\"0005\"";                                ┃ │ context    13% ▓░░░░░░░░░ 25k / 200k │
+ ┃    6 + export const etag06 = "W/\"0006\"";                                ┃ └──────────────────────────────────────┘
+ ┃    7 + export const etag07 = "W/\"0007\"";                                ┃ ┌────────────── Changes ───────────────┐
+ ┃    8 + export const etag08 = "W/\"0008\"";                                ┃ │ ⎇ main ↑3                            █
+ ┃    9 + export const etag09 = "W/\"0009\"";                                ┃ │ ▾ Working tree  +≥977 −≥259          █
+ ┃   10 + export const etag10 = "W/\"0010\"";                                ┃ │   ▾ catalog/                         █
+ ┃   11 + export const etag11 = "W/\"0011\"";                                ┃ │     ▾ cache/                         █
+ ┃   12 + export const etag12 = "W/\"0012\"";                                ┃ │       lru.ts                 +31  −9 █
+ ┃   13 + export const etag13 = "W/\"0013\"";                                ┃ │       index.ts               +12  −0 █
+ ┃   14 + export const etag14 = "W/\"0014\"";                                ┃ │     fetch.ts                +149 −12 █
+ ┃   15 + export const etag15 = "W/\"0015\"";                                ┃ │     etag.ts                  +88 −41 │
+ ┃   16 + export const etag16 = "W/\"0016\"";                                ┃ │   ▾ docs/                            │
+ ┃   17 + export const etag17 = "W/\"0017\"";                                ┃ │     ▾ adr/                           │
+ ┃   18 + export const etag18 = "W/\"0018\"";                                █ │       0004-etags.md          +34  −1 │
+ ┃   19 + export const etag19 = "W/\"0019\"";                                █ │     ▾ diagrams/                      │
+ ┃   20 + export const etag20 = "W/\"0020\"";                                █ │       cache.png                —   — │
+ ┃   21 + export const etag21 = "W/\"0021\"";                                █ │     caching.md               +64 −22 │
+ ┃   22 + export const etag22 = "W/\"0022\"";                                █ │   ▾ server/                          │
+ ┃   23 + export const etag23 = "W/\"0023\"";                                █ │     ▾ handlers/                      │
+ ┃   24 + export const etag24 = "W/\"0024\"";                                █ │       manifest.ts            +97  −4 │
+ ┃   25 + export const etag25 = "W/\"0025\"";                                █ └──────────────────────────────────────┘
+ ┃   26 + export const etag26 = "W/\"0026\"";                                █ ┌────────────── Activity ──────────────┐
+ ┃   27 + export const etag27 = "W/\"0027\"";                                █ │ ▾ Sub-agents  1 running · 1 failed   │
+ ┃   28 + export const etag28 = "W/\"0028\"";                                █ │ ◆ test Cover tests/fe… sonnet 1m 42s │
+ ┃   29 + export const etag29 = "W/\"0029\"";                                █ │   └ Reading tests/stream.rs          │
+ ┃   30 + export const etag30 = "W/\"0030\"";                                █ │ ▾ Tools  9 calls ✗ 2 · 0 denied      │
+ ┃   ▴ the last 10 rows are shown · Ctrl+T hides them                        █ │   Exploring code   3 ▓▓▓▓▓▓▓▓▓▓      │
+ ┃                                                                           █ │   Notion           3 ▓▓▓▓▓▓▓▓▓▓ ✗ 1  │
+ ┃ ───────────────────────────────────────────────────────────────────────── ┃ │   Editing files    2 ▓▓▓▓▓▓          │
+ ┃  ask  >  Ask for a change · @ file · Ctrl+F find           Ctrl+J newline ┃ │   Build and test   1 ▓▓▓        ✗ 1  │
+ ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ └──────────────────────────────────────┘
 EscStop 1Help     2Compact     3Clear     4Model     5Diff     6Rewind     7MCP     8Memory     9Settings     0Quit

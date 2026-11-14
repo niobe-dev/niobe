@@ -1,30 +1,30 @@
  Niobe  Session  Context  Model  View  Help                            opus-5  claude · default  ○ not attached  13:41
-┏━ > add etag support to the catalog fetcher so we stop re-downloading unchanged manifests ━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-┃ > you                                                             ┌──────────────────────────────────────────────┐   ┃
-┃   add etag support to the catalog fetcher so we stop re-downloadin│ 5h         62% ▓▓▓▓▓▓▓░░░░░ resets 16:40     │   ┃
-┃                                                                   │ 7d         18% ▓▓░░░░░░░░░░ resets Tue 15:00 │   ┃
-┃ ◆ Reading catalog/fetch.ts and its callers first. Two call sites, │ ──────────────────────────────────────────── │   ┃
-┃                                                                   │ opus-5    100% ▓▓▓▓▓▓▓▓▓▓▓▓   49k            │   ┃
-┃   Read 3 files, used Notion 2 times                               │ cache hit  86% ▓▓▓▓▓▓▓▓▓▓░░   40k            │   ┃
-┃                   ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ Settings ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓────────────── │   ┃
-┃ ✗ Notion·update… {┃                                                                              ┃k / 200k       │ed ┃
-┃   └ 404 object_not┃  Profile   claude · default                                                  ┃────────────── │   ┃
-┃                   ┃  Model     opus-5                                                            ┃   +≥977 −≥259 │   ┃
-┃ ◆ Caching the etag┃  Mode      ask                                                               ┃────────────── │   ┃
-┃                   ┃  Theme     cyber                                                             ┃ sonnet 1m 42s │   ┃
-┃   Edited 1 file +6┃                                                                              ┃               │   ┃
-┃                   ┃  Config files, the later over the earlier:                                   ┃───────────────┘   ┃
-┃ ◆ Rewriting the 30┃    /home/me/.config/niobe/config.toml                                        ┃                   ┃
-┃                   ┃    /home/me/src/niobe/.niobe/config.toml — not there                         ┃                   ┃
-┃ ◆ The notebook tha┃                                                                              ┃                   ┃
-┃                   ┃  niobe reads them as a session starts, so a change takes effect in the next  ┃                   ┃
-┃ ✗ Bash           n┃  one.                                                                        ┃     exit 1 · 0.4s ┃
-┃   └ 1 failing: fet┃                                                                              ┃                   ┃
-┃                   ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ o open · Esc close ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛                   ┃
-┃ ◆ Etags cached in the LRU; 304s short-circuit. One test still red — the 304 path asserts a body that is no longer    ┃
-┃   sent.                                                                                                              ┃
-┃                                                                                                                      ┃
-┃ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ┃
-┃  ask  >  Ask for a change · @ file · Ctrl+F find                                   Shift+Tab cycles · Ctrl+J newline ┃
-┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+ ┏━ > add etag support to the catalog fetcher so we stop re-downloading… ━━━━┓ ┌─────────────── Usage ────────────────┐
+ ┃   unchanged manifests                                                     ┃ │ 5h         62% ▓▓░░ resets 16:40     │
+ ┃                                                                           █ │ 7d         18% ▓░░░ resets Tue 15:00 │
+ ┃ ◆ Reading catalog/fetch.ts and its callers first. Two call sites, one     █ │ ──────────────────────────────────── │
+ ┃   test file.                                                              █ │ opus-5    100% ▓▓▓▓▓▓▓▓▓▓▓▓   49k    │
+ ┃                                                                           █ │ cache hit  86% ▓▓▓▓▓▓▓▓▓▓░░   40k    │
+ ┃   Read 3 files, used Notion 2 times                                       █ │ ──────────────────────────────────── │
+ ┃                  ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ Settings ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓░░░░░░ 25k / 200k │
+ ┃ ✗ Notion·update… ┃                                                                              ┃──────────────────┘
+ ┃   └ 404 object_no┃  Profile   claude · default                                                  ┃es ───────────────┐
+ ┃                  ┃  Model     opus-5                                                            ┃                  █
+ ┃ ◆ Caching the eta┃  Mode      ask                                                               ┃77 −≥259          █
+ ┃                  ┃  Theme     cyber                                                             ┃                  │
+ ┃   Edited 1 file +┃                                                                              ┃                  │
+ ┃                  ┃  Config files, the later over the earlier:                                   ┃          +31  −9 │
+ ┃ ◆ Rewriting the 3┃    /home/me/.config/niobe/config.toml                                        ┃          +12  −0 │
+ ┃                  ┃    /home/me/src/niobe/.niobe/config.toml — not there                         ┃         +149 −12 │
+ ┃ ◆ The notebook th┃                                                                              ┃          +88 −41 │
+ ┃                  ┃  niobe reads them as a session starts, so a change takes effect in the next  ┃                  │
+ ┃ ✗ Bash           ┃  one.                                                                        ┃──────────────────┘
+ ┃   └ 1 failing: fe┃                                                                              ┃ity ──────────────┐
+ ┃                  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ o open · Esc close ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ning · 1 failed   █
+ ┃ ◆ Etags cached in the LRU; 304s short-circuit. One test still red — the   █ │ ◆ test Cover tests/fe… sonnet 1m 42s █
+ ┃   304 path asserts a body that is no longer sent.                         █ │   └ Reading tests/stream.rs          █
+ ┃                                                                           █ │ ▾ Tools  8 calls ✗ 2 · 0 denied      █
+ ┃ ───────────────────────────────────────────────────────────────────────── ┃ │   Exploring code   3 ▓▓▓▓▓▓▓▓▓▓      █
+ ┃  ask  >  Ask for a change · @ file · Ctrl+F find           Ctrl+J newline ┃ │   Notion           3 ▓▓▓▓▓▓▓▓▓▓ ✗ 1  │
+ ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ └──────────────────────────────────────┘
 EscStop 1Help     2Compact     3Clear     4Model     5Diff     6Rewind     7MCP     8Memory     9Settings     0Quit

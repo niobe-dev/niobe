@@ -1,30 +1,30 @@
  Niobe  Session  Context  Model  View  Help                            opus-5  claude · default  ○ not attached  13:41
-┏━ > add etag support to the catalog fetcher so we stop re-downloading unchanged manifests ━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-┃ > you                                                             ┌──────────────────────────────────────────────┐   ┃
-┃   add etag support to the catalog fetcher so we stop re-downloadin│ 5h         62% ▓▓▓▓▓▓▓░░░░░ resets 16:40     │   ┃
-┃                                                                   │ 7d         18% ▓▓░░░░░░░░░░ resets Tue 15:00 │   ┃
-┃ ◆ Reading catalog/fetch.ts and its callers first. Two call sites, │ ──────────────────────────────────────────── │   ┃
-┃                                                                   │ opus-5    100% ▓▓▓▓▓▓▓▓▓▓▓▓   49k            │   ┃
-┃   Read 3 files, used Notion 2 times                               │ cache hit  86% ▓▓▓▓▓▓▓▓▓▓░░   40k            │   ┃
-┃                                                                   │ ──────────────────────────────────────────── │   ┃
-┃ ✗ Notion┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ MCP servers ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓     │ed ┃
-┃   └ 404 ┃                                                                                                  ┃──── │   ┃
-┃         ┃  › github       connected      user                                                     2 tools  ┃≥259 │   ┃
-┃ ◆ Cachin┃    notes        connected      project                                                   1 tool  ┃──── │   ┃
-┃         ┃    linear       needs sign-in  user                                                    no tools  ┃ 42s │   ┃
-┃   Edited┃    remote docs  failed         local                                                   no tools  ┃     │   ┃
-┃         ┃                                                                                                  ┃─────┘   ┃
-┃ ◆ Rewrit┃  Adding, removing or turning a server off and signing in to one are the claude CLI's own: run    ┃         ┃
-┃         ┃  `claude` in a terminal and use /mcp there, or `claude mcp --help`. A change reaches the next    ┃         ┃
-┃ ◆ The no┃  session. Its servers are configured in ~/.claude.json, the user's and each project's own, and   ┃         ┃
-┃         ┃  in the repository's .mcp.json.                                                                  ┃         ┃
-┃ ✗ Bash  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ ↑↓ choose · Enter detail · Esc close ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛1 · 0.4s ┃
-┃   └ 1 failing: fetch returns the cached body on a 304                                                                ┃
-┃                                                                                                                      ┃
-┃ ◆ Etags cached in the LRU; 304s short-circuit. One test still red — the 304 path asserts a body that is no longer    ┃
-┃   sent.                                                                                                              ┃
-┃                                                                                                                      ┃
-┃ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ┃
-┃  ask  >  Ask for a change · @ file · Ctrl+F find                                   Shift+Tab cycles · Ctrl+J newline ┃
-┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+ ┏━ > add etag support to the catalog fetcher so we stop re-downloading… ━━━━┓ ┌─────────────── Usage ────────────────┐
+ ┃   unchanged manifests                                                     ┃ │ 5h         62% ▓▓░░ resets 16:40     │
+ ┃                                                                           █ │ 7d         18% ▓░░░ resets Tue 15:00 │
+ ┃ ◆ Reading catalog/fetch.ts and its callers first. Two call sites, one     █ │ ──────────────────────────────────── │
+ ┃   test file.                                                              █ │ opus-5    100% ▓▓▓▓▓▓▓▓▓▓▓▓   49k    │
+ ┃                                                                           █ │ cache hit  86% ▓▓▓▓▓▓▓▓▓▓░░   40k    │
+ ┃   Read 3 files, used Notion 2 times                                       █ │ ──────────────────────────────────── │
+ ┃                                                                           █ │ context    13% ▓░░░░░░░░░ 25k / 200k │
+ ┃ ✗ Notio┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ MCP servers ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓────────┘
+ ┃   └ 404┃                                                                                                  ┃────────┐
+ ┃        ┃  › github       connected      user                                                     2 tools  ┃        █
+ ┃ ◆ Cachi┃    notes        connected      project                                                   1 tool  ┃        █
+ ┃        ┃    linear       needs sign-in  user                                                    no tools  ┃        │
+ ┃   Edite┃    remote docs  failed         local                                                   no tools  ┃        │
+ ┃        ┃                                                                                                  ┃+31  −9 │
+ ┃ ◆ Rewri┃  Adding, removing or turning a server off and signing in to one are the claude CLI's own: run    ┃+12  −0 │
+ ┃        ┃  `claude` in a terminal and use /mcp there, or `claude mcp --help`. A change reaches the next    ┃149 −12 │
+ ┃ ◆ The n┃  session. Its servers are configured in ~/.claude.json, the user's and each project's own, and   ┃+88 −41 │
+ ┃        ┃  in the repository's .mcp.json.                                                                  ┃        │
+ ┃ ✗ Bash ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ ↑↓ choose · Enter detail · Esc close ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛────────┘
+ ┃   └ 1 failing: fetch returns the cached body on a 304                     █ ┌────────────── Activity ──────────────┐
+ ┃                                                                           █ │ ▾ Sub-agents  1 running · 1 failed   █
+ ┃ ◆ Etags cached in the LRU; 304s short-circuit. One test still red — the   █ │ ◆ test Cover tests/fe… sonnet 1m 42s █
+ ┃   304 path asserts a body that is no longer sent.                         █ │   └ Reading tests/stream.rs          █
+ ┃                                                                           █ │ ▾ Tools  8 calls ✗ 2 · 0 denied      █
+ ┃ ───────────────────────────────────────────────────────────────────────── ┃ │   Exploring code   3 ▓▓▓▓▓▓▓▓▓▓      █
+ ┃  ask  >  Ask for a change · @ file · Ctrl+F find           Ctrl+J newline ┃ │   Notion           3 ▓▓▓▓▓▓▓▓▓▓ ✗ 1  │
+ ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ └──────────────────────────────────────┘
 EscStop 1Help     2Compact     3Clear     4Model     5Diff     6Rewind     7MCP     8Memory     9Settings     0Quit

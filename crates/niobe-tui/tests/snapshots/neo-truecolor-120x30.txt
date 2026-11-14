@@ -2,55 +2,53 @@
   b  Rgb(0, 255, 65) on Rgb(0, 26, 8), bold | underlined
   c  Rgb(0, 255, 65) on Rgb(0, 26, 8), bold
   d  Rgb(0, 255, 65) on Rgb(0, 26, 8), dim
-  e  Rgb(0, 255, 65) on Rgb(2, 8, 3)
-  f  Rgb(255, 255, 255) on Rgb(2, 8, 3), bold | reversed
-  g  Rgb(255, 255, 255) on Rgb(2, 8, 3), reversed
-  h  Rgb(155, 255, 176) on Rgb(2, 8, 3)
-  i  Rgb(255, 255, 255) on Rgb(2, 8, 3), bold
-  j  Rgb(15, 107, 39) on Rgb(2, 8, 3)
+  e  Rgb(155, 255, 176) on Rgb(2, 8, 3)
+  f  Rgb(0, 255, 65) on Rgb(2, 8, 3)
+  g  Rgb(255, 255, 255) on Rgb(2, 8, 3), bold | reversed
+  h  Rgb(255, 255, 255) on Rgb(2, 8, 3), reversed
+  i  Rgb(15, 107, 39) on Rgb(2, 8, 3)
+  j  Rgb(0, 255, 65) on Rgb(2, 8, 3), bold
   k  Rgb(255, 255, 255) on Rgb(2, 8, 3)
   l  Rgb(46, 139, 68) on Rgb(2, 8, 3)
   m  Rgb(255, 176, 0) on Rgb(2, 8, 3), bold
   n  Rgb(255, 176, 0) on Rgb(2, 8, 3)
-  o  Rgb(62, 102, 70) on Rgb(0, 0, 0)
-  p  Rgb(155, 255, 176) on Rgb(2, 8, 3), bold
-  q  Rgb(0, 255, 65) on Rgb(2, 8, 3), bold
-  r  Rgb(255, 59, 59) on Rgb(2, 8, 3), bold
-  s  Rgb(255, 59, 59) on Rgb(2, 8, 3)
-  t  Rgb(124, 255, 158) on Rgb(2, 8, 3)
-  u  Rgb(2, 8, 3) on Rgb(0, 255, 65), bold
-  v  Rgb(2, 8, 3) on Rgb(0, 255, 65)
-  w  Rgb(0, 255, 65) on Rgb(0, 59, 18), dim
-  x  Rgb(155, 255, 176) on Rgb(0, 26, 8)
-  y  Rgb(0, 255, 65) on Rgb(0, 59, 18)
+  o  Rgb(155, 255, 176) on Rgb(2, 8, 3), bold
+  p  Rgb(255, 59, 59) on Rgb(2, 8, 3), bold
+  q  Rgb(255, 59, 59) on Rgb(2, 8, 3)
+  r  Rgb(124, 255, 158) on Rgb(2, 8, 3)
+  s  Rgb(2, 8, 3) on Rgb(0, 255, 65), bold
+  t  Rgb(2, 8, 3) on Rgb(0, 255, 65)
+  u  Rgb(0, 255, 65) on Rgb(0, 59, 18), dim
+  v  Rgb(155, 255, 176) on Rgb(0, 26, 8)
+  w  Rgb(0, 255, 65) on Rgb(0, 59, 18)
 
 abaaaaaabaaaaaaaabaaaaaaaabaaaaaabaaaaabaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaccccccaaddddddddddddddddaaaaaaaaaaaaaaaaaadddddaa
-eefffggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggeeeeeeeeeeeeeeeeeeeeeeeeeeeee
-ehiiiiihhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjhhhe
-ehhhkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkjhllllllllllmmmmhnnnnnnnllllllllllllllllllhhhhhjoohe
-ehhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhjhllllllllllpppphhhlllllllllllllllllllllllllllhjoohe
-ehqqhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhjhjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjhjoohe
-ehhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhjhllllllllllpppphhhhhhhhhhhhhllllllhhhhhhhhhhhhjoohe
-ehhhlllllllllllllllllllllllllllllllllhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhjhllllllllllqqqqheeeeeeeeeellllllllhhhhhhhhhhhhjoohe
-ehhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhjhjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjhjoohe
-ehrrsssssssssssssshllhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhjhllllllllllpppphhhlllllllllllllllllllllhhhhhhhjoohe
-ehhhllhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhjhjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjhjoohe
-ehhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhjhttttttlllhhhhhhhhhhhhhhhhhhhhhhhheeeeehssssshjoohe
-ehqqhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhjhjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjhjoohe
-ehhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhjhqqeeeehhhhhhhhhhhhhhhhhhhhhhhhllllllleeeeeeehjoohe
-ehhhlllllllllllllllllllhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhjhlllllllllllllllllllllllllllhhhhhhhhhhhhhhhhhhjoohe
-ehhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjoohe
-ehqqhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhoooooooooooooooooooooooooooooooooooooooooooooooohe
-ehhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhe
-ehqqhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhe
-ehhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhe
-ehrrsssssssssssssshllllllllhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhsssssslllllllhe
-ehhhllhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhe
-ehhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhe
-ehqqhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhe
-ehhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhe
-ehhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhe
-ehjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjhe
-ehuuuuuqqqvlllllllllllllllllllllllllllllllllllllllhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhlllllllllllllllllllllllllllllllllhe
-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
-cccwwwwxcyyyyyyyyxcwwwwwwwwwwwxcwwwwwwwwwxcwwwwwwwwwxcyyyyyyyyxcwwwwwwwwwwxcyyyyyyyxcyyyyyyyyyyxcyyyyyyyyyyyyxcyyyyyyyyx
+effggghhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhfffffeiiiiiiiiiiiiiiiijjjjjjjiiiiiiiiiiiiiiiiie
+efeeekkkkkkkkkkkkkkkkkkkeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeefeiellllllllllmmmmennllllllllllllllleeeeeie
+efeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeefeiellllllllllooooeelllllllllllllllllllleie
+efejjeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeefeieiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiieie
+efeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeefeiellllllllllooooeeeeeeeeeeeeelllllleeeeie
+efeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeefeielllllllllljjjjefffffffffflllllllleeeeie
+efeeellllllllllllllllllllllllllllllllleeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeefeieiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiieie
+efeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeefeiellllllllllooooeelllllllllllllllllllleie
+efeppqqqqqqqqqqqqqqelleeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeqqqqqqefeiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiie
+efeeelleeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeefeiiiiiiiiiiiiiiijjjjjjjjjiiiiiiiiiiiiiiiie
+efeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeefeierrrrrrllleeeeeeeeeeeeeeeeeeeeeeeeeeeefe
+efejjeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeefeiejjjjjjjjjjjjjjeefffffeqqqqqeeeeeeeeeefe
+efeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeefeieeelllllllllleeeeeeeeeeeeeeeeeeeeeeeeeie
+efeeellllllllllllllllllleeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeefeieeeeelllllllleeeeeeeeeeeeeeeeeeeeeeeeeie
+efeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeefeieeeeeeeeeeeeeeeeeeeeeeeeeeeeeefffeeqqeie
+efejjeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeefeieeeeeeeeeeeeeeeeeeeeeeeeeeeeeefffeeqqeie
+efeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeefeieeeeeeeeeeeeeeeeeeeeeeeeeeeeeffffeqqqeie
+efejjeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeefeieeeeeeeeeeeeeeeeeeeeeeeeeeeeeefffeqqqeie
+efeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeefeieeellllllleeeeeeeeeeeeeeeeeeeeeeeeeeeeie
+efeppqqqqqqqqqqqqqqelllllllleeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeqqqqqqlllllllefeiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiie
+efeeelleeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeefeiiiiiiiiiiiiiiijjjjjjjjjjiiiiiiiiiiiiiiie
+efeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeefeiejjjjjjjjjjjjeeeeeeeeeeellllllllllleeefe
+efejjeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeefeiejjffffeeeeeeeeeeeeeeeelllllllfffffffefe
+efeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeefeiellllllllllllllllllllllllllleeeeeeeeeefe
+efeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeefeiejjjjjjjeeeeeeeeeeqqqllllllllllleeeeeefe
+efeiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiefeielllllllllllllllleeeeeffffffffffeeeeeefe
+efesssssjjjtllllllllllllllllllllllllllllllllllllllleeeeeeeeeeellllllllllllllefeielllllllllllllllleeeeeffffffffffqqqqeeie
+efffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffeiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiie
+cccuuuuvcwwwwwwwwvcuuuuuuuuuuuvcuuuuuuuuuvcuuuuuuuuuvcwwwwwwwwvcuuuuuuuuuuvcwwwwwwwvcwwwwwwwwwwvcwwwwwwwwwwwwvcwwwwwwwwv

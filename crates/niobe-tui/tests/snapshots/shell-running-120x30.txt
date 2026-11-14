@@ -1,0 +1,30 @@
+ Niobe  Session  Context  Model  View  Help                                                           ○ idle 0s  00:17
+ ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ Session ─ niobe ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓ ┌─────────────── Usage ────────────────┐
+ ┃   Ran 1 shell command, running cargo build…                               ┃ │ 5h   —                               │
+ ┃                                                                           ┃ │ 7d   —                               │
+ ┃                                                                           ┃ │ asked of the backend                 │
+ ┃                                                                           ┃ │ ──────────────────────────────────── │
+ ┃                                                                           ┃ │ no tokens reported yet               │
+ ┃                                                                           ┃ └──────────────────────────────────────┘
+ ┃                                                                           ┃ ┌────────────── Changes ───────────────┐
+ ┃                                                                           ┃ │ ⎇ main                               │
+ ┃                                                                           ┃ │ ▾ Working tree  —                    │
+ ┃                                                                           ┃ │   not read yet                       │
+ ┃                                                                           ┃ │                                      │
+ ┃                                                                           ┃ │                                      │
+ ┃                                                                           ┃ │                                      │
+ ┃                                                                           ┃ │                                      │
+ ┃                                                                           ┃ │                                      │
+ ┃                                                                           ┃ │                                      │
+ ┃                                                                           ┃ │                                      │
+ ┃                                                                           ┃ │                                      │
+ ┃                                                                           ┃ │                                      │
+ ┃                                                                           ┃ └──────────────────────────────────────┘
+ ┃                                                                           ┃ ┌────────────── Activity ──────────────┐
+ ┃                                                                           ┃ │ ▾ Shells  1 running                  │
+ ┃                                                                           ┃ │ $ cargo build --release       1m 00s │
+ ┃                                                                           ┃ │   ▓▓▓▓▓░░░░░░░ ~40% of last 2m 30s   │
+ ┃ ───────────────────────────────────────────────────────────────────────── ┃ │ ▾ Tools  1 call · 0 denied · 0 B out │
+ ┃  —  >  Ask for a change · Ctrl+F find     Shift+Tab mode · Ctrl+J newline ┃ │   Other   1 ▓▓▓▓▓▓▓▓▓▓▓▓             │
+ ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ └──────────────────────────────────────┘
+EscStop 1Help     2Compact     3Clear     4Model     5Diff     6Rewind     7MCP     8Memory     9Settings     0Quit

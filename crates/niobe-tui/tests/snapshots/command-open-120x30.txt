@@ -1,30 +1,30 @@
  Niobe  Session  Context  Model  View  Help                            opus-5  claude · default  ○ not attached  13:41
-┏━ > add etag support to the catalog fetcher so we stop re-downloading unchanged manifests ━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-┃    44 -   const res = await fetch(url, init);                     ┌──────────────────────────────────────────────┐   ┃
-┃    43 +   if (cached?.etag) {                                     │ 5h         62% ▓▓▓▓▓▓▓░░░░░ resets 16:40     │   ┃
-┃    44 +     headers.set("If-None-Match", cached.etag);            │ 7d         18% ▓▓░░░░░░░░░░ resets Tue 15:00 │   ┃
-┃    45 +   }                                                       │ ──────────────────────────────────────────── │   ┃
-┃    46 +   const res = await fetch(url, { ...init, headers });     │ opus-5    100% ▓▓▓▓▓▓▓▓▓▓▓▓   49k            │   ┃
-┃    47 +   if (res.status === 304 && cached) return cached.body;   │ cache hit  86% ▓▓▓▓▓▓▓▓▓▓░░   40k            │   ┃
-┃    48     return res;                                             │ ──────────────────────────────────────────── │   ┃
-┃       …                                                           │ context    13% ▓▓░░░░░░░░░░ 25k / 200k       │   ┃
-┃   115     cache.set(url, {                                        │ ──────────────────────────────────────────── │   ┃
-┃   116 +     etag: res.headers.get("ETag"),                        │ ⎇ main ↑3                        +≥977 −≥259 │   ┃
-┃   117       body,                                                 │ ──────────────────────────────────────────── │   ┃
-┃   └ allowed by you                                                │ ◆ test Cover tests/fetch.test… sonnet 1m 42s │   █
-┃                                                                   │   └ Reading tests/stream.rs                  │   █
-┃ ◆ Rewriting the 304 test around the cached body.                  └──────────────────────────────────────────────┘   █
-┃                                                                                                                      █
-┃ ◆ The notebook that demonstrates the fetcher needs the new call shape.                                               █
-┃                                                                                                                      █
-┃ ✗ Bash           npm test                                                                              exit 1 · 0.4s █
-┃   $ npm test -- fetch                                                                                                █
-┃   └ 1 failing: fetch returns the cached body on a 304                                                                █
-┃                                                                                                                      █
-┃ ◆ Etags cached in the LRU; 304s short-circuit. One test still red — the 304 path asserts a body that is no longer    █
-┃   sent.                                                                                                              █
-┃                                                                                                                      █
-┃ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ┃
-┃  ask  >  Ask for a change · @ file · Ctrl+F find                                   Shift+Tab cycles · Ctrl+J newline ┃
-┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+ ┏━ > add etag support to the catalog fetcher so we stop re-downloading… ━━━━┓ ┌─────────────── Usage ────────────────┐
+ ┃    44 -   const res = await fetch(url, init);                             ┃ │ 5h         62% ▓▓░░ resets 16:40     │
+ ┃    43 +   if (cached?.etag) {                                             ┃ │ 7d         18% ▓░░░ resets Tue 15:00 │
+ ┃    44 +     headers.set("If-None-Match", cached.etag);                    ┃ │ ──────────────────────────────────── │
+ ┃    45 +   }                                                               ┃ │ opus-5    100% ▓▓▓▓▓▓▓▓▓▓▓▓   49k    │
+ ┃    46 +   const res = await fetch(url, { ...init, headers });             ┃ │ cache hit  86% ▓▓▓▓▓▓▓▓▓▓░░   40k    │
+ ┃    47 +   if (res.status === 304 && cached) return cached.body;           ┃ │ ──────────────────────────────────── │
+ ┃    48     return res;                                                     ┃ │ context    13% ▓░░░░░░░░░ 25k / 200k │
+ ┃       …                                                                   ┃ └──────────────────────────────────────┘
+ ┃   115     cache.set(url, {                                                ┃ ┌────────────── Changes ───────────────┐
+ ┃   116 +     etag: res.headers.get("ETag"),                                ┃ │ ⎇ main ↑3                            █
+ ┃   117       body,                                                         ┃ │ ▾ Working tree  +≥977 −≥259          █
+ ┃   └ allowed by you                                                        █ │   ▾ catalog/                         │
+ ┃                                                                           █ │     ▾ cache/                         │
+ ┃ ◆ Rewriting the 304 test around the cached body.                          █ │       lru.ts                 +31  −9 │
+ ┃                                                                           █ │       index.ts               +12  −0 │
+ ┃ ◆ The notebook that demonstrates the fetcher needs the new call shape.    █ │     fetch.ts                +149 −12 │
+ ┃                                                                           █ │     etag.ts                  +88 −41 │
+ ┃ ✗ Bash           npm test                                   exit 1 · 0.4s █ │   ▾ docs/                            │
+ ┃   $ npm test -- fetch                                                     █ └──────────────────────────────────────┘
+ ┃   └ 1 failing: fetch returns the cached body on a 304                     █ ┌────────────── Activity ──────────────┐
+ ┃                                                                           █ │ ▾ Sub-agents  1 running · 1 failed   █
+ ┃ ◆ Etags cached in the LRU; 304s short-circuit. One test still red — the   █ │ ◆ test Cover tests/fe… sonnet 1m 42s █
+ ┃   304 path asserts a body that is no longer sent.                         █ │   └ Reading tests/stream.rs          █
+ ┃                                                                           █ │ ▾ Tools  8 calls ✗ 2 · 0 denied      █
+ ┃ ───────────────────────────────────────────────────────────────────────── ┃ │   Exploring code   3 ▓▓▓▓▓▓▓▓▓▓      █
+ ┃  ask  >  Ask for a change · @ file · Ctrl+F find           Ctrl+J newline ┃ │   Notion           3 ▓▓▓▓▓▓▓▓▓▓ ✗ 1  │
+ ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ └──────────────────────────────────────┘
 EscStop 1Help     2Compact     3Clear     4Model     5Diff     6Rewind     7MCP     8Memory     9Settings     0Quit

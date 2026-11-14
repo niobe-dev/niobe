@@ -140,15 +140,16 @@ impl Action {
     }
 }
 
-/// A pane of the right-hand stack, which the View menu shows and hides. The
-/// main view draws none of them until it is asked to.
+/// A pane of the right-hand stack, which the View menu shows and hides. Each
+/// is shown until it is hidden.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum SidePane {
     /// The plan's windows, the tokens and the context.
     Usage,
     /// The branch and the working tree.
     Changes,
-    /// The sub-agents, the decisions the agent stated and the tools.
+    /// The sub-agents and shell commands running now, and the tools; drawn
+    /// only while it has something in it.
     Activity,
 }
 

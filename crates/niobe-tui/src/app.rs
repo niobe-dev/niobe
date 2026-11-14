@@ -152,33 +152,29 @@ impl Focus {
 }
 
 /// A section of the Changes or Activity pane, which folds on its own.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Section {
     /// What the repository says the working tree has changed: every
     /// uncommitted change, whoever made it.
     WorkingTree,
-    /// The sub-agents the session spawned, running and finished.
+    /// A directory of the working tree, by its path from the repository's
+    /// root with its trailing slash: it folds the files and directories
+    /// under it away.
+    Directory(String),
+    /// The sub-agents running now.
     SubAgents,
-    /// The decisions the agent's replies stated, as it tells them.
-    Decisions,
+    /// The shell commands running now.
+    Shells,
     /// The tools it called, and how often.
     Tools,
 }
 
 impl Section {
-    /// Every section, in the order the panes draw them.
-    pub const ALL: [Section; 4] = [
-        Section::WorkingTree,
-        Section::SubAgents,
-        Section::Decisions,
-        Section::Tools,
-    ];
-
     /// The pane this section is drawn in.
-    pub fn pane(self) -> Pane {
+    pub fn pane(&self) -> Pane {
         match self {
-            Section::WorkingTree => Pane::Changes,
-            Section::SubAgents | Section::Decisions | Section::Tools => Pane::Activity,
+            Section::WorkingTree | Section::Directory(_) => Pane::Changes,
+            Section::SubAgents | Section::Shells | Section::Tools => Pane::Activity,
         }
     }
 }
@@ -236,11 +232,11 @@ impl Scroller {
         let at = self
             .headers
             .iter()
-            .position(|(section, _)| Some(*section) == self.cursor)
+            .position(|(section, _)| self.cursor.as_ref() == Some(section))
             .unwrap_or(0);
         self.headers
             .get(at)
-            .map(|(section, row)| (at, *section, *row))
+            .map(|(section, row)| (at, section.clone(), *row))
     }
 
     /// Moves the cursor to the next section down, or up, stopping at either
@@ -253,7 +249,7 @@ impl Scroller {
             true => (at + 1).min(self.headers.len().saturating_sub(1)),
             false => at.saturating_sub(1),
         };
-        if let Some((section, row)) = self.headers.get(to).copied() {
+        if let Some((section, row)) = self.headers.get(to).cloned() {
             self.cursor = Some(section);
             self.reveal(row);
         }
@@ -896,6 +892,22 @@ pub struct Entry {
     pub queued: bool,
 }
 
+/// A shell command running now, as the Activity pane lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunningShell {
+    /// What it runs, in one line.
+    pub command: String,
+    /// When it started running, where the shell's clock said.
+    pub since: Option<Stamp>,
+    /// How long the same command took the last time it ran to the end in
+    /// this session, which is all its progress can be read against: the
+    /// backend says nothing of a command's progress until it ends.
+    pub last_run: Option<Duration>,
+    /// Whether the backend moved it to the background, so that no turn is
+    /// waiting on it.
+    pub background: bool,
+}
+
 /// One tool call as the transcript shows it: what it does, how it ended and
 /// what it cost.
 ///
@@ -1390,8 +1402,23 @@ pub struct App {
     /// How long the last run of each test command took, by what the call
     /// does, where it ran to the end and its counts were read.
     test_times: BTreeMap<String, Duration>,
+    /// How long the last run of each shell command took that ended well, by
+    /// what the call does, and which call it was: what a command running
+    /// again is measured against while it runs. One the backend moved to the
+    /// background is taken out again, since its call ended when it was moved
+    /// there rather than when the command did.
+    shell_times: BTreeMap<String, (Duration, ToolCallId)>,
+    /// Every shell command a call of this session ran — the agent's and the
+    /// operator's `!` ones — by its call: what it runs and when its call
+    /// started, and how many shell calls started before it. Kept past the
+    /// call's end, because a command the backend moved to the background runs
+    /// on after it.
+    shell_calls: BTreeMap<ToolCallId, (String, Option<Stamp>, usize)>,
     /// The repository's files, indexed for the list under an `@` word.
     mention_index: crate::mention::Files,
+    /// The working tree's files as the directories they are in, built once
+    /// for each read that changed them rather than on every frame.
+    tree: crate::tree::Tree,
     /// Sections the operator has folded away, in whichever pane they belong
     /// to. One set, because a section is in exactly one pane.
     folded: std::collections::BTreeSet<Section>,
@@ -1748,10 +1775,9 @@ pub struct App {
     /// The hint said while a rewind is waiting on the backend's answer, which
     /// the answer replaces where no key has already.
     rewinding: Option<String>,
-    /// The panes of the right-hand stack that are not drawn: every one of
-    /// them until the View menu shows it, since the main view gives the
-    /// session the whole width and puts what the session stands at in the
-    /// info panel over its corner.
+    /// The panes of the right-hand stack the View menu hid. None is hidden
+    /// to begin with: the stack beside the session is where it says what it
+    /// stands at, what it changed and what is at work.
     hidden: BTreeSet<crate::menu::SidePane>,
     /// The files outside the session the shell can name or have opened.
     places: Places,
@@ -1813,9 +1839,6 @@ pub struct App {
     /// conversation opens with, which the idle scene is drawn behind until
     /// something else happens.
     cleared: bool,
-    /// Where the last frame drew the info panel over the transcript, so a
-    /// click on it does not land on the line it hides.
-    info_drawn: Option<ratatui::layout::Rect>,
     /// The wall clock the same tick read, which is what every event folded in
     /// now is stamped with. `None` until the loop has ticked, which is also
     /// what a fold with no clock behind it — a JSON Lines log — leaves behind:
@@ -2243,7 +2266,10 @@ impl App {
 
         Self {
             test_times: BTreeMap::new(),
+            shell_times: BTreeMap::new(),
+            shell_calls: BTreeMap::new(),
             mention_index: crate::mention::Files::new(&repo.files),
+            tree: crate::tree::Tree::of(&repo.working),
             repo,
             folded: std::collections::BTreeSet::new(),
             changes: Scroller::default(),
@@ -2368,7 +2394,7 @@ impl App {
             rewinding: None,
             unlisted_held: None,
             reconnecting: None,
-            hidden: BTreeSet::from(crate::menu::SidePane::ALL),
+            hidden: BTreeSet::new(),
             places: Places::default(),
             trusting: None,
             trusted: None,
@@ -2387,7 +2413,6 @@ impl App {
             now: None,
             scene_seed: 0,
             cleared: false,
-            info_drawn: None,
             at: None,
             unsaved: None,
             asides: BTreeSet::new(),
@@ -3100,6 +3125,11 @@ impl App {
                 let head = tool_label(name);
                 let mut call = Call::started(what_it_does(summary.as_deref(), input), self.at);
                 call.programs = programs_of(name, None, summary.as_deref());
+                if name == crate::shell::OPERATOR_SHELL || call.programs.is_some() {
+                    let order = self.shell_calls.len();
+                    self.shell_calls
+                        .insert(id.clone(), (call.what.clone(), self.at, order));
+                }
                 if call.testing {
                     call.last_run = self.test_times.get(&call.what).copied();
                 }
@@ -3221,6 +3251,15 @@ impl App {
                         call.programs = Some(programs);
                         call.command = command.clone();
                     }
+                }
+                if let Some(call) = ended
+                    .and_then(|(at, index)| self.entries.get(at).and_then(|e| e.calls.get(index)))
+                    && self.shell_calls.contains_key(id)
+                    && call.outcome == Some(ToolOutcome::Ok)
+                    && let Some(took) = call.took
+                {
+                    self.shell_times
+                        .insert(call.what.clone(), (took, id.clone()));
                 }
                 // A failed call is kept too: a test run that failed ended
                 // its call with a failing status.
@@ -3573,7 +3612,12 @@ impl App {
             // The command's end is told by the notice the backend reports
             // beside it; the call's row already says it was moved to the
             // background.
-            Event::BackgroundCommandStarted { .. } | Event::BackgroundCommandEnded { .. } => {}
+            // A command moved to the background ended its call when it was
+            // moved, which is no measure of how long the command takes.
+            Event::BackgroundCommandStarted { id } => {
+                self.shell_times.retain(|_, (_, timed)| timed != id);
+            }
+            Event::BackgroundCommandEnded { .. } => {}
 
             // Straight after its call's end, so in the same tick and at the
             // same clock: the moment the call finished.
@@ -7097,13 +7141,14 @@ impl App {
 
     /// Folds `section` away, or opens it again.
     pub fn fold(&mut self, section: Section) {
+        let pane = section.pane();
         if !self.folded.remove(&section) {
             self.folded.insert(section);
         }
         // What is above the viewport changed height, so an offset measured
         // against the old height would leave the pane scrolled past its end
         // until the next wheel notch. Only the pane the section is in moved.
-        self.scroller_mut(section.pane()).scroll = 0;
+        self.scroller_mut(pane).scroll = 0;
     }
 
     fn scroller(&self, pane: Pane) -> &Scroller {
@@ -7489,7 +7534,7 @@ impl App {
         let Some((_, section, row)) = scroller.cursor() else {
             return;
         };
-        scroller.cursor = Some(section);
+        scroller.cursor = Some(section.clone());
         scroller.scroll = scroller.scroll.min(row);
         if !self.folded.remove(&section) {
             self.folded.insert(section);
@@ -7506,7 +7551,15 @@ impl App {
         if repo.files != self.repo.files {
             self.mention_index = crate::mention::Files::new(&repo.files);
         }
+        if repo.working != self.repo.working {
+            self.tree = crate::tree::Tree::of(&repo.working);
+        }
         self.repo = repo;
+    }
+
+    /// The working tree's files as the directories they are in.
+    pub(crate) fn tree(&self) -> &crate::tree::Tree {
+        &self.tree
     }
 
     /// The profile the operator selected, if any.
@@ -7537,38 +7590,51 @@ impl App {
         &self.agents
     }
 
-    /// What each shell command running now runs: the operator's `!`
-    /// commands that have not ended, oldest first, then the commands the
-    /// backend moved to the background, each by what its call says it does.
+    /// Every shell command running now, the longest running first: the
+    /// agent's shell calls the session is waiting on, the operator's `!`
+    /// commands, and the commands the backend moved to the background.
     ///
-    /// A background command whose call this shell never saw — one the
+    /// A call waiting on a question has not started, and is left out. A
+    /// background command whose call this shell never saw — one the
     /// conversation started before a clear — has nothing to be named by and
     /// is left out rather than drawn as a blank.
-    pub fn shells(&self) -> Vec<&str> {
-        let background = self.session.background_commands().iter().filter_map(|id| {
-            self.recorded
-                .iter()
-                .rev()
-                .find(|(recorded, _)| recorded == id)
-                .map(|(_, call)| call.what.as_str())
+    pub fn running_shells(&self) -> Vec<RunningShell> {
+        let in_flight = self.session.in_flight_tools().keys().filter_map(|id| {
+            let (what, began, order) = self.shell_calls.get(id)?;
+            let call = self
+                .tool_entries
+                .get(id)
+                .and_then(|(at, index)| self.entries.get(*at)?.calls.get(*index));
+            match call {
+                Some(call) if call.asked || !call.running() => None,
+                Some(call) => Some((*order, self.running_shell(&call.what, call.began(), false))),
+                None => Some((*order, self.running_shell(what, *began, false))),
+            }
         });
-        self.running_commands
+        let background = self
+            .session
+            .background_commands()
             .iter()
-            .map(|(_, command)| command.as_str())
-            .chain(background)
-            .collect()
+            .filter_map(|id| self.shell_calls.get(id))
+            .map(|(what, began, order)| (*order, self.running_shell(what, *began, true)));
+        let mut shells: Vec<(usize, RunningShell)> = in_flight.chain(background).collect();
+        shells.sort_by_key(|(order, shell)| (shell.since.map(|since| since.at()), *order));
+        shells.into_iter().map(|(_, shell)| shell).collect()
     }
 
-    /// Where the last frame drew the info panel, or `None` where it drew
-    /// none.
-    pub(crate) fn drew_info(&mut self, at: Option<ratatui::layout::Rect>) {
-        self.info_drawn = at;
-    }
-
-    /// Where the last frame drew the info panel.
-    #[cfg(test)]
-    pub(crate) fn info_drawn(&self) -> Option<ratatui::layout::Rect> {
-        self.info_drawn
+    /// A shell command running since `since`, with how long it took the last
+    /// time it ran to the end.
+    fn running_shell(&self, what: &str, since: Option<Stamp>, background: bool) -> RunningShell {
+        RunningShell {
+            command: what.to_owned(),
+            since,
+            last_run: self
+                .shell_times
+                .get(what)
+                .map(|(took, _)| *took)
+                .or_else(|| self.test_times.get(what).copied()),
+            background,
+        }
     }
 
     /// What a sub-agent was spawned to do.
@@ -8675,10 +8741,7 @@ impl App {
     /// last frame drew none of the session's lines there.
     fn transcript_point(&self, column: u16, row: u16) -> Option<crate::select::Point> {
         let (area, lines) = self.transcript_drawn?;
-        let on_info = self
-            .info_drawn
-            .is_some_and(|info| info.contains((column, row).into()));
-        if !area.contains((column, row).into()) || on_info {
+        if !area.contains((column, row).into()) {
             return None;
         }
         let line = self.scroll() + usize::from(row - area.y);
@@ -11688,7 +11751,17 @@ mod tests {
     fn a_section_folds_and_opens_again() {
         let mut app = app();
 
-        assert!(Section::ALL.iter().all(|s| !app.folded(*s)));
+        assert!(
+            [
+                Section::WorkingTree,
+                Section::Directory("src/".to_owned()),
+                Section::SubAgents,
+                Section::Shells,
+                Section::Tools
+            ]
+            .into_iter()
+            .all(|s| !app.folded(s))
+        );
 
         app.fold(Section::SubAgents);
         assert!(app.folded(Section::SubAgents));
@@ -22322,17 +22395,17 @@ mod tests {
         use crate::menu::SidePane;
 
         let mut app = app();
-        assert!(!app.shows(SidePane::Changes));
+        assert!(app.shows(SidePane::Changes));
         app.on_key(alt('v'));
         app.on_key(key(KeyCode::Char('c')));
         app.on_key(key(KeyCode::Enter));
-        assert!(app.shows(SidePane::Changes));
-        assert!(!app.shows(SidePane::Activity));
+        assert!(!app.shows(SidePane::Changes));
+        assert!(app.shows(SidePane::Activity));
 
         app.on_key(alt('v'));
         app.on_key(key(KeyCode::Char('c')));
         app.on_key(key(KeyCode::Enter));
-        assert!(!app.shows(SidePane::Changes), "and hidden again");
+        assert!(app.shows(SidePane::Changes), "and shown again");
     }
 
     #[test]
@@ -23826,21 +23899,21 @@ mod tests {
         }
     }
 
-    /// The main view gives the session the whole width: the right-hand stack
-    /// is not drawn until the View menu shows one of its panes.
+    /// The right-hand stack is drawn beside the session from the start; the
+    /// View menu hides each pane.
     #[test]
-    fn the_right_hand_stack_is_hidden_until_the_view_menu_shows_a_pane() {
+    fn every_pane_of_the_right_hand_stack_is_shown_until_the_view_menu_hides_it() {
         use crate::menu::{Action, SidePane};
 
         let mut app = app();
         for pane in [SidePane::Usage, SidePane::Changes, SidePane::Activity] {
-            assert!(!app.shows(pane), "{pane:?} starts hidden");
+            assert!(app.shows(pane), "{pane:?} starts shown");
         }
 
         app.perform(Action::Pane(SidePane::Changes));
 
-        assert!(app.shows(SidePane::Changes));
-        assert!(!app.shows(SidePane::Usage));
+        assert!(!app.shows(SidePane::Changes));
+        assert!(app.shows(SidePane::Usage));
     }
 
     /// A conversation cleared is a new session, and it opens as one does: on
@@ -23866,13 +23939,15 @@ mod tests {
         assert!(!app.showing_scene());
     }
 
-    /// The shells at work are the operator's `!` commands that have not
-    /// ended and the commands the backend moved to the background, each by
-    /// what it runs; one that ended leaves the list.
+    /// The shells at work are the agent's shell calls the session waits on,
+    /// the operator's `!` commands that have not ended and the commands the
+    /// backend moved to the background, each by what it runs; one that ended
+    /// leaves the list, and a call still waiting on a question is not
+    /// running yet.
     #[test]
-    fn the_shells_running_are_the_operators_commands_and_the_backends_background_ones() {
+    fn the_shells_running_are_the_agents_calls_the_operators_commands_and_the_background() {
         let mut app = app().attached().runs_commands();
-        assert!(app.shells().is_empty());
+        assert!(app.running_shells().is_empty());
 
         app.apply(&start("b1", "Bash", "{}", Some("npm run dev")));
         app.apply(&end("b1", "Bash"));
@@ -23880,10 +23955,66 @@ mod tests {
         typed(&mut app, "!tail -f log/dev.log");
         app.on_key(key(KeyCode::Enter));
         assert_eq!(app.take_commands().len(), 1, "the command was run");
+        app.apply(&start("b2", "Bash", "{}", Some("cargo test")));
+        app.apply(&start("r1", "Read", "{}", Some("src/lib.rs")));
 
-        assert_eq!(app.shells(), vec!["tail -f log/dev.log", "npm run dev"]);
+        let running = |app: &App| -> Vec<(String, bool)> {
+            app.running_shells()
+                .into_iter()
+                .map(|shell| (shell.command, shell.background))
+                .collect()
+        };
+        assert_eq!(
+            running(&app),
+            [
+                ("npm run dev".to_owned(), true),
+                ("tail -f log/dev.log".to_owned(), false),
+                ("cargo test".to_owned(), false),
+            ],
+            "in the order they started"
+        );
 
+        app.apply(&end("b2", "Bash"));
         app.apply(&Event::BackgroundCommandEnded { id: "b1".into() });
-        assert_eq!(app.shells(), vec!["tail -f log/dev.log"]);
+        assert_eq!(running(&app), [("tail -f log/dev.log".to_owned(), false)]);
+    }
+
+    /// A command running again is measured against how long it took the
+    /// last time it ran to the end; one moved to the background ended its
+    /// call when it was moved, which measures nothing.
+    #[test]
+    fn a_shell_command_running_again_carries_how_long_its_last_whole_run_took() {
+        let mut app = app().attached();
+        let epoch = std::time::UNIX_EPOCH;
+        let at = |secs: u64| Some(Stamp::new(epoch + Duration::from_secs(secs), None));
+        let now = Instant::now();
+
+        app.tick(now, at(100));
+        app.apply(&start("b1", "Bash", "{}", Some("cargo build")));
+        app.tick(now, at(140));
+        app.apply(&end("b1", "Bash"));
+        app.apply(&start("b2", "Bash", "{}", Some("npm run dev")));
+        app.tick(now, at(141));
+        app.apply(&end("b2", "Bash"));
+        app.apply(&Event::BackgroundCommandStarted { id: "b2".into() });
+
+        app.tick(now, at(200));
+        app.apply(&start("b3", "Bash", "{}", Some("cargo build")));
+        app.apply(&start("b4", "Bash", "{}", Some("npm run dev")));
+        let shells = app.running_shells();
+        let build = shells
+            .iter()
+            .find(|shell| shell.command == "cargo build")
+            .expect("the build runs");
+        assert_eq!(build.last_run, Some(Duration::from_secs(40)));
+        assert_eq!(build.since, at(200));
+        let dev = shells
+            .iter()
+            .find(|shell| shell.command == "npm run dev" && !shell.background)
+            .expect("the server runs again in the foreground");
+        assert_eq!(
+            dev.last_run, None,
+            "its last run was moved to the background"
+        );
     }
 }

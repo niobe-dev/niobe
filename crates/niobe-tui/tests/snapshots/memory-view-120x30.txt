@@ -1,30 +1,30 @@
  Niobe  Session  Context  Model  View  Help                            opus-5  claude · default  ○ not attached  13:41
-┏━ > add etag support to the catalog fetcher so we stop re-downloading unchanged manifests ━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-┃ > you                                                             ┌──────────────────────────────────────────────┐   ┃
-┃   add etag support to the catalog fetcher so we stop re-downloadin│ 5h         62% ▓▓▓▓▓▓▓░░░░░ resets 16:40     │   ┃
-┃                                                                   │ 7d         18% ▓▓░░░░░░░░░░ resets Tue 15:00 │   ┃
-┃ ◆ Reading catalog/fetch.ts and its callers first. Two call sites, │ ──────────────────────────────────────────── │   ┃
-┃                                                                   │ opus-5    100% ▓▓▓▓▓▓▓▓▓▓▓▓   49k            │   ┃
-┃   Read 3 files, used Notion 2 times                               │ cache hit  86% ▓▓▓▓▓▓▓▓▓▓░░   40k            │   ┃
-┃                                                                   │ ──────────────────────────────────────────── │   ┃
-┃ ✗ Notion·update… {}                                               │ context    13% ▓▓░░░░░░░░░░ 25k / 200k       │ed ┃
-┃   └ 404 ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ Memory ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓──── │   ┃
-┃         ┃                                                                                                  ┃≥259 │   ┃
-┃ ◆ Cachin┃  › user         ~/.claude/CLAUDE.md                                                1 line · 8 B  ┃──── │   ┃
-┃         ┃    imported       ~/.claude/RTK.md                                               3 lines · 16 B  ┃ 42s │   ┃
-┃   Edited┃    parent       ~/CLAUDE.md                                                       1 line · 21 B  ┃     │   ┃
-┃         ┃    project      CLAUDE.md                                                         1 line · 11 B  ┃─────┘   ┃
-┃ ◆ Rewrit┃    imported       AGENTS.md                                           8 lines · 155 B · changed  ┃         ┃
-┃         ┃    auto-memory  ~/.claude/projects/-home-me-src-niobe/memory/MEMORY.md           2 lines · 96 B  ┃         ┃
-┃ ◆ The no┃    note           priorities.md — what matters first                              1 line · 16 B  ┃         ┃
-┃         ┃    note           facts.md — verified CLI facts                                   1 line · 13 B  ┃         ┃
-┃ ✗ Bash  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━ ↑↓ choose · Enter read · e edit · Esc close ━━━━━━━━━━━━━━━━━━━━━━━━━━━┛1 · 0.4s ┃
-┃   └ 1 failing: fetch returns the cached body on a 304                                                                ┃
-┃                                                                                                                      ┃
-┃ ◆ Etags cached in the LRU; 304s short-circuit. One test still red — the 304 path asserts a body that is no longer    ┃
-┃   sent.                                                                                                              ┃
-┃                                                                                                                      ┃
-┃ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ┃
-┃  ask  >  Ask for a change · @ file · Ctrl+F find                                   Shift+Tab cycles · Ctrl+J newline ┃
-┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+ ┏━ > add etag support to the catalog fetcher so we stop re-downloading… ━━━━┓ ┌─────────────── Usage ────────────────┐
+ ┃   unchanged manifests                                                     ┃ │ 5h         62% ▓▓░░ resets 16:40     │
+ ┃                                                                           █ │ 7d         18% ▓░░░ resets Tue 15:00 │
+ ┃ ◆ Reading catalog/fetch.ts and its callers first. Two call sites, one     █ │ ──────────────────────────────────── │
+ ┃   test file.                                                              █ │ opus-5    100% ▓▓▓▓▓▓▓▓▓▓▓▓   49k    │
+ ┃                                                                           █ │ cache hit  86% ▓▓▓▓▓▓▓▓▓▓░░   40k    │
+ ┃   Read 3 files, used Notion 2 times                                       █ │ ──────────────────────────────────── │
+ ┃                                                                           █ │ context    13% ▓░░░░░░░░░ 25k / 200k │
+ ┃ ✗ Notion·update… {}                                                failed █ └──────────────────────────────────────┘
+ ┃   └ 404┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ Memory ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓────────┐
+ ┃        ┃                                                                                                  ┃        █
+ ┃ ◆ Cachi┃  › user         ~/.claude/CLAUDE.md                                                1 line · 8 B  ┃        █
+ ┃        ┃    imported       ~/.claude/RTK.md                                               3 lines · 16 B  ┃        │
+ ┃   Edite┃    parent       ~/CLAUDE.md                                                       1 line · 21 B  ┃        │
+ ┃        ┃    project      CLAUDE.md                                                         1 line · 11 B  ┃+31  −9 │
+ ┃ ◆ Rewri┃    imported       AGENTS.md                                           8 lines · 155 B · changed  ┃+12  −0 │
+ ┃        ┃    auto-memory  ~/.claude/projects/-home-me-src-niobe/memory/MEMORY.md           2 lines · 96 B  ┃149 −12 │
+ ┃ ◆ The n┃    note           priorities.md — what matters first                              1 line · 16 B  ┃+88 −41 │
+ ┃        ┃    note           facts.md — verified CLI facts                                   1 line · 13 B  ┃        │
+ ┃ ✗ Bash ┗━━━━━━━━━━━━━━━━━━━━━━━━━━ ↑↓ choose · Enter read · e edit · Esc close ━━━━━━━━━━━━━━━━━━━━━━━━━━━┛────────┘
+ ┃   └ 1 failing: fetch returns the cached body on a 304                     █ ┌────────────── Activity ──────────────┐
+ ┃                                                                           █ │ ▾ Sub-agents  1 running · 1 failed   █
+ ┃ ◆ Etags cached in the LRU; 304s short-circuit. One test still red — the   █ │ ◆ test Cover tests/fe… sonnet 1m 42s █
+ ┃   304 path asserts a body that is no longer sent.                         █ │   └ Reading tests/stream.rs          █
+ ┃                                                                           █ │ ▾ Tools  8 calls ✗ 2 · 0 denied      █
+ ┃ ───────────────────────────────────────────────────────────────────────── ┃ │   Exploring code   3 ▓▓▓▓▓▓▓▓▓▓      █
+ ┃  ask  >  Ask for a change · @ file · Ctrl+F find           Ctrl+J newline ┃ │   Notion           3 ▓▓▓▓▓▓▓▓▓▓ ✗ 1  │
+ ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ └──────────────────────────────────────┘
 EscStop 1Help     2Compact     3Clear     4Model     5Diff     6Rewind     7MCP     8Memory     9Settings     0Quit

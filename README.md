@@ -11,8 +11,8 @@ Every cost figure is either one the backend reported or labelled as an estimate;
 is no figure, the screen shows an em dash.
 
 ![Niobe in the cyber theme: the agent's replies with its calls summed up between them, a
-failed test run, and the info panel over the transcript's corner with the plan's windows, the
-tokens, the branch and what its working tree changes, and the sub-agent at work](crates/niobe-tui/tests/snapshots/cyber-120x30.svg)
+failed test run, and beside them the plan's windows and the tokens, the branch and the working
+tree as a tree of its directories, and the sub-agent and the tools at work](crates/niobe-tui/tests/snapshots/cyber-120x30.svg)
 
 The same session in the other themes — `classic`, `neo` and `modern`, chosen with `--theme`:
 
@@ -71,12 +71,14 @@ You need the [`claude` CLI](https://code.claude.com/docs/en/setup) installed and
 Run `niobe` in a repository. Type a prompt and press Enter; Shift+Enter (or Ctrl+J) opens a new
 line, F1 lists the keys, Shift+Tab changes the permission mode and Ctrl+Q quits.
 
-The session takes the whole width. On a terminal at least 100 columns wide, a small panel over
-its top-right corner shows what the session stands at — the plan's windows or the money, the
-tokens by model, the context, the branch and the lines its working tree adds and removes, and
-the sub-agents and shell commands at work — and only what there is: a part with nothing in it
-is not drawn. The View menu shows the Usage, Changes and Activity panes beside the session
-instead, with the working tree file by file, the decisions and the tools.
+On a terminal at least 100 columns wide, a column beside the session shows what it stands at.
+Usage has the plan's windows or the money, the tokens by model and the context. Changes has the
+branch and the working tree as a tree of its directories, each of which Enter folds once Tab has
+put the keyboard in the pane. Activity, drawn only while it has something in it, has the
+sub-agents and shell commands running now — each command with how long it has run and, where
+the same command ran to the end earlier, a bar of this run against that one, marked as an
+estimate since the backend reports no progress of its own — and the tool calls by kind of work.
+The View menu hides and shows each.
 
 With no config file naming a profile it runs the `claude` on your `PATH` with that CLI's own
 settings, under a profile it calls `claude`; the `[permissions]` rules niobe writes into the
@@ -142,9 +144,9 @@ commands, paths, errors and security warnings kept whole, and `--terse on|off` s
 run. It is off by default. On the bench it cut output tokens by 14% with every task still passing.
 
 Each new conversation in the shell is asked to state the choices it makes — work left out of scope,
-one approach taken over another — on a line that opens `DECISION:`. The Activity pane, which
-View › Activity pane shows, lists them under *Decisions, as the agent says*: the agent's own account of its reasoning, which it may have
-wrong. `decisions = false` at the top of a config stops asking; `niobe -p` never asks.
+one approach taken over another — on a line that opens `DECISION:`. The project overview —
+`niobe overview`, or `o` in a side pane — lists them, marked as the agent's own account of its
+reasoning, which it may have wrong. `decisions = false` at the top of a config stops asking; `niobe -p` never asks.
 
 `trim = true` at the top of a config has the agent read a cargo command's output without cargo's
 build progress and the tests that passed. Every failure, panic, compiler error and `test result:`

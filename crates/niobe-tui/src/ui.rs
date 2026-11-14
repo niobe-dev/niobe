@@ -3,9 +3,9 @@
 
 //! Drawing the three regions: menu bar, panes, F-key bar.
 //!
-//! The main view gives the session pane the whole body, with the info panel
-//! over its top-right corner ([`crate::info`]); the Usage, Changes and
-//! Activity panes are drawn beside it where the View menu shows them.
+//! The main view draws the session pane beside a stack of the Usage, Changes
+//! and Activity panes, each of which the View menu hides; the Activity pane
+//! is drawn only while it has something in it.
 //!
 //! There is no status line. What one carried is spread across the menu row —
 //! the session's identity, what it is doing and the time of day — and the
@@ -1098,9 +1098,12 @@ fn segment_spans(segments: Vec<Segment>) -> Vec<Span<'static>> {
 fn draw_body(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
     use crate::menu::SidePane;
 
+    // The Activity pane takes its room only while it has something in it;
+    // otherwise the panes above it have the column.
     let shown: Vec<SidePane> = SidePane::ALL
         .into_iter()
         .filter(|pane| app.shows(*pane))
+        .filter(|pane| *pane != SidePane::Activity || has_activity(app))
         .collect();
     if area.width < WIDE_COLUMNS || shown.is_empty() {
         app.right_stack_hidden();
@@ -1108,41 +1111,44 @@ fn draw_body(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
         return;
     }
 
-    // Session pane to right stack, 1.9 : 1, with a column of desktop between
-    // them. The transcript is what a session is read in; the panes beside it
-    // are figures, and a figure needs a fraction of the width a paragraph
-    // does.
-    let [_, stack] = Layout::horizontal([Constraint::Fill(19), Constraint::Fill(10)])
-        .spacing(DESKTOP_MARGIN)
-        .areas(area);
-
-    // And a column of desktop at each edge of the screen, so the panes stand
-    // off the screen's edges as they stand off each other. Both come
-    // out of the session pane: its prose rewraps a column narrower, where the
-    // right stack's rows are as wide as their figures need and a column less
-    // would cost the context meter a cell. Narrow, the columns are worth more
-    // as transcript.
+    // A column of desktop at each edge of the screen and one between the
+    // session and the stack, so the panes stand off the screen's edges as
+    // they stand off each other. The transcript is what a session is read
+    // in; the panes beside it are figures, and a figure needs a fraction of
+    // the width a paragraph does.
     let panes = area.inner(Margin::new(DESKTOP_MARGIN, 0));
-    let [left, right] = Layout::horizontal([Constraint::Fill(1), Constraint::Length(stack.width)])
-        .spacing(DESKTOP_MARGIN)
-        .areas(panes);
+    let [left, right] = Layout::horizontal([
+        Constraint::Fill(1),
+        Constraint::Length(stack_columns(area.width)),
+    ])
+    .spacing(DESKTOP_MARGIN)
+    .areas(panes);
 
     draw_session(frame, left, true, app, theme);
 
-    // Usage takes the rows its figures need and no more; what is left goes to
-    // the two panes that grow with the session, 1.3 : 1 in favour of the files
-    // it changed. A pane the operator hid gives its rows to the others, and
-    // Usage alone leaves desktop under it.
+    // Usage takes the rows its figures need and no more. Activity takes the
+    // rows it holds, up to ten parts in twenty-three of what is left, so a
+    // pane with a few rows of tools leaves the rest to the files the session
+    // changed; it scrolls beyond that. Changes takes what remains. A pane the
+    // operator hid gives its rows to the others, and Usage alone leaves
+    // desktop under it.
     let usage_rows = usage_height(app).min(right.height);
+    let activity_rows = {
+        let held = activity_rows(app, usize::from(right.width.saturating_sub(4)), theme)
+            .rows
+            .len();
+        let share = right.height.saturating_sub(usage_rows).saturating_mul(10) / 23;
+        u16::try_from(held + 2).unwrap_or(u16::MAX).min(share)
+    };
     let mut constraints: Vec<Constraint> = shown
         .iter()
         .map(|pane| match pane {
             SidePane::Usage => Constraint::Length(usage_rows),
-            SidePane::Changes => Constraint::Fill(13),
-            SidePane::Activity => Constraint::Fill(10),
+            SidePane::Changes => Constraint::Fill(1),
+            SidePane::Activity => Constraint::Length(activity_rows),
         })
         .collect();
-    if shown == [SidePane::Usage] {
+    if !shown.contains(&SidePane::Changes) {
         constraints.push(Constraint::Fill(1));
     }
     let areas = Layout::vertical(constraints).split(right);
@@ -1164,6 +1170,21 @@ fn draw_body(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
         }
     }
 }
+
+/// How wide the right-hand stack is on a body `width` columns wide: a third
+/// of it, but never narrower than [`STACK_LEAST`] nor wider than
+/// [`STACK_MOST`], past which the panes' rows only grow longer gaps and the
+/// columns are worth more as transcript. From 120 columns that leaves the
+/// plan's window rows a bar beside their share and their reset.
+fn stack_columns(width: u16) -> u16 {
+    (width / 3).clamp(STACK_LEAST, STACK_MOST)
+}
+
+/// The narrowest the right-hand stack is drawn.
+const STACK_LEAST: u16 = 34;
+
+/// The widest the right-hand stack is drawn.
+const STACK_MOST: u16 = 52;
 
 /// How a pane's border is drawn: the pane with the keyboard in the theme's
 /// focus line and colour, every other pane in its plain line and the frame
@@ -1197,12 +1218,6 @@ impl Border {
             focused,
         }
     }
-}
-
-/// The frame of a pane that does not have the keyboard, with nothing on its
-/// edges: what the info panel is drawn in.
-pub(crate) fn plain_frame(theme: &Theme) -> Block<'static> {
-    frame_of(Border::of(false, theme), theme)
 }
 
 /// The pane frame every pane shares: the border [`Border`] says, the title
@@ -1344,12 +1359,6 @@ fn draw_session(frame: &mut Frame, area: Rect, panes: bool, app: &mut App, theme
         app,
         theme,
     );
-    // The Usage pane says what the panel would, beside the session, where
-    // the right-hand stack is drawn.
-    match !panes && area.width >= WIDE_COLUMNS {
-        true => crate::info::draw(frame, transcript, app, theme),
-        false => app.drew_info(None),
-    }
 
     frame.render_widget(
         Paragraph::new(divider_line(
@@ -5527,44 +5536,6 @@ fn usage_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
     )
 }
 
-/// What the Usage pane says, less every row that stands where a figure has
-/// not come yet: the windows still asked of the backend, the line that says
-/// no tokens were reported, the context a compaction left unmeasured. What
-/// the info panel draws, which shows only what there is.
-pub(crate) fn usage_available(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
-    let windows = match app.plan_windows() {
-        PlanWindows::Awaited => Vec::new(),
-        PlanWindows::None | PlanWindows::Reported(_) | PlanWindows::Carried { .. } => {
-            window_lines(app, width, theme)
-        }
-    };
-    let spend = match models(app).is_empty() {
-        true => {
-            let beyond = beyond_messages(app);
-            (beyond > 0)
-                .then(|| beyond_messages_line(beyond, width, theme))
-                .into_iter()
-                .collect()
-        }
-        false => spend_lines(app, width, theme),
-    };
-    let context = match app.session().context() {
-        Some(_) => context_lines(app, width, theme),
-        None => Vec::new(),
-    };
-    arranged(
-        app,
-        UsageBlocks {
-            money: money_lines(app, width, theme),
-            windows,
-            spend,
-            context,
-        },
-        width,
-        theme,
-    )
-}
-
 /// The blocks of rows usage is told in, before they are put in order.
 struct UsageBlocks {
     money: Vec<Line<'static>>,
@@ -5819,12 +5790,14 @@ fn bar_line(
     ])
 }
 
-/// The Activity pane: the sub-agents the session spawned, the decisions its
-/// replies stated, and the tools it called.
+/// The Activity pane: what is at work now — the sub-agents running and the
+/// shell commands running — and the tools the session called, by the kind
+/// of work they did. It scrolls, and its sections fold on the same mechanism
+/// the Changes pane uses.
 ///
-/// One column for what the agent is doing and what it says it decided. It
-/// scrolls
-/// and its sections fold on the same mechanism the Changes pane uses.
+/// A section with nothing in it is left out rather than drawn empty, and a
+/// pane with no section at all is not drawn: `0 running` and `none spawned`
+/// are rows the operator reads to learn nothing.
 fn draw_activity(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
     draw_scrolling_pane(
         frame,
@@ -5837,16 +5810,147 @@ fn draw_activity(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
     );
 }
 
+/// Whether the Activity pane has anything to show: a sub-agent or a shell
+/// command running, or a tool called.
+fn has_activity(app: &App) -> bool {
+    app.agents().iter().any(SubAgent::is_running)
+        || !app.running_shells().is_empty()
+        || !app.session().tools().by_name.is_empty()
+}
+
 /// Every row the Activity pane has, folded sections included as their header
-/// alone.
+/// alone, and sections with nothing in them left out.
 fn activity_rows(app: &App, width: usize, theme: &Theme) -> PaneRows {
     let session = app.session();
     let mut rows = PaneRows::default();
-    rows.section(Section::SubAgents, agent_rows(app, session, width, theme));
-    rows.section(Section::Decisions, decision_rows(app, width, theme));
-    rows.section(Section::Tools, tool_rows(app, session, width, theme));
+    if app.agents().iter().any(SubAgent::is_running) {
+        rows.section(Section::SubAgents, agent_rows(app, session, width, theme));
+    }
+    let shells = app.running_shells();
+    if !shells.is_empty() {
+        rows.section(Section::Shells, shell_rows(app, &shells, width, theme));
+    }
+    if !session.tools().by_name.is_empty() {
+        rows.section(Section::Tools, tool_rows(app, session, width, theme));
+    }
     rows
 }
+
+/// The shell commands running now: a row each with what it runs and how
+/// long it has run, and under it, where the same command ran to the end
+/// earlier in the session, a bar of this run's time against that one's.
+///
+/// The backend says nothing of a command's progress until it ends, so the
+/// bar is the clock against the last run, said as `~` and named as such,
+/// and never claims to be the command's own count. A command the agent is
+/// waiting on opens with `$`, one the backend moved to the background with
+/// `&`, as a shell writes them.
+fn shell_rows(
+    app: &App,
+    shells: &[crate::app::RunningShell],
+    width: usize,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let folded = app.folded(Section::Shells);
+    let mut rows = vec![section_header(
+        folded,
+        "Shells",
+        vec![Figure::lead(
+            0,
+            Span::styled(
+                format!("{} running", shells.len()),
+                Style::new().fg(theme.fg),
+            ),
+        )],
+        width,
+        theme,
+    )];
+    if folded {
+        return rows;
+    }
+    for shell in shells {
+        let ran = shell
+            .since
+            .zip(app.stamp())
+            .and_then(|(since, now)| now.since(since));
+        rows.push(shell_row(shell, ran, width, theme));
+        if let Some(line) = ran
+            .zip(shell.last_run)
+            .and_then(|(ran, last)| shell_progress(ran, last, width, theme))
+        {
+            rows.push(line);
+        }
+    }
+    rows
+}
+
+/// `$ cargo test --workspace     1m 12s`: what a shell command runs, cut to
+/// fit, and how long it has run at the pane's right edge, or `running` where
+/// the shell has no clock to say.
+fn shell_row(
+    shell: &crate::app::RunningShell,
+    ran: Option<std::time::Duration>,
+    width: usize,
+    theme: &Theme,
+) -> Line<'static> {
+    let mark = match shell.background {
+        true => "& ",
+        false => "$ ",
+    };
+    let time = ran.map_or_else(|| "running".to_owned(), clock::spent);
+    let room = width.saturating_sub(text::width(mark) + 1 + text::width(&time));
+    let command = text::truncate(&shell.command, room);
+    let pad = room.saturating_sub(text::width(&command));
+    Line::from(vec![
+        Span::styled(mark, Style::new().fg(theme.hot).bold()),
+        Span::styled(command, Style::new().fg(theme.fg)),
+        Span::raw(" ".repeat(pad + 1)),
+        Span::styled(time, Style::new().fg(theme.hot)),
+    ])
+}
+
+/// `  ▓▓▓▓░░░░░░ ~40% of last 2m 30s`: a running command's time against the
+/// last whole run of the same command, full and `past last 2m 30s` once it
+/// has gone on longer. `None` where the pane has no room for a bar.
+fn shell_progress(
+    ran: std::time::Duration,
+    last: std::time::Duration,
+    width: usize,
+    theme: &Theme,
+) -> Option<Line<'static>> {
+    let share = match last.as_millis() {
+        0 => 1.0,
+        last => ran.as_millis() as f64 / last as f64,
+    };
+    let said = match share >= 1.0 {
+        true => format!("past last {}", clock::took(last)),
+        false => format!(
+            "~{}% of last {}",
+            (share * 100.0).floor(),
+            clock::took(last)
+        ),
+    };
+    let cells = width
+        .saturating_sub(text::width(ROW_INDENT) + 1 + text::width(&said))
+        .min(SHELL_BAR);
+    if cells < SHELL_BAR_LEAST {
+        return None;
+    }
+    let (filled, track) = crate::meter::meter(share.min(1.0), cells);
+    Some(Line::from(vec![
+        Span::raw(ROW_INDENT),
+        Span::styled(filled, Style::new().fg(theme.hot)),
+        Span::styled(track, Style::new().fg(theme.dim)),
+        Span::styled(format!(" {said}"), Style::new().fg(theme.dim)),
+    ]))
+}
+
+/// The longest a shell command's bar is drawn.
+const SHELL_BAR: usize = 12;
+
+/// The shortest a shell command's bar is drawn: fewer cells than this read
+/// as no bar at all, and the time on the row above already says the rest.
+const SHELL_BAR_LEAST: usize = 4;
 
 /// What the sub-agents section says about itself: how many are running, how
 /// many were spawned in all, and how many failed.
@@ -5933,10 +6037,6 @@ fn agent_rows(
         theme,
     )];
     if folded {
-        return rows;
-    }
-    if app.agents().is_empty() {
-        rows.push(Line::from("  none spawned").style(Style::new().fg(theme.dim)));
         return rows;
     }
     rows.extend(running_agent_lines(app, width, theme));
@@ -6196,6 +6296,12 @@ impl PaneRows {
         self.rows.extend(rows.into_iter().map(PaneRow::Drawn));
     }
 
+    /// A row that is a section's header, at the next row.
+    fn header(&mut self, section: Section, line: Line<'static>) {
+        self.headers.push((section, self.rows.len()));
+        self.rows.push(PaneRow::Drawn(line));
+    }
+
     /// A section's rows, the first of which is its header.
     fn section(&mut self, section: Section, rows: Vec<Line<'static>>) {
         self.section_of(section, rows.into_iter().map(PaneRow::Drawn).collect());
@@ -6216,10 +6322,11 @@ enum PaneRow {
     /// A row laid out as it was listed.
     Drawn(Line<'static>),
     /// A file of the working tree, by where it is in the repository's list,
-    /// with the bytes of its path its directory row already said and the
-    /// columns every file's counts are drawn in.
+    /// with how many directories it hangs under, the bytes of its path they
+    /// already said and the columns every file's counts are drawn in.
     WorkingFile {
         at: usize,
+        depth: usize,
         under: usize,
         columns: Columns,
     },
@@ -6230,8 +6337,13 @@ impl PaneRow {
     fn line(self, app: &App, width: usize, theme: &Theme) -> Line<'static> {
         match self {
             PaneRow::Drawn(line) => line,
-            PaneRow::WorkingFile { at, under, columns } => match app.repo().working.get(at) {
-                Some(file) => working_file_row(file, under, columns, width, theme),
+            PaneRow::WorkingFile {
+                at,
+                depth,
+                under,
+                columns,
+            } => match app.repo().working.get(at) {
+                Some(file) => working_file_row(file, (depth, under), columns, width, theme),
                 None => Line::default(),
             },
         }
@@ -6254,7 +6366,11 @@ fn mark_cursor(
         .find(|(section, _)| *section == cursor)
         .and_then(|(_, row)| row.checked_sub(from))
         .and_then(|row| shown.get_mut(row))
-        .and_then(|line| line.spans.first_mut());
+        .and_then(|line| {
+            line.spans
+                .iter_mut()
+                .find(|span| !span.content.trim().is_empty())
+        });
     if let Some(span) = span {
         span.style = span.style.add_modifier(Modifier::REVERSED);
     }
@@ -6272,10 +6388,7 @@ fn changes_rows(app: &App, width: usize, theme: &Theme) -> PaneRows {
     match &repo.branch {
         Some(branch) => {
             rows.extend([branch_row(branch, repo, width, theme)]);
-            rows.section_of(
-                Section::WorkingTree,
-                working_tree_rows(app, repo, width, theme),
-            );
+            working_tree_rows(app, repo, width, theme, &mut rows);
         }
         None => rows.extend([Line::from(Span::styled(
             text::truncate(NOT_A_REPOSITORY, width),
@@ -6457,7 +6570,8 @@ fn working_tree_rows(
     repo: &crate::app::Repo,
     width: usize,
     theme: &Theme,
-) -> Vec<PaneRow> {
+    rows: &mut PaneRows,
+) {
     let (added, removed) = working_counts(repo);
     let summary = match repo.read {
         false => vec![Figure::lead(
@@ -6468,52 +6582,90 @@ fn working_tree_rows(
     };
 
     let folded = app.folded(Section::WorkingTree);
-    let mut rows = vec![PaneRow::Drawn(section_header(
-        folded,
-        "Working tree",
-        summary,
-        width,
-        theme,
-    ))];
+    rows.header(
+        Section::WorkingTree,
+        section_header(folded, "Working tree", summary, width, theme),
+    );
     if folded {
-        return rows;
+        return;
     }
     // Nobody has looked yet, which is not the repository saying nothing
     // changed.
     if !repo.read {
-        rows.push(PaneRow::Drawn(
-            Line::from("  not read yet").style(Style::new().fg(theme.dim)),
-        ));
-        return rows;
+        rows.extend([Line::from("  not read yet").style(Style::new().fg(theme.dim))]);
+        return;
     }
     if repo.working.is_empty() {
-        rows.push(PaneRow::Drawn(
-            Line::from("  nothing changed yet").style(Style::new().fg(theme.dim)),
-        ));
-        return rows;
+        rows.extend([Line::from("  nothing changed yet").style(Style::new().fg(theme.dim))]);
+        return;
     }
 
-    // `grouped` keeps the files in the order the repository gave them, so
-    // the files' rows count through that list.
     let columns = Columns::of(&repo.working);
-    let mut at = 0;
-    for row in tree::grouped(&repo.working) {
-        rows.push(match row {
-            tree::Row::Dir(dir) => PaneRow::Drawn(
-                Line::from(format!(
-                    "  {}",
-                    text::truncate_start(&dir, width.saturating_sub(2))
-                ))
-                .style(Style::new().fg(theme.dim)),
+    let shut = |path: &str| app.folded(Section::Directory(path.to_owned()));
+    for node in app.tree().visible(shut) {
+        match node {
+            tree::Node::Dir(dir) => rows.header(
+                Section::Directory(dir.path.clone()),
+                directory_row(dir, shut(&dir.path), columns, width, theme),
             ),
-            tree::Row::File { under, .. } => {
-                let row = PaneRow::WorkingFile { at, under, columns };
-                at += 1;
-                row
-            }
-        });
+            tree::Node::File { at, depth, under } => rows.rows.push(PaneRow::WorkingFile {
+                at: *at,
+                depth: *depth,
+                under: *under,
+                columns,
+            }),
+        }
     }
-    rows
+}
+
+/// How far a row of the working tree `depth` directories down is indented:
+/// a step past the section's own indent for each directory above it, so a
+/// file's name starts under its directory's.
+fn tree_indent(depth: usize) -> String {
+    format!("{ROW_INDENT}{}", TREE_STEP.repeat(depth))
+}
+
+/// What each directory a row of the working tree is under indents it by.
+const TREE_STEP: &str = "  ";
+
+/// A directory's row: its fold marker and its name, and, folded, how many
+/// files it holds and the lines they add and remove, in the columns the
+/// files' own counts are drawn in, since its files are no longer there to
+/// say so.
+fn directory_row(
+    dir: &tree::Dir,
+    folded: bool,
+    columns: Columns,
+    width: usize,
+    theme: &Theme,
+) -> Line<'static> {
+    let indent = tree_indent(dir.depth);
+    let style = Style::new().fg(theme.dim);
+    if !folded {
+        let room = width.saturating_sub(text::width(&indent) + 2);
+        return Line::from(vec![
+            Span::raw(indent),
+            Span::styled(
+                format!("▾ {}", text::truncate_start(&dir.name, room)),
+                style,
+            ),
+        ]);
+    }
+    let added = count('+', dir.added.0, dir.added.1);
+    let removed = count('−', dir.removed.0, dir.removed.1);
+    let name = format!("▸ {}  {}", dir.name, files_said(dir.files));
+    let mut row = counted_row(
+        &indent,
+        &name,
+        (Tag::None, &added, &removed),
+        columns,
+        width,
+        theme,
+    );
+    if let Some(span) = row.spans.get_mut(1) {
+        span.style = style;
+    }
+    row
 }
 
 /// The lines the working tree adds and removes across its files, as
@@ -6538,70 +6690,23 @@ fn working_counts(repo: &crate::app::Repo) -> (String, String) {
     (side(|file| file.added, '+'), side(|file| file.removed, '−'))
 }
 
-/// `⎇ main ↑3  +977 −259`: the branch, how far it has drifted from its
-/// upstream, and the lines the working tree changes, `width` columns wide.
-/// `None` outside a repository.
-///
-/// The counts are left off until the repository has been read and while it
-/// has nothing uncommitted: a dash or `+0 −0` there would be a row reporting
-/// nothing. Where the row is too narrow for them, the branch's name is what
-/// is cut, and a count is kept whole or not drawn.
-pub(crate) fn branch_and_changes(app: &App, width: usize, theme: &Theme) -> Option<Line<'static>> {
-    let repo = app.repo();
-    let branch = repo.branch.as_deref()?;
-    let counts = branch_counts(repo);
-    let room = counts.as_ref().map_or(0, counts_columns);
-    let Some((added, removed)) = counts.filter(|_| room < width) else {
-        return Some(branch_row(branch, repo, width, theme));
-    };
-    let mut row = branch_row(branch, repo, width - room, theme);
-    let pad = (width - room).saturating_sub(row.width());
-    row.spans.push(Span::raw(" ".repeat(pad) + BRANCH_GAP));
-    row.spans
-        .push(Span::styled(added, Style::new().fg(theme.add)));
-    row.spans.push(Span::raw(" "));
-    row.spans
-        .push(Span::styled(removed, Style::new().fg(theme.del)));
-    Some(row)
-}
-
-/// How wide [`branch_and_changes`] is with nothing cut, or `None` outside a
-/// repository.
-pub(crate) fn branch_and_changes_columns(app: &App) -> Option<usize> {
-    let repo = app.repo();
-    let branch = repo.branch.as_deref()?;
-    let row = text::width("⎇ ") + text::width(branch) + text::width(&drift(repo));
-    Some(row + branch_counts(repo).as_ref().map_or(0, counts_columns))
-}
-
-/// The working tree's counts the branch row carries: none until the
-/// repository has been read, and none while nothing is uncommitted.
-fn branch_counts(repo: &crate::app::Repo) -> Option<(String, String)> {
-    (repo.read && !repo.working.is_empty()).then(|| working_counts(repo))
-}
-
-/// The columns the counts take on the branch row, the gap before them
-/// included.
-fn counts_columns((added, removed): &(String, String)) -> usize {
-    text::width(BRANCH_GAP) + text::width(added) + 1 + text::width(removed)
-}
-
-/// What stands between the branch and the working tree's counts.
-const BRANCH_GAP: &str = "  ";
-
 /// A working-tree file's row, its path less the `under` bytes the directory
 /// row above it already said.
 fn working_file_row(
     file: &crate::app::WorkingFile,
-    under: usize,
+    (depth, under): (usize, usize),
     columns: Columns,
     width: usize,
     theme: &Theme,
 ) -> Line<'static> {
-    let row = tree::Row::File { file, under };
+    // A rename is one claim about one file, and keeps the whole of it.
+    let name = match file.path.contains(" => ") {
+        true => file.path.as_str(),
+        false => file.path.get(under..).unwrap_or(&file.path),
+    };
     counted_row(
-        FILE_INDENT,
-        row.name(),
+        &tree_indent(depth),
+        name,
         (
             Tag::new(file.new),
             &measured('+', file.added),
@@ -6611,83 +6716,6 @@ fn working_file_row(
         width,
         theme,
     )
-}
-
-/// What a decision's time column is drawn in: `13:41` and a space.
-const DECISION_TIME: usize = 6;
-
-/// The decisions the agent's replies stated, newest first.
-///
-/// The heading says whose account they are: the agent reports its own
-/// reasoning and may have it wrong, and a pane that listed it bare would read
-/// as a log of what happened. A decision a sub-agent stated is that agent's
-/// account, and its row names the agent by its tag.
-///
-/// **Newest first**: the pane does not follow its own tail, so a decision
-/// appended at the bottom of a section whose top is wherever the sub-agents
-/// above it end would land below the fold and never be seen. Under the
-/// heading it is always one row from where the eye already is.
-fn decision_rows(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
-    let folded = app.folded(Section::Decisions);
-    let count = app.session().decisions().len();
-    let mut rows = vec![section_header(
-        folded,
-        "Decisions, as the agent says",
-        vec![Figure::lead(
-            0,
-            Span::styled(count.to_string(), Style::new().fg(theme.fg)),
-        )],
-        width,
-        theme,
-    )];
-    if folded {
-        return rows;
-    }
-    if count == 0 {
-        let none = match app.decisions_asked() {
-            true => "  none stated yet",
-            false => "  not asked for: decisions = false",
-        };
-        rows.push(Line::from(none).style(Style::new().fg(theme.dim)));
-        return rows;
-    }
-
-    let column = text::width(ROW_INDENT) + DECISION_TIME;
-    for (decision, at) in app.decisions().collect::<Vec<_>>().into_iter().rev() {
-        // A log that kept no times gives a decision no time. The column stays
-        // so the summaries keep their edge, but it is left blank rather than
-        // filled with a zero, which would be a moment nobody recorded.
-        let when = at
-            .and_then(|at| at.local())
-            .map(|time| time.to_string())
-            .unwrap_or_default();
-        // A sub-agent's decision is its account and not the session's, so it
-        // is named by the tag its transcript rows carry, and its text hangs
-        // after the tag on every row it wraps to.
-        let tag = decision.agent.as_ref().map(|agent| {
-            let tag = app.sub_agent_tag(agent);
-            format!("{} ", text::truncate(&tag, crate::tags::TAG_MAX))
-        });
-        let tagged = column + tag.as_deref().map_or(0, text::width);
-        for (i, wrapped) in text::wrap(&decision.summary, width.saturating_sub(tagged + 1))
-            .into_iter()
-            .enumerate()
-        {
-            let (head, by) = match i {
-                0 => (
-                    format!("{ROW_INDENT}{when:<w$}", w = DECISION_TIME),
-                    tag.clone().unwrap_or_default(),
-                ),
-                _ => (" ".repeat(tagged), String::new()),
-            };
-            rows.push(Line::from(vec![
-                Span::styled(head, Style::new().fg(theme.dim)),
-                Span::styled(by, Style::new().fg(theme.agent)),
-                Span::styled(wrapped, Style::new().fg(theme.fg)),
-            ]));
-        }
-    }
-    rows
 }
 
 /// A tool's family, which is the row it is counted under.
@@ -6719,10 +6747,6 @@ fn tool_rows(app: &App, session: &SessionState, width: usize, theme: &Theme) -> 
         theme,
     )];
     if folded {
-        return rows;
-    }
-    if tools.by_name.is_empty() {
-        rows.push(Line::from("  none called").style(Style::new().fg(theme.dim)));
         return rows;
     }
 
@@ -6832,36 +6856,8 @@ fn work_rows(tools: &ToolTotals, width: usize, theme: &Theme) -> Vec<Line<'stati
         );
         push_unrun(&mut row, (kind.denied, kind.stopped), theme);
         rows.push(row);
-        rows.push(
-            Line::from(specifics_line(&kind.specifics, width)).style(Style::new().fg(theme.dim)),
-        );
     }
     rows
-}
-
-/// `    grep 21 · sed 18 · Read 4 · …`: what did a kind of work, busiest
-/// first, as many whole as fit in `width` columns, and `…` where some did
-/// not.
-fn specifics_line(specifics: &BTreeMap<String, u64>, width: usize) -> String {
-    const INDENT: &str = "    ";
-    const BETWEEN: &str = " · ";
-    let mut busiest: Vec<(&String, &u64)> = specifics.iter().collect();
-    busiest.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
-    let mut line = INDENT.to_owned();
-    for (at, (specific, count)) in busiest.iter().enumerate() {
-        let item = format!("{specific} {count}");
-        let between = if at == 0 { "" } else { BETWEEN };
-        let last = at + 1 == busiest.len();
-        // Room is kept for ` · …` after any item but the last.
-        let after = if last { 0 } else { text::width(BETWEEN) + 1 };
-        if text::width(&line) + text::width(between) + text::width(&item) + after > width {
-            line.push_str(if at == 0 { "…" } else { " · …" });
-            return text::truncate(&line, width);
-        }
-        line.push_str(between);
-        line.push_str(&item);
-    }
-    line
 }
 
 /// How long a tools row's bar may be beside a name column `name` wide.
@@ -6967,10 +6963,8 @@ fn measured(sign: char, lines: Option<u64>) -> String {
     }
 }
 
-/// What a row under a section header is indented by, and what a file under a
-/// directory row is indented by again.
+/// What a row under a section header is indented by.
 const ROW_INDENT: &str = "  ";
-const FILE_INDENT: &str = "    ";
 
 /// What a counted row says of its file between the name and the counts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -7046,7 +7040,7 @@ impl Columns {
 /// still names the file, and a count cut anywhere is a different number. The
 /// tag keeps its place beside the counts for the same reason.
 fn counted_row(
-    indent: &'static str,
+    indent: &str,
     name: &str,
     (tag, added, removed): (Tag, &str, &str),
     columns: Columns,
@@ -7065,7 +7059,7 @@ fn counted_row(
     let pad = |column: usize, part: &str| " ".repeat(column.saturating_sub(text::width(part)));
 
     Line::from(vec![
-        Span::raw(indent),
+        Span::raw(indent.to_owned()),
         Span::styled(name, Style::new().fg(theme.fg)),
         Span::raw(" ".repeat(gap)),
         Span::styled(tag.text(), Style::new().fg(theme.dim)),
@@ -9903,97 +9897,6 @@ mod tests {
         assert!(rows[0].contains("1 running"), "{rows:?}");
         assert_eq!(rows.len(), 2, "{rows:?}");
         assert!(rows[1].contains("explore a1"), "{rows:?}");
-    }
-
-    fn decision_text(app: &App, width: usize) -> Vec<String> {
-        decision_rows(app, width, &Theme::default())
-            .iter()
-            .map(line_text)
-            .collect()
-    }
-
-    #[test]
-    fn the_decisions_section_says_whose_account_it_is_and_lists_the_newest_first() {
-        let mut app = App::new(crate::app::Repo::default());
-        app.apply(&niobe_core::Event::AssistantMessage {
-            text: "DECISION: reused the cache\nDECISION: left the exporter alone".to_owned(),
-            agent: None,
-        });
-
-        let rows = decision_text(&app, 60);
-        assert!(rows[0].contains("Decisions, as the agent says"), "{rows:?}");
-        assert!(rows[0].ends_with('2'), "{rows:?}");
-        assert!(rows[1].contains("left the exporter alone"), "{rows:?}");
-        assert!(rows[2].contains("reused the cache"), "{rows:?}");
-        assert!(
-            rows[1].starts_with("        "),
-            "no clock, so the time column is blank rather than a made-up moment"
-        );
-    }
-
-    /// A sub-agent's decision is that agent's account, not the session's:
-    /// the row names it by the tag its transcript rows carry, and the
-    /// session's own decision carries no tag.
-    #[test]
-    fn a_decision_a_sub_agent_stated_names_that_agent_and_the_session_s_own_names_none() {
-        use niobe_core::event::{AgentId, Event};
-        let mut app = App::new(crate::app::Repo::default());
-        app.apply(&Event::AgentSpawn {
-            id: AgentId::new("a1"),
-            parent: None,
-            kind: Some("Explore".to_owned()),
-            label: "look around".to_owned(),
-        });
-        app.apply(&Event::AssistantMessage {
-            text: "DECISION: read only the parser".to_owned(),
-            agent: Some(AgentId::new("a1")),
-        });
-        app.apply(&Event::AssistantMessage {
-            text: "DECISION: left the exporter alone".to_owned(),
-            agent: None,
-        });
-
-        let rows = decision_text(&app, 60);
-        assert_eq!(rows[1].trim(), "left the exporter alone", "{rows:?}");
-        assert_eq!(rows[2].trim(), "explore read only the parser", "{rows:?}");
-    }
-
-    #[test]
-    fn a_sub_agent_s_wrapped_decision_hangs_under_its_text_and_not_under_its_tag() {
-        use niobe_core::event::{AgentId, Event};
-        let mut app = App::new(crate::app::Repo::default());
-        app.apply(&Event::AgentSpawn {
-            id: AgentId::new("a1"),
-            parent: None,
-            kind: Some("Explore".to_owned()),
-            label: "look around".to_owned(),
-        });
-        app.apply(&Event::AssistantMessage {
-            text: "DECISION: read only the parser and nothing of the exporter".to_owned(),
-            agent: Some(AgentId::new("a1")),
-        });
-
-        let rows = decision_text(&app, 30);
-        let first = rows[1].find("read").expect("the first row holds the text");
-        assert!(rows.len() > 2, "{rows:?}");
-        assert!(
-            rows[2..].iter().all(|row| row.len() > first
-                && row[..first].trim().is_empty()
-                && text::width(row) <= 30),
-            "{rows:?}"
-        );
-    }
-
-    #[test]
-    fn an_empty_decisions_section_says_whether_any_were_asked_for() {
-        let asked = App::new(crate::app::Repo::default());
-        assert_eq!(decision_text(&asked, 40)[1].trim(), "none stated yet");
-
-        let unasked = App::new(crate::app::Repo::default()).with_decisions_asked(false);
-        assert_eq!(
-            decision_text(&unasked, 40)[1].trim(),
-            "not asked for: decisions = false"
-        );
     }
 
     fn line_text(line: &Line<'_>) -> String {

@@ -412,10 +412,6 @@ fn a_refusal_written_at_the_prompt_reads_as_one_entry_that_keeps_the_words() {
     assert_eq!(app.session().permissions_denied(), 1);
     assert_eq!(refusals(&app), 1, "{:#?}", app.entries());
 
-    // Beside the Usage pane, where no info panel stands over the row.
-    app.perform(niobe_tui::menu::Action::Pane(
-        niobe_tui::menu::SidePane::Usage,
-    ));
     let frame = screen(&mut app);
     assert!(
         frame.contains("You answered instead: Do not create denied.txt."),

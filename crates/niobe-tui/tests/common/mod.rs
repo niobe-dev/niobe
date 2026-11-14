@@ -494,16 +494,6 @@ pub fn running_session() -> App {
     session_read_at_a_fixed_moment(&session_events())
 }
 
-/// `app` with every pane of the right-hand stack shown, as the View menu
-/// shows them: the main view draws none of them, and a test of one of them
-/// draws it.
-pub fn with_side_panes(mut app: App) -> App {
-    for pane in niobe_tui::menu::SidePane::ALL {
-        app.perform(niobe_tui::menu::Action::Pane(pane));
-    }
-    app
-}
-
 /// The same session with `cargo test` run once more at its end for each of
 /// `runs`, each reporting what its record holds, the tests it named included.
 pub fn session_with_test_records(runs: &[TestRunRecord]) -> App {

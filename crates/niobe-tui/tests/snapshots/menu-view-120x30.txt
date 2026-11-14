@@ -1,30 +1,30 @@
  Niobe  Session  Context  Model  View  Help                            opus-5  claude · default  ○ not attached  13:41
-┏━ > add etag support to the cat┌─────────────────────────────────┐ing unchanged manifests ━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-┃ > you                         │ Diff                 F5  Ctrl+T │ ┌──────────────────────────────────────────────┐   ┃
-┃   add etag support to the cata│ Group by agent                a │n│ 5h         62% ▓▓▓▓▓▓▓░░░░░ resets 16:40     │   ┃
-┃                               │ Notable only                  n │ │ 7d         18% ▓▓░░░░░░░░░░ resets Tue 15:00 │   ┃
-┃ ◆ Reading catalog/fetch.ts and│ Tool calls…                   d │ │ ──────────────────────────────────────────── │   ┃
-┃                               │ Just one agent…               s │ │ opus-5    100% ▓▓▓▓▓▓▓▓▓▓▓▓   49k            │   ┃
-┃   Read 3 files, used Notion 2 │ Project overview…             o │ │ cache hit  86% ▓▓▓▓▓▓▓▓▓▓░░   40k            │   ┃
-┃                               │ Usage pane               hidden │ │ ──────────────────────────────────────────── │   ┃
-┃ ✗ Notion·update… {}           │ Changes pane             hidden │ │ context    13% ▓▓░░░░░░░░░░ 25k / 200k       │ed ┃
-┃   └ 404 object_not_found — the│ Activity pane            hidden │a│ ──────────────────────────────────────────── │   ┃
-┃                               │ Theme…                          │ │ ⎇ main ↑3                        +≥977 −≥259 │   ┃
-┃ ◆ Caching the etag beside the └─────────────────────────────────┘t│ ──────────────────────────────────────────── │   ┃
-┃                                                                   │ ◆ test Cover tests/fetch.test… sonnet 1m 42s │   ┃
-┃   Edited 1 file +6 −2                                             │   └ Reading tests/stream.rs                  │   ┃
-┃                                                                   └──────────────────────────────────────────────┘   ┃
-┃ ◆ Rewriting the 304 test around the cached body.                                                                     ┃
-┃                                                                                                                      ┃
-┃ ◆ The notebook that demonstrates the fetcher needs the new call shape.                                               ┃
-┃                                                                                                                      ┃
-┃ ✗ Bash           npm test                                                                              exit 1 · 0.4s ┃
-┃   └ 1 failing: fetch returns the cached body on a 304                                                                ┃
-┃                                                                                                                      ┃
-┃ ◆ Etags cached in the LRU; 304s short-circuit. One test still red — the 304 path asserts a body that is no longer    ┃
-┃   sent.                                                                                                              ┃
-┃                                                                                                                      ┃
-┃ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ┃
-┃  ask  >  Ask for a change · @ file · Ctrl+F find                                   Shift+Tab cycles · Ctrl+J newline ┃
-┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+ ┏━ > add etag support to the ca┌─────────────────────────────────┐ding… ━━━━┓ ┌─────────────── Usage ────────────────┐
+ ┃   unchanged manifests        │ Diff                 F5  Ctrl+T │          ┃ │ 5h         62% ▓▓░░ resets 16:40     │
+ ┃                              │ Group by agent                a │          █ │ 7d         18% ▓░░░ resets Tue 15:00 │
+ ┃ ◆ Reading catalog/fetch.ts an│ Notable only                  n │, one     █ │ ──────────────────────────────────── │
+ ┃   test file.                 │ Tool calls…                   d │          █ │ opus-5    100% ▓▓▓▓▓▓▓▓▓▓▓▓   49k    │
+ ┃                              │ Just one agent…               s │          █ │ cache hit  86% ▓▓▓▓▓▓▓▓▓▓░░   40k    │
+ ┃   Read 3 files, used Notion 2│ Project overview…             o │          █ │ ──────────────────────────────────── │
+ ┃                              │ Usage pane                shown │          █ │ context    13% ▓░░░░░░░░░ 25k / 200k │
+ ┃ ✗ Notion·update… {}          │ Changes pane              shown │   failed █ └──────────────────────────────────────┘
+ ┃   └ 404 object_not_found — th│ Activity pane             shown │ration    █ ┌────────────── Changes ───────────────┐
+ ┃                              │ Theme…                          │          █ │ ⎇ main ↑3                            █
+ ┃ ◆ Caching the etag beside the└─────────────────────────────────┘ the LRU. █ │ ▾ Working tree  +≥977 −≥259          █
+ ┃                                                                           █ │   ▾ catalog/                         │
+ ┃   Edited 1 file +6 −2                                                     █ │     ▾ cache/                         │
+ ┃                                                                           █ │       lru.ts                 +31  −9 │
+ ┃ ◆ Rewriting the 304 test around the cached body.                          █ │       index.ts               +12  −0 │
+ ┃                                                                           █ │     fetch.ts                +149 −12 │
+ ┃ ◆ The notebook that demonstrates the fetcher needs the new call shape.    █ │     etag.ts                  +88 −41 │
+ ┃                                                                           █ │   ▾ docs/                            │
+ ┃ ✗ Bash           npm test                                   exit 1 · 0.4s █ └──────────────────────────────────────┘
+ ┃   └ 1 failing: fetch returns the cached body on a 304                     █ ┌────────────── Activity ──────────────┐
+ ┃                                                                           █ │ ▾ Sub-agents  1 running · 1 failed   █
+ ┃ ◆ Etags cached in the LRU; 304s short-circuit. One test still red — the   █ │ ◆ test Cover tests/fe… sonnet 1m 42s █
+ ┃   304 path asserts a body that is no longer sent.                         █ │   └ Reading tests/stream.rs          █
+ ┃                                                                           █ │ ▾ Tools  8 calls ✗ 2 · 0 denied      █
+ ┃ ───────────────────────────────────────────────────────────────────────── ┃ │   Exploring code   3 ▓▓▓▓▓▓▓▓▓▓      █
+ ┃  ask  >  Ask for a change · @ file · Ctrl+F find           Ctrl+J newline ┃ │   Notion           3 ▓▓▓▓▓▓▓▓▓▓ ✗ 1  │
+ ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ └──────────────────────────────────────┘
 EscStop 1Help     2Compact     3Clear     4Model     5Diff     6Rewind     7MCP     8Memory     9Settings     0Quit

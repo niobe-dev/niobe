@@ -14,7 +14,7 @@
 
 mod common;
 
-use common::{running_session, screen, style_at, with_side_panes};
+use common::{running_session, screen, style_at};
 use niobe_core::event::Event;
 use niobe_tui::Handoff;
 use niobe_tui::app::App;
@@ -160,36 +160,6 @@ fn a_click_on_a_link_opens_it_and_a_click_beside_it_opens_nothing() {
     assert_eq!(app.take_handoffs(), Vec::new());
 }
 
-/// The info panel stands over the transcript's top-right corner, and a
-/// click on it reaches nothing under it: the link it hides is not what the
-/// operator aimed at. Beside the panel, the same link opens.
-#[test]
-fn a_click_on_the_info_panel_opens_nothing_it_hides() {
-    let mut app = App::new(niobe_tui::app::Repo {
-        name: "niobe".to_owned(),
-        branch: Some("main".to_owned()),
-        ..Default::default()
-    });
-    app.apply(&Event::AssistantMessage {
-        text: format!("{} https://example.com/x", "a".repeat(90)),
-        agent: None,
-    });
-    let frame = screen(&mut app, WIDTH, HEIGHT);
-    let (link, row) = cell_of(&frame, "https://exa");
-    let (panel, top) = cell_of(&frame, "┌────────┐");
-    assert_eq!(row, top, "the link is on the panel's row:\n{frame}");
-    assert!(link < panel, "the link runs under the panel:\n{frame}");
-
-    click(&mut app, (panel + 2, row));
-    assert_eq!(app.take_handoffs(), Vec::new());
-
-    click(&mut app, (link, row));
-    assert_eq!(
-        app.take_handoffs(),
-        vec![Handoff::Open("https://example.com/x".to_owned())]
-    );
-}
-
 #[test]
 fn a_markdown_link_opens_where_it_leads() {
     let mut app = replied("See [the guide](https://example.com/guide) first.");
@@ -221,7 +191,7 @@ fn how_a_copy_went_is_said_on_the_bar() {
 #[test]
 fn a_drag_past_the_bottom_of_the_transcript_scrolls_it_on() {
     // Beside the panes, where the session is too long for its pane.
-    let mut app = with_side_panes(running_session());
+    let mut app = running_session();
     let _ = screen(&mut app, WIDTH, HEIGHT);
     app.scroll_to_head();
     let _ = screen(&mut app, WIDTH, HEIGHT);

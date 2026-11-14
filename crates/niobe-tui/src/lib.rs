@@ -37,7 +37,6 @@ mod goal;
 pub mod history;
 mod hunks;
 pub mod images;
-mod info;
 mod input;
 pub mod journal;
 // The shell reads the terminal itself only where `poll(2)` can see it, which
@@ -79,7 +78,7 @@ pub mod watch;
 pub use alert::{Alert, Alerts, Notification};
 pub use app::{
     Answer, App, Arrival, Ask, Call, ConfigFile, Entry, EntryKind, Picker, Places, Purpose, Repo,
-    Section, SelectedProfile, Sheet, WorkingFile,
+    RunningShell, Section, SelectedProfile, Sheet, WorkingFile,
 };
 pub use bridge::{Bridge, BridgeError, Detached};
 pub use desktop::{Desktop, Handoff, NoDesktop};
