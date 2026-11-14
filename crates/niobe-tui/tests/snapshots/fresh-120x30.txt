@@ -1,11 +1,11 @@
  Niobe  Session  Context  Model  View  Help                                                                 ○ starting
  ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━ Session ─ niobe ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓ ┌──────────────── Usage ────────────────┐
- ┃ .    .                                                                   ┃ │ 5h   —                                │
- ┃      +  .                                                                ┃ │ 7d   —                                │
- ┃                         .                                                ┃ │ asked of the backend                  │
- ┃    -=>                             .                 +                   ┃ │ ───────────────────────────────────── │
- ┃                                    .       .                             ┃ │ no tokens reported yet                │
- ┃                                       .    *           ·                 ┃ └───────────────────────────────────────┘
+ ┃                                                                          ┃ │ 5h   —                                │
+ ┃  Welcome to Niobe, the coding agent that                                 ┃ │ 7d   —                                │
+ ┃  makes building things with agents                                       ┃ │ asked of the backend                  │
+ ┃  transparent and fun.                                +                   ┃ │ ───────────────────────────────────── │
+ ┃  Start by entering your prompt down below. .                             ┃ │ no tokens reported yet                │
+ ┃                                            *           ·                 ┃ └───────────────────────────────────────┘
  ┃                                            │                   .OPEN     ┃ ┌─────────────── Changes ───────────────┐
  ┃                                     ░░░░┌────┐                ┌──────┐   ┃ │ ⎇ main                                │
  ┃                     <=-             ░░░░│    │    .         ░░│      │   ┃ │ ▾ Working tree  —                     │

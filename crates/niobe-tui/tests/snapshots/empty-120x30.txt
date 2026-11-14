@@ -1,12 +1,12 @@
  Niobe  Session  Context  Model  View  Help                                                             ○ not attached
 ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ Session ─ niobe ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-┃  No backend attached. `niobe profiles` shows what is defined.                                           ┌────────┐   ┃
-┃      +  .                                                                                               │ ⎇ main │   ┃
-┃                         .                                                                             * └────────┘   ┃
-┃                                    .                 +                                 -=>            │      .       ┃
-┃                                    .       .                                                          │              ┃
-┃                                       .    *           ·                                              │              ┃
-┃                                            │                   .OPEN                               ┌─────┐           ┃
+┃                                                                                                         ┌────────┐   ┃
+┃  Welcome to Niobe, the coding agent that                                                                │ ⎇ main │   ┃
+┃  makes building things with agents                                                                    * └────────┘   ┃
+┃  transparent and fun.                                +                                 -=>            │      .       ┃
+┃  Start by entering your prompt down below. .                                                          │              ┃
+┃                                            *           ·                                              │              ┃
+┃  No backend attached. `niobe profiles` shows what is defined.  .OPEN                               ┌─────┐           ┃
 ┃                                     ░░░░┌────┐                ┌──────┐      -=>     .            ░░│     │           ┃
 ┃                                     ░░░░│    │░   .          ░│      │  .      ░░░░░           ░░░░│ ▪   │        ░░ ┃
 ┃        ░░░░░       ░░░░             ░░░░│    │░ .     ░░░░░  ░│      │         ░░░░░ .         ░░░░│     │        ░░ ┃

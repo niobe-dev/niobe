@@ -1,12 +1,12 @@
  Niobe  Session  Context  Model  View  Help                                                             ○ not attached
  ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━ Session ─ niobe ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓ ┌──────────────── Usage ────────────────┐
- ┃  No backend attached. `niobe profiles` shows what is defined.            ┃ │ no tokens reported yet                │
- ┃      +  .                                                                ┃ └───────────────────────────────────────┘
- ┃                         .                                                ┃ ┌─────────────── Changes ───────────────┐
- ┃    -=>                             .                 +                   ┃ │ ⎇ main                                │
- ┃                                    .       .                             ┃ │ ▾ Working tree  3 files  +≥4 −0       │
- ┃                                       .    *           ·                 ┃ │   .                                   │
- ┃                                            │                   .OPEN     ┃ │     kept.txt                    +1 −0 │
+ ┃                                                                          ┃ │ no tokens reported yet                │
+ ┃  Welcome to Niobe, the coding agent that                                 ┃ └───────────────────────────────────────┘
+ ┃  makes building things with agents                                       ┃ ┌─────────────── Changes ───────────────┐
+ ┃  transparent and fun.                                +                   ┃ │ ⎇ main                                │
+ ┃  Start by entering your prompt down below. .                             ┃ │ ▾ Working tree  3 files  +≥4 −0       │
+ ┃                                            *           ·                 ┃ │   .                                   │
+ ┃  No backend attached. `niobe profiles` shows what is defined.  .OPEN     ┃ │     kept.txt                    +1 −0 │
  ┃                                     ░░░░┌────┐                ┌──────┐   ┃ │     large.txt               new  —    │
  ┃                     <=-             ░░░░│    │    .         ░░│      │   ┃ │   sub/dir/                            │
  ┃        ░░░░░       ░░░░             ░░░░│    │  .     ░░░░░░░░│      │   ┃ │     inner.txt               new +3    │

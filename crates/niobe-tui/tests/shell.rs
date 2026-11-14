@@ -1108,6 +1108,41 @@ fn an_empty_session_renders_at_both_sizes() {
     assert_snapshot("empty-120x30", &screen(&mut empty_session(), 120, 30));
 }
 
+/// A shell that has just opened greets the operator over its idle scene, in
+/// the top-left corner, whatever the theme and at either depth; the first
+/// thing the session holds takes the greeting away.
+#[test]
+fn a_new_session_greets_the_operator_over_the_scene_in_every_theme() {
+    for theme in THEMES {
+        for depth in [Depth::Sixteen, Depth::TrueColour] {
+            let mut app = empty_session()
+                .attached()
+                .with_depth(depth)
+                .with_theme(theme);
+            let frame = screen(&mut app, 120, 30);
+            let rows: Vec<&str> = frame.lines().collect();
+            let inside: String = rows[3].chars().skip(1).collect();
+            assert!(
+                inside.starts_with("  Welcome to Niobe, the coding agent that"),
+                "{}\n{frame}",
+                theme.name
+            );
+            let greeting = rows[3..8].join(" ");
+            for words in [
+                "transparent and fun.",
+                "Start by entering your prompt down below.",
+            ] {
+                assert!(greeting.contains(words), "{}\n{frame}", theme.name);
+            }
+        }
+    }
+    let mut app = empty_session().attached();
+    app.apply(&Event::UserMessage {
+        text: "hello".to_owned(),
+    });
+    assert!(!screen(&mut app, 120, 30).contains("Welcome to Niobe"));
+}
+
 /// A session with a backend attached and nothing asked yet: every side pane
 /// says what will appear in it, and the plan's windows are drawn waiting for
 /// the first reply rather than left out.

@@ -262,7 +262,8 @@ reviewers that encode both, for an agent working in this tree.
   is called in a row and what the cache saved — `meter.rs` the two-tone bar every share in that
   pane is drawn with, `tree.rs` groups the working tree's files under the directories they
   share, `scene.rs` is the animation the session pane shows while nothing has happened in it since it
-  started or was cleared — the row a clear leaves drawn over its foot —
+  started or was cleared — the row a clear leaves drawn over its foot, and, on a session that
+  has just opened, a greeting over its top-left corner in every theme —
   one per theme as `Theme::scene` names it and a user's theme keeps its base's — `scene/rain.rs`
   `neo`'s glyph rain, katakana, digits and marks written by falling heads and fading behind them
   in the accent; `scene/skyline.rs` `cyber`'s night city, two rows of towers sliding past at

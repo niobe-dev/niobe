@@ -2242,12 +2242,19 @@ fn draw_transcript(
             theme,
         );
         draw_under_scene(frame, area, app, theme);
-        if !app.is_attached() {
+        // Not under the question whether to trust the repository's config:
+        // the greeting would show round its edges, and the session has not
+        // been let start yet.
+        let below = match app.entries().is_empty() && app.trusting().is_none() {
+            true => draw_welcome(frame, area, theme),
+            false => 0,
+        };
+        if !app.is_attached() && below < area.height {
             let notice = unattached(theme);
             let width = u16::try_from(notice.width())
                 .unwrap_or(u16::MAX)
                 .min(area.width);
-            let row = Rect::new(area.x, area.y, width, area.height.min(1));
+            let row = Rect::new(area.x, area.y + below, width, 1);
             // Cleared first: a style laid over a cell keeps the modifiers it
             // had, and a scene's faint glyphs are dim.
             frame.render_widget(Clear, row);
@@ -3562,6 +3569,76 @@ fn draw_under_scene(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
             row,
         );
     }
+}
+
+/// What the session pane greets the operator with over its idle scene, in
+/// every theme, until the session's first entry: what Niobe is, then where to
+/// begin.
+const WELCOME: [&str; 2] = [
+    "Welcome to Niobe, the coding agent that makes building things with agents \
+     transparent and fun.",
+    "Start by entering your prompt down below.",
+];
+
+/// How wide the greeting is let run before it wraps: narrow enough that the
+/// info panel, at its widest over the pane's other corner, leaves it whole on
+/// a terminal wide enough to draw the panel at all.
+const WELCOME_COLUMNS: usize = 44;
+
+/// The greeting over the scene's top-left corner, on the pane's own colour
+/// with a cell of it all round so the scene's glyphs do not run into the
+/// words, its name in the title colour. Returns the rows it took, none where
+/// the pane is too small to hold it whole: half a greeting reads as a fault.
+fn draw_welcome(frame: &mut Frame, area: Rect, theme: &Theme) -> u16 {
+    let lines = welcome_lines(usize::from(area.width).saturating_sub(2), theme);
+    let widest = lines.iter().map(Line::width).max().unwrap_or(0);
+    let (Ok(rows), Ok(columns)) = (u16::try_from(lines.len() + 2), u16::try_from(widest + 2))
+    else {
+        return 0;
+    };
+    if lines.is_empty() || rows > area.height || columns > area.width {
+        return 0;
+    }
+    let block = Rect::new(area.x, area.y, columns, rows);
+    // Cleared first: a style laid over a cell keeps the modifiers it had, and
+    // a scene's faint glyphs are dim.
+    frame.render_widget(Clear, block);
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::new().bg(theme.pane_bg)),
+        block.inner(Margin::new(1, 1)),
+    );
+    frame
+        .buffer_mut()
+        .set_style(block, Style::new().bg(theme.pane_bg));
+    rows
+}
+
+/// The greeting wrapped to `columns`, at most [`WELCOME_COLUMNS`]; nothing
+/// where a word of it would have to be cut to fit.
+fn welcome_lines(columns: usize, theme: &Theme) -> Vec<Line<'static>> {
+    const NAME: &str = "Welcome to Niobe,";
+    let columns = columns.min(WELCOME_COLUMNS);
+    if columns < NAME.len() {
+        return Vec::new();
+    }
+    let [about, start] = WELCOME;
+    let mut lines = Vec::new();
+    for (at, row) in text::wrap(about, columns).into_iter().enumerate() {
+        let plain = Style::new().fg(theme.fg);
+        lines.push(match (at, row.strip_prefix(NAME)) {
+            (0, Some(rest)) => Line::from(vec![
+                Span::styled(NAME, Style::new().fg(theme.title).bold()),
+                Span::styled(rest.to_owned(), plain),
+            ]),
+            _ => Line::from(Span::styled(row, plain)),
+        });
+    }
+    lines.extend(
+        text::wrap(start, columns)
+            .into_iter()
+            .map(|row| Line::from(Span::styled(row, Style::new().fg(theme.dim)))),
+    );
+    lines
 }
 
 /// What the session pane says, over its idle scene, where no backend is attached
