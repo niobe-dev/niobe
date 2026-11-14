@@ -57,9 +57,12 @@
 <rect x="0" y="36" width="9" height="18" fill="#0a0f0c"/>
 <rect x="9" y="36" width="9" height="18" fill="#0a0f0c"/>
 <text x="9" y="49" textLength="9" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#39ff7a">┃</text>
-<rect x="18" y="36" width="198" height="18" fill="#0a0f0c"/>
-<rect x="216" y="36" width="468" height="18" fill="#0a0f0c"/>
-<text x="216" y="49" textLength="468" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#312e14">▝▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▘</text>
+<rect x="18" y="36" width="189" height="18" fill="#0a0f0c"/>
+<rect x="207" y="36" width="9" height="18" fill="#0a0f0c"/>
+<text x="207" y="49" textLength="9" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#31132c">▀</text>
+<rect x="216" y="36" width="459" height="18" fill="#000000"/>
+<text x="216" y="49" textLength="459" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#31132c">▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀</text>
+<rect x="675" y="36" width="9" height="18" fill="#000000"/>
 <rect x="684" y="36" width="9" height="18" fill="#0a0f0c"/>
 <rect x="693" y="36" width="9" height="18" fill="#0a0f0c"/>
 <text x="693" y="49" textLength="9" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#39ff7a">┃</text>
@@ -624,57 +627,57 @@
 <rect x="1071" y="504" width="9" height="18" fill="#0a0f0c"/>
 <rect x="0" y="522" width="27" height="18" fill="#0d0b16"/>
 <text x="0" y="535" textLength="27" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#39ff7a" font-weight="bold">Esc</text>
-<rect x="27" y="522" width="36" height="18" fill="#a259ff"/>
-<text x="27" y="535" textLength="36" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#07060d" opacity="0.6">Stop</text>
+<rect x="27" y="522" width="36" height="18" fill="#2c1328"/>
+<text x="27" y="535" textLength="36" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#e6e9ff" opacity="0.6">Stop</text>
 <rect x="63" y="522" width="9" height="18" fill="#0d0b16"/>
 <rect x="72" y="522" width="9" height="18" fill="#0d0b16"/>
 <text x="72" y="535" textLength="9" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#39ff7a" font-weight="bold">1</text>
-<rect x="81" y="522" width="72" height="18" fill="#a259ff"/>
-<text x="81" y="535" textLength="72" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#07060d">Help    </text>
+<rect x="81" y="522" width="72" height="18" fill="#2c1328"/>
+<text x="81" y="535" textLength="72" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#e6e9ff">Help    </text>
 <rect x="153" y="522" width="9" height="18" fill="#0d0b16"/>
 <rect x="162" y="522" width="9" height="18" fill="#0d0b16"/>
 <text x="162" y="535" textLength="9" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#39ff7a" font-weight="bold">2</text>
-<rect x="171" y="522" width="99" height="18" fill="#a259ff"/>
-<text x="171" y="535" textLength="99" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#07060d" opacity="0.6">Compact    </text>
+<rect x="171" y="522" width="99" height="18" fill="#2c1328"/>
+<text x="171" y="535" textLength="99" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#e6e9ff" opacity="0.6">Compact    </text>
 <rect x="270" y="522" width="9" height="18" fill="#0d0b16"/>
 <rect x="279" y="522" width="9" height="18" fill="#0d0b16"/>
 <text x="279" y="535" textLength="9" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#39ff7a" font-weight="bold">3</text>
-<rect x="288" y="522" width="81" height="18" fill="#a259ff"/>
-<text x="288" y="535" textLength="81" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#07060d" opacity="0.6">Clear    </text>
+<rect x="288" y="522" width="81" height="18" fill="#2c1328"/>
+<text x="288" y="535" textLength="81" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#e6e9ff" opacity="0.6">Clear    </text>
 <rect x="369" y="522" width="9" height="18" fill="#0d0b16"/>
 <rect x="378" y="522" width="9" height="18" fill="#0d0b16"/>
 <text x="378" y="535" textLength="9" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#39ff7a" font-weight="bold">4</text>
-<rect x="387" y="522" width="81" height="18" fill="#a259ff"/>
-<text x="387" y="535" textLength="81" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#07060d" opacity="0.6">Model    </text>
+<rect x="387" y="522" width="81" height="18" fill="#2c1328"/>
+<text x="387" y="535" textLength="81" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#e6e9ff" opacity="0.6">Model    </text>
 <rect x="468" y="522" width="9" height="18" fill="#0d0b16"/>
 <rect x="477" y="522" width="9" height="18" fill="#0d0b16"/>
 <text x="477" y="535" textLength="9" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#39ff7a" font-weight="bold">5</text>
-<rect x="486" y="522" width="72" height="18" fill="#a259ff"/>
-<text x="486" y="535" textLength="72" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#07060d">Diff    </text>
+<rect x="486" y="522" width="72" height="18" fill="#2c1328"/>
+<text x="486" y="535" textLength="72" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#e6e9ff">Diff    </text>
 <rect x="558" y="522" width="9" height="18" fill="#0d0b16"/>
 <rect x="567" y="522" width="9" height="18" fill="#0d0b16"/>
 <text x="567" y="535" textLength="9" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#39ff7a" font-weight="bold">6</text>
-<rect x="576" y="522" width="90" height="18" fill="#a259ff"/>
-<text x="576" y="535" textLength="90" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#07060d" opacity="0.6">Rewind    </text>
+<rect x="576" y="522" width="90" height="18" fill="#2c1328"/>
+<text x="576" y="535" textLength="90" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#e6e9ff" opacity="0.6">Rewind    </text>
 <rect x="666" y="522" width="9" height="18" fill="#0d0b16"/>
 <rect x="675" y="522" width="9" height="18" fill="#0d0b16"/>
 <text x="675" y="535" textLength="9" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#39ff7a" font-weight="bold">7</text>
-<rect x="684" y="522" width="63" height="18" fill="#a259ff"/>
-<text x="684" y="535" textLength="63" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#07060d">MCP    </text>
+<rect x="684" y="522" width="63" height="18" fill="#2c1328"/>
+<text x="684" y="535" textLength="63" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#e6e9ff">MCP    </text>
 <rect x="747" y="522" width="9" height="18" fill="#0d0b16"/>
 <rect x="756" y="522" width="9" height="18" fill="#0d0b16"/>
 <text x="756" y="535" textLength="9" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#39ff7a" font-weight="bold">8</text>
-<rect x="765" y="522" width="90" height="18" fill="#a259ff"/>
-<text x="765" y="535" textLength="90" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#07060d">Memory    </text>
+<rect x="765" y="522" width="90" height="18" fill="#2c1328"/>
+<text x="765" y="535" textLength="90" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#e6e9ff">Memory    </text>
 <rect x="855" y="522" width="9" height="18" fill="#0d0b16"/>
 <rect x="864" y="522" width="9" height="18" fill="#0d0b16"/>
 <text x="864" y="535" textLength="9" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#39ff7a" font-weight="bold">9</text>
-<rect x="873" y="522" width="108" height="18" fill="#a259ff"/>
-<text x="873" y="535" textLength="108" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#07060d">Settings    </text>
+<rect x="873" y="522" width="108" height="18" fill="#2c1328"/>
+<text x="873" y="535" textLength="108" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#e6e9ff">Settings    </text>
 <rect x="981" y="522" width="9" height="18" fill="#0d0b16"/>
 <rect x="990" y="522" width="9" height="18" fill="#0d0b16"/>
 <text x="990" y="535" textLength="9" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#39ff7a" font-weight="bold">0</text>
-<rect x="999" y="522" width="72" height="18" fill="#a259ff"/>
-<text x="999" y="535" textLength="72" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#07060d">Quit    </text>
+<rect x="999" y="522" width="72" height="18" fill="#2c1328"/>
+<text x="999" y="535" textLength="72" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#e6e9ff">Quit    </text>
 <rect x="1071" y="522" width="9" height="18" fill="#0d0b16"/>
 </svg>

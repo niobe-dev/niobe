@@ -19,9 +19,9 @@
  ┃ ◆ Etags cached in the LRU; 304s short-circuit. One test still red — the   █ │     etag.ts                  +88 −41 │
  ┃   304 path asserts a body that is no longer sent.                         █ │   ▾ docs/                            │
  ┃                                                                           █ └──────────────────────────────────────┘
- ┃                                                 ▗▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▖ █ ┌────────────── Activity ──────────────┐
- ┃                                                  and update the docs too  █ │ ▾ Sub-agents  1 running · 1 failed   █
- ┃                                                 ▝▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▘ █ │ ◆ test Cover tests/fe… sonnet 1m 42s █
+ ┃                                                ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄  █ ┌────────────── Activity ──────────────┐
+ ┃                                                 and update the docs too   █ │ ▾ Sub-agents  1 running · 1 failed   █
+ ┃                                                ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀  █ │ ◆ test Cover tests/fe… sonnet 1m 42s █
  ┃                                queued — the agent has not taken it in yet █ │   └ Reading tests/stream.rs          █
  ┃                                                                           █ │ ▾ Tools  8 calls ✗ 2 · 0 denied      █
  ┃ ───────────────────────────────────────────────────────────────────────── ┃ │   Exploring code   3 ▓▓▓▓▓▓▓▓▓▓      █

@@ -1,8 +1,8 @@
  Niobe  Session  Context  Model  View  Help                             ○ idle
 ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ > /compact ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-┃                                                                   ▗▄▄▄▄▄▄▄▄▖ ┃
-┃                                                                    /compact  ┃
-┃                                                                   ▝▀▀▀▀▀▀▀▀▘ ┃
+┃                                                                  ▄▄▄▄▄▄▄▄▄▄  ┃
+┃                                                                   /compact   ┃
+┃                                                                  ▀▀▀▀▀▀▀▀▀▀  ┃
 ┃                                                                              ┃
 ┃ ⇣ context compacted · 192k → 18k tokens                                      ┃
 ┃                                                                              ┃

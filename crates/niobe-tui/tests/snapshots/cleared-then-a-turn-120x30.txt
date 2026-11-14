@@ -5,9 +5,9 @@
  ┃   line is in front of the model, and what came before is a session of its ┃ │ sonnet-5  100% ▓▓▓▓▓▓▓▓▓▓▓▓   600    │
  ┃   own, with its own cost. Session › Resume opens it again.                ┃ │ cache hit   0% ░░░░░░░░░░░░     0    │
  ┃                                                                           ┃ └──────────────────────────────────────┘
- ┃                                                            ▗▄▄▄▄▄▄▄▄▄▄▄▄▖ ┃ ┌────────────── Changes ───────────────┐
- ┃                                                             where was I?  ┃ │ ⎇ main ↑3                            █
- ┃                                                            ▝▀▀▀▀▀▀▀▀▀▀▀▀▘ ┃ │ ▾ Working tree  +≥977 −≥259          █
+ ┃                                                           ▄▄▄▄▄▄▄▄▄▄▄▄▄▄  ┃ ┌────────────── Changes ───────────────┐
+ ┃                                                            where was I?   ┃ │ ⎇ main ↑3                            █
+ ┃                                                           ▀▀▀▀▀▀▀▀▀▀▀▀▀▀  ┃ │ ▾ Working tree  +≥977 −≥259          █
  ┃                                                                           ┃ │   ▾ catalog/                         █
  ┃ ◆ A new conversation.                                                     ┃ │     ▾ cache/                         █
  ┃                                                                           ┃ │       lru.ts                 +31  −9 █

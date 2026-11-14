@@ -937,6 +937,14 @@ mod tests {
         assert_ne!(sky(0), sky(14), "the sky glows toward the horizon");
     }
 
+    /// The F-key labels are the plum the far towers stand in, so the bar
+    /// under the city reads as a row of the same night.
+    #[test]
+    fn cybers_f_key_labels_are_the_far_towers_plum() {
+        let deep = CYBER.at(Depth::TrueColour);
+        assert_eq!(Ink::of(&deep).far, Style::new().bg(deep.fkey_bg));
+    }
+
     #[test]
     fn a_roof_sign_spells_its_word_centred_on_the_roof() {
         let tower = Tower {

@@ -8,9 +8,9 @@
 ║ ◆ ╔═════════════════════════════ Sub-agents ═════════════════════════════╗4  ║
 ║   ║                                                                      ║   ║
 ║   ║    test                   Cover tests/fetch.test.ts · running        ║   ║
-║   ║    reviewer               Review catalog/cache.ts                    ║▄▖ ║
-║   ║    doc                    Write docs/etags.md                        ║.  █
-║   ║    deep1                  Review fetch.py · running                  ║▀▘ █
+║   ║    reviewer               Review catalog/cache.ts                    ║▄  ║
+║   ║    doc                    Write docs/etags.md                        ║   █
+║   ║    deep1                  Review fetch.py · running                  ║▀  █
 ║   ║  › deep2                  Review cache.py · running                  ║   █
 ║ ▾ ║                                                                      ║ B █
 ║   ║  ↑↓ choose · Enter show its entries alone · Esc close                ║ B █

@@ -20,9 +20,9 @@
  ┃ ◆ Etags cached in the LRU; 304s short-circuit. One test still red — the   █ │   ▾ docs/                            │
  ┃   304 path asserts a body that is no longer sent.                         █ └──────────────────────────────────────┘
  ┃                                                                           █ ┌────────────── Activity ──────────────┐
- ┃                                                 ▗▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▖ █ │ ▾ Sub-agents  1 running · 1 failed   █
- ┃                                                  and update the docs too  █ │ ◆ test Cover tests/fe… sonnet 1m 42s █
- ┃                                                 ▝▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▘ █ │   └ Reading tests/stream.rs          █
+ ┃                                                ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄  █ │ ▾ Sub-agents  1 running · 1 failed   █
+ ┃                                                 and update the docs too   █ │ ◆ test Cover tests/fe… sonnet 1m 42s █
+ ┃                                                ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀  █ │   └ Reading tests/stream.rs          █
  ┃                                                                           █ │ ▾ Tools  8 calls ✗ 2 · 0 denied      █
  ┃ ───────────────────────────────────────────────────────────────────────── ┃ │   Exploring code   3 ▓▓▓▓▓▓▓▓▓▓      █
  ┃  ask  >  Ask for a change · @ file · Ctrl+F find           Ctrl+J newline ┃ │   Notion           3 ▓▓▓▓▓▓▓▓▓▓ ✗ 1  │

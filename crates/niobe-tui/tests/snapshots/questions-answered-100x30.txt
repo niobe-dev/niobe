@@ -13,16 +13,16 @@
  ┃   still red — the 304 path asserts a body that is no longer █ │ ▾ Working tree  +≥977 −≥259    █
  ┃   sent.                                                     █ │   ▾ catalog/                   │
  ┃                                                             █ │     ▾ cache/                   │
- ┃                ▗▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▖ █ │       lru.ts           +31  −9 │
- ┃                 ▎ The loop is done. Is pushing to main the  █ │       index.ts         +12  −0 │
- ┃                 ▎ deploy, or should I also cut a release?   █ │     fetch.ts          +149 −12 │
- ┃                 Also cut a release now                      █ │     etag.ts            +88 −41 │
- ┃                ▝▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▘ █ │   ▾ docs/                      │
+ ┃               ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄  █ │       lru.ts           +31  −9 │
+ ┃                ▎ The loop is done. Is pushing to main the   █ │       index.ts         +12  −0 │
+ ┃                ▎ deploy, or should I also cut a release?    █ │     fetch.ts          +149 −12 │
+ ┃                Also cut a release now                       █ │     etag.ts            +88 −41 │
+ ┃               ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀  █ │   ▾ docs/                      │
  ┃                                                             █ └────────────────────────────────┘
- ┃                                        ▗▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▖ █ ┌─────────── Activity ───────────┐
- ┃                                         ▎ Which platforms?  █ │ ▾ Sub-agents  1 running        █
- ┃                                         macOS, Linux        █ │ ◆ test Cover tests/fe… running █
- ┃                                        ▝▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▘ █ │   └ Reading tests/stream.rs    █
+ ┃                                       ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄  █ ┌─────────── Activity ───────────┐
+ ┃                                        ▎ Which platforms?   █ │ ▾ Sub-agents  1 running        █
+ ┃                                        macOS, Linux         █ │ ◆ test Cover tests/fe… running █
+ ┃                                       ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀  █ │   └ Reading tests/stream.rs    █
  ┃                                                             █ │ ▾ Tools  8 calls ✗ 2           █
  ┃ ─────────────────────────────────────────────────────────── ┃ │   Exploring code   3 ▓▓▓▓      █
  ┃  ask  >  Ask for a change · @ file           Ctrl+J newline ┃ │   Notion           3 ▓▓▓▓ ✗ 1  │

@@ -1,6 +1,6 @@
  Niobe  Session  Context  Model  View  Help                            opus-5  claude · default  ○ not attached  13:41
  ┏━━ > add etag support to the c┌─────────────────────────────────┐ading… ━━━┓ ┌─────────────── Usage ────────────────┐
- ┃                      ▝▀▀▀▀▀▀▀│ Diff                 F5  Ctrl+T │▀▀▀▀▀▀▀▀▘ ┃ │ 5h         62% ▓▓░░ resets 16:40     │
+ ┃                     ▀▀▀▀▀▀▀▀▀│ Diff                 F5  Ctrl+T │▀▀▀▀▀▀▀▀  ┃ │ 5h         62% ▓▓░░ resets 16:40     │
  ┃                              │ Group by agent                a │          ┃ │ 7d         18% ▓░░░ resets Tue 15:00 │
  ┃ ◆ Reading catalog/fetch.ts an│ Notable only                  n │, one     █ │ ──────────────────────────────────── │
  ┃   test file.                 │ Tool calls…                   d │          █ │ opus-5    100% ▓▓▓▓▓▓▓▓▓▓▓▓   49k    │

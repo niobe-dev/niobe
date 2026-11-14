@@ -531,7 +531,7 @@ fn draw_menu_list(
     frame.render_widget(Clear, area);
     frame.render_widget(block, area);
 
-    let hot = Style::new().fg(theme.hot).bold().underlined();
+    let hot = Style::new().fg(theme.menu_hot).bold().underlined();
     let lines: Vec<Line> = menu
         .items
         .iter()
@@ -928,7 +928,7 @@ fn menu_spans(open: Option<usize>, theme: &Theme) -> Vec<Span<'static>> {
                 Style::new().fg(theme.menu_bg).bg(theme.menu_fg),
                 theme.open_menu_hot(),
             ),
-            false => (Style::new().fg(theme.menu_fg), theme.hot),
+            false => (Style::new().fg(theme.menu_fg), theme.menu_hot),
         };
         let mut chars = menu.name.chars();
         let first = chars.next().unwrap_or(' ');
@@ -2470,7 +2470,7 @@ enum Copied {
     AsShown,
     /// With the reply's glyph in its gutter read as a blank.
     Marked,
-    /// As a line of a prompt's bubble: its rounded ends as nothing.
+    /// As a line of a prompt's bubble: its top and bottom as nothing.
     InBubble,
 }
 
@@ -2494,7 +2494,7 @@ struct Drawn {
     /// which is a mark rather than part of what the agent said: a copy
     /// reads it as the blank gutter it stands in.
     marked: bool,
-    /// Whether the lines are a prompt's bubble, whose rounded ends are
+    /// Whether the lines are a prompt's bubble, whose top and bottom are
     /// drawing rather than text: a copy reads them as blank lines.
     bubble: bool,
     lines: Vec<Line<'static>>,
@@ -2896,7 +2896,7 @@ impl DrawnEntries {
     /// bottom in one walk, as a copy of them reads — `None` for a line a copy
     /// leaves out: the glyph in a reply's gutter read as the blank it stands
     /// in, so that the gutter the reply's lines share is
-    /// taken off them all; a bubble's rounded ends as no line at all, being
+    /// taken off them all; a bubble's top and bottom as no line at all, being
     /// drawing and not words; and a bubble's rows, but for those `cut` says a
     /// copy takes only some cells of, as their words behind the gutter a
     /// reply's are drawn behind, rather than behind the cells that set the

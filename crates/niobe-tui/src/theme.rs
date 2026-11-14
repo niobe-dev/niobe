@@ -152,6 +152,10 @@ pub struct Theme {
     pub menu_bg: Color,
     /// Text on the menu bar.
     pub menu_fg: Color,
+    /// The hot letter of a menu's name on the menu bar, and of an item of an
+    /// open menu: a field of its own rather than [`Theme::hot`], because a
+    /// theme can draw its menus on a colour its accent does not read on.
+    pub menu_hot: Color,
     /// The line an open menu is framed in.
     pub menu_border: BorderType,
     /// An open menu's items.
@@ -200,10 +204,10 @@ pub struct Theme {
     pub user: Color,
     /// Behind the operator's own messages: the bubble a sent prompt is drawn
     /// in, as a messenger draws the messages one sends, and the colour of
-    /// its rounded ends. A wash of [`Theme::user`] over the panes where the
-    /// theme is drawn in 24-bit colour; in the sixteen names, a grey or a
-    /// black that sets the bubble off from the panes and keeps the
-    /// operator's colour legible on it.
+    /// its top and bottom. A wash of one of the theme's colours over the
+    /// panes where the theme is drawn in 24-bit colour; in the sixteen
+    /// names, a grey or a black that sets the bubble off from the panes and
+    /// keeps the operator's colour legible on it.
     pub user_bg: Color,
     /// The assistant's messages.
     pub agent: Color,
@@ -248,7 +252,7 @@ pub struct Theme {
     pub shadow_fg: Color,
 }
 
-/// The DOS-blue theme: Far Manager's default colours.
+/// The DOS-blue theme: Turbo Pascal's IDE.
 ///
 /// The IBM CGA palette, which is exactly what the sixteen ANSI colours encode,
 /// so this theme has no truecolor table: it is drawn in the user's own
@@ -256,19 +260,23 @@ pub struct Theme {
 /// would want is outside those sixteen, so they use [`Color::Black`] and
 /// [`Color::Blue`].
 ///
-/// Each role takes the colour Far gives the same role: light cyan text on
-/// blue panels, black on cyan for the menu bar, the F-key labels and the
-/// cursor bar, white on cyan for an open menu with its item under the cursor
-/// white on black, white numbers on a black key bar, black on grey dialogs in
-/// a white double frame, and a dark grey shadow on black.
+/// Each role takes the colour Turbo Pascal gives the same role: yellow text
+/// on the blue editor, its words in white where they stand out of it, the
+/// windows framed in light grey and the active one in a white double line
+/// with a white title, black on light grey with red hot letters for the menu
+/// bar and an open menu, black on light grey for the status line, a green bar
+/// for the item under a cursor, black on grey dialogs in a white double
+/// frame, and a black shadow under a dialog that leaves what it falls on dark
+/// grey.
 ///
-/// Three of Far's choices are not taken. Far frames every panel in a double
-/// line; here the panes are single and the one with the keyboard double,
-/// because the line is the mark of focus a terminal without colour keeps.
-/// Far draws its command line grey on black; the composer sits inside the
-/// session pane's frame rather than on a line of its own under the panels, so
-/// it keeps the pane's blue. And Far's red warning dialog has no counterpart:
-/// no dialog here asks before something that cannot be undone.
+/// Three of Turbo Pascal's choices are not taken. Its status line is one
+/// flat grey with the keys' names in red; here the keys' numbers are the
+/// bright red on a dark grey gap between them, so each label still reads as
+/// a block of its own. The operator's messages sit in dark grey bubbles,
+/// which Turbo Pascal has no counterpart for, so the black shadow they cast
+/// still shows. And it has no colour for a window running low; that takes
+/// the dark yellow CGA draws brown, short of the bright red of what has run
+/// out.
 pub const CLASSIC: Theme = Theme {
     name: "CLASSIC",
     scene: Scene::Life,
@@ -276,27 +284,29 @@ pub const CLASSIC: Theme = Theme {
     border_focus: BorderType::Double,
 
     pane_bg: Color::Blue,
-    frame: Color::LightCyan,
+    frame: Color::Gray,
     frame_focus: Color::White,
-    title: Color::LightYellow,
-    fg: Color::LightCyan,
+    title: Color::White,
+    fg: Color::LightYellow,
     dim: Color::Gray,
-    hot: Color::LightYellow,
-    // The one yellow in the sixteen, so a window running low takes the
-    // accent's colour here: there is no amber to give it one of its own.
-    warn: Color::LightYellow,
+    hot: Color::White,
+    // CGA's dark yellow, which it draws brown: the amber of the sixteen.
+    warn: Color::Yellow,
 
-    menu_bg: Color::Cyan,
+    menu_bg: Color::Gray,
     menu_fg: Color::Black,
-    menu_border: BorderType::Double,
-    pulldown_fg: Color::White,
-    pulldown_frame: Color::White,
+    // Turbo Pascal's red hot letters: the accent's white would vanish on
+    // the grey.
+    menu_hot: Color::Red,
+    menu_border: BorderType::Plain,
+    pulldown_fg: Color::Black,
+    pulldown_frame: Color::Black,
     pulldown_dim: Color::DarkGray,
-    menu_cursor_bg: Color::Black,
-    menu_cursor_fg: Color::White,
-    keybar_bg: Color::Black,
-    keybar_fg: Color::White,
-    fkey_bg: Color::Cyan,
+    menu_cursor_bg: Color::Green,
+    menu_cursor_fg: Color::Black,
+    keybar_bg: Color::DarkGray,
+    keybar_fg: Color::LightRed,
+    fkey_bg: Color::Gray,
     fkey_fg: Color::Black,
 
     add: Color::LightGreen,
@@ -307,25 +317,25 @@ pub const CLASSIC: Theme = Theme {
     add_bg: Color::Black,
     del_bg: Color::Black,
 
-    user: Color::LightYellow,
-    // The navy a bubble would want is not one of the sixteen: black sets it
-    // off from the blue panes, as it does a diff.
-    user_bg: Color::Black,
-    agent: Color::LightCyan,
-    tool: Color::LightMagenta,
-    // The body text is Far's light cyan, so code is the white Far's editor
-    // keeps for what stands out of it.
+    // The operator's words in the white the editor keeps for what stands
+    // out, apart from the agent's yellow.
+    user: Color::White,
+    // A dark grey bubble, the face of a window Turbo Pascal has set aside:
+    // black would be the very colour of the shadow it casts on the blue.
+    user_bg: Color::DarkGray,
+    agent: Color::LightYellow,
+    tool: Color::LightCyan,
     code: Color::White,
     command: Color::LightMagenta,
 
     dialog_bg: Color::Gray,
     dialog_fg: Color::Black,
-    // Far greys out what a dialog cannot do in dark grey on its grey face;
-    // the panes' grey would be the face itself.
+    // Turbo Pascal greys out what a dialog cannot do in dark grey on its grey
+    // face; the panes' grey would be the face itself.
     dialog_dim: Color::DarkGray,
     dialog_frame: Color::White,
     dialog_title: Color::Black,
-    cursor_bg: Color::Cyan,
+    cursor_bg: Color::Green,
     cursor_fg: Color::Black,
     shadow: Color::Black,
     shadow_fg: Color::DarkGray,
@@ -364,6 +374,7 @@ pub const NEO: Theme = Theme {
 
     menu_bg: Color::Black,
     menu_fg: Color::Green,
+    menu_hot: Color::LightGreen,
     menu_border: BorderType::Plain,
     pulldown_fg: Color::Green,
     pulldown_frame: Color::Green,
@@ -452,6 +463,7 @@ pub const CYBER: Theme = Theme {
 
     menu_bg: Color::Black,
     menu_fg: Color::White,
+    menu_hot: Color::LightGreen,
     menu_border: BorderType::Plain,
     pulldown_fg: Color::White,
     pulldown_frame: Color::White,
@@ -532,6 +544,7 @@ pub const MODERN: Theme = Theme {
 
     menu_bg: Color::DarkGray,
     menu_fg: Color::White,
+    menu_hot: Color::LightBlue,
     menu_border: BorderType::Plain,
     pulldown_fg: Color::White,
     pulldown_frame: Color::White,
@@ -627,6 +640,7 @@ pub const NEO_TRUE: Theme = Theme {
 
     menu_bg: hex(0x001a08),
     menu_fg: hex(0x00ff41),
+    menu_hot: hex(0x00ff41),
     pulldown_fg: hex(0x00ff41),
     pulldown_frame: hex(0x00ff41),
     pulldown_dim: hex(0x2e8b44),
@@ -663,6 +677,11 @@ pub const NEO_TRUE: Theme = Theme {
     ..NEO
 };
 
+/// The plum `cyber`'s far towers stand in against the night: its titles'
+/// magenta, `0xff2bd6`, at 14% over its panes' `0x0a0f0c`. The skyline mixes
+/// it from the theme as it draws; the F-key labels take it from here.
+const FAR_TOWERS: Color = wash(0xff2bd6, 0x0a0f0c, 14);
+
 /// [`CYBER`] as designed, for a terminal that can draw it: the pale-blue body
 /// text, the specific green and magenta, and the dark green frames the
 /// sixteen-colour table has to give up.
@@ -684,6 +703,7 @@ pub const CYBER_TRUE: Theme = Theme {
 
     menu_bg: hex(0x0d0b16),
     menu_fg: hex(0xe6e9ff),
+    menu_hot: hex(0x39ff7a),
     pulldown_fg: hex(0xe6e9ff),
     pulldown_frame: hex(0xe6e9ff),
     pulldown_dim: hex(0x6b9a7c),
@@ -691,10 +711,12 @@ pub const CYBER_TRUE: Theme = Theme {
     menu_cursor_fg: hex(0x07060d),
     keybar_bg: hex(0x0d0b16),
     keybar_fg: hex(0x39ff7a),
-    // A neon violet, not the titles' magenta: the keys are the operator's
+    // The plum of the skyline's far towers — the titles' magenta at 14% over
+    // the panes — not the magenta itself: the keys are the operator's
     // controls, and a pink row under the pane titles read as more titles.
-    fkey_bg: hex(0xa259ff),
-    fkey_fg: hex(0x07060d),
+    // The labels are the body text's pale blue, which reads on it at 14 to 1.
+    fkey_bg: FAR_TOWERS,
+    fkey_fg: hex(0xe6e9ff),
 
     add: hex(0x39ff7a),
     del: hex(0xff4d6d),
@@ -702,8 +724,11 @@ pub const CYBER_TRUE: Theme = Theme {
     add_bg: wash(0x39ff7a, 0x080c0a, WASH),
     del_bg: wash(0xff4d6d, 0x080c0a, WASH),
 
+    // The neon's yellow on a bubble washed in the magenta: the words stand
+    // apart from the titles and the agent's green, and the bubble keeps the
+    // operator's side of the conversation in the colour of the keys.
     user: hex(0xffd23f),
-    user_bg: wash(0xffd23f, 0x0a0f0c, BUBBLE),
+    user_bg: wash(0xff2bd6, 0x0a0f0c, BUBBLE),
     agent: hex(0x39ff7a),
     tool: hex(0xb9c1ff),
     code: hex(0xffd23f),
@@ -739,6 +764,7 @@ pub const MODERN_TRUE: Theme = Theme {
 
     menu_bg: hex(0x323233),
     menu_fg: hex(0xcccccc),
+    menu_hot: hex(0x4fc1ff),
     pulldown_fg: hex(0xcccccc),
     pulldown_frame: hex(0xcccccc),
     pulldown_dim: hex(0x858585),
@@ -883,7 +909,7 @@ impl Theme {
             (t.code, t.pane_bg, "code in a reply"),
             (t.command, t.pane_bg, "a command named in a prompt"),
             (t.menu_fg, t.menu_bg, "the menu bar"),
-            (t.hot, t.menu_bg, "a menu hot key"),
+            (t.menu_hot, t.menu_bg, "a menu hot key"),
             (t.pulldown_fg, t.menu_bg, "an open menu's item"),
             (t.pulldown_frame, t.menu_bg, "an open menu's frame"),
             (
@@ -891,7 +917,7 @@ impl Theme {
                 t.menu_bg,
                 "an open menu's item that can do nothing",
             ),
-            (t.hot, t.menu_bg, "an open menu's hot key"),
+            (t.menu_hot, t.menu_bg, "an open menu's hot key"),
             (t.menu_cursor_bg, t.menu_bg, "an open menu's cursor row"),
             (
                 t.menu_cursor_fg,
@@ -949,7 +975,7 @@ impl Theme {
             (t.add, t.add_bg, "a diff's added line"),
             (t.del, t.del_bg, "a diff's removed line"),
             (t.menu_fg, t.menu_bg, "the menu bar"),
-            (t.hot, t.menu_bg, "a menu hot key"),
+            (t.menu_hot, t.menu_bg, "a menu hot key"),
             (t.del, t.menu_bg, "an error count in the menu row"),
             (t.fkey_fg, t.fkey_bg, "an F-key label"),
             (t.keybar_fg, t.keybar_bg, "an F-key's number"),
@@ -1045,7 +1071,7 @@ pub fn register_user(themes: Vec<UserTheme>) -> bool {
 
 impl Theme {
     /// The colours a theme file may set, by the key it spells them with.
-    pub const COLOUR_KEYS: [&'static str; 39] = [
+    pub const COLOUR_KEYS: [&'static str; 40] = [
         "pane_bg",
         "frame",
         "frame_focus",
@@ -1056,6 +1082,7 @@ impl Theme {
         "warn",
         "menu_bg",
         "menu_fg",
+        "menu_hot",
         "pulldown_fg",
         "pulldown_frame",
         "pulldown_dim",
@@ -1105,6 +1132,7 @@ impl Theme {
             "warn" => &mut self.warn,
             "menu_bg" => &mut self.menu_bg,
             "menu_fg" => &mut self.menu_fg,
+            "menu_hot" => &mut self.menu_hot,
             "pulldown_fg" => &mut self.pulldown_fg,
             "pulldown_frame" => &mut self.pulldown_frame,
             "pulldown_dim" => &mut self.pulldown_dim,
@@ -1396,66 +1424,76 @@ mod tests {
         assert_eq!(CLASSIC.at(Depth::Sixteen), CLASSIC);
     }
 
-    /// `classic` is Far Manager's default colour table, role for role, where
-    /// the shell has the role: each pair here is the foreground and
-    /// background Far draws that part of its screen in.
+    /// `classic` is Turbo Pascal's IDE, role for role, where the shell has
+    /// the role: each pair here is the foreground and background Turbo
+    /// Pascal draws that part of its screen in.
     #[test]
-    fn classic_draws_each_part_of_the_screen_in_far_managers_colours() {
+    fn classic_draws_each_part_of_the_screen_in_turbo_pascals_colours() {
         let t = CLASSIC;
-        for (ours, far, what) in [
+        for (ours, turbo, what) in [
             (
                 (t.fg, t.pane_bg),
-                (Color::LightCyan, Color::Blue),
-                "panel text",
+                (Color::LightYellow, Color::Blue),
+                "the editor's text",
+            ),
+            (
+                (t.code, t.pane_bg),
+                (Color::White, Color::Blue),
+                "the editor's words that stand out",
             ),
             (
                 (t.frame, t.pane_bg),
-                (Color::LightCyan, Color::Blue),
-                "a panel's frame",
+                (Color::Gray, Color::Blue),
+                "a window's frame",
+            ),
+            (
+                (t.frame_focus, t.pane_bg),
+                (Color::White, Color::Blue),
+                "the active window's frame",
+            ),
+            (
+                (t.title, t.pane_bg),
+                (Color::White, Color::Blue),
+                "a window's title",
             ),
             (
                 (t.menu_fg, t.menu_bg),
-                (Color::Black, Color::Cyan),
+                (Color::Black, Color::Gray),
                 "the menu bar",
             ),
             (
-                (t.hot, t.menu_bg),
-                (Color::LightYellow, Color::Cyan),
-                "a menu's hot key",
+                (t.menu_hot, t.menu_bg),
+                (Color::Red, Color::Gray),
+                "a menu's hot letter",
             ),
             (
                 (t.pulldown_fg, t.menu_bg),
-                (Color::White, Color::Cyan),
+                (Color::Black, Color::Gray),
                 "an open menu",
             ),
             (
                 (t.pulldown_frame, t.menu_bg),
-                (Color::White, Color::Cyan),
+                (Color::Black, Color::Gray),
                 "an open menu's frame",
             ),
             (
                 (t.pulldown_dim, t.menu_bg),
-                (Color::DarkGray, Color::Cyan),
+                (Color::DarkGray, Color::Gray),
                 "a greyed item",
             ),
             (
                 (t.menu_cursor_fg, t.menu_cursor_bg),
-                (Color::White, Color::Black),
+                (Color::Black, Color::Green),
                 "the selected item",
             ),
             (
-                (t.keybar_fg, t.keybar_bg),
-                (Color::White, Color::Black),
-                "an F-key's number",
-            ),
-            (
                 (t.fkey_fg, t.fkey_bg),
-                (Color::Black, Color::Cyan),
-                "an F-key's label",
+                (Color::Black, Color::Gray),
+                "the status line",
             ),
             (
                 (t.cursor_fg, t.cursor_bg),
-                (Color::Black, Color::Cyan),
+                (Color::Black, Color::Green),
                 "the cursor bar",
             ),
             (
@@ -1474,20 +1512,15 @@ mod tests {
                 "a dialog's frame",
             ),
             (
-                (t.dialog_title, t.dialog_bg),
-                (Color::Black, Color::Gray),
-                "a dialog's title",
-            ),
-            (
                 (t.shadow_fg, t.shadow),
                 (Color::DarkGray, Color::Black),
                 "a shadow",
             ),
         ] {
-            assert_eq!(ours, far, "{what}");
+            assert_eq!(ours, turbo, "{what}");
         }
-        assert_eq!(t.menu_border, BorderType::Double, "an open menu's frame");
-        assert_eq!(t.border_focus, BorderType::Double, "a dialog's frame");
+        assert_eq!(t.menu_border, BorderType::Plain, "an open menu's frame");
+        assert_eq!(t.border_focus, BorderType::Double, "the active window");
     }
 
     #[test]

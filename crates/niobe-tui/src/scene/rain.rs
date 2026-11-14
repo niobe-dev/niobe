@@ -358,7 +358,7 @@ mod tests {
         assert!(!greenest(&MODERN));
         let sixteen = Ink::of(&CLASSIC);
         assert_eq!(sixteen.trail[0].fg, Some(CLASSIC.hot));
-        assert_eq!(sixteen.trail[3].fg, Some(Color::Yellow));
+        assert_eq!(sixteen.trail[3].fg, Some(Color::Gray));
         assert_eq!(Ink::of(&NEO).trail[0].fg, Some(Color::LightGreen));
     }
 

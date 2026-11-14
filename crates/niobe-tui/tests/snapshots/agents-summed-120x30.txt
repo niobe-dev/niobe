@@ -14,9 +14,9 @@
  ┃ ◆ Etags cached in the LRU; 304s short-circuit. One test still red — the   █ │   ▾ catalog/                         │
  ┃   304 path asserts a body that is no longer sent.                         █ │     ▾ cache/                         │
  ┃                                                                           █ │       lru.ts                 +31  −9 │
- ┃                               ▗▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▖ █ │       index.ts               +12  −0 │
- ┃                                Review fetch.py and cache.py in parallel.  █ │     fetch.ts                +149 −12 │
- ┃                               ▝▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▘ █ │     etag.ts                  +88 −41 │
+ ┃                              ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄  █ │       index.ts               +12  −0 │
+ ┃                               Review fetch.py and cache.py in parallel.   █ │     fetch.ts                +149 −12 │
+ ┃                              ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀  █ │     etag.ts                  +88 −41 │
  ┃                                                                           █ │   ▾ docs/                            │
  ┃ ▾ Agent ×2       deep-reasoner: Review fetch.py, deep-reasoner: R…  240 B █ └──────────────────────────────────────┘
  ┃   ├ deep-reasoner: Review fetch.py                                  120 B █ ┌────────────── Activity ──────────────┐

@@ -1,14 +1,14 @@
  Niobe  Session  Context  Model  View  Help           opus-5  claude · default
 ┏━━━━━━━━━━━━━━━━━━━ > what does the fetcher do with a 304? ━━━━━━━━━━━━━━━━━━━┓
-┃                                       ▗▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▖ ┃
-┃                                        what does the fetcher do with a 304?  ┃
-┃                                       ▝▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▘ ┃
+┃                                      ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄  ┃
+┃                                       what does the fetcher do with a 304?   ┃
+┃                                      ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀  ┃
 ┃                                                                              ┃
 ┃ ◆ It treats it as an error and downloads the manifest again.                 ┃
 ┃                                                                              ┃
-┃                                      ▗▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▖ ┃
-┃                                       keep the cached copy on a 304 instead  ┃
-┃                                      ▝▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▘ ┃
+┃                                     ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄  ┃
+┃                                      keep the cached copy on a 304 instead   ┃
+┃                                     ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀  ┃
 ┃                                                                              ┃
 ┃ ◆ Done: a 304 now returns the cached manifest.                               ┃
 ┃                                                                              ┃

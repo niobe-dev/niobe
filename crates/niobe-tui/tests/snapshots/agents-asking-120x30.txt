@@ -1,7 +1,7 @@
  Niobe  Session  Context  Model  View  Help                            opus-5  claude · default  ○ not attached  13:41
  ┏━━ > add etag support to the catalog fetcher so we stop re-downloading… ━━━┓ ┌─────────────── Usage ────────────────┐
- ┃                                Review fetch.py and cache.py in parallel.  ┃ │ 5h         62% ▓▓░░ resets 16:40     │
- ┃                               ▝▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▘ ┃ │ 7d         18% ▓░░░ resets Tue 15:00 │
+ ┃                               Review fetch.py and cache.py in parallel.   ┃ │ 5h         62% ▓▓░░ resets 16:40     │
+ ┃                              ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀  ┃ │ 7d         18% ▓░░░ resets Tue 15:00 │
  ┃                                                                           ┃ │ ──────────────────────────────────── │
  ┃ ▾ Agent ×2       deep-reasoner: Review fetch.py, deep-reasoner: R…  240 B ┃ │ opus-5    100% ▓▓▓▓▓▓▓▓▓▓▓▓   49k    │
  ┃   ├ deep-reasoner: Review fetch.py                                  120 B ┃ │ cache hit  86% ▓▓▓▓▓▓▓▓▓▓░░   40k    │

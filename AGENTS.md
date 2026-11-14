@@ -229,7 +229,8 @@ reviewers that encode both, for an agent working in this tree.
   their glyph and no head line naming them; what an agent says of its work as it goes — a
   `Narration`, never its reply — is one of the things it said, drawn dim and slanted under `∴`. `bubble.rs` draws the operator's prompt as a
   messenger draws what one sends — on the right, in a bubble of the theme's `user_bg` with
-  half-cell rounded ends, no name over it, what became of it under it — and so each answer the
+  half-cell top and bottom and square corners, casting the theme's `shadow` a column right and
+  half a row down, no name over it, what became of it under it — and so each answer the
   operator gave a question the agent put, the question quoted at the bubble's top. `calls.rs` draws a tool call, in that full view, as a row of a table — its name, the tag of the sub-agent that made
   it where one did, each in a column as wide as the transcript's widest, what it does, and on the
   right what it cost, by what the backend reported and the shell's own clock — the whole row dim

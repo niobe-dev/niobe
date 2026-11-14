@@ -3,13 +3,16 @@
 
 //! The operator's own message, drawn as a messenger draws the messages one
 //! sends: on the right of the transcript, in a bubble of a colour of its own
-//! with rounded ends, its words wrapped inside it, and — where it answers a
+//! casting a shadow, its words wrapped inside it, and — where it answers a
 //! question the agent put — that question quoted at its top.
 //!
 //! The bubble is what says whose words they are, so nothing is drawn over
-//! it. Its ends are half-cell blocks in the bubble's colour, which round its
-//! corners and give it half a row of room above and below its words without
-//! taking a whole row for each.
+//! it. Its top and bottom are half-cell blocks in the bubble's colour, which
+//! give it half a row of room above and below its words without taking a
+//! whole row for each, and it casts the theme's shadow a column to its right
+//! and half a row below it, as a dialog does. The corners are square: a
+//! quarter block rounding one is drawn at a quarter of a cell's width, which
+//! leaves a notch on each side rather than a curve.
 
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -27,13 +30,18 @@ const QUOTE: &str = "▎ ";
 /// below it, a message would wrap a word or two a row.
 const NARROWEST: usize = 24;
 
+/// The columns of shadow right of a bubble.
+const SHADOW: usize = 1;
+
 /// How wide a bubble may grow in a transcript `width` cells wide: four
 /// fifths of it, leaving the other side to the agent as a messenger leaves it
-/// to the other party, so a long prompt still reads as a message sent.
+/// to the other party, so a long prompt still reads as a message sent — and
+/// never so wide that its shadow falls off the transcript.
 fn widest(width: usize) -> usize {
+    let most = width.saturating_sub(SHADOW);
     match width < NARROWEST {
-        true => width,
-        false => (width * 4 / 5).max(NARROWEST),
+        true => most,
+        false => (width * 4 / 5).max(NARROWEST).min(most),
     }
 }
 
@@ -70,21 +78,25 @@ pub(crate) fn lines(
         .unwrap_or(0)
         .clamp(1, room);
     let outer = inner + 2 * PADDING;
-    let indent = || Span::raw(" ".repeat(width.saturating_sub(outer)));
+    let indent = || Span::raw(" ".repeat(width.saturating_sub(outer + SHADOW)));
     let bubble = Style::new().bg(theme.user_bg);
     let edge = Style::new().fg(theme.user_bg);
+    let shadow = Style::new().bg(theme.shadow);
     let row = |spans: Vec<Span<'static>>, used: usize| {
         let mut row = vec![indent(), Span::styled(" ".repeat(PADDING), bubble)];
         row.extend(spans);
         let rest = inner.saturating_sub(used) + PADDING;
         row.push(Span::styled(" ".repeat(rest), bubble));
+        row.push(Span::styled(" ".repeat(SHADOW), shadow));
         Line::from(row)
     };
 
-    let middle = "▄".repeat(outer.saturating_sub(2));
+    // The shadow starts half a row below the bubble's top, which is the top
+    // of the row under this one: beside the top it is still the pane.
     let mut lines = vec![Line::from(vec![
         indent(),
-        Span::styled(format!("▗{middle}▖"), edge),
+        Span::styled("▄".repeat(outer), edge),
+        Span::raw(" ".repeat(SHADOW)),
     ])];
     let dim = bubble.fg(theme.dim);
     for said in quoted {
@@ -102,10 +114,16 @@ pub(crate) fn lines(
             .collect();
         lines.push(row(spans, used));
     }
-    let middle = "▀".repeat(outer.saturating_sub(2));
+    // The bubble's bottom half a row over the shadow's, which is a column
+    // to the right: under the bubble's first column it is still the pane.
     lines.push(Line::from(vec![
         indent(),
-        Span::styled(format!("▝{middle}▘"), edge),
+        Span::styled("▀".repeat(outer.min(SHADOW)), edge),
+        Span::styled(
+            "▀".repeat(outer.saturating_sub(SHADOW)),
+            edge.bg(theme.shadow),
+        ),
+        Span::styled(" ".repeat(SHADOW), shadow),
     ]));
     if !note.is_empty() {
         let note = text::truncate(note, width);
@@ -118,8 +136,8 @@ pub(crate) fn lines(
     lines
 }
 
-/// Whether `line`, one of those [`lines`] draws, is one of the bubble's
-/// rounded ends, which are drawing rather than the message's words.
+/// Whether `line`, one of those [`lines`] draws, is the bubble's top or
+/// bottom, which are drawing rather than the message's words.
 ///
 /// Read by where [`lines`] puts each span rather than by reading the cells
 /// before them: a copy asks it of every row of every prompt in the session,
@@ -127,7 +145,7 @@ pub(crate) fn lines(
 /// short prompt's row.
 pub(crate) fn is_end(line: &Line<'_>) -> bool {
     match line.spans.as_slice() {
-        [_, end] => end.content.starts_with(['▗', '▝']),
+        [_, end, _, ..] => end.content.starts_with(['▄', '▀']),
         _ => false,
     }
 }
@@ -137,7 +155,8 @@ pub(crate) fn is_end(line: &Line<'_>) -> bool {
 /// what became of the message, as a copy reads them.
 pub(crate) fn words<'a>(line: &'a Line<'a>) -> &'a [Span<'a>] {
     match line.spans.as_slice() {
-        // A row of the bubble: the indent, the padding, then what it holds.
+        // A row of the bubble: the indent, the padding, then what it holds,
+        // and the padding and the shadow after it, which are blank.
         [_, _, held @ ..] if !held.is_empty() => held,
         // What became of the message, behind its indent.
         [_, note] => std::slice::from_ref(note),
@@ -156,7 +175,7 @@ fn cells(line: &Line<'_>) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::theme::CYBER;
+    use crate::theme::{CLASSIC, CYBER};
 
     fn plain(lines: &[Line<'_>]) -> Vec<String> {
         lines
@@ -171,25 +190,59 @@ mod tests {
     }
 
     #[test]
-    fn a_short_message_hugs_its_words_against_the_right_edge() {
+    fn a_short_message_hugs_its_words_against_its_shadow_at_the_right_edge() {
         let drawn = plain(&lines("", vec![Line::from("hi there")], "", 40, &CYBER));
         assert_eq!(
             drawn,
             [
-                format!("{}▗{}▖", " ".repeat(30), "▄".repeat(8)),
-                format!("{} hi there ", " ".repeat(30)),
-                format!("{}▝{}▘", " ".repeat(30), "▀".repeat(8)),
+                format!("{}{} ", " ".repeat(29), "▄".repeat(10)),
+                format!("{} hi there  ", " ".repeat(29)),
+                format!("{}{} ", " ".repeat(29), "▀".repeat(10)),
                 String::new(),
             ]
         );
+    }
+
+    /// The edges are straight, and the shadow falls a column right of the
+    /// bubble and half a row below it: beside the bubble's words, under its
+    /// bottom but for its first column, and nowhere beside its top.
+    #[test]
+    fn the_bubble_casts_a_shadow_a_column_right_and_half_a_row_down() {
+        let theme = CLASSIC;
+        let drawn = lines("", vec![Line::from("go")], "", 20, &theme);
+        let cells = |line: &Line<'_>| -> Vec<(char, Style)> {
+            line.spans
+                .iter()
+                .flat_map(|span| span.content.chars().map(move |c| (c, span.style)))
+                .collect()
+        };
+        let [top, words, bottom] = [&drawn[0], &drawn[1], &drawn[2]].map(cells);
+        let shadow = Style::new().bg(theme.shadow);
+        let edge = Style::new().fg(theme.user_bg);
+        assert!(top[15..19].iter().all(|cell| *cell == ('▄', edge)));
+        assert_eq!(top[19], (' ', Style::new()), "no shadow beside the top");
+        assert_eq!(words[19], (' ', shadow));
+        assert!(
+            words[15..19]
+                .iter()
+                .all(|(_, style)| style.bg == Some(theme.user_bg))
+        );
+        assert_eq!(bottom[15], ('▀', edge));
+        assert!(
+            bottom[16..19]
+                .iter()
+                .all(|cell| *cell == ('▀', edge.bg(theme.shadow)))
+        );
+        assert_eq!(bottom[19], (' ', shadow));
     }
 
     #[test]
     fn a_long_message_takes_four_fifths_of_the_transcript_and_no_more() {
         assert_eq!(room(100), 78);
         assert_eq!(room(30), 22);
-        // Narrower than a bubble is worth narrowing, it takes the width.
-        assert_eq!(room(20), 18);
+        // Narrower than a bubble is worth narrowing, it takes the width
+        // but the column its shadow falls in.
+        assert_eq!(room(20), 17);
         assert_eq!(room(1), 1);
     }
 
@@ -206,7 +259,7 @@ mod tests {
         assert_eq!(drawn[2].trim(), "macOS");
         // The bubble is as wide as the widest of its rows, the quote's here.
         assert_eq!(drawn[2].len(), 40);
-        assert!(drawn[2].starts_with(&" ".repeat(20)));
+        assert!(drawn[2].starts_with(&" ".repeat(19)));
     }
 
     #[test]
@@ -231,10 +284,12 @@ mod tests {
         assert_eq!(
             read,
             [
-                (true, "▗▄▄▄▄▄▄▄▄▖".to_owned()),
+                // An end's spans past its first edge are drawing too; a
+                // copy leaves the whole row out by `is_end`.
+                (true, String::new()),
                 (false, "▎ Which?".to_owned()),
                 (false, "go".to_owned()),
-                (true, "▝▀▀▀▀▀▀▀▀▘".to_owned()),
+                (true, "▀▀▀▀▀▀▀▀▀".to_owned()),
                 (false, "queued".to_owned()),
                 (false, String::new()),
             ]
@@ -248,8 +303,9 @@ mod tests {
         for end in ends {
             assert_eq!(end.spans[1].style.fg, Some(CYBER.user_bg));
         }
+        let row = &drawn[1].spans;
         assert!(
-            drawn[1].spans[1..]
+            row[1..row.len() - 1]
                 .iter()
                 .all(|span| span.style.bg == Some(CYBER.user_bg))
         );

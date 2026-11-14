@@ -20,8 +20,9 @@
 //!
 //! A cell of the board is half a terminal cell, the upper or lower half
 //! block, so the board's cells are about square. A cell born this generation
-//! is drawn white, one that has lived longer in the theme's body colour, and
-//! one that died this generation leaves a dim ghost for one generation.
+//! is drawn white, one that has lived longer in the theme's body colour —
+//! `classic`'s editor yellow — and one that died this generation leaves a
+//! dim ghost of that colour for one generation.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -482,12 +483,12 @@ mod tests {
         assert_eq!(glyph, '▀');
         assert_eq!(
             (style.fg, style.bg),
-            (Some(Color::White), Some(Color::Cyan))
+            (Some(Color::White), Some(Color::Yellow))
         );
     }
 
     #[test]
-    fn the_cells_are_drawn_in_classics_light_colours_on_its_blue() {
+    fn the_cells_are_drawn_in_classics_yellow_and_white_on_its_blue() {
         let area = Rect::new(0, 0, 80, 24);
         let mut buffer = Buffer::empty(area);
         super::super::draw(
@@ -497,7 +498,7 @@ mod tests {
             7,
             &CLASSIC,
         );
-        let colours = [Color::Blue, Color::LightCyan, Color::White, Color::Cyan];
+        let colours = [Color::Blue, Color::LightYellow, Color::White, Color::Yellow];
         let mut seen = std::collections::HashSet::new();
         for cell in buffer.content() {
             assert!(
@@ -506,7 +507,7 @@ mod tests {
             );
             seen.insert(cell.fg);
         }
-        assert!(seen.contains(&Color::LightCyan) && seen.contains(&Color::White));
+        assert!(seen.contains(&Color::LightYellow) && seen.contains(&Color::White));
     }
 
     /// A pane larger than the largest board sees it in tiles, which the

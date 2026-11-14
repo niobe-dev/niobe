@@ -249,9 +249,9 @@ fn every_theme_draws_the_calls_dimmer_than_the_reply_and_the_prompt_apart() {
 }
 
 /// The operator's prompt is drawn as a messenger draws the message one sends:
-/// on the right, in a bubble of a colour of its own with rounded ends, the
-/// words in the operator's colour, and no name over it — whose words they are
-/// is what the bubble says.
+/// on the right, in a bubble of a colour of its own with square corners and
+/// a shadow, the words in the operator's colour, and no name over it — whose
+/// words they are is what the bubble says.
 #[test]
 fn a_prompt_is_drawn_as_a_message_bubble_on_the_right() {
     let prompt = "and update the docs too";
@@ -271,17 +271,24 @@ fn a_prompt_is_drawn_as_a_message_bubble_on_the_right() {
         .iter()
         .position(|row| row.contains(prompt))
         .expect("the prompt is on screen");
-    // One cell of the bubble on either side of the words, and the bubble's
-    // right end against the transcript's right edge, by the pane's border
-    // or the scrollbar on it.
-    assert!(ends_at_the_edge(rows[at], &format!("{prompt} ")), "{frame}");
+    // One cell of the bubble on either side of the words, then the column
+    // its shadow falls in against the transcript's right edge, by the pane's
+    // border or the scrollbar on it.
+    assert!(
+        ends_at_the_edge(rows[at], &format!("{prompt}  ")),
+        "{frame}"
+    );
     let column = rows[at].find(prompt).expect("the prompt's row holds it");
     let top = rows[at - 1];
     let bottom = rows[at + 1];
-    assert_eq!(top.get(column - 1..column + 2), Some("▗"), "{frame}");
-    assert!(top.contains("▄▖"), "{frame}");
-    assert_eq!(bottom.get(column - 1..column + 2), Some("▝"), "{frame}");
-    assert!(bottom.contains("▀▘"), "{frame}");
+    // Square corners: the top and the bottom run straight from the
+    // bubble's first column to its last, with no quarter block notching it.
+    assert_eq!(top.get(column - 1..column + 5), Some("▄▄"), "{frame}");
+    assert_eq!(bottom.get(column - 1..column + 5), Some("▀▀"), "{frame}");
+    assert_eq!(top.get(column - 2..column - 1), Some(" "), "{frame}");
+    assert!(!frame.contains(['▗', '▖', '▝', '▘']), "{frame}");
+    assert!(ends_at_the_edge(top, "▄ "), "{frame}");
+    assert!(ends_at_the_edge(bottom, "▀ "), "{frame}");
     assert_snapshot("prompt-bubble-120x30", &frame);
 
     for theme in THEMES {
@@ -293,19 +300,25 @@ fn a_prompt_is_drawn_as_a_message_bubble_on_the_right() {
             assert_eq!(style.fg, Some(palette.user), "{name} at {depth:?}");
             assert_eq!(style.bg, Some(palette.user_bg), "{name} at {depth:?}");
             assert_eq!(
-                style_at(&mut app, 120, 30, "▗").and_then(|style| style.fg),
+                style_at(&mut app, 120, 30, "▄▄▄").and_then(|style| style.fg),
                 Some(palette.user_bg),
-                "{name} at {depth:?}: the bubble's rounded end"
+                "{name} at {depth:?}: the bubble's top"
+            );
+            let beside = style_at(&mut app, 120, 30, "▀▀▀ ").map(|style| style.bg);
+            assert_eq!(
+                beside,
+                Some(Some(palette.shadow)),
+                "{name} at {depth:?}: the shadow under the bubble"
             );
         }
     }
 }
 
-/// Whether `row` has `said` against the transcript's right edge: followed by
-/// the one cell of margin the session pane keeps inside its border, and then
-/// that border, or the scrollbar drawn on it.
+/// Whether `row` has `said`, where it last appears, against the transcript's
+/// right edge: followed by the one cell of margin the session pane keeps
+/// inside its border, and then that border, or the scrollbar drawn on it.
 fn ends_at_the_edge(row: &str, said: &str) -> bool {
-    row.split_once(said)
+    row.rsplit_once(said)
         .is_some_and(|(_, after)| after.starts_with(" ┃") || after.starts_with(" █"))
 }
 
@@ -7110,7 +7123,7 @@ fn every_menu_title_keeps_its_hot_letter_and_the_open_one_is_inverted_in_every_t
             let at = title_at(&row, menu.name);
             assert_eq!(
                 cells[at].fg,
-                Some(theme.hot),
+                Some(theme.menu_hot),
                 "{} {}",
                 theme.name,
                 menu.name
@@ -7159,7 +7172,7 @@ fn an_open_menus_hot_letter_is_never_drawn_on_its_own_colour() {
 }
 
 #[test]
-fn an_open_menu_in_classic_is_painted_in_far_managers_colours() {
+fn an_open_menu_in_classic_is_painted_in_turbo_pascals_colours() {
     let mut app = running_session()
         .with_depth(Depth::Sixteen)
         .with_theme(CLASSIC);
