@@ -69,12 +69,12 @@ fn a_resize_redraws_inside_a_frame_budget() {
 /// How deep the quotes of [`a_reply_quoted_thousands_deep_redraws_inside_a_frame_budget`]
 /// are nested, and how many lines are drawn inside them: a reply of 22 KB,
 /// which a model can write.
-/// The rain an empty session pane shows is drawn on every tick of a loop
-/// that ticks thirty times a second while it falls, each frame a different
+/// The scene an empty session pane shows — each theme's own — is drawn on
+/// every tick of a loop that ticks thirty times a second while it plays, each frame a different
 /// moment of it, in every theme at the depth a truecolour terminal draws.
 #[test]
 #[cfg_attr(debug_assertions, ignore = "a frame is timed in an optimised build")]
-fn the_rain_in_an_empty_session_pane_falls_inside_a_frame_budget() {
+fn the_scene_in_an_empty_session_pane_plays_inside_a_frame_budget() {
     let _alone = ALONE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -96,7 +96,7 @@ fn the_rain_in_an_empty_session_pane_falls_inside_a_frame_budget() {
 
         assert!(
             median <= FRAME_BUDGET,
-            "{}: the median frame of rain at 200x60 took {median:?}, over the \
+            "{}: the median frame of its scene at 200x60 took {median:?}, over the \
              {FRAME_BUDGET:?} budget",
             theme.name
         );

@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) Viacheslav Shynkarenko
 
-//! The rain the session pane shows before anything has happened in it.
+//! The rain `neo` shows in the session pane before anything has happened in
+//! it.
 //!
 //! Every other column is a lane down which drops fall. A drop is a bright
 //! head that writes a glyph into each cell it passes; the glyphs it leaves
@@ -11,21 +12,15 @@
 //! every frame. Lanes fall at speeds of their own, and some are further off:
 //! slower and dimmer, with no white head.
 //!
-//! Nothing is kept between frames. Each cell is worked out from the seed,
-//! the moment it is drawn at and where the cell is, so a resize needs
-//! nothing redone, and two draws at one moment draw one frame.
-//!
 //! The ink is the theme's accent, [`Theme::hot`], faded toward the pane's
-//! own colour, with the head drawn toward white. The accent is green in
-//! [`crate::theme::NEO`] and [`crate::theme::CYBER`] alone, so those are the
-//! themes the rain is green in; every other theme rains in its own accent.
-
-use std::time::Duration;
+//! own colour, with the head drawn toward white, so a theme a user wrote over
+//! `neo` rains in its own accent.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 
+use super::{blend, darker, mix, rgb};
 use crate::theme::Theme;
 
 /// The half-width katakana the rain is mostly written in, `ｦ` to `ﾝ`: one
@@ -89,44 +84,6 @@ impl Ink {
                 }
             }
         }
-    }
-}
-
-/// The red, green and blue of a colour given as such; `None` for one of the
-/// sixteen names, whose values are the terminal's to choose.
-fn rgb(colour: Color) -> Option<(u8, u8, u8)> {
-    match colour {
-        Color::Rgb(r, g, b) => Some((r, g, b)),
-        _ => None,
-    }
-}
-
-/// `ink` laid over `paper` at `percent` opacity.
-fn blend(ink: (u8, u8, u8), paper: (u8, u8, u8), percent: u32) -> Color {
-    let mix = |ink: u8, paper: u8| {
-        let mixed = (u32::from(ink) * percent + u32::from(paper) * (100 - percent) + 50) / 100;
-        u8::try_from(mixed).unwrap_or(u8::MAX)
-    };
-    Color::Rgb(
-        mix(ink.0, paper.0),
-        mix(ink.1, paper.1),
-        mix(ink.2, paper.2),
-    )
-}
-
-/// The darker of a bright one of the sixteen, which is where a trail fades
-/// to when the terminal draws only those: the sixteen have no shades between.
-fn darker(colour: Color) -> Color {
-    match colour {
-        Color::LightGreen => Color::Green,
-        Color::LightBlue => Color::Blue,
-        Color::LightYellow => Color::Yellow,
-        Color::LightCyan => Color::Cyan,
-        Color::LightRed => Color::Red,
-        Color::LightMagenta => Color::Magenta,
-        Color::White => Color::Gray,
-        Color::Gray => Color::DarkGray,
-        other => other,
     }
 }
 
@@ -194,23 +151,10 @@ struct Drop {
     key: u64,
 }
 
-/// Draws the rain into `area` of `buffer` as it stands at `clock`, a moment
-/// counted from any fixed origin — the shell counts from the epoch — from
-/// `seed`, in `theme`'s accent over its pane colour. Every cell of the area is
-/// drawn, a blank on the pane's colour where no drop lights it.
-pub(crate) fn draw(buffer: &mut Buffer, area: Rect, clock: Duration, seed: u64, theme: &Theme) {
-    // Reset whole rather than styled over: a style laid on a cell adds its
-    // modifiers to the ones already there, and a dim or bold left by what
-    // was drawn before would show through.
-    let blank = Style::new().fg(theme.fg).bg(theme.pane_bg);
-    for y in area.top()..area.bottom() {
-        for x in area.left()..area.right() {
-            buffer[(x, y)].reset();
-            buffer[(x, y)].set_style(blank);
-        }
-    }
+/// Draws the rain into `area` of `buffer`, cleared to the pane's colour, as
+/// it stands `millis` after the origin, from `seed`, in `theme`'s accent.
+pub(super) fn draw(buffer: &mut Buffer, area: Rect, millis: u64, seed: u64, theme: &Theme) {
     let ink = Ink::of(theme);
-    let millis = u64::try_from(clock.as_millis()).unwrap_or(u64::MAX);
     let height = u64::from(area.height);
     for x in (area.left().saturating_add(1)..area.right()).step_by(2) {
         let lane = Lane::new(seed, u64::from(x - area.left()), height);
@@ -316,23 +260,23 @@ fn pick(n: u64) -> char {
     }
 }
 
-/// SplitMix64's finaliser: a well-spread number from any other.
-fn mix(n: u64) -> u64 {
-    let n = (n ^ (n >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    let n = (n ^ (n >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    n ^ (n >> 31)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    use crate::theme::{CLASSIC, CYBER, Depth, MODERN, NEO};
+    use std::time::Duration;
 
+    use crate::theme::{CLASSIC, Depth, MODERN, NEO, Scene};
+
+    /// The rain drawn in `theme`'s colours, whatever scene the theme has.
     fn rained(theme: &Theme, millis: u64) -> Buffer {
         let area = Rect::new(0, 0, 80, 24);
         let mut buffer = Buffer::empty(area);
-        draw(&mut buffer, area, Duration::from_millis(millis), 7, theme);
+        let theme = Theme {
+            scene: Scene::Rain,
+            ..*theme
+        };
+        super::super::draw(&mut buffer, area, Duration::from_millis(millis), 7, &theme);
         buffer
     }
 
@@ -359,31 +303,6 @@ mod tests {
         );
         assert_ne!(first, rained(&NEO, 500), "half a second on, it has moved");
         assert_eq!(first, rained(&NEO, 0), "one moment draws one frame");
-    }
-
-    /// Drawn over a pane that held dim and bold text, every cell is in a
-    /// style of the rain's own: nothing left under it shows through.
-    #[test]
-    fn the_rain_leaves_nothing_of_what_was_drawn_before() {
-        let area = Rect::new(0, 0, 80, 24);
-        let mut buffer = Buffer::empty(area);
-        buffer.set_style(area, Style::new().fg(Color::White).dim().italic());
-        draw(&mut buffer, area, Duration::from_millis(900), 7, &CYBER);
-        let ink = Ink::of(&CYBER);
-        let blank = Style::new().fg(CYBER.fg).bg(CYBER.pane_bg);
-        let mut styles: Vec<Style> = vec![blank, ink.head, ink.neck];
-        styles.extend(ink.trail);
-        for cell in buffer.content() {
-            let drawn = cell.style();
-            assert!(
-                styles.iter().any(|style| {
-                    style.fg.unwrap_or(Color::Reset) == drawn.fg.unwrap_or(Color::Reset)
-                        && style.bg == drawn.bg
-                        && style.add_modifier == drawn.add_modifier
-                }),
-                "{drawn:?}"
-            );
-        }
     }
 
     #[test]
@@ -424,10 +343,10 @@ mod tests {
         );
     }
 
-    /// Green is the accent of the two Matrix themes alone, so the rain is
-    /// green there and in the theme's own colour everywhere else.
+    /// The rain is drawn in the accent: green in `neo`, and a theme's own
+    /// colour in a theme with another.
     #[test]
-    fn the_rain_is_green_in_neo_and_cyber_and_the_accent_elsewhere() {
+    fn the_rain_falls_in_the_themes_accent() {
         let greenest = |theme: &Theme| {
             let ink = Ink::of(&theme.at(Depth::TrueColour));
             let Some(Color::Rgb(r, g, b)) = ink.trail[0].fg else {
@@ -436,7 +355,6 @@ mod tests {
             g > r && g > b
         };
         assert!(greenest(&NEO));
-        assert!(greenest(&CYBER));
         assert!(!greenest(&MODERN));
         let sixteen = Ink::of(&CLASSIC);
         assert_eq!(sixteen.trail[0].fg, Some(CLASSIC.hot));

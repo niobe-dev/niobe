@@ -219,10 +219,10 @@ fn open(app: App, around: Around<'_>) -> io::Result<(Ended, App)> {
     // names — when a window comes back — is read in the timezone the rest of
     // the shell is drawn in.
     let mut app = app.with_clock(clock.clone());
-    // A seed of the process's own, so that one session's rain does not fall
-    // as the last one's did: the standard hasher is keyed at random for each
+    // A seed of the process's own, so that one session's idle scene does not
+    // play out as the last one's did: the standard hasher is keyed at random for each
     // process, and nothing else here draws on chance.
-    app.seed_rain(std::hash::BuildHasher::hash_one(
+    app.seed_scene(std::hash::BuildHasher::hash_one(
         &std::collections::hash_map::RandomState::new(),
         0_u8,
     ));
@@ -443,10 +443,10 @@ fn event_loop<B: Backend<Error = io::Error>>(
             ring_for(app, machine.ring)?;
 
             // An image asked for is looked for again soon, as a reply is: the
-            // operator is waiting to see it land in the prompt. The rain in an
+            // operator is waiting to see it land in the prompt. The scene in an
             // empty session pane is drawn as often, since at ten frames a
-            // second its heads step rather than fall.
-            let tick = if producing || app.fetching_image() || app.raining() {
+            // second what moves in it steps rather than glides.
+            let tick = if producing || app.fetching_image() || app.showing_scene() {
                 BUSY_TICK
             } else {
                 TICK

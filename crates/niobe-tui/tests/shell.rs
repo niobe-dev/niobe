@@ -4632,7 +4632,7 @@ fn a_wheel_notch_over_the_activity_pane_moves_only_that_pane() {
 
 /// The row the ask bar is drawn on: the one where a badge meets the prompt's
 /// marker, whichever mode the badge names.
-/// The composer's row: the last one holding its prompt, since the rain an
+/// The composer's row: the last one holding its prompt, since the scene an
 /// empty session pane shows can write a `>` anywhere above it.
 fn bar_row(frame: &str) -> String {
     frame
@@ -5745,15 +5745,33 @@ fn session_with_files() -> App {
 /// The rows of the list of files standing over the transcript, each trimmed
 /// to what is inside its border.
 fn file_list(frame: &str) -> Vec<String> {
-    let rows: Vec<&str> = frame.lines().collect();
-    let Some(top) = rows.iter().position(|row| row.contains(" @ file ")) else {
+    list_rows(frame, " @ file ")
+}
+
+/// The rows of the list whose top border carries `title`, each trimmed to
+/// what is inside its border. The list is cut out by the columns of its own
+/// corners, since the scene an empty session pane shows beside it can draw
+/// lines of the same glyphs.
+fn list_rows(frame: &str, title: &str) -> Vec<String> {
+    let rows: Vec<Vec<char>> = frame.lines().map(|row| row.chars().collect()).collect();
+    let Some((top, at)) = rows.iter().enumerate().find_map(|(y, row)| {
+        let text: String = row.iter().collect();
+        let byte = text.find(title)?;
+        Some((y, text[..byte].chars().count()))
+    }) else {
+        return Vec::new();
+    };
+    let Some(left) = rows[top][..at].iter().rposition(|glyph| *glyph == '┌') else {
+        return Vec::new();
+    };
+    let Some(right) = rows[top][at..].iter().position(|glyph| *glyph == '┐') else {
         return Vec::new();
     };
     rows[top + 1..]
         .iter()
-        .take_while(|row| !row.contains('└'))
+        .take_while(|row| row.get(left) == Some(&'│'))
         .map(|row| {
-            let inside = row.split('│').nth(1).unwrap_or_default();
+            let inside: String = row[left + 1..at + right].iter().collect();
             inside.trim().to_owned()
         })
         .collect()
@@ -5881,18 +5899,7 @@ fn session_with_commands() -> App {
 /// The rows of the list of commands standing over the transcript, each
 /// trimmed to what is inside its border.
 fn command_list(frame: &str) -> Vec<String> {
-    let rows: Vec<&str> = frame.lines().collect();
-    let Some(top) = rows.iter().position(|row| row.contains(" / command ")) else {
-        return Vec::new();
-    };
-    rows[top + 1..]
-        .iter()
-        .take_while(|row| !row.contains('└'))
-        .map(|row| {
-            let inside = row.split('│').nth(1).unwrap_or_default();
-            inside.trim().to_owned()
-        })
-        .collect()
+    list_rows(frame, " / command ")
 }
 
 #[test]

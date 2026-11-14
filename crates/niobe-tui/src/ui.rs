@@ -2216,11 +2216,11 @@ fn draw_transcript(
     if app.entries().is_empty() && question.is_empty() {
         app.drew_transcript(area, 0);
         app.measured(0, height);
-        crate::rain::draw(
+        crate::scene::draw(
             frame.buffer_mut(),
             area,
-            app.rain_clock(),
-            app.rain_seed(),
+            app.scene_clock(),
+            app.scene_seed(),
             theme,
         );
         if !app.is_attached() {
@@ -2230,7 +2230,7 @@ fn draw_transcript(
                 .min(area.width);
             let row = Rect::new(area.x, area.y, width, area.height.min(1));
             // Cleared first: a style laid over a cell keeps the modifiers it
-            // had, and the rain's faint glyphs are dim.
+            // had, and a scene's faint glyphs are dim.
             frame.render_widget(Clear, row);
             frame.render_widget(Paragraph::new(notice), row);
         }
@@ -3509,7 +3509,7 @@ fn working_line(activity: &Activity, width: usize, theme: &Theme) -> Line<'stati
     ])
 }
 
-/// What the session pane says, over the rain, where no backend is attached
+/// What the session pane says, over its idle scene, where no backend is attached
 /// to ask anything of.
 fn unattached(theme: &Theme) -> Line<'static> {
     Line::from(Span::styled(

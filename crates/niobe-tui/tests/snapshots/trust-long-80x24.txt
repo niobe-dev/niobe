@@ -1,23 +1,23 @@
  Niobe  Session  Context  Model  View  Help                     ○ not attached
 ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ Session ─ niobe ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-┃  N┏━━━━━━━━━━━━━━━━━━ Trust this repository's config? ━━━━━━━━━━━━━━━━━━━┓ ｺ ┃
-┃  ｹ┃                                                                      ┃ - ┃
-┃  ｬ┃  /home/me/src/niobe/.niobe/config.toml                               ┃ ﾃ ┃
-┃  6┃                                                                      ┃ ｴ ┃
-┃  1┃  It sets what only a config you trust may:                           ┃ ｦ ┃
-┃  ｵ┃                                                                      ┃ ﾚ ┃
-┃   ┃  permissions  allow Bash(script-1.sh)                                ┃ ｵ ┃
-┃   ┃  permissions  allow Bash(script-2.sh)                                ┃ > ┃
-┃   ┃  permissions  allow Bash(script-3.sh)                                ┃ ｭ ┃
-┃   ┃  permissions  allow Bash(script-4.sh)                                ┃ ﾓ ┃
-┃   ┃  permissions  allow Bash(script-5.sh)                                ┃   ┃
-┃   ┃  … and 35 more; the file has them all                                ┃   ┃
+┃  N┏━━━━━━━━━━━━━━━━━━ Trust this repository's config? ━━━━━━━━━━━━━━━━━━━┓   ┃
 ┃   ┃                                                                      ┃   ┃
-┃   ┃  Not all of what it sets fits here, so it is not trusted from here:  ┃   ┃
-┃   ┃  run `niobe trust` in this repository to read it all, or make the    ┃   ┃
-┃   ┃  terminal taller.                                                    ┃   ┃
-┃  ｪ┃                                                                      ┃   ┃
-┃  ｪ┃    1. Yes — not until all of it is shown                             ┃   ┃
+┃   ┃  /home/me/src/niobe/.niobe/config.toml                               ┃   ┃
+┃   ┃                                                                      ┃   ┃
+┃   ┃  It sets what only a config you trust may:                           ┃   ┃
+┃   ┃                                                                      ┃   ┃
+┃   ┃  permissions  allow Bash(script-1.sh)                                ┃   ┃
+┃   ┃  permissions  allow Bash(script-2.sh)                                ┃   ┃
+┃   ┃  permissions  allow Bash(script-3.sh)                                ┃   ┃
+┃   ┃  permissions  allow Bash(script-4.sh)                                ┃   ┃
+┃   ┃  permissions  allow Bash(script-5.sh)                                ┃░░ ┃
+┃   ┃  … and 35 more; the file has them all                                ┃░░ ┃
+┃ ░░┃                                                                      ┃░░ ┃
+┃ ░┌┃  Not all of what it sets fits here, so it is not trusted from here:  ┃░┌ ┃
+┃ ░│┃  run `niobe trust` in this repository to read it all, or make the    ┃░│ ┃
+┃ ░│┃  terminal taller.                                                    ┃░│ ┃
+┃ ░│┃                                                                      ┃░│ ┃
+┃ ░│┃    1. Yes — not until all of it is shown                             ┃░│ ┃
 ┃ ──┃  › 2. No, open without it                                            ┃── ┃
 ┃  —┃                                                                      ┃ne ┃
 ┗━━━┗━━━━ ↑↓ choose, pause, Enter answer · Esc no · Ctrl+C twice quit ━━━━━┛━━━┛

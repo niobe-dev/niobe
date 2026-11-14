@@ -87,11 +87,35 @@ impl Depth {
     }
 }
 
+/// What the session pane shows while nothing has happened in it: an
+/// animation of the theme's own, drawn in its colours.
+///
+/// A theme a user writes over a built-in one keeps the base's scene, since
+/// the scene is drawn from the theme's colours rather than a palette of its
+/// own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Scene {
+    /// Glyphs falling down the pane in the accent, as on the terminal of a
+    /// film about a simulated world.
+    Rain,
+    /// A night city at street level: two rows of towers sliding past at
+    /// their own depths, lit windows, neon signs and craft crossing between.
+    Skyline,
+    /// Stars rushing out of the middle of the pane, as the screen savers of
+    /// the DOS years flew through them.
+    Starfield,
+    /// Points drifting about the pane, each joined to the ones near it by a
+    /// line that fades as they part.
+    Plexus,
+}
+
 /// Every colour the shell draws with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Theme {
     /// The name shown in the menu bar.
     pub name: &'static str,
+    /// What the session pane shows before anything has happened in it.
+    pub scene: Scene,
 
     /// The line every pane but the focused one is drawn in.
     pub border: BorderType,
@@ -240,6 +264,7 @@ pub struct Theme {
 /// no dialog here asks before something that cannot be undone.
 pub const CLASSIC: Theme = Theme {
     name: "CLASSIC",
+    scene: Scene::Starfield,
     border: BorderType::Plain,
     border_focus: BorderType::Double,
 
@@ -314,6 +339,7 @@ pub const CLASSIC: Theme = Theme {
 /// colour as the bar behind it is not a label.
 pub const NEO: Theme = Theme {
     name: "NEO",
+    scene: Scene::Rain,
     border: BorderType::Plain,
     border_focus: BorderType::Double,
 
@@ -399,6 +425,7 @@ pub const NEO: Theme = Theme {
 /// the design's glow.
 pub const CYBER: Theme = Theme {
     name: "CYBER",
+    scene: Scene::Skyline,
     border: BorderType::Plain,
     border_focus: BorderType::Thick,
 
@@ -473,6 +500,7 @@ pub const CYBER: Theme = Theme {
 /// panes are framed as `cyber`'s are.
 pub const MODERN: Theme = Theme {
     name: "MODERN",
+    scene: Scene::Plexus,
     border: BorderType::Plain,
     border_focus: BorderType::Thick,
 
