@@ -324,7 +324,9 @@ reviewers that encode both, for an agent working in this tree.
   once that answer has come, asks it once with `get_usage` where the plan's five-hour and
   seven-day windows stand, which the CLI reads from the claude.ai usage endpoint with its own
   sign-in and which becomes the `UsageWindows` a turn's `rate_limit_event` does, so a session
-  shows them before its first turn — asks it
+  shows them before its first turn, and with `get_settings` which model its settings start it
+  on, which the menu row names until a turn's `init` does, beside the plan the `initialize`
+  answer says the sign-in is on, in the CLI's words and with nothing of who is signed in — asks it
   `mcp_status` whenever an `init` lists a server standing otherwise than it last said, and after
   `mcp_reconnect`, which it sends for the MCP view's `r` — starts it with
   `CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING` and sends each prompt with a `uuid`, which

@@ -83,6 +83,8 @@ impl Attention {
             | Event::ModeSelected { .. }
             | Event::ModeUnknown
             | Event::ModelSelected { .. }
+            | Event::ModelConfigured { .. }
+            | Event::Account { .. }
             | Event::AgentSpawn { .. }
             | Event::AgentProgress { .. }
             | Event::BackgroundCommandStarted { .. }

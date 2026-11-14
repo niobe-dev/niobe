@@ -1021,10 +1021,15 @@ pub(crate) struct ControlOutcome {
 /// The body of a successful answer.
 ///
 /// The answer to `initialize` also says who is signed in, which output styles
-/// there are and the process's id. None of that is read: the account is the
-/// CLI's business, and the rest arrives again on `init`.
+/// there are and the process's id. Of the account only the plan's name is
+/// read: who is signed in is the CLI's business, and the rest arrives again
+/// on `init`.
 #[derive(Debug, Deserialize)]
 pub(crate) struct ControlAnswer {
+    /// The account the CLI is signed in with, in the answer to `initialize`.
+    pub(crate) account: Option<Account>,
+    /// The settings in force, in the answer to `get_settings`.
+    pub(crate) applied: Option<Applied>,
     /// Every slash command the CLI runs, as it stood when it answered.
     pub(crate) commands: Option<Vec<Command>>,
     /// Every model the signed-in account can run the session on, in the order
@@ -1075,6 +1080,28 @@ pub(crate) struct ControlAnswer {
     /// or the CLI could not read them. Recorded from Claude Code 2.1.322 on a
     /// Max login, before any turn.
     pub(crate) rate_limits: Option<PlanLimits>,
+}
+
+/// The account in the answer to `initialize`. Recorded from Claude Code
+/// 2.1.325 on a subscription login: `{"email":…,"organization":…,
+/// "subscriptionType":"Claude Ultra","apiProvider":"firstParty"}`. The email
+/// and organisation name the person signed in, and are not read.
+#[derive(Debug, Deserialize)]
+pub(crate) struct Account {
+    /// The plan the sign-in is on, in the CLI's words; absent for a sign-in
+    /// that is on none.
+    #[serde(rename = "subscriptionType")]
+    pub(crate) subscription_type: Option<String>,
+}
+
+/// The settings in force, in the answer to `get_settings`. Recorded from
+/// Claude Code 2.1.325: beside every source's settings it gives what they came
+/// to, `{"model":"claude-opus-5-5","effort":"high",…}`, with the alias the
+/// settings name (`opus`) resolved to the release it runs.
+#[derive(Debug, Deserialize)]
+pub(crate) struct Applied {
+    /// The model the session runs on until it is told otherwise.
+    pub(crate) model: Option<String>,
 }
 
 /// The plan's windows as the answer to `get_usage` has them.

@@ -982,6 +982,15 @@ fn identity_segments(app: &App, theme: &Theme) -> Vec<Segment> {
             style: Style::new().fg(theme.menu_fg).bold(),
         });
     }
+    // The plan as the backend named it, between the model and the profile it
+    // was signed in under: which subscription the session draws on is what
+    // its usage windows are windows of.
+    if let Some(plan) = app.session().plan() {
+        segments.push(Segment {
+            text: plan.to_owned(),
+            style: Style::new().fg(theme.menu_fg),
+        });
+    }
     if let Some(under) = under {
         segments.push(Segment {
             text: under,
@@ -8048,6 +8057,27 @@ mod tests {
             backend_session: None,
         }));
         assert_eq!(row_of(&app).last(), Some(&"● working 30s".to_owned()));
+    }
+
+    /// Before any turn, the row names the model the backend's settings start
+    /// it on and the plan its sign-in is on, as the backend said them.
+    #[test]
+    fn the_row_names_the_model_and_the_plan_the_backend_said_before_any_turn() {
+        let mut app = started_on_max();
+        app.apply(&niobe_core::event::Event::Account {
+            plan: Some("Claude Ultra".to_owned()),
+        });
+        app.apply(&niobe_core::event::Event::ModelConfigured {
+            model: "claude-opus-5-5".to_owned(),
+        });
+        assert_eq!(
+            row_of(&app)[..3],
+            [
+                "claude-opus-5-5".to_owned(),
+                "Claude Ultra".to_owned(),
+                "claude · max".to_owned()
+            ]
+        );
     }
 
     /// What the menu row's right-hand group reads as, segment by segment.

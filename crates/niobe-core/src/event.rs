@@ -903,6 +903,33 @@ pub enum Event {
         billing: Billing,
     },
 
+    /// What the backend said of the account it is signed in with, which it
+    /// can say before any turn.
+    ///
+    /// Each backend names its own plans, so the plan is carried as the
+    /// backend wrote it and shown that way: it is a name, never read for how
+    /// the session is billed, which [`Event::Billing`] says. The last report
+    /// stands.
+    Account {
+        /// The subscription plan the sign-in is on, in the backend's words
+        /// (`Claude Ultra`); `None` where the backend said nothing of one, as
+        /// for a sign-in that is an API key.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        plan: Option<String>,
+    },
+
+    /// The model the backend's own settings start the session on, as the
+    /// backend said before any turn named the model it runs.
+    ///
+    /// The model a turn reports, in [`Event::SessionMeta`], and one the
+    /// operator chose are truer, so this names the session's model only until
+    /// either has, and is what a change the backend refuses falls back to
+    /// where nothing else is known.
+    ModelConfigured {
+        /// The model, as the backend names it.
+        model: String,
+    },
+
     /// How much the main agent's last request put in front of the model.
     ///
     /// Carried apart from [`Event::Usage`] because a usage record is money

@@ -795,6 +795,8 @@ fn send_produced(
             | SessionEvent::PermissionWithdrawn { .. }
             | SessionEvent::ModeUnknown
             | SessionEvent::ModelRefused { .. }
+            | SessionEvent::ModelConfigured { .. }
+            | SessionEvent::Account { .. }
             | SessionEvent::FileChange { .. }
             | SessionEvent::TestRun { .. }
             | SessionEvent::AgentSpawn { .. }

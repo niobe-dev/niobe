@@ -183,10 +183,20 @@ type TitleRequests = Arc<Mutex<Vec<String>>>;
 /// about yet, for the reason [`ModelRequests`] has.
 type McpRequests = Arc<Mutex<Vec<McpRequest>>>;
 
-/// The `request_id`s of `get_usage` requests the thread reading the CLI has
-/// not been told about yet, for the reason [`ModelRequests`] has: a refusal
-/// of one would otherwise read as the refusal of a change.
-type UsageRequests = Arc<Mutex<Vec<String>>>;
+/// The `request_id`s of the requests asked once the CLI has answered
+/// `initialize` that the thread reading the CLI has not been told about yet,
+/// with what each asks, for the reason [`ModelRequests`] has: a refusal of
+/// one would otherwise read as the refusal of a change.
+type UsageRequests = Arc<Mutex<Vec<(String, Opening)>>>;
+
+/// What a request asked once the CLI has answered `initialize` is about.
+#[derive(Debug, Clone, Copy)]
+enum Opening {
+    /// Where the plan's usage windows stand (`get_usage`).
+    Usage,
+    /// Which settings are in force, the model among them (`get_settings`).
+    Settings,
+}
 
 /// The rewinds the thread reading the CLI has not been told about yet, for
 /// the reason [`ModelRequests`] has.
@@ -888,8 +898,11 @@ impl Session {
                     }
                 }
                 if let Ok(mut asked) = asked_about_usage.lock() {
-                    for request_id in asked.drain(..) {
-                        translator.asked_for_usage(&request_id);
+                    for (request_id, about) in asked.drain(..) {
+                        match about {
+                            Opening::Usage => translator.asked_for_usage(&request_id),
+                            Opening::Settings => translator.asked_for_settings(&request_id),
+                        }
                     }
                 }
                 if let Ok(mut asked) = asked_to_rewind.lock() {
@@ -1262,14 +1275,35 @@ impl Session {
     /// the request refuses it; neither is said, since the pane then waits for
     /// a turn's report as it did before.
     fn ask_usage(&mut self) -> std::io::Result<()> {
+        self.ask_opening(
+            Opening::Usage,
+            serde_json::json!({ "subtype": "get_usage", "skip_behaviors": true }),
+        )
+    }
+
+    /// Asks the CLI which settings are in force, so the session names the
+    /// model it starts on before a turn's `init` does.
+    ///
+    /// The CLI answers with every settings source and what they came to,
+    /// whose `model` is the release the settings' alias resolves to — the
+    /// one place it is said before a turn. A CLI that does not take the
+    /// request refuses it, which is not said: the model is then named by the
+    /// first turn, as it was before.
+    fn ask_settings(&mut self) -> std::io::Result<()> {
+        self.ask_opening(
+            Opening::Settings,
+            serde_json::json!({ "subtype": "get_settings" }),
+        )
+    }
+
+    /// Sends `request`, asked once the CLI has answered `initialize`, having
+    /// told the reading thread what its answer is about.
+    fn ask_opening(&mut self, about: Opening, request: serde_json::Value) -> std::io::Result<()> {
         let id = self.next_request_id();
         if let Ok(mut asked) = self.usage_requests.lock() {
-            asked.push(id.clone());
+            asked.push((id.clone(), about));
         }
-        self.ask(&control_request(
-            &id,
-            serde_json::json!({ "subtype": "get_usage", "skip_behaviors": true }),
-        ))
+        self.ask(&control_request(&id, request))
     }
 
     /// Asks the CLI to connect to the MCP server `server` again.
@@ -1374,6 +1408,7 @@ impl Session {
         }
         if self.usage_wanted.swap(false, Ordering::Relaxed) {
             let _ = self.ask_usage();
+            let _ = self.ask_settings();
         }
         let called_for = self
             .follow_ups
@@ -3066,6 +3101,48 @@ mod tests {
     /// Once the CLI has answered `initialize`, it is asked where the plan's
     /// windows stand, and its answer is the windows the session shows before
     /// any turn has run.
+    /// The model the CLI starts on is asked of it straight after the plan's
+    /// windows, and named before any turn has run.
+    #[cfg(unix)]
+    #[test]
+    fn the_model_the_cli_starts_on_is_asked_for_as_it_starts_and_named_before_any_turn() {
+        let scratch = tempfile::tempdir().expect("a scratch directory");
+        let asked = scratch.path().join("asked");
+        let initialized = r#"{"type":"control_response","response":{"subtype":"success","request_id":"niobe-1","response":{"commands":[{"name":"compact"}],"account":{"subscriptionType":"Claude Ultra"}}}}"#;
+        let settings = r#"{"type":"control_response","response":{"subtype":"success","request_id":"niobe-3","response":{"applied":{"model":"claude-opus-5-5"}}}}"#;
+        let (mut session, _dir) = started(&format!(
+            "read -r initialize\nprintf '%s\\n' '{initialized}'\n\
+             read -r usage\nread -r settings\nprintf '%s\\n' \"$settings\" > '{asked}'\n\
+             printf '%s\\n' '{settings}'\nexec sleep 30\n",
+            asked = asked.display()
+        ));
+
+        let events = drained_until(&mut session, |event| {
+            matches!(event, Event::ModelConfigured { .. })
+        });
+
+        assert!(
+            events.contains(&Event::Account {
+                plan: Some("Claude Ultra".to_owned())
+            }),
+            "{events:#?}"
+        );
+        assert!(
+            events.contains(&Event::ModelConfigured {
+                model: "claude-opus-5-5".to_owned()
+            }),
+            "{events:#?}"
+        );
+        let said = std::fs::read_to_string(&asked).expect("the stand-in wrote what it read");
+        let request: serde_json::Value =
+            serde_json::from_str(said.trim()).expect("the request is JSON");
+        assert_eq!(
+            request["request"],
+            serde_json::json!({ "subtype": "get_settings" })
+        );
+        assert_eq!(request["request_id"], "niobe-3");
+    }
+
     #[cfg(unix)]
     #[test]
     fn the_plans_windows_are_asked_for_as_the_cli_starts_and_answered_before_any_turn() {

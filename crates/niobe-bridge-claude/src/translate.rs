@@ -76,6 +76,11 @@
 //!   The answer to `get_usage`, asked once the CLI has answered `initialize`,
 //!   carries the same two windows before any turn, as a percent rather than
 //!   a share, and becomes the same event.
+//! * The answer to `initialize` names the plan the sign-in is on, which
+//!   becomes [`Event::Account`]; who is signed in is not read. The answer to
+//!   `get_settings`, asked beside `get_usage`, names the model the settings
+//!   start the session on, which becomes [`Event::ModelConfigured`] — the
+//!   one place the model is said before a turn's `init`.
 //! * `system`/`init` carries the CLI's version, its tool list and the state of
 //!   each MCP server. [`SessionMeta`] carries the model and the CLI's own
 //!   session id, and the mode it reports becomes [`Event::ModeSelected`]; the
@@ -625,6 +630,10 @@ pub struct Translator {
     /// this account, cannot say, and the pane goes on waiting for a turn's
     /// report.
     usage_requests: BTreeSet<String>,
+    /// The `request_id`s of the `get_settings` requests Niobe made that the
+    /// CLI has not answered yet: a CLI that refuses one has said nothing of
+    /// its model, and the session waits for a turn to name it.
+    settings_requests: BTreeSet<String>,
     /// Per-message usage since the last `result`, for the turn reconciliation.
     turn: Counts,
     /// Of the per-message cache writes since the last `result`, the ones
@@ -811,6 +820,7 @@ impl Translator {
             mcp_status_wanted: false,
             usage_wanted: None,
             usage_requests: BTreeSet::new(),
+            settings_requests: BTreeSet::new(),
             mcp_status_refused: false,
             turn: Counts::default(),
             turn_1h: Some(0),
@@ -1089,6 +1099,13 @@ impl Translator {
     /// plan's usage windows stand (`get_usage`).
     pub fn asked_for_usage(&mut self, request_id: &str) {
         self.usage_requests.insert(request_id.to_owned());
+    }
+
+    /// Records that the control request `request_id` asks the CLI which
+    /// settings are in force (`get_settings`), which is where the model it
+    /// starts on is said before a turn names it.
+    pub fn asked_for_settings(&mut self, request_id: &str) {
+        self.settings_requests.insert(request_id.to_owned());
     }
 
     /// Records that the control request `request_id` asks the CLI to
@@ -1442,6 +1459,19 @@ impl Translator {
             }
             return;
         }
+        if let Some(id) = outcome.request_id.as_deref()
+            && self.settings_requests.remove(id)
+        {
+            if let Some(model) = outcome
+                .response
+                .and_then(|answer| answer.applied)
+                .and_then(|applied| applied.model)
+                .filter(|model| !model.is_empty())
+            {
+                out.push(Event::ModelConfigured { model });
+            }
+            return;
+        }
         if let Some(rewind) = outcome
             .request_id
             .as_deref()
@@ -1499,6 +1529,11 @@ impl Translator {
             };
             if answer.fast_mode_disabled_reason.is_some() {
                 self.unavailable.push("fast".to_owned());
+            }
+            if let Some(account) = answer.account {
+                out.push(Event::Account {
+                    plan: account.subscription_type.filter(|plan| !plan.is_empty()),
+                });
             }
             if let Some(commands) = answer.commands {
                 out.push(self.listed(commands));
@@ -11995,6 +12030,62 @@ error: could not compile `demo` (lib test) due to 1 previous error";
                 overage: Overage::Refused(OverageRefusal::OutOfCredits),
             })]
         );
+    }
+
+    /// The answer to `initialize` recorded from Claude Code 2.1.325 on a
+    /// subscription login, cut to the account and one command, with the
+    /// person signed in replaced.
+    const INITIALIZED_SIGNED_IN: &str = r#"{"type":"control_response","response":{"subtype":"success","request_id":"niobe-1","response":{"commands":[{"name":"compact"}],"account":{"email":"someone@example.com","organization":"someone@example.com's Organization","subscriptionType":"Claude Ultra","apiProvider":"firstParty"},"pid":84479}}}"#;
+
+    #[test]
+    fn the_answer_to_initialize_names_the_plan_and_nobody_signed_in() {
+        let mut translator = Translator::new("max");
+        let events = translator.line(INITIALIZED_SIGNED_IN);
+        assert_eq!(
+            events.first(),
+            Some(&Event::Account {
+                plan: Some("Claude Ultra".to_owned()),
+            })
+        );
+        let said = format!("{events:?}");
+        assert!(!said.contains("someone@example.com"), "{said}");
+
+        let keyed = translator.line(r#"{"type":"control_response","response":{"subtype":"success","request_id":"niobe-1","response":{"commands":[],"account":{"apiProvider":"firstParty"}}}}"#);
+        assert_eq!(keyed.first(), Some(&Event::Account { plan: None }));
+        assert!(
+            !translator
+                .line(INITIALIZED)
+                .iter()
+                .any(|event| matches!(event, Event::Account { .. })),
+            "an answer that says nothing of the account leaves the plan as it was"
+        );
+    }
+
+    /// The answer to `get_settings` recorded from Claude Code 2.1.325, cut to
+    /// the settings that named the model and what they came to.
+    const SETTINGS_ANSWER: &str = r#"{"type":"control_response","response":{"subtype":"success","request_id":"niobe-3","response":{"effective":{"model":"opus","effortLevel":"high"},"sources":[{"source":"flagSettings","settings":{"model":"opus"}}],"applied":{"model":"claude-opus-5-5","effort":"high","advisor":null}}}}"#;
+
+    #[test]
+    fn the_answer_to_get_settings_names_the_model_the_session_starts_on() {
+        let mut translator = Translator::new("max");
+        translator.asked_for_settings("niobe-3");
+        assert_eq!(
+            translator.line(SETTINGS_ANSWER),
+            [Event::ModelConfigured {
+                model: "claude-opus-5-5".to_owned(),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_refusal_of_get_settings_or_an_answer_naming_no_model_says_nothing() {
+        let mut translator = Translator::new("max");
+        translator.asked_for_settings("niobe-3");
+        translator.asked_for_settings("niobe-4");
+        let refused = translator.line(r#"{"type":"control_response","response":{"subtype":"error","request_id":"niobe-3","error":"Unknown control request subtype: get_settings"}}"#);
+        assert_eq!(refused, [], "an older CLI's refusal is no warning");
+        let unnamed = translator.line(r#"{"type":"control_response","response":{"subtype":"success","request_id":"niobe-4","response":{"applied":{"model":null}}}}"#);
+        assert_eq!(unnamed, []);
     }
 
     #[test]

@@ -632,6 +632,11 @@ pub struct SessionState {
     /// What the session is on: what the backend last said it was running, or
     /// the model the operator has since chosen and it has not yet confirmed.
     model: Option<String>,
+    /// The model the backend's settings start it on, as it said before a turn
+    /// named one: what a refused change falls back to where no turn has.
+    configured_model: Option<String>,
+    /// The plan the backend's sign-in is on, as the backend last named it.
+    plan: Option<String>,
     totals: Totals,
     /// What the backend last said was left of the plan's usage windows.
     /// `None` until one has said: a metered profile never reports these, and
@@ -884,8 +889,21 @@ impl SessionState {
             Event::ModelRefused { back_to } => {
                 self.model = back_to
                     .clone()
-                    .or_else(|| self.meta.as_ref().and_then(|meta| meta.model.clone()));
+                    .or_else(|| self.meta.as_ref().and_then(|meta| meta.model.clone()))
+                    .or_else(|| self.configured_model.clone());
             }
+
+            // Said before any turn, and so the session's model only where
+            // nothing truer has named one: a turn's report, or the operator's
+            // choice.
+            Event::ModelConfigured { model } => {
+                self.configured_model = Some(model.clone());
+                if self.model.is_none() {
+                    self.model = Some(model.clone());
+                }
+            }
+
+            Event::Account { plan } => self.plan = plan.clone(),
 
             Event::Titled { title } => self.title = Some(title.clone()),
 
@@ -1390,6 +1408,8 @@ impl SessionState {
             meta: self.meta.take(),
             mode: self.mode,
             model: self.model.take(),
+            configured_model: self.configured_model.take(),
+            plan: self.plan.take(),
             usage_windows: self.usage_windows.take(),
             five_hour_left: self.five_hour_left,
             billing: self.billing.take(),
@@ -1615,6 +1635,12 @@ impl SessionState {
     /// reading, however much was spent since.
     pub fn five_hour_reports(&self) -> u64 {
         self.five_hour_reports
+    }
+
+    /// The plan the backend's sign-in is on, in the backend's own words, as
+    /// it last said; `None` where it has said nothing of one.
+    pub fn plan(&self) -> Option<&str> {
+        self.plan.as_deref()
     }
 
     /// How the session is billed, as the backend or the profile last said.
@@ -3788,6 +3814,65 @@ mod tests {
         state.apply(&Event::ModelRefused { back_to: None });
 
         assert_eq!(state.model(), None);
+    }
+
+    /// What the backend's settings start it on names the session before any
+    /// turn, and gives way to the operator's choice and to a turn's report.
+    #[test]
+    fn the_configured_model_names_the_session_until_a_choice_or_a_turn_does() {
+        let mut state = SessionState::new();
+        state.apply(&Event::ModelConfigured {
+            model: "claude-opus-5-5".to_owned(),
+        });
+        assert_eq!(state.model(), Some("claude-opus-5-5"));
+
+        state.apply(&Event::ModelSelected {
+            model: "no-such-model".to_owned(),
+        });
+        state.apply(&Event::ModelRefused { back_to: None });
+        assert_eq!(state.model(), Some("claude-opus-5-5"));
+
+        state.apply(&Event::SessionMeta(SessionMeta {
+            backend: Backend::Claude,
+            profile: "max".to_owned(),
+            model: Some("claude-sonnet-5-5".to_owned()),
+            backend_session: None,
+        }));
+        state.apply(&Event::ModelConfigured {
+            model: "claude-opus-5-5".to_owned(),
+        });
+        assert_eq!(state.model(), Some("claude-sonnet-5-5"));
+    }
+
+    /// A model the operator chose before the backend answered what its
+    /// settings start it on is not overruled by that late answer.
+    #[test]
+    fn a_configured_model_said_after_a_choice_leaves_the_choice() {
+        let mut state = SessionState::new();
+        state.apply(&Event::ModelSelected {
+            model: "haiku".to_owned(),
+        });
+        state.apply(&Event::ModelConfigured {
+            model: "claude-opus-5-5".to_owned(),
+        });
+        assert_eq!(state.model(), Some("haiku"));
+    }
+
+    #[test]
+    fn the_plan_is_the_one_the_backend_last_named_and_outlasts_a_clear() {
+        let mut state = SessionState::new();
+        assert_eq!(state.plan(), None);
+        state.apply(&Event::Account {
+            plan: Some("Claude Max".to_owned()),
+        });
+        state.apply(&Event::Account {
+            plan: Some("Claude Ultra".to_owned()),
+        });
+        state.apply(&Event::Cleared);
+        assert_eq!(state.plan(), Some("Claude Ultra"));
+
+        state.apply(&Event::Account { plan: None });
+        assert_eq!(state.plan(), None);
     }
 
     fn changed(path: &str, added: Option<u64>, removed: Option<u64>) -> Event {

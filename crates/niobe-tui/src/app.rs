@@ -2695,6 +2695,8 @@ impl App {
             | Event::ModeUnknown
             | Event::ModelSelected { .. }
             | Event::ModelRefused { .. }
+            | Event::ModelConfigured { .. }
+            | Event::Account { .. }
             | Event::AgentSpawn { .. }
             | Event::AgentProgress { .. }
             | Event::AgentExit { .. }
@@ -3561,6 +3563,8 @@ impl App {
             | Event::ModeUnknown
             | Event::ModelSelected { .. }
             | Event::ModelRefused { .. }
+            | Event::ModelConfigured { .. }
+            | Event::Account { .. }
             | Event::UsageWindows(_)
             | Event::Billing { .. }
             | Event::Commands { .. }

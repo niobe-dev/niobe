@@ -163,6 +163,12 @@ fn one_of_each() -> Vec<Event> {
         Event::ModelRefused {
             back_to: Some(text("sonnet")),
         },
+        Event::ModelConfigured {
+            model: text("claude-opus-5-5"),
+        },
+        Event::Account {
+            plan: Some(text("Claude Ultra")),
+        },
         Event::FileChange {
             path: text("src/a.rs"),
             added: Some(1),
@@ -311,6 +317,8 @@ fn every_variant_is_listed() {
             Event::ModeUnknown => "mode_unknown",
             Event::ModelSelected { .. } => "model_selected",
             Event::ModelRefused { .. } => "model_refused",
+            Event::ModelConfigured { .. } => "model_configured",
+            Event::Account { .. } => "account",
             Event::FileChange { .. } => "file_change",
             Event::TestRun { .. } => "test_run",
             Event::AgentSpawn { .. } => "agent_spawn",
@@ -331,7 +339,7 @@ fn every_variant_is_listed() {
         assert!(!seen.contains(&name), "{name} is listed twice");
         seen.push(name);
     }
-    assert_eq!(seen.len(), 43, "every variant has one value: {seen:?}");
+    assert_eq!(seen.len(), 45, "every variant has one value: {seen:?}");
 }
 
 #[test]
