@@ -2141,6 +2141,88 @@ fn a_resumed_session_starts_its_cli_on_the_same_conversation_and_in_the_same_mod
     assert!(started[1].contains("--permission-mode plan"), "{started:?}");
 }
 
+/// A `claude` that writes down how it was started and says which conversation
+/// it is only once it is sent a turn, as the CLI's `init` comes with a turn: a
+/// session that sends none records no conversation to carry on. A request
+/// that is not a turn, such as one for a title, is left unanswered.
+const CONVERSES_ONLY_WHEN_SENT_A_TURN_CLAUDE: &str = "#!/bin/sh\n\
+    printf '%s\\n' \"$*\" >> args.log\n\
+    read -r first\n\
+    while read -r line; do\n\
+    case \"$line\" in\n\
+    *'\"type\":\"user\"'*)\n\
+    printf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"conv-1\",\"model\":\"claude-opus-5\",\"permissionMode\":\"default\"}'\n\
+    printf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"model\":\"claude-opus-5\",\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"answered-the-turn\"}]}}'\n\
+    printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"done\"}' ;;\n\
+    esac\n\
+    done\n";
+
+/// A recorded session that never reached a turn has no conversation to carry
+/// on, so resuming it starts a new one, which is asked what any new one is —
+/// here, to state its decisions. Once a turn has given it a conversation,
+/// resuming it carries that on and asks nothing again: the CLI keeps the
+/// system prompt the conversation began with.
+#[test]
+fn a_resumed_session_with_no_conversation_of_its_own_starts_one_asked_what_a_new_one_is() {
+    let repo = repo();
+    let home = stand_in(repo.path(), CONVERSES_ONLY_WHEN_SENT_A_TURN_CLAUDE);
+    {
+        let (terminal, slave) = Terminal::open();
+        let mut shell = shell_driving_the_stand_in(&slave, repo.path(), home.path())
+            .spawn()
+            .expect("the niobe binary runs");
+        terminal.shows(OPENING_FRAME);
+        terminal.typed(b"!");
+        terminal.shows("what it prints");
+        terminal.typed(b"echo seeded-$((6*7))\r");
+        terminal.shows("seeded-42");
+        recorded(repo.path(), 2);
+        lines_written(&repo.path().join("args.log"), 1);
+        terminal.typed(CTRL_Q);
+        let (_, status) = ended(&mut shell);
+        let (drawn, _) = released(terminal, slave);
+        assert!(
+            status.success(),
+            "the first session ended with {status}: {drawn}"
+        );
+    }
+
+    for (started, sends_a_turn) in [(2, true), (3, false)] {
+        let (terminal, slave) = Terminal::open();
+        let mut shell = shell_driving_the_stand_in(&slave, repo.path(), home.path())
+            .args(["--resume", "1"])
+            .spawn()
+            .expect("the niobe binary runs");
+        lines_written(&repo.path().join("args.log"), started);
+        if sends_a_turn {
+            terminal.typed(b"go\r");
+        }
+        terminal.shows("answered-the-turn");
+        terminal.typed(CTRL_Q);
+        let (_, status) = ended(&mut shell);
+        let (drawn, _) = released(terminal, slave);
+        assert!(
+            status.success(),
+            "resume {started} ended with {status}: {drawn}"
+        );
+    }
+
+    let started = std::fs::read_to_string(repo.path().join("args.log"))
+        .expect("the stand-in wrote down how it was started");
+    let started: Vec<&str> = started.lines().collect();
+    assert_eq!(started.len(), 3, "{started:?}");
+    assert!(!started[1].contains("--resume"), "{started:?}");
+    assert!(
+        started[1].contains("--append-system-prompt") && started[1].contains("DECISION:"),
+        "a new conversation started on a resume was not asked for its decisions: {started:?}"
+    );
+    assert!(started[2].contains("--resume conv-1"), "{started:?}");
+    assert!(
+        !started[2].contains("--append-system-prompt"),
+        "a conversation carried on was asked again: {started:?}"
+    );
+}
+
 /// A `claude` that writes down how it was started, reports the plan's windows
 /// with every turn it answers, and answers it.
 const REPORTS_THE_WINDOWS_CLAUDE: &str = "#!/bin/sh\n\

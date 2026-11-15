@@ -214,6 +214,26 @@ fn open(target: &Target, profile: Option<&str>, asked: &Asked) -> Result<Option<
     }
 }
 
+/// What the shell asks of a conversation as it starts — a title from its
+/// prompts, terse replies, its decisions stated — under `loaded`'s config and
+/// what the command line `asked` for, as a [`backend::Attach`] the rest of
+/// whose fields are left at their defaults.
+///
+/// One answer for every shell, whether it opens new, on a recorded session or
+/// on the CLI's own transcript: whether a conversation is carried on is for
+/// [`backend::attach`] to read off [`backend::Attach::resume`], and it asks
+/// none of this of one, since the CLI keeps the system prompt and the title it
+/// began with. A recorded session that never reached a turn has no
+/// conversation to carry on, and the one it starts is new.
+fn asked_of_a_new_conversation(loaded: &config::Loaded, asked: &Asked) -> backend::Attach {
+    backend::Attach {
+        title: loaded.config.titles() == niobe_config::Titles::Model,
+        terse: asked.terse.unwrap_or(loaded.config.terse()),
+        decisions: loaded.config.decisions(),
+        ..backend::Attach::default()
+    }
+}
+
 /// Where a session started under `trim = true` keeps the outputs it trims,
 /// and the binary that trims them; `None` where the config leaves it off.
 /// Refused where `.niobe/` leads out of the repository, since the whole
@@ -477,14 +497,11 @@ fn shell(profile: Option<&str>, asked: &Asked, opening: Opening) -> Result<Optio
         selected.as_ref(),
         &backend::Attach {
             budget_usd: asked.budget,
-            title: loaded.config.titles() == niobe_config::Titles::Model,
-            terse: asked.terse.unwrap_or(loaded.config.terse()),
-            decisions: loaded.config.decisions(),
             tap: tap.clone(),
             trim: trim_for(&root, loaded.config.trim())?,
             model: model.clone(),
             effort: effort.clone(),
-            ..backend::Attach::default()
+            ..asked_of_a_new_conversation(&loaded, asked)
         },
         std::env::var_os(niobe_bridge_claude::transcript::CONFIG_DIR_VAR),
         std::env::var_os("HOME"),
@@ -797,19 +814,17 @@ fn resume(
         &root,
         selected.as_ref(),
         &backend::Attach {
+            // `None` where the session never reached a turn, and the CLI
+            // then starts a conversation of its own, asked what a new one is.
             resume: continuing,
             mode: app.session().mode(),
             budget_usd: asked.budget,
-            title: false,
-            // The conversation's system prompt was recorded when it began,
-            // and the CLI sends that record whatever a later start passes.
-            terse: false,
-            decisions: false,
             tap: tap.clone(),
             trim: trim_for(&root, loaded.config.trim())?,
             model: model.clone(),
             effort: effort.clone(),
             one_turn: false,
+            ..asked_of_a_new_conversation(&loaded, asked)
         },
         std::env::var_os(niobe_bridge_claude::transcript::CONFIG_DIR_VAR),
         std::env::var_os("HOME"),
@@ -1032,16 +1047,12 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<Option<
             resume: Some(session.to_owned()),
             mode: app.session().mode(),
             budget_usd: asked.budget,
-            title: false,
-            // The conversation's system prompt was recorded when it began,
-            // and the CLI sends that record whatever a later start passes.
-            terse: false,
-            decisions: false,
             tap: tap.clone(),
             trim: trim_for(&root, loaded.config.trim())?,
             model: model.clone(),
             effort: effort.clone(),
             one_turn: false,
+            ..asked_of_a_new_conversation(&loaded, asked)
         },
         std::env::var_os(niobe_bridge_claude::transcript::CONFIG_DIR_VAR),
         std::env::var_os("HOME"),
