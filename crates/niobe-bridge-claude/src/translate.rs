@@ -402,7 +402,8 @@ struct Reported {
 /// $0.0560548 came back from one more turn reporting $0.064619. A translator
 /// that starts from nothing reports all of it as that turn's cost, on top of
 /// the earlier turns already on screen, so a resumed session's translator
-/// starts from this instead.
+/// starts from this instead — until a bill holds less than this of a model,
+/// which says the process restored nothing; see [`Translator::resuming`].
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Spent {
     by_model: BTreeMap<String, Reported>,
@@ -645,6 +646,11 @@ pub struct Translator {
     unfinished: Vec<String>,
     /// Per model, everything reported for it so far this session.
     reported: BTreeMap<String, Reported>,
+    /// Per model, the running totals the next bill counts on from, as the
+    /// CLI last stated them: what a resumed session's process restored, or
+    /// the last bill. Part of `reported`, and what a bill that holds less of
+    /// a model shows its process never counted.
+    carried: BTreeMap<String, Reported>,
     /// Why a resumed session's earlier spend is unknown, until the notice
     /// saying so has gone out with the first events.
     unknown_spend: Option<String>,
@@ -826,6 +832,7 @@ impl Translator {
             turn_1h: Some(0),
             unfinished: Vec::new(),
             reported: BTreeMap::new(),
+            carried: BTreeMap::new(),
             unknown_spend: None,
             restored_unknown: false,
             unread_said: BTreeSet::new(),
@@ -858,6 +865,15 @@ impl Translator {
     /// having spent `spent`: what the CLI restores is counted as already
     /// reported, so the first turn reports only its own cost.
     ///
+    /// The CLI does not always restore it. A process that counted from
+    /// nothing instead shows it in a bill holding less of a model than was
+    /// restored, which a running total carried over never does, and its
+    /// bills are measured from nothing carried over from then on, as the
+    /// transcript reader measures an accounting that names a start of its
+    /// own. One whose own spend has already passed what was restored, in
+    /// every count of every model, by its first bill cannot be told from one
+    /// that carried it over, and is measured as one.
+    ///
     /// Where `spent` is [`Spent::unknown`], the first bill cannot be split
     /// into what was restored and what the turn added, so none of it is
     /// counted: that turn's tokens are its messages' own, and its cost goes
@@ -869,6 +885,7 @@ impl Translator {
     #[must_use]
     pub fn resuming(mut self, spent: &Spent) -> Self {
         self.reported = spent.by_model.clone();
+        self.carried = spent.by_model.clone();
         self.unknown_spend = spent.unknown.clone();
         self.restored_unknown = spent.unknown.is_some();
         self
@@ -897,16 +914,62 @@ impl Translator {
         });
         self.short.extend(lost.collect::<Vec<_>>());
         self.reported = spent.by_model.clone();
+        self.carried = spent.by_model.clone();
         self.restored_unknown = spent.unknown.is_some();
     }
 
-    /// Measures the next bill from nothing: the running totals of a process
-    /// that resumed the session without restoring the last bill's, and so
-    /// counted its own spend from its own start. What was reported before
-    /// stays reported; the next bill holds none of it.
+    /// Measures the next bill from nothing carried over: the running totals
+    /// of a process that resumed the session without restoring the last
+    /// bill's, and so counted its own spend from its own start. What was
+    /// reported before stays reported; the next bill holds none of what was
+    /// carried, and all of what this process's own messages reported since,
+    /// which is what it is measured from.
+    ///
+    /// The transcript reader calls this where an accounting names a start of
+    /// its own; a bill that holds less than was carried calls it too, live
+    /// or read back (see [`Translator::count_on`]).
     pub(crate) fn counted_afresh(&mut self) {
-        self.reported.clear();
+        for (model, carried) in std::mem::take(&mut self.carried) {
+            if let Some(seen) = self.reported.get_mut(&model) {
+                seen.tokens = carried.tokens.beyond(seen.tokens);
+                seen.cost_usd = (seen.cost_usd - carried.cost_usd).max(0.0);
+            }
+        }
         self.restored_unknown = false;
+    }
+
+    /// Takes `bill`, a turn's running totals per model, as what the next one
+    /// counts on from — first measuring it from nothing carried over where it
+    /// holds less of a model than was carried, in any count or in what it
+    /// cost.
+    ///
+    /// The CLI's running totals only grow within a process, and one that
+    /// resumes a session restores them whole or not at all: of 178
+    /// accountings that followed another in the same transcript, on the
+    /// machine [`Translator::counted_afresh`] was first written on, the 177
+    /// that carried it over each held at least its totals, and the one that
+    /// did not held its own spend alone. So a figure below what was carried
+    /// is a process that counted from nothing, and every model of its bill is
+    /// its own spend. A model the bill does not name, or a cost it does not
+    /// state as a number, says nothing either way.
+    fn count_on(&mut self, bill: &BTreeMap<String, wire::ModelUsage>) {
+        let fell = bill.iter().any(|(model, usage)| {
+            self.carried.get(model).is_some_and(|carried| {
+                let cost = usage.cost_usd.as_ref().and_then(wire::Cost::usd);
+                !Counts::from(usage).beyond(carried.tokens).is_empty()
+                    || cost.is_some_and(|cost| cost < carried.cost_usd - COST_TOLERANCE_USD)
+            })
+        });
+        if fell {
+            self.counted_afresh();
+        }
+        for (model, usage) in bill {
+            let carried = self.carried.entry(model.clone()).or_default();
+            carried.tokens = Counts::from(usage);
+            if let Some(cost) = usage.cost_usd.as_ref().and_then(wire::Cost::usd) {
+                carried.cost_usd = cost;
+            }
+        }
     }
 
     /// The same translator, told how the session is billed by the profile it
@@ -2189,6 +2252,7 @@ impl Translator {
         // The CLI drops a goal with the conversation it was set in.
         self.goal = None;
         self.reported.clear();
+        self.carried.clear();
         self.restored_unknown = false;
         // The turn a resumed bill left uncounted belongs to the conversation
         // before the clear; the new one's settlements cover all it spent.
@@ -3472,6 +3536,7 @@ impl Translator {
             self.report_session_cost(outcome, out);
             return;
         }
+        self.count_on(&outcome.model_usage);
         let moved = self.file_messages_under_their_bill(&outcome.model_usage);
 
         let mut costs = 0.0;
@@ -3570,6 +3635,7 @@ impl Translator {
             self.restored_unknown = true;
             return;
         }
+        self.count_on(&outcome.model_usage);
         for (model, usage) in &outcome.model_usage {
             let seen = self.reported.entry(model.clone()).or_default();
             seen.tokens = Counts::from(usage);
@@ -6522,6 +6588,173 @@ mod tests {
             "{events:?}"
         );
         assert_eq!(warnings(&events), Vec::<String>::new());
+    }
+
+    /// What a `cost-state` recorded as `model_usage`, as the binary reads it
+    /// out of the CLI's transcript to resume a session from.
+    fn spent(model_usage: &str) -> Spent {
+        let model_usage: BTreeMap<String, wire::ModelUsage> =
+            serde_json::from_str(model_usage).expect("the test's modelUsage is well formed");
+        Spent::from_model_usage(&model_usage)
+    }
+
+    /// A turn's `result` closing a session whose running totals are `model_usage`.
+    fn running_totals(model_usage: &str, total: f64) -> String {
+        format!(
+            r#"{{"type":"result","subtype":"success","modelUsage":{model_usage},"total_cost_usd":{total}}}"#
+        )
+    }
+
+    /// The lines a resumed `work` session billed by use folds to, from the
+    /// spend its transcript recorded.
+    fn resumed_from(restored: &str, lines: &[&str]) -> Vec<Event> {
+        let mut translator = Translator::new("work")
+            .billed_as(Billing::Metered)
+            .resuming(&spent(restored));
+        lines
+            .iter()
+            .flat_map(|line| translator.line(line))
+            .collect()
+    }
+
+    fn totals_of(events: &[Event]) -> niobe_core::session::Totals {
+        niobe_core::session::SessionState::replay(events)
+            .totals()
+            .clone()
+    }
+
+    /// The case the restored spend is for: the process carried the earlier
+    /// running totals over, and the turn costs what it added to them.
+    #[test]
+    fn a_resumed_process_that_carried_the_earlier_spend_over_is_billed_what_it_added() {
+        let events = resumed_from(
+            r#"{"opus-5":{"inputTokens":100,"outputTokens":50,"costUSD":1.0}}"#,
+            &[
+                INIT_FAMILY,
+                MAIN_START,
+                &delta(10, 5),
+                &running_totals(
+                    r#"{"opus-5":{"inputTokens":110,"outputTokens":55,"costUSD":1.1}}"#,
+                    1.1,
+                ),
+            ],
+        );
+        let totals = totals_of(&events);
+
+        assert_counted_once(&totals, 10, 5);
+        assert!(
+            (totals.reported_cost_usd - 0.1).abs() < 1e-9,
+            "{}",
+            totals.reported_cost_usd
+        );
+        assert!(totals.cost_fully_reported(), "{totals:?}");
+    }
+
+    /// The CLI does not always carry a resumed session's running totals over:
+    /// a process that names a start of its own counts from nothing, which the
+    /// transcript reader measures its accounting from; see
+    /// `an_accounting_that_did_not_carry_the_one_before_is_counted_from_nothing`
+    /// in `transcript.rs`. Live, the start is not on the stream, and the
+    /// bill says it instead: a running total the CLI carried over never holds
+    /// less than it carried. Measured from the restored $1.00, the first
+    /// turn's $0.10 reads as nothing and the second's $1.20 as $0.20, a whole
+    /// figure short by the restored dollar.
+    #[test]
+    fn a_resumed_process_that_counted_from_nothing_is_billed_its_whole_spend() {
+        let restored = r#"{"opus-5":{"inputTokens":100,"outputTokens":50,"costUSD":1.0}}"#;
+        let first = [
+            INIT_FAMILY,
+            MAIN_START,
+            &delta(10, 5),
+            &running_totals(
+                r#"{"opus-5":{"inputTokens":10,"outputTokens":5,"costUSD":0.1}}"#,
+                0.1,
+            ),
+        ];
+        let after_one = totals_of(&resumed_from(restored, &first));
+        assert_counted_once(&after_one, 10, 5);
+        assert!(
+            (after_one.reported_cost_usd - 0.1).abs() < 1e-9,
+            "{}",
+            after_one.reported_cost_usd
+        );
+        assert!(after_one.cost_fully_reported(), "{after_one:?}");
+
+        let second = running_totals(
+            r#"{"opus-5":{"inputTokens":2010,"outputTokens":505,"costUSD":1.2}}"#,
+            1.2,
+        );
+        let message = delta(2000, 500);
+        let both: Vec<&str> = first
+            .iter()
+            .copied()
+            .chain([MAIN_START, &message, &second])
+            .collect();
+        let totals = totals_of(&resumed_from(restored, &both));
+        assert_counted_once(&totals, 2010, 505);
+        assert!(
+            (totals.reported_cost_usd - 1.2).abs() < 1e-9,
+            "{}",
+            totals.reported_cost_usd
+        );
+        assert!(totals.cost_fully_reported(), "{totals:?}");
+    }
+
+    /// Every model a process that counted from nothing billed is its own
+    /// spend whole: the small model the CLI summarises with, which writes no
+    /// message, as much as the session's.
+    #[test]
+    fn a_resumed_process_that_counted_from_nothing_is_billed_every_model_whole() {
+        let events = resumed_from(
+            r#"{"opus-5":{"inputTokens":100,"outputTokens":50,"costUSD":1.0},"haiku-5":{"inputTokens":40,"outputTokens":4,"costUSD":0.02}}"#,
+            &[
+                INIT_FAMILY,
+                MAIN_START,
+                &delta(10, 5),
+                &running_totals(
+                    r#"{"opus-5":{"inputTokens":10,"outputTokens":5,"costUSD":0.1},"haiku-5":{"inputTokens":4,"outputTokens":1,"costUSD":0.001}}"#,
+                    0.101,
+                ),
+            ],
+        );
+        let totals = totals_of(&events);
+
+        assert_counted_once(&totals, 14, 6);
+        assert!(
+            (totals.reported_cost_usd - 0.101).abs() < 1e-9,
+            "{}",
+            totals.reported_cost_usd
+        );
+        assert!(totals.cost_fully_reported(), "{totals:?}");
+    }
+
+    /// Whether a process carried the earlier totals over is the process's,
+    /// not a model's: one model's figure below what was restored says the
+    /// process counted from nothing, and a model it has already spent more
+    /// on than was restored is its own spend whole too, not what it added.
+    #[test]
+    fn one_model_billed_below_what_was_restored_counts_the_whole_bill_from_nothing() {
+        let events = resumed_from(
+            r#"{"opus-5":{"inputTokens":100,"outputTokens":50,"costUSD":1.0},"haiku-5":{"inputTokens":4,"outputTokens":1,"costUSD":0.001}}"#,
+            &[
+                INIT_FAMILY,
+                MAIN_START,
+                &delta(10, 5),
+                &running_totals(
+                    r#"{"opus-5":{"inputTokens":10,"outputTokens":5,"costUSD":0.1},"haiku-5":{"inputTokens":40,"outputTokens":10,"costUSD":0.02}}"#,
+                    0.12,
+                ),
+            ],
+        );
+        let totals = totals_of(&events);
+
+        assert_counted_once(&totals, 50, 15);
+        assert!(
+            (totals.reported_cost_usd - 0.12).abs() < 1e-9,
+            "{}",
+            totals.reported_cost_usd
+        );
+        assert!(totals.cost_fully_reported(), "{totals:?}");
     }
 
     /// A cleared conversation is a stored session of its own, which is read

@@ -4906,6 +4906,59 @@ mod tests {
         }
     }
 
+    /// An accounting that names no start still says it carried nothing over
+    /// where it holds less than the one before, which a running total carried
+    /// over never does: the rule the live stream, which carries no start,
+    /// reads a resumed process's bills by, so both read the same accountings
+    /// as the same spend.
+    #[test]
+    fn an_accounting_below_the_one_before_is_counted_from_nothing_where_no_start_is_named() {
+        let at = |stamp: &str, record: String| {
+            record.replacen('{', &format!(r#"{{"timestamp":"{stamp}","#), 1)
+        };
+        let accounting = |input: u64, output: u64, usd: f64| {
+            format!(
+                r#"{{"type":"cost-state","totalCostUSD":{usd},"modelUsage":{{"claude-opus-5":{{"inputTokens":{input},"outputTokens":{output},"costUSD":{usd}}}}}}}"#
+            )
+        };
+        let events = imported(&[
+            &at("2026-09-30T05:00:00.000Z", prompt("first")),
+            &at(
+                "2026-09-30T05:00:01.000Z",
+                response("msg_1", "claude-opus-5", 2, 10),
+            ),
+            &accounting(2, 10, 0.01),
+            &at("2026-09-30T09:00:30.000Z", prompt("second")),
+            &at(
+                "2026-09-30T09:00:31.000Z",
+                response("msg_2", "claude-opus-5", 3, 4),
+            ),
+            &accounting(3, 4, 0.004),
+            &at("2026-09-30T10:00:00.000Z", prompt("third")),
+            &at(
+                "2026-09-30T10:00:01.000Z",
+                response("msg_3", "claude-opus-5", 5, 7),
+            ),
+            &accounting(8, 11, 0.006),
+        ]);
+
+        let counted = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Usage(usage) => Some((usage.input, usage.output)),
+                _ => None,
+            })
+            .fold((0, 0), |(i, o), (input, output)| (i + input, o + output));
+        assert_eq!(counted, (2 + 3 + 5, 10 + 4 + 7), "{events:#?}");
+        let totals = niobe_core::SessionState::replay(&events).totals().clone();
+        assert!(
+            (totals.reported_cost_usd - 0.016).abs() < 1e-9,
+            "{}",
+            totals.reported_cost_usd
+        );
+        assert!(totals.cost_fully_reported(), "{events:#?}");
+    }
+
     #[test]
     fn a_response_written_over_several_records_is_counted_once_by_its_last() {
         let record = |at: &str, output: u64, block: &str| {

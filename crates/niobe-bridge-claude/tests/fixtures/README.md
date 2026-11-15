@@ -1337,7 +1337,14 @@ least the totals before them, and the one that named a start of its own held
 its own process's spend alone — 59,335 Opus output tokens after 381,652. The
 reader measures such a record from nothing; the unit test
 `an_accounting_that_did_not_carry_the_one_before_is_counted_from_nothing`
-holds the case.
+holds the case. Since a total carried over never holds less than the one before
+it, a record or a live `result` that holds less of a model than what it would
+have carried over is measured from nothing too, which is how the live stream,
+which names no `startTime`, reads a resumed process that restored nothing; the
+unit tests `a_resumed_process_that_counted_from_nothing_is_billed_its_whole_spend`
+in `src/translate.rs` and
+`an_accounting_below_the_one_before_is_counted_from_nothing_where_no_start_is_named`
+in `src/transcript.rs` hold it.
 
 ## `models-listed.jsonl`
 

@@ -384,7 +384,9 @@ reviewers that encode both, for an agent working in this tree.
   the time its record was stamped (`stamp.rs` reads the CLI's UTC stamps and nothing else), which
   is what an import shows it at and stores it at — and a resumed
   session's translator starts from the spend its last `cost-state` records, because the CLI
-  restores those running totals on `--resume` — where the file cannot be read, that spend is
+  restores those running totals on `--resume` — and from nothing once a bill holds less of a
+  model than that, which only a process that restored nothing writes, as the reader counts an
+  accounting that names a start of its own — where the file cannot be read, that spend is
   unknown, the session says so and counts nothing of its first bill, rather than bill the
   earlier session again — and a record the CLI was cut off writing, even inside a character,
   is left out while the rest still reads, and only a regular file of at most 256 MiB is read,
