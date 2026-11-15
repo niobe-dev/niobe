@@ -1902,6 +1902,26 @@ pub fn user_file(
 mod tests {
     use super::*;
 
+    /// What `load` gives, in no more than `seconds` for one of two runs.
+    ///
+    /// The bound is that a hostile config's files are each looked at once,
+    /// not a measure of the machine; a run that a loaded machine held past
+    /// it is run once more, as a timing test on a loaded machine is
+    /// (AGENTS.md §9), and only a bound missed twice fails.
+    fn loaded_within(seconds: u64, load: impl Fn() -> Loaded) -> Loaded {
+        let budget = std::time::Duration::from_secs(seconds);
+        let started = std::time::Instant::now();
+        let loaded = load();
+        if started.elapsed() < budget {
+            return loaded;
+        }
+        let again = std::time::Instant::now();
+        let loaded = load();
+        let took = again.elapsed();
+        assert!(took < budget, "{took:?} twice past {budget:?}");
+        loaded
+    }
+
     #[test]
     fn the_shell_is_told_which_models_the_selected_profile_offers() {
         let config = niobe_config::Config::parse(
@@ -2666,12 +2686,9 @@ mod tests {
         ));
         std::fs::create_dir(repeated.dir.path().join("p"))
             .expect("the temporary directory is writable");
-        let started = std::time::Instant::now();
-        let untrusted = repeated
-            .load()
+        let untrusted = loaded_within(10, || repeated.load())
             .untrusted
             .expect("the config is asked about");
-        assert!(started.elapsed() < std::time::Duration::from_secs(10));
         assert_eq!(untrusted.attached.len(), 1, "{:?}", untrusted.attached);
 
         let many: Vec<String> = (0..=CANDIDATES).map(|n| format!("\"f{n}\"")).collect();
@@ -2855,11 +2872,9 @@ mod tests {
             );
         }
         clone.write("x.sh", "echo one");
-        let started = std::time::Instant::now();
-
-        let untrusted = clone.load().untrusted.expect("the config is asked about");
-
-        assert!(started.elapsed() < std::time::Duration::from_secs(15));
+        let untrusted = loaded_within(15, || clone.load())
+            .untrusted
+            .expect("the config is asked about");
         assert!(
             untrusted
                 .attached
@@ -2913,11 +2928,9 @@ mod tests {
             "claude.json",
             &format!(r#"{{"statusLine":{{"command":"sh{words}"}}}}"#),
         );
-        let started = std::time::Instant::now();
-
-        let untrusted = clone.load().untrusted.expect("the config is asked about");
-
-        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        let untrusted = loaded_within(10, || clone.load())
+            .untrusted
+            .expect("the config is asked about");
         assert!(record_trust(&clone.record, &untrusted).is_err());
     }
 
@@ -3444,15 +3457,7 @@ mod tests {
             "claude.json",
             &format!(r#"{{"statusLine":{{"command":"sh{words}"}}}}"#),
         );
-        let started = std::time::Instant::now();
-
-        let _ = clone.load();
-
-        assert!(
-            started.elapsed() < std::time::Duration::from_secs(5),
-            "{:?}",
-            started.elapsed()
-        );
+        loaded_within(5, || clone.load());
     }
 
     #[test]
@@ -3526,15 +3531,7 @@ mod tests {
                 "a/".repeat(499_000)
             ),
         );
-        let started = std::time::Instant::now();
-
-        let _ = clone.load();
-
-        assert!(
-            started.elapsed() < std::time::Duration::from_secs(3),
-            "{:?}",
-            started.elapsed()
-        );
+        loaded_within(3, || clone.load());
     }
 
     /// A command is read as a shell reads its words: a quoted path keeps
@@ -3644,15 +3641,7 @@ mod tests {
         for n in 0..CANDIDATES {
             clone.write(&format!("f{n}"), "");
         }
-        let started = std::time::Instant::now();
-
-        let _ = clone.load();
-
-        assert!(
-            started.elapsed() < std::time::Duration::from_secs(10),
-            "{:?}",
-            started.elapsed()
-        );
+        loaded_within(10, || clone.load());
     }
 
     /// No file has a path longer than the system opens, so a command whose
@@ -3666,11 +3655,9 @@ mod tests {
             "claude.json",
             &format!(r#"{{"statusLine":{{"command":"{cds}{words}"}}}}"#),
         );
-        let started = std::time::Instant::now();
-
-        let untrusted = clone.load().untrusted.expect("the config is asked about");
-
-        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        let untrusted = loaded_within(10, || clone.load())
+            .untrusted
+            .expect("the config is asked about");
         assert!(!untrusted.attached.is_empty());
     }
 
@@ -3706,11 +3693,9 @@ mod tests {
             "s.json",
             &format!(r#"{{"statusLine":{{"command":"{}"}}}}"#, "a ".repeat(2000)),
         );
-        let started = std::time::Instant::now();
-
-        let untrusted = clone.load().untrusted.expect("the config is asked about");
-
-        assert!(started.elapsed() < std::time::Duration::from_secs(20));
+        let untrusted = loaded_within(20, || clone.load())
+            .untrusted
+            .expect("the config is asked about");
         assert_eq!(untrusted.attached.len(), 1);
         assert_eq!(untrusted.attached[0].profiles.len(), 5000);
     }
