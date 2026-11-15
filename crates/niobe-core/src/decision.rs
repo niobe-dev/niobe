@@ -56,6 +56,9 @@ struct Fence {
     mark: char,
     /// How long the run that opened it is: a closing run is at least as long.
     run: usize,
+    /// The column the opening run starts at inside the quotes: a closing run
+    /// is indented no more than three past it, and one further in is code.
+    lead: usize,
     quotes: usize,
     /// The column a line must be indented to inside the quotes to be in the
     /// list item the fence opened in; 0 where it opened in none.
@@ -69,12 +72,16 @@ impl Fence {
             .into_iter()
             .find(|mark| held.content.starts_with(*mark))?;
         let run = run_of(held.content, mark);
-        if run < 3 {
+        // A backtick run with a backtick after it is code in a line of text,
+        // as CommonMark reads it, and opens nothing.
+        let info = held.content.get(run..).unwrap_or_default();
+        if run < 3 || (mark == '`' && info.contains('`')) {
             return None;
         }
         Some(Self {
             mark,
             run,
+            lead: if held.listed { held.indent } else { held.lead },
             quotes: held.quotes,
             indent: if held.listed { held.indent } else { 0 },
         })
@@ -89,14 +96,16 @@ impl Fence {
     }
 
     /// Whether `held`, a line inside this fence, closes it: in the quote it
-    /// was opened in, a run of its character at least as long as the one
-    /// that opened it, and nothing after the run but blanks, as CommonMark
+    /// was opened in, indented no more than three past it, a run of its
+    /// character at least as long as the one that opened it, and nothing
+    /// after the run but blanks, as CommonMark
     /// reads a closing fence and the transcript draws one. A line quoted
     /// deeper is the code's own, and so is `` ```sh `` inside `` ```` ``.
     fn closed_by(&self, held: &Held) -> bool {
         let run = run_of(held.content, self.mark);
         held.quotes == self.quotes
             && !held.listed
+            && held.lead <= self.lead.saturating_add(3)
             && run >= self.run
             && held
                 .content
@@ -270,6 +279,24 @@ mod tests {
 
         let other = "```\n~~~\nDECISION: still code\n```\nDECISION: after";
         assert_eq!(decisions(other), ["after"]);
+    }
+
+    /// A line indented four columns or more past the fence is code inside
+    /// it, however it reads, as CommonMark and the transcript read it; and
+    /// a backtick fence's info string holds no backtick.
+    #[test]
+    fn a_fence_is_not_closed_by_a_line_indented_past_it_and_not_opened_by_a_backtick_run_in_text() {
+        let indented = "```\n    ```\nDECISION: still code\n```\nDECISION: after";
+        assert_eq!(decisions(indented), ["after"]);
+
+        let listed = "```markdown\n- Install:\n\n    ```sh\n    cargo install x\n    ```\n```\n\nDECISION: documented it";
+        assert_eq!(decisions(listed), ["documented it"]);
+
+        let in_an_item = "- Run:\n\n    ```sh\n    DECISION: code\n    ```\n\nDECISION: after";
+        assert_eq!(decisions(in_an_item), ["after"]);
+
+        let not_a_fence = "```js` is how it is written\nDECISION: read";
+        assert_eq!(decisions(not_a_fence), ["read"]);
     }
 
     #[test]
