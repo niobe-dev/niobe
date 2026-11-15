@@ -7,8 +7,10 @@
 //! so restoration is not a line at the end of `main`. It is three mechanisms that each cover one way out:
 //!
 //! * a clean quit and any error — [`TerminalGuard`]'s `Drop`,
-//! * a panic — the hook [`install_panic_hook`] installs, which runs before the
-//!   guard unwinds (this is why the release profile keeps `panic = "unwind"`),
+//! * a panic on the thread that holds the terminal — the hook
+//!   [`install_panic_hook`] installs, which runs before the guard unwinds
+//!   (this is why the release profile keeps `panic = "unwind"`); a panic on
+//!   any other thread ends that thread, not the session,
 //! * SIGTERM and SIGHUP — [`Shutdown`], which flips a flag the event loop reads
 //!   so the guard drops normally. It keeps the two apart: SIGTERM asks the
 //!   process to stop, SIGHUP says the terminal it ran on has gone, and the
@@ -60,6 +62,34 @@ use ratatui::crossterm::terminal::{
 /// Read only by the panic hook, which has no guard to ask: a panic in a unit
 /// test must not spray escape sequences at a terminal the shell never touched.
 static TERMINAL_ENTERED: AtomicBool = AtomicBool::new(false);
+
+thread_local! {
+    /// Whether this thread is the one that put the terminal into the drawing
+    /// mode, and so the one whose panic ends the session.
+    ///
+    /// The panic hook runs on whichever thread panicked. A thread the session
+    /// started to read or write beside it — the session store's writer, a
+    /// reader of the CLI's output or of earlier sessions — is not drawing,
+    /// and its panic is handled where its work is waited on: handing the
+    /// terminal back for it would leave the loop drawing on the operator's
+    /// screen in cooked mode, with nothing left to hand back at the quit.
+    static HOLDS_THE_TERMINAL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Marks the terminal as in the drawing mode, held by this thread.
+fn entered() {
+    HOLDS_THE_TERMINAL.set(true);
+    TERMINAL_ENTERED.store(true, Ordering::SeqCst);
+}
+
+/// Whether a panic on this thread ends the session, and so owes the terminal
+/// being handed back first. A thread whose locals are being torn down holds
+/// nothing.
+fn holds_the_terminal() -> bool {
+    HOLDS_THE_TERMINAL
+        .try_with(std::cell::Cell::get)
+        .unwrap_or(false)
+}
 
 /// What the terminal was asked to report keys with and still owes being asked
 /// to stop, as an [`Asked`].
@@ -431,7 +461,7 @@ impl<W: Write> TerminalGuard<W> {
         // Set before the screen is entered, not after: it is what
         // `restore` checks, and a failure on the next line has to undo raw
         // mode rather than decide there was nothing to undo.
-        TERMINAL_ENTERED.store(true, Ordering::SeqCst);
+        entered();
         enter_screen(&mut guard.out)?;
         // On the alternate screen, where the push is made: the protocol keeps
         // a stack per screen. modifyOtherKeys is asked for only where an
@@ -551,7 +581,7 @@ impl<W: Write> TerminalGuard<W> {
         if self.raw_mode {
             std::mem::take(&mut self.handed).put_back()?;
             enable_raw_mode()?;
-            TERMINAL_ENTERED.store(true, Ordering::SeqCst);
+            entered();
         }
         // Cleared only once raw mode is back: until then, a failure has
         // nothing to undo, and a restore that followed would write a
@@ -579,7 +609,7 @@ impl<W: Write> TerminalGuard<W> {
         if self.raw_mode {
             disable_raw_mode()?;
             enable_raw_mode()?;
-            TERMINAL_ENTERED.store(true, Ordering::SeqCst);
+            entered();
         }
         enter_screen(&mut self.out)?;
         if self.keyboard == Asked::Enhancement {
@@ -623,10 +653,14 @@ impl<W: Write> Drop for TerminalGuard<W> {
 /// Without it a panic prints its message into the alternate screen, which is
 /// then torn down — so the operator sees a working prompt and no reason why
 /// their session ended.
+///
+/// Only a panic on the thread that holds the terminal ends the session, so
+/// only that one hands it back. Any other thread's is reported by the hook
+/// before it, and handled wherever that thread's work is waited on.
 pub fn install_panic_hook() {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        if TERMINAL_ENTERED.swap(false, Ordering::SeqCst) {
+        if holds_the_terminal() && TERMINAL_ENTERED.swap(false, Ordering::SeqCst) {
             let keyboard =
                 Asked::from_stored(KEYBOARD_ASKED.swap(Asked::Nothing as u8, Ordering::SeqCst));
             let _ = disable_raw_mode();

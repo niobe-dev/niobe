@@ -237,6 +237,7 @@ fn write(
 ) {
     let mut given_up: Option<String> = None;
     for handed_over in handed {
+        panic_in_the_writer_if_the_environment_asks();
         let outcomes = match &given_up {
             Some(reason) => vec![Err(reason.clone().into())],
             None => target.record(handed_over),
@@ -334,6 +335,30 @@ fn panic_if_the_environment_asks() {
 
 #[cfg(not(debug_assertions))]
 fn panic_if_the_environment_asks() {}
+
+/// The variable that asks for the panic below.
+#[cfg(debug_assertions)]
+const PANIC_IN_THE_WRITER: &str = "NIOBE_TEST_PANIC_IN_THE_WRITER";
+
+/// Panics the writer on the first event it is handed, when the environment
+/// asks for it.
+///
+/// The writer is a thread of its own, and a panic there must end that thread
+/// and leave the terminal with the loop that holds it: what the writer did
+/// not keep is reported as not saved, and the session goes on. `tests/pty.rs`
+/// sets the variable and reads what the shell drew after the panic.
+///
+/// Compiled out without debug assertions, as [`panic_if_the_environment_asks`]
+/// is.
+#[cfg(debug_assertions)]
+fn panic_in_the_writer_if_the_environment_asks() {
+    if std::env::var_os(PANIC_IN_THE_WRITER).is_some() {
+        panic!("{PANIC_IN_THE_WRITER} asked for a panic in the session store's writer");
+    }
+}
+
+#[cfg(not(debug_assertions))]
+fn panic_in_the_writer_if_the_environment_asks() {}
 
 #[cfg(test)]
 mod tests {

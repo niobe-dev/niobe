@@ -1624,6 +1624,55 @@ fn panics_and_hands_back(keys: Keys) {
     );
 }
 
+/// The variable the binary reads to panic the session store's writer, which
+/// is a thread of its own: the one way to panic a thread other than the one
+/// holding the terminal. Compiled in only with debug assertions on, as
+/// [`PANIC_ON_RECORD`] is.
+const PANIC_IN_THE_WRITER: &str = "NIOBE_TEST_PANIC_IN_THE_WRITER";
+
+/// A panic on a thread of the session's own — here the session store's
+/// writer — ends that thread and not the session: the shell keeps the screen,
+/// says what was not saved, and hands the terminal back once, at the quit.
+#[cfg(debug_assertions)]
+#[test]
+fn a_panic_on_a_thread_that_does_not_hold_the_terminal_leaves_the_session_on_screen() {
+    let repo = repo();
+    let (terminal, slave) = Terminal::open();
+    let mut shell = shell_command(&slave, repo.path())
+        .env(PANIC_IN_THE_WRITER, "1")
+        .spawn()
+        .expect("the niobe binary runs");
+    terminal.shows(OPENING_FRAME);
+
+    // The prompt is the first event the writer is handed, and it panics on
+    // it, saying so on standard error as any panic does; the next prompt is
+    // handed to a writer that has gone.
+    terminal.typed(b"anything\r");
+    terminal.shows(PANIC_IN_THE_WRITER);
+    terminal.typed(b"again\r");
+    terminal.shows("not saved");
+    let after = terminal.mark();
+    terminal.typed(b"still-drawn");
+    terminal.shows_since(after, "still-drawn");
+    terminal.typed(CTRL_Q);
+
+    let (_, status) = ended(&mut shell);
+    let (drawn, cooked) = released(terminal, slave);
+    assert!(status.success(), "the shell ended with {status}: {drawn:?}");
+    assert_handed_back(&drawn, cooked, "a quit after the writer panicked");
+    let restored = drawn
+        .find(RESTORED)
+        .expect("the shell handed the terminal back");
+    let still = drawn
+        .find("still-drawn")
+        .expect("what was typed after the panic was drawn");
+    assert!(
+        still < restored,
+        "the writer's panic handed the terminal back while the session went on drawing: \
+         {drawn:?}"
+    );
+}
+
 #[test]
 fn the_shell_ends_when_the_terminal_it_draws_on_goes_away() {
     let repo = repo();
