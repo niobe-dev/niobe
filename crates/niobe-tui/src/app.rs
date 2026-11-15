@@ -6685,7 +6685,13 @@ impl App {
             Overlay::List => self.picking.as_ref().map(|picker| picker.at),
             Overlay::History => self.browser.as_ref().map(|browser| browser.at),
             Overlay::Memory => self.memory.as_ref().map(|view| view.at),
-            Overlay::Mcp => self.mcp.as_ref().map(|view| view.at),
+            // The servers are replaced whole as the backend reports them,
+            // and the view's keys clamp its cursor to the list as it stands
+            // now: so does the row a click counts its keys from.
+            Overlay::Mcp => self.mcp.as_ref().map(|view| {
+                view.at
+                    .min(self.session.mcp_servers().len().saturating_sub(1))
+            }),
             Overlay::Menu | Overlay::Sheet | Overlay::Search | Overlay::Detail => None,
         }
     }
@@ -22101,6 +22107,31 @@ mod tests {
         assert!(app.mcp().is_none());
         app.on_key(ctrl('s'));
         assert!(app.memory().is_none());
+    }
+
+    /// A click works out the keys that reach its row from the cursor, which
+    /// is past the end of a list the backend shortened since: counted from
+    /// there, every key after the first moved it again.
+    #[test]
+    fn a_click_on_a_shortened_mcp_list_lands_on_the_row_clicked() {
+        use niobe_core::event::McpStatus;
+        let mut app = offering(&["mcp"]);
+        let servers = |count: usize| Event::McpServers {
+            servers: (0..count)
+                .map(|at| mcp_server(&format!("srv{at}"), McpStatus::Connected, &[]))
+                .collect(),
+        };
+        app.apply(&servers(5));
+        app.on_key(key(KeyCode::F(7)));
+        app.on_key(key(KeyCode::End));
+        app.apply(&servers(3));
+
+        app.click_row(Overlay::Mcp, 2);
+
+        assert_eq!(
+            app.mcp().and_then(|view| view.detail.clone()),
+            Some(("srv2".to_owned(), 0))
+        );
     }
 
     #[test]
