@@ -4980,15 +4980,24 @@ fn background_ended(command: &str, status: Option<&str>, summary: Option<&str>) 
         .and_then(exit_code_in)
         .map(|code| format!(" with exit code {code}"))
         .unwrap_or_default();
+    Event::Notice {
+        message: format!(
+            "the background command {} {how}{code}",
+            quoted_command(command)
+        ),
+    }
+}
+
+/// A shell command as a notice names it: its first line in backticks, and an
+/// ellipsis after it where more lines follow.
+pub(crate) fn quoted_command(command: &str) -> String {
     let mut lines = command.lines();
     let first = lines.next().unwrap_or_default().trim();
     let more = match lines.next() {
         Some(_) => " …",
         None => "",
     };
-    Event::Notice {
-        message: format!("the background command `{first}{more}` {how}{code}"),
-    }
+    format!("`{first}{more}`")
 }
 
 /// How the CLI opens its summary of a background command that ended of

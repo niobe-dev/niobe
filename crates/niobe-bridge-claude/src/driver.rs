@@ -60,7 +60,7 @@ use niobe_core::image::Image;
 use crate::base64;
 use crate::spilled;
 use crate::tap::Tap;
-use crate::translate::{ModelAnswer, Spent, Translator};
+use crate::translate::{ModelAnswer, Spent, Translator, quoted_command};
 
 /// The binary this bridge drives, as looked up on `PATH`.
 pub const BINARY: &str = "claude";
@@ -727,8 +727,14 @@ pub struct Session {
     /// stopped between turns takes those running in the background with it.
     running_agents: BTreeSet<AgentId>,
     /// The calls whose shell commands the CLI moved to the background and
-    /// has not said have ended. They run in its process group too.
-    background_commands: BTreeSet<ToolCallId>,
+    /// has not said have ended, each with the command it ran where its end
+    /// said. They run in its process group too, and a CLI stopped between
+    /// turns takes them with it.
+    background_commands: BTreeMap<ToolCallId, Option<String>>,
+    /// The last call to end that ran a shell command, and that command: the
+    /// translator says a command moved to the background right after the
+    /// end of the call that started it, which is the only event naming it.
+    last_command: Option<(ToolCallId, String)>,
 }
 
 impl Session {
@@ -1031,7 +1037,8 @@ impl Session {
             model_answers,
             turn_open: false,
             running_agents: BTreeSet::new(),
-            background_commands: BTreeSet::new(),
+            background_commands: BTreeMap::new(),
+            last_command: None,
             stopped_between_turns: false,
         };
         // The writer has only just been started, so the queue cannot be
@@ -1439,14 +1446,14 @@ impl Session {
                 }
                 Err(TryRecvError::Empty) => {
                     if let Some(ended) = self.left_holding_output() {
-                        events.extend(self.agents_cancelled());
+                        events.extend(self.background_work_ended());
                         events.push(ended);
                     }
                     return events;
                 }
                 Err(TryRecvError::Disconnected) => {
                     if let Some(ended) = self.ended() {
-                        events.extend(self.agents_cancelled());
+                        events.extend(self.background_work_ended());
                         events.push(ended);
                     }
                     return events;
@@ -1521,8 +1528,20 @@ impl Session {
         if let Event::AgentExit { id, .. } = event {
             self.running_agents.remove(id);
         }
+        if let Event::ToolCallEnd {
+            id,
+            command: Some(command),
+            ..
+        } = event
+        {
+            self.last_command = Some((id.clone(), command.clone()));
+        }
         if let Event::BackgroundCommandStarted { id } = event {
-            self.background_commands.insert(id.clone());
+            let command = self
+                .last_command
+                .take()
+                .and_then(|(ended, command)| (ended == *id).then_some(command));
+            self.background_commands.insert(id.clone(), command);
         }
         if let Event::BackgroundCommandEnded { id } = event {
             self.background_commands.remove(id);
@@ -1530,21 +1549,34 @@ impl Session {
     }
 
     /// An exit, cancelled, for each sub-agent still running when the CLI was
-    /// stopped between turns, where the session carries on: the agents ran
-    /// in the CLI's process group, which has ended, and nothing will report
-    /// their end. Nothing where the session ends instead, since its end says
-    /// for itself that nothing it ran is running any more.
-    fn agents_cancelled(&mut self) -> Vec<Event> {
+    /// stopped between turns, where the session carries on, and an end for
+    /// each shell command it had in the background, after a notice that it
+    /// was stopped with the CLI: the agents and the commands ran in the
+    /// CLI's process group, which has ended, and nothing will report their
+    /// end. A command's end is told no exit code, since none was read.
+    /// Nothing where the session ends instead, since its end says for itself
+    /// that nothing it ran is running any more.
+    fn background_work_ended(&mut self) -> Vec<Event> {
         if !self.stopped_between_turns {
             return Vec::new();
         }
-        std::mem::take(&mut self.running_agents)
+        let agents = std::mem::take(&mut self.running_agents)
             .into_iter()
             .map(|id| Event::AgentExit {
                 id,
                 outcome: AgentOutcome::Cancelled,
-            })
-            .collect()
+            });
+        let commands = std::mem::take(&mut self.background_commands)
+            .into_iter()
+            .flat_map(|(id, command)| {
+                [
+                    Event::Notice {
+                        message: stopped_with_the_cli(command.as_deref()),
+                    },
+                    Event::BackgroundCommandEnded { id },
+                ]
+            });
+        agents.chain(commands).collect()
     }
 
     /// What to start a CLI with to carry the session on, where the one this
@@ -1627,8 +1659,9 @@ impl Session {
         // Stopped from outside with nothing under way: what the conversation
         // holds is in the CLI's transcript, and a CLI started on it again
         // carries the conversation on, so the session is not over. The
-        // background agents that ended with it are reported cancelled
-        // ahead of this end; see [`Session::agents_cancelled`].
+        // background agents that ended with it are reported cancelled, and
+        // its background commands ended, ahead of this end; see
+        // [`Session::background_work_ended`].
         if self.next.carry_on
             && !self.turn_open
             && unanswered.is_empty()
@@ -2242,6 +2275,19 @@ fn ended_because(status: std::process::ExitStatus, said: &str) -> String {
         );
     }
     message
+}
+
+/// The notice for a background command that ended with the CLI's process
+/// group, named as the CLI's own end of one is, where its call said what it
+/// ran.
+fn stopped_with_the_cli(command: Option<&str>) -> String {
+    match command {
+        Some(command) => format!(
+            "the background command {} was stopped with the `claude` CLI",
+            quoted_command(command)
+        ),
+        None => "a background command was stopped with the `claude` CLI".to_owned(),
+    }
 }
 
 /// What to say about a CLI stopped between turns, `how` it was, in a session
@@ -4650,6 +4696,43 @@ read -r rest
     /// runs, in the shapes `background-commands.jsonl` recorded from 2.1.309.
     #[cfg(unix)]
     const BACKGROUND_COMMAND: &str = r#"printf '%s\n' '{"type":"system","subtype":"init","session_id":"s-9","model":"claude-sonnet-5","permissionMode":"default"}' '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_cmd","name":"Bash","input":{"command":"cargo test","run_in_background":true}}]}}' '{"type":"user","message":{"content":[{"tool_use_id":"toolu_cmd","type":"tool_result","is_error":false,"content":"Command running in background with ID: b1. You will be notified when it completes."}]},"tool_use_result":{"stdout":"","stderr":"","interrupted":false,"isImage":false,"noOutputExpected":false,"backgroundTaskId":"b1"}}' '{"type":"result","subtype":"success","is_error":false,"session_id":"s-9"}'"#;
+
+    /// A shell command the CLI moved to the background ran in the CLI's
+    /// process group, which ends with it: no word of the command's end will
+    /// come, so the session is told it was stopped with the CLI, and that it
+    /// has ended, before it is told the CLI carries on. Told nothing, it
+    /// would show the command running for good.
+    #[cfg(unix)]
+    #[test]
+    fn a_cli_stopped_between_turns_ends_the_background_commands_it_left_running() {
+        let (mut session, mut events, _dir) = carried_on(
+            &format!("read -r initialize\nread -r turn\n{BACKGROUND_COMMAND}\nkill -TERM $$\n"),
+            true,
+        );
+        events.extend(drained_to_the_end(&mut session));
+
+        let ended = events
+            .iter()
+            .position(|event| {
+                matches!(event, Event::BackgroundCommandEnded { id } if id.as_str() == "toolu_cmd")
+            })
+            .expect("the command's end is reported");
+        assert!(
+            matches!(&events[ended - 1], Event::Notice { message }
+                if message == "the background command `cargo test` was stopped with the \
+                               `claude` CLI"),
+            "{events:#?}"
+        );
+        assert!(
+            matches!(events.last(), Some(Event::Notice { message })
+                if message.starts_with("the `claude` CLI was stopped by SIGTERM while no turn was running.")),
+            "{events:#?}"
+        );
+        assert_eq!(ended, events.len() - 2, "{events:#?}");
+        let state = niobe_core::session::SessionState::replay(&events);
+        assert!(state.background_commands().is_empty(), "{events:#?}");
+        assert!(session.next().is_some());
+    }
 
     /// A CLI that leaves of itself, with an exit status of 0, while work it
     /// ran in the background is still going has not ended cleanly: that work
