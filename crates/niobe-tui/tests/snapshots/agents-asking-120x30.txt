@@ -11,7 +11,7 @@
  ┃                                                                           ┃ ┌────────────── Changes ───────────────┐
  ┃ ! denied  deep1 › Bash · curl -sI localhost:8080                          ┃ │ ⎇ main ↑3                            █
  ┃                                                                           ┃ │ ▾ Working tree  +≥977 −≥259          █
- ┃   ┌─ ? deep2 asks ─────────────────────────────────────── blocks turn 2 ┐ ┃ │   ▾ catalog/                         █
+ ┃   ┌─ ? deep2 asks ─────────────────────────────────────── blocks turn 1 ┐ ┃ │   ▾ catalog/                         █
  ┃   │ to run Bash                                                         │ ┃ │     ▾ cache/                         █
  ┃   │ python3 probe.py                                                    │ █ │       lru.ts                 +31  −9 █
  ┃   │                                                                     │ █ │       index.ts               +12  −0 █

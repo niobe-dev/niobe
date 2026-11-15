@@ -367,9 +367,9 @@ pub struct Ask {
     /// tool's name: it is what tells a call that looks routine from the
     /// reason it was stopped on.
     pub reason: Option<String>,
-    /// The turn the call belongs to, counted in prompts sent this session,
-    /// which is what the question says it is blocking. Zero where the session
-    /// has no prompt on record, as one attached to a turn already running.
+    /// The turn the call belongs to, numbered as the fold numbers turns,
+    /// which is what the question says it is blocking. Zero where the fold
+    /// saw no turn begin, as one attached to a turn already running.
     pub turn: u64,
     /// The sub-agent whose call this is, or `None` for the session's own.
     /// Who asked is said on the question and nowhere in the answer: a
@@ -3585,7 +3585,14 @@ impl App {
                     target: target.clone(),
                     proposed: proposal.clone().map(Proposed::new),
                     reason: reason.clone(),
-                    turn: self.session.user_messages(),
+                    // Numbered by the fold, as every turn on screen is; a
+                    // turn it never saw begin has no number to give.
+                    turn: match self.session.turn_running() {
+                        true => u64::try_from(self.session.turns().len())
+                            .unwrap_or(u64::MAX)
+                            .saturating_add(1),
+                        false => 0,
+                    },
                     agent: agent.clone(),
                 });
             }
@@ -14658,11 +14665,28 @@ mod tests {
         assert_eq!(app.asks_waiting(), 0);
     }
 
+    /// The turn is numbered as every other turn number on screen is, by the
+    /// fold: a prompt sent while a turn runs joins it, and a turn the backend
+    /// starts of itself is a turn though no prompt opened it.
     #[test]
     fn a_question_names_the_turn_it_is_blocking() {
-        let mut app = sent(sent(app().attached(), "first"), "second");
-        app.apply(&prompt(Some("rm -rf build")));
-        assert_eq!(app.asking().map(|ask| ask.turn), Some(2));
+        let mut first = sent(app().attached(), "first");
+        first.apply(&Event::TurnEnded);
+        let mut second = sent(first, "second");
+        second.apply(&prompt(Some("rm -rf build")));
+        assert_eq!(second.asking().map(|ask| ask.turn), Some(2));
+
+        let mut queued = sent(sent(app().attached(), "first"), "and also");
+        queued.apply(&prompt(Some("rm -rf build")));
+        assert_eq!(queued.asking().map(|ask| ask.turn), Some(1));
+
+        let mut own = sent(app().attached(), "go");
+        own.apply(&Event::TurnEnded);
+        own.apply(&Event::AssistantDelta {
+            text: "The background command finished".to_owned(),
+        });
+        own.apply(&prompt(Some("rm -rf build")));
+        assert_eq!(own.asking().map(|ask| ask.turn), Some(2));
     }
 
     /// What the operator sees as one character can be several code points: a
