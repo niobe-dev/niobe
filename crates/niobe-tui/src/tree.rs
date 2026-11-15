@@ -140,8 +140,12 @@ impl<'a> Built<'a> {
     /// Hangs the `at`th file, at `path`, under its directories.
     fn place(&mut self, at: usize, path: &'a str) {
         let mut parent = ROOT;
+        // git lists a repository inside the working tree that it does not
+        // track as its directory, slash and all: one entry, named by itself,
+        // and no directory holding a file with no name.
+        let entry = path.strip_suffix('/').unwrap_or(path);
         if !path.contains(" => ")
-            && let Some((dirs, _)) = path.rsplit_once('/')
+            && let Some((dirs, _)) = entry.rsplit_once('/')
         {
             for name in dirs.split('/') {
                 parent = self.dir(parent, name);
@@ -336,6 +340,17 @@ mod tests {
                 "    app.rs",
                 "AGENTS.md",
             ]
+        );
+    }
+
+    /// git lists an untracked repository inside the working tree as its
+    /// directory, with the slash after it: one row, by that name.
+    #[test]
+    fn a_directory_git_lists_whole_is_a_row_of_its_own_name() {
+        let files = [file("nested/"), file("src/vendored/"), file("src/lib.rs")];
+        assert_eq!(
+            unfolded(&files),
+            ["src/", "  vendored/", "  lib.rs", "nested/"]
         );
     }
 
