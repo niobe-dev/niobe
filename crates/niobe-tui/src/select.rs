@@ -86,21 +86,24 @@ impl Selection {
         start.line..=end.line
     }
 
-    /// What is covered, as text: `line_at` gives each transcript line as it
-    /// was drawn.
+    /// What is covered, as text: `line_at` gives each transcript line as a
+    /// copy reads it — see [`CopiedLine`].
     ///
     /// Each line's trailing blanks are dropped, and the indent the lines
     /// share is taken off them all: the transcript draws a gutter before every
     /// line of a message, and copied text is wanted without it. A first line
     /// that starts part way along has no indent of its own to share.
-    pub(crate) fn text(&self, mut line_at: impl FnMut(usize) -> Option<String>) -> String {
+    pub(crate) fn text<L: Into<CopiedLine>>(
+        &self,
+        mut line_at: impl FnMut(usize) -> Option<L>,
+    ) -> String {
         let (start, _) = self.ends();
         let pieces: Vec<String> = self
             .lines()
             .filter_map(|line| {
-                let drawn = line_at(line)?;
+                let copied = line_at(line)?.into();
                 let (from, to) = self.columns_on(line)?;
-                Some(covered(drawn, from, to))
+                Some(copied.covered(from, to))
             })
             .collect();
         let shares_indent =
@@ -121,6 +124,67 @@ impl Selection {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+}
+
+/// A transcript line as a copy reads it, before a selection takes the cells
+/// it covers.
+///
+/// Most lines are read in the cells they are drawn in. A row of a prompt's
+/// bubble a selection takes only some cells of is drawn behind cells that
+/// set the bubble against the right edge, which are drawing and not words:
+/// it is kept as drawn, so the selection's columns land on the cells the
+/// operator marked, and those cells are read as the gutter every other
+/// copied line is drawn behind once the selection has taken its part.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CopiedLine {
+    text: String,
+    /// The cells before the words that are drawing, and the blanks a copy
+    /// reads them as; `None` where every cell is read as drawn.
+    drawing: Option<(usize, usize)>,
+}
+
+impl CopiedLine {
+    /// `text`, as drawn, whose first `drawn` cells are drawing before its
+    /// words, read as `read` blanks.
+    pub(crate) fn behind(text: String, drawn: usize, read: usize) -> Self {
+        Self {
+            text,
+            drawing: Some((drawn, read)),
+        }
+    }
+
+    /// The whole line, as a copy of all of it reads: as drawn, or its
+    /// drawing read as the gutter.
+    pub(crate) fn into_text(self) -> String {
+        match self.drawing {
+            None => self.text,
+            Some(_) => self.covered(0, usize::MAX),
+        }
+    }
+
+    /// What the cells from `from` up to `to` read as, without trailing
+    /// blanks: the drawing before the words read as the part of the gutter
+    /// those cells reach back into, and nothing where they hold no words.
+    fn covered(self, from: usize, to: usize) -> String {
+        let Some((drawn, read)) = self.drawing.filter(|(drawn, _)| from < *drawn) else {
+            return covered(self.text, from, to);
+        };
+        let words = covered(self.text, drawn, to);
+        match words.is_empty() {
+            true => words,
+            false => format!("{}{words}", " ".repeat(read.saturating_sub(from))),
+        }
+    }
+}
+
+impl From<String> for CopiedLine {
+    /// `text`, read in the cells it is drawn in.
+    fn from(text: String) -> Self {
+        Self {
+            text,
+            drawing: None,
+        }
     }
 }
 
@@ -526,6 +590,26 @@ mod tests {
         let up = Selection::new(at(1, 5), at(0, 6));
         assert_eq!(down.text(drawn(&lines)), "two three\nfour");
         assert_eq!(up.text(drawn(&lines)), "two three\nfour");
+    }
+
+    /// Ten cells of drawing before the words, read as a gutter of two.
+    #[test]
+    fn a_rows_drawing_reads_as_the_part_of_the_gutter_a_cut_reaches_back_into() {
+        let row = |from, to| {
+            CopiedLine::behind(format!("{}words 漢字  ", " ".repeat(10)), 10, 2).covered(from, to)
+        };
+        assert_eq!(row(0, usize::MAX), "  words 漢字");
+        assert_eq!(row(1, usize::MAX), " words 漢字");
+        assert_eq!(row(5, usize::MAX), "words 漢字");
+        assert_eq!(row(12, usize::MAX), "rds 漢字");
+        assert_eq!(row(0, 8), "", "a cut ending in the drawing takes no words");
+        assert_eq!(row(0, 13), "  wor");
+        assert_eq!(row(0, 17), "  words 漢", "a wide character in either cell");
+        assert_eq!(
+            CopiedLine::behind(" ".repeat(10), 10, 2).into_text(),
+            "",
+            "a row of nothing but drawing"
+        );
     }
 
     #[test]

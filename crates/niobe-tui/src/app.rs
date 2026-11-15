@@ -6233,7 +6233,14 @@ impl App {
             return;
         }
         let mut copied = self.drawn.copied_lines_from(0, |_| false);
-        let text: Vec<String> = (0..lines).filter_map(|_| copied.next().flatten()).collect();
+        let text: Vec<String> = (0..lines)
+            .filter_map(|_| {
+                copied
+                    .next()
+                    .flatten()
+                    .map(crate::select::CopiedLine::into_text)
+            })
+            .collect();
         self.handoffs
             .push(crate::desktop::Handoff::Copy(text.join("\n")));
     }
@@ -8982,7 +8989,7 @@ impl App {
     fn selected_text(&self, selection: crate::select::Selection) -> String {
         let covered = selection.lines();
         let (first, last) = (*covered.start(), *covered.end());
-        let mut lines: Vec<Option<String>> = self
+        let mut lines: Vec<Option<crate::select::CopiedLine>> = self
             .drawn
             .copied_lines_from(first, |line| line == first || line == last)
             .take(covered.count())
@@ -22848,6 +22855,7 @@ mod tests {
                     .copied_lines_from(line, |_| false)
                     .next()
                     .flatten()
+                    .map(crate::select::CopiedLine::into_text)
             })
             .collect();
 

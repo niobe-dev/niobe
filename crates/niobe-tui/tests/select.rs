@@ -866,3 +866,122 @@ fn a_click_on_a_link_a_calls_row_cut_short_opens_the_call_and_not_the_part_drawn
     let detail = app.detail().expect("the click opened the call on its row");
     assert!(detail.text().contains(&link), "{frame}");
 }
+
+/// The running session after the operator sent `prompt`, drawn as a bubble
+/// against the right edge, and the frame it is drawn in.
+fn prompted(prompt: &str) -> (App, String) {
+    let mut app = running_session();
+    app.apply(&Event::UserMessage {
+        text: prompt.to_owned(),
+    });
+    let frame = screen(&mut app, WIDTH, HEIGHT);
+    (app, frame)
+}
+
+/// The cell the transcript's first column is drawn in on `frame`, where the
+/// session's last reply sets its glyph.
+fn left_edge(frame: &str) -> u16 {
+    cell_of(frame, "◆ Etags cached").0
+}
+
+/// `cell` moved `columns` to the right.
+fn right_of((column, row): (u16, u16), columns: u16) -> (u16, u16) {
+    (column + columns, row)
+}
+
+/// A prompt's rows are set against the right edge by blank cells that are
+/// drawing, not words: a drag that ends on the last row reads that row as
+/// the rows above it read, behind the gutter every copied line loses.
+#[test]
+fn a_drag_over_a_prompt_copies_its_lines_without_the_cells_that_set_it_right() {
+    let (mut app, frame) = prompted("alpha one\nbravo two\ncharlie three");
+
+    drag(
+        &mut app,
+        cell_of(&frame, "alpha one"),
+        right_of(cell_of(&frame, "charlie three"), 12),
+    );
+
+    assert_eq!(
+        app.take_handoffs(),
+        vec![Handoff::Copy(
+            "alpha one\nbravo two\ncharlie three".to_owned()
+        )]
+    );
+}
+
+#[test]
+fn a_drag_from_the_left_edge_over_a_prompt_copies_its_lines_alone() {
+    let (mut app, frame) = prompted("alpha one\nbravo two\ncharlie three");
+    let (_, first) = cell_of(&frame, "alpha one");
+
+    drag(
+        &mut app,
+        (left_edge(&frame), first),
+        right_of(cell_of(&frame, "charlie three"), 12),
+    );
+
+    assert_eq!(
+        app.take_handoffs(),
+        vec![Handoff::Copy(
+            "alpha one\nbravo two\ncharlie three".to_owned()
+        )]
+    );
+}
+
+#[test]
+fn a_drag_ending_part_way_through_a_prompts_word_copies_up_to_where_it_ended() {
+    let (mut app, frame) = prompted("alpha one\nbravo two\ncharlie three");
+
+    drag(
+        &mut app,
+        cell_of(&frame, "alpha one"),
+        right_of(cell_of(&frame, "charlie three"), 3),
+    );
+
+    assert_eq!(
+        app.take_handoffs(),
+        vec![Handoff::Copy("alpha one\nbravo two\nchar".to_owned())]
+    );
+}
+
+#[test]
+fn a_drag_over_a_prompt_of_one_row_copies_its_words() {
+    let (mut app, frame) = prompted("just the one row");
+
+    drag(
+        &mut app,
+        (left_edge(&frame), cell_of(&frame, "just the one row").1),
+        right_of(cell_of(&frame, "just the one row"), 15),
+    );
+
+    assert_eq!(
+        app.take_handoffs(),
+        vec![Handoff::Copy("just the one row".to_owned())]
+    );
+}
+
+/// A drag from a reply's words into the prompt under it copies both, each
+/// line behind the one gutter they share.
+#[test]
+fn a_drag_from_a_reply_into_the_prompt_under_it_copies_both_without_the_bubbles_cells() {
+    let mut app = replied("The config lives in niobe.toml.");
+    app.apply(&Event::UserMessage {
+        text: "alpha one\nbravo two".to_owned(),
+    });
+    let frame = screen(&mut app, WIDTH, HEIGHT);
+    let (reply, row) = cell_of(&frame, "The config lives");
+
+    drag(
+        &mut app,
+        (reply - 2, row),
+        right_of(cell_of(&frame, "bravo two"), 4),
+    );
+
+    assert_eq!(
+        app.take_handoffs(),
+        vec![Handoff::Copy(
+            "The config lives in niobe.toml.\n\nalpha one\nbravo".to_owned()
+        )]
+    );
+}

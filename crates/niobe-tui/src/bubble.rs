@@ -164,6 +164,17 @@ pub(crate) fn words<'a>(line: &'a Line<'a>) -> &'a [Span<'a>] {
     }
 }
 
+/// The cells of `line`, one of those [`lines`] draws, before its
+/// [`words`]: the drawing that sets the bubble against the right edge.
+pub(crate) fn words_at(line: &Line<'_>) -> usize {
+    let before = line.spans.len().saturating_sub(words(line).len());
+    line.spans
+        .iter()
+        .take(before)
+        .map(|span| text::width(&span.content))
+        .sum()
+}
+
 /// How many cells `line` is drawn across.
 fn cells(line: &Line<'_>) -> usize {
     line.spans

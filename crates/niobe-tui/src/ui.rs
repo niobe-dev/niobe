@@ -2889,16 +2889,19 @@ impl DrawnEntries {
     /// leaves out: the glyph in a reply's gutter read as the blank it stands
     /// in, so that the gutter the reply's lines share is
     /// taken off them all; a bubble's top and bottom as no line at all, being
-    /// drawing and not words; and a bubble's rows, but for those `cut` says a
-    /// copy takes only some cells of, as their words behind the gutter a
-    /// reply's are drawn behind, rather than behind the cells that set the
-    /// bubble against the right edge, which a cut row keeps so that its
-    /// cells are the ones drawn.
+    /// drawing and not words; and a bubble's rows as their words behind the
+    /// gutter a reply's are drawn behind, rather than behind the cells that
+    /// set the bubble against the right edge — but for those `cut` says a
+    /// copy takes only some cells of, which keep their cells so that a
+    /// selection's columns land on the ones drawn, and say which are the
+    /// drawing to read as the gutter: see [`crate::select::CopiedLine`].
     pub(crate) fn copied_lines_from<'a>(
         &'a self,
         start: usize,
         cut: impl Fn(usize) -> bool + 'a,
-    ) -> impl Iterator<Item = Option<String>> + 'a {
+    ) -> impl Iterator<Item = Option<crate::select::CopiedLine>> + 'a {
+        use crate::select::CopiedLine;
+
         self.drawn
             .iter()
             .flat_map(|drawn| {
@@ -2914,16 +2917,20 @@ impl DrawnEntries {
             .enumerate()
             .skip(start)
             .map(move |(number, (read, line))| match read {
-                Copied::AsShown => Some(crate::select::shown(line)),
-                Copied::Marked => Some(unmarked(crate::select::shown(line))),
+                Copied::AsShown => Some(crate::select::shown(line).into()),
+                Copied::Marked => Some(unmarked(crate::select::shown(line)).into()),
                 Copied::InBubble if crate::bubble::is_end(line) => None,
-                Copied::InBubble if cut(number) => Some(crate::select::shown(line)),
+                Copied::InBubble if cut(number) => Some(CopiedLine::behind(
+                    crate::select::shown(line),
+                    crate::bubble::words_at(line),
+                    GUTTER,
+                )),
                 Copied::InBubble => {
                     let words = crate::select::shown_spans(crate::bubble::words(line));
-                    Some(match words.trim_end() {
+                    Some(CopiedLine::from(match words.trim_end() {
                         "" => String::new(),
                         words => format!("{}{words}", " ".repeat(GUTTER)),
-                    })
+                    }))
                 }
             })
     }
