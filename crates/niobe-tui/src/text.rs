@@ -576,16 +576,48 @@ pub fn wrap_words_exact_rows(text: &str, columns: usize) -> usize {
     if columns == 0 || text.is_empty() {
         return 0;
     }
+    if fits_one_row(text, columns) {
+        return 1;
+    }
     controls_shown_in_rows(text)
         .split('\n')
         .map(|line| match line.len() > WORD_BREAK_BYTES {
             true => wrap_exact_rows(line, columns),
+            false if fits_one_row(line, columns) => 1,
             false => {
                 let line = tabs_expanded(line);
                 row_pieces(&line, columns, usize::MAX).len().max(1)
             }
         })
         .fold(0, usize::saturating_add)
+}
+
+/// Whether `line` is sure to be one row of `columns` as [`wrap_words_exact`]
+/// lays it out, read without breaking it into graphemes or showing what is
+/// hidden in it. A proposed write of millions of short lines is counted a
+/// line at a time, and walking each by grapheme took seconds to lay the
+/// question out.
+///
+/// Printable ASCII is a cell a byte. Anything else holding no tab to expand
+/// or line to break is one row where it has no more than half `columns`
+/// characters: showing what is hidden puts one character in place of one,
+/// and no grapheme is drawn wider than two cells for each character in it —
+/// an emoji's selector widens the one before it to two.
+fn fits_one_row(line: &str, columns: usize) -> bool {
+    if line.len() > columns.saturating_mul(2) {
+        return false;
+    }
+    if line.bytes().all(|b| matches!(b, b' '..=b'~')) {
+        return line.len() <= columns;
+    }
+    let mut characters = 0usize;
+    for c in line.chars() {
+        if matches!(c, '\t' | '\n') {
+            return false;
+        }
+        characters = characters.saturating_add(1);
+    }
+    characters.saturating_mul(2) <= columns
 }
 
 /// The longest line, in bytes, that [`wrap_words_exact`] breaks between
@@ -1675,12 +1707,29 @@ mod tests {
         "e\u{301}e\u{301}e\u{301}e\u{301}e\u{301}",
         "ascii line\nлиния\n\tтаб\n",
         "echo 中\n\u{200d}中 rm -rf ~",
+        "   ",
+        "ab   ",
+        "  a b",
+        "abc   d",
+        "abcdefg",
+        "a b c d e f g h i j k",
+        "x/y/z/",
+        "a\tb",
+        "日本語",
+        "❤️❤️❤️",
+        "#️⃣ key",
+        "ｶﾞｷﾞｸﾞ",
+        "a\x1bb\u{200b}c\r",
+        "\u{fe0f}\u{200d}x\u{e0041}",
+        "🇺🇦🏴\u{e0067}\u{e0062}\u{e0065}\u{e006e}\u{e0067}\u{e007f}",
     ];
 
+    /// Wide enough that most of the texts fit a row, which is counted
+    /// without laying the row out, and must agree with the layout anyway.
     #[test]
     fn a_word_wrap_counts_and_lays_out_the_rows_it_makes() {
         for text in AWKWARD {
-            for columns in [1, 2, 3, 4, 7, 11] {
+            for columns in [1, 2, 3, 4, 6, 7, 11, 12, 40] {
                 let whole = wrap_words_exact(text, columns);
                 assert_eq!(
                     wrap_words_exact_rows(text, columns),

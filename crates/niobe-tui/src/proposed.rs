@@ -37,6 +37,9 @@ pub struct Proposed {
     /// The rows the call's subject wraps to in all, and the width they were
     /// counted at: see [`Proposed::subject_rows`].
     subject_count: std::cell::Cell<Option<(usize, usize)>>,
+    /// The rows the change wraps to in all, at the width they were counted
+    /// at: counting them reads every line of it.
+    change_count: hunks::RowCount,
 }
 
 /// What a question's call is drawn as, with what the rows leave out.
@@ -104,6 +107,7 @@ impl Proposed {
             lines,
             others: std::cell::OnceCell::new(),
             subject_count: std::cell::Cell::new(None),
+            change_count: hunks::RowCount::default(),
         }
     }
 
@@ -228,7 +232,7 @@ impl Proposed {
         );
         if let Some(lines) = self.lines.as_deref().filter(|lines| !lines.is_empty()) {
             rows.push(Line::from(""));
-            let (change, beyond) = hunks::proposed(lines, width, open, theme);
+            let (change, beyond) = hunks::proposed(lines, width, open, theme, &self.change_count);
             if beyond > 0 {
                 markers.push((rows.len() + change.len() - 1, 1, beyond));
             }

@@ -742,8 +742,9 @@ const LAYOUT_BUDGET: Duration = Duration::from_millis(250);
 
 /// A permission question is drawn with every tick while it waits, and every
 /// part of it — the tool's name, the reason, the target, the arguments by
-/// key or as one string, a command, an edit — may hold a value of any size
-/// the stream carried. The frame has to cost the rows it shows.
+/// key or as one string, a command, an edit, a write or an edit of millions
+/// of short lines, in ASCII or not — may hold a value of any size the stream
+/// carried. The frame has to cost the rows it shows.
 #[test]
 #[cfg_attr(debug_assertions, ignore = "a frame is timed in an optimised build")]
 fn a_question_holding_a_huge_value_redraws_inside_the_write_budget() {
@@ -752,6 +753,7 @@ fn a_question_holding_a_huge_value_redraws_inside_the_write_budget() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let huge = "word ".repeat(HUGE_VALUE_BYTES / 5);
     let lines = "-- pad\n".repeat(HUGE_VALUE_BYTES / 8);
+    let script = "-- рад\n".repeat(HUGE_VALUE_BYTES / 10);
     let asks: Vec<(&str, Event)> = vec![
         (
             "an argument by key",
@@ -830,6 +832,58 @@ fn a_question_holding_a_huge_value_redraws_inside_the_write_budget() {
                         path: "a.rs".to_owned(),
                         old: "x".to_owned(),
                         new: huge.clone(),
+                        every: false,
+                    },
+                    ["file_path", "old_string", "new_string"],
+                )),
+            ),
+        ),
+        (
+            "a write of many lines",
+            ask(
+                "Write",
+                serde_json::json!({ "file_path": "a.sql", "content": lines }),
+                Some("a.sql"),
+                None,
+                Some(niobe_core::Proposal::new(
+                    niobe_core::Action::Write {
+                        path: "a.sql".to_owned(),
+                        content: lines.clone(),
+                        existed: Some(false),
+                    },
+                    ["file_path", "content"],
+                )),
+            ),
+        ),
+        (
+            "a write of many lines in another script",
+            ask(
+                "Write",
+                serde_json::json!({ "file_path": "a.sql", "content": script }),
+                Some("a.sql"),
+                None,
+                Some(niobe_core::Proposal::new(
+                    niobe_core::Action::Write {
+                        path: "a.sql".to_owned(),
+                        content: script.clone(),
+                        existed: Some(false),
+                    },
+                    ["file_path", "content"],
+                )),
+            ),
+        ),
+        (
+            "an edit of many lines",
+            ask(
+                "Edit",
+                serde_json::json!({ "file_path": "a.sql", "old_string": "x", "new_string": format!("x\n{lines}") }),
+                Some("a.sql"),
+                None,
+                Some(niobe_core::Proposal::new(
+                    niobe_core::Action::Replace {
+                        path: "a.sql".to_owned(),
+                        old: "x".to_owned(),
+                        new: format!("x\n{lines}"),
                         every: false,
                     },
                     ["file_path", "old_string", "new_string"],

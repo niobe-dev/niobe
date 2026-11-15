@@ -188,11 +188,15 @@ pub(crate) fn lines(
 ///
 /// With the rows, how many lines of the change the marker stands for and are
 /// not drawn: none where the change is whole or open.
+///
+/// `counted` is where the rows the change wraps to in all are kept for the
+/// width they were counted at, by whoever holds `lines`: see [`RowCount`].
 pub(crate) fn proposed(
     lines: &[DiffLine],
     width: usize,
     open: bool,
     theme: &Theme,
+    counted: &RowCount,
 ) -> (Vec<Line<'static>>, usize) {
     let mut rows = Vec::new();
     let mut dropped = false;
@@ -204,11 +208,15 @@ pub(crate) fn proposed(
         true => OPEN_ROWS,
         false => MAX_ROWS,
     };
+    let known = counted.at(width);
     let mut uncounted = 0;
     for (line, keep) in lines.iter().zip(near_a_change(lines)) {
         if !keep {
             dropped = true;
             continue;
+        }
+        if rows.len() > ceiling && known.is_some() {
+            break;
         }
         if rows.len() > ceiling {
             // Counted as it would be laid out: the row that marks the lines
@@ -230,7 +238,11 @@ pub(crate) fn proposed(
         uncounted += all.saturating_sub(laid.len());
         rows.extend(laid);
     }
-    let total = rows.len() + uncounted;
+    let total = known.unwrap_or_else(|| {
+        let total = rows.len() + uncounted;
+        counted.keep(width, total);
+        total
+    });
     if open && total > OPEN_ROWS + 1 {
         let beyond = total - OPEN_ROWS;
         rows.truncate(OPEN_ROWS);
@@ -247,6 +259,31 @@ pub(crate) fn proposed(
     rows.push(marker(beyond, open, width, theme));
     // What the marker stands for is not drawn only while the change is cut.
     (rows, if open { 0 } else { beyond })
+}
+
+/// The rows a proposed change wraps to in all, laid out whole, and the width
+/// they were counted at.
+///
+/// Counting them reads every line of the change, which can be millions, and
+/// the question is laid out again whenever Ctrl+T, the theme or the width
+/// changes. The count is the same cut or open — a row past the cut is
+/// counted as the layout would draw it — so it is kept for the width alone,
+/// and holds only for the lines it was counted from.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct RowCount(std::cell::Cell<Option<(usize, usize)>>);
+
+impl RowCount {
+    /// The rows counted at `width`, where they were last counted at it.
+    fn at(&self, width: usize) -> Option<usize> {
+        self.0
+            .get()
+            .and_then(|(counted_at, rows)| (counted_at == width).then_some(rows))
+    }
+
+    /// Keeps `rows` as the count at `width`, in place of any other.
+    fn keep(&self, width: usize, rows: usize) {
+        self.0.set(Some((width, rows)));
+    }
 }
 
 /// How many rows of a proposed change are laid out with the diffs open: more
@@ -757,14 +794,14 @@ mod tests {
                 .collect()
         };
 
-        let (cut, beyond) = proposed(&line, 22, false, &CLASSIC);
+        let (cut, beyond) = proposed(&line, 22, false, &CLASSIC, &RowCount::default());
         let cut = text(&cut);
         assert_eq!(cut.len(), MAX_ROWS + 1);
         assert_eq!(cut[1], format!("+ {}", "x".repeat(20)));
         assert_eq!(cut[MAX_ROWS].trim_end(), "… 16 more rows");
         assert_eq!(beyond, 16);
 
-        let (open, beyond) = proposed(&line, 22, true, &CLASSIC);
+        let (open, beyond) = proposed(&line, 22, true, &CLASSIC, &RowCount::default());
         let open = text(&open);
         assert_eq!(
             open.len(),
@@ -781,22 +818,45 @@ mod tests {
     #[test]
     fn lines_past_the_cut_count_every_row_they_wrap_to() {
         let wide = [added(&"x".repeat(700)), added(&"x".repeat(700))];
-        let (open, _) = proposed(&wide, 22, true, &CLASSIC);
+        let (open, _) = proposed(&wide, 22, true, &CLASSIC, &RowCount::default());
         assert_eq!(open.len(), 70 + 1, "every row of both lines and the marker");
 
-        let (_, beyond) = proposed(&wide, 22, false, &CLASSIC);
+        let (_, beyond) = proposed(&wide, 22, false, &CLASSIC, &RowCount::default());
         assert_eq!(beyond, 70 - MAX_ROWS);
 
         let mut apart = vec![added(&"x".repeat(700))];
         apart.extend((0..2 * CONTEXT_LINES + 1).map(|_| context("same")));
         apart.push(added("y"));
-        let (open, _) = proposed(&apart, 22, true, &CLASSIC);
-        let (_, beyond) = proposed(&apart, 22, false, &CLASSIC);
+        let (open, _) = proposed(&apart, 22, true, &CLASSIC, &RowCount::default());
+        let (_, beyond) = proposed(&apart, 22, false, &CLASSIC, &RowCount::default());
         assert_eq!(
             beyond,
             open.len() - 1 - MAX_ROWS,
             "the elided row is a row too"
         );
+    }
+
+    /// The rows a change wraps to are counted once for a width and kept:
+    /// every later layout at that width, cut or open, says what a layout
+    /// counting them afresh says, and one at another width counts again.
+    #[test]
+    fn the_rows_counted_once_for_a_width_are_the_rows_of_every_layout_at_it() {
+        let mut lines = vec![added(&"x".repeat(700))];
+        lines.extend((0..2 * CONTEXT_LINES + 1).map(|_| context("same")));
+        lines.extend((0..OPEN_ROWS + 500).map(|at| added(&"word ".repeat(at % 9 + 1))));
+        let kept = RowCount::default();
+        for (width, open) in [
+            (22, false),
+            (22, true),
+            (40, true),
+            (40, false),
+            (22, false),
+            (22, true),
+        ] {
+            let laid = proposed(&lines, width, open, &CLASSIC, &kept);
+            let afresh = proposed(&lines, width, open, &CLASSIC, &RowCount::default());
+            assert_eq!(laid, afresh, "{width} columns, open: {open}");
+        }
     }
 
     #[test]
