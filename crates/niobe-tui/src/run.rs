@@ -279,7 +279,19 @@ fn open(app: App, around: Around<'_>) -> io::Result<(Ended, App)> {
             // did the Ctrl+C or Ctrl+\ typed at the cooked terminal to give up
             // on the editor: it was the editor's interrupt, and quitting on it
             // would end a session the operator only meant to leave unedited.
+            //
+            // A hangup that came meanwhile is the session's end, as it is
+            // during a stop: the terminal stays handed back and the loop ends
+            // the session without drawing. Taken again, the modes put back
+            // first are refused by a terminal that has hung up, and the
+            // session would end as that error rather than as the terminal
+            // gone. Read with the same settling as after a stop, since the
+            // hangup the editor ended on can reach this process's handler a
+            // moment after the editor has been reaped.
             Hold::Retake => {
+                if !retakes(shutdown.requested_after_continue()) {
+                    return Ok(());
+                }
                 guard.resume()?;
                 shutdown.take_suspend();
                 shutdown.take_continued();
@@ -428,6 +440,14 @@ fn event_loop<B: Backend<Error = io::Error>>(
             run_commands(app, shell);
             fetch_images(app, images);
             let lent = hand_off(app, desktop, machine.suspend)?;
+            // A terminal that hung up while it was lent was left handed back,
+            // and is not drawn on: the session ends here.
+            if lent {
+                quit_on_signal(app, machine.shutdown, &mut ended);
+                if app.should_quit() {
+                    continue;
+                }
+            }
             send_produced(app, journal, backend, rules);
             keep_preferences(app, preferences);
             // An editor drew on the screen while it had the terminal, and a draw
@@ -867,6 +887,18 @@ fn run_commands(app: &mut App, shell: &mut dyn Shell) {
     // been started by the time it is stopped.
     for id in app.take_stops() {
         shell.stop(&id);
+    }
+}
+
+/// Whether the terminal is taken again once the program it was lent to has
+/// ended, by what a signal had asked of the session by then: not after a
+/// hangup, which says there is no terminal left to take. A request to stop is
+/// not one: the terminal is still there, an interrupt from its keyboard was
+/// the editor's, and the loop quits on a SIGTERM once the terminal is back.
+fn retakes(stop: Option<Stop>) -> bool {
+    match stop {
+        None | Some(Stop::Requested) => true,
+        Some(Stop::TerminalGone) => false,
     }
 }
 
@@ -1581,6 +1613,19 @@ mod tests {
         );
         assert!(!owed, "the draw pays what was owed");
         assert!(!whole_frame_owed(false, &mut owed));
+    }
+
+    #[test]
+    fn a_terminal_lent_to_an_editor_is_taken_again_unless_it_hung_up_meanwhile() {
+        assert!(retakes(None));
+        assert!(
+            retakes(Some(Stop::Requested)),
+            "a request to stop is quit on with the terminal taken back"
+        );
+        assert!(
+            !retakes(Some(Stop::TerminalGone)),
+            "a terminal that hung up was taken again, and refuses the modes put back"
+        );
     }
 
     #[test]

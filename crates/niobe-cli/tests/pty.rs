@@ -3055,6 +3055,79 @@ fn an_interrupt_typed_while_an_editor_has_the_terminal_does_not_end_the_session(
     assert!(status.success(), "the shell ended with {status}: {drawn}");
 }
 
+/// A hangup that arrives while an editor has the terminal says the terminal
+/// has gone, so the shell does not take it again once the editor ends: it
+/// ends the session as a terminal that went away. Taken again, the modes it
+/// puts back are refused by a terminal that has hung up — `EIO` on Linux —
+/// and the session ended as a failure.
+#[test]
+fn a_hangup_while_an_editor_has_the_terminal_ends_the_session_without_taking_it_again() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo = repo();
+    let home = stand_in(repo.path(), WRITES_DOWN_TURNS_CLAUDE);
+    let elsewhere = tempfile::tempdir().expect("a temporary directory can be created");
+    std::fs::write(repo.path().join("CLAUDE.md"), "@tools/notes.md\n")
+        .expect("the memory file is written");
+    std::fs::create_dir(repo.path().join("tools")).expect("a directory for the notes");
+    std::fs::write(repo.path().join("tools").join("notes.md"), "notes\n")
+        .expect("the imported file is written");
+    let editor = elsewhere.path().join("editor");
+    // Says it has the terminal, then waits until the test has hung up.
+    let waiting = repo.path().join("editor-waiting");
+    let go = repo.path().join("editor-go");
+    std::fs::write(
+        &editor,
+        format!(
+            "#!/bin/sh\n: > '{}'\nwhile [ ! -e '{}' ]; do sleep 0.05; done\nexit 0\n",
+            waiting.display(),
+            go.display()
+        ),
+    )
+    .expect("the stand-in editor is written");
+    std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o755))
+        .expect("the stand-in editor is made executable");
+
+    let (terminal, slave) = Terminal::open();
+    let mut shell = Reaped(
+        shell_driving_the_stand_in(&slave, repo.path(), home.path())
+            .env("HOME", elsewhere.path())
+            .env("CLAUDE_CONFIG_DIR", elsewhere.path().join("claude"))
+            .env_remove("VISUAL")
+            .env("EDITOR", &editor)
+            .spawn()
+            .expect("the niobe binary runs"),
+    );
+    terminal.shows(OPENING_FRAME);
+
+    terminal.typed(b"\x1b[19~");
+    terminal.shows("notes.md");
+    terminal.typed(b"\x1b[F");
+    terminal.typed(b"e");
+    let deadline = Instant::now() + PATIENCE;
+    while !waiting.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(waiting.exists(), "the editor was not started");
+    let lent = terminal.mark();
+    signal(&shell, Signal::HUP);
+    std::fs::write(&go, "").expect("the editor is let go");
+
+    let (_, status) = ended(&mut shell);
+    let (drawn, cooked) = released(terminal, slave);
+    assert!(
+        status.success(),
+        "a hangup while the terminal was lent ended the shell with {status}: {drawn:?}"
+    );
+    assert!(
+        !drawn[lent..].contains(ENTER_ALTERNATE_SCREEN),
+        "the shell took a terminal that had hung up back from the editor: {:?}",
+        &drawn[lent..]
+    );
+    // Handed back once, for the editor, and never taken again.
+    assert_handed_back(&drawn, cooked, "a hangup while an editor had the terminal");
+}
+
 /// An editor that dies with the terminal in its own modes — killed, or
 /// crashed before it could put them back — leaves the terminal raw and
 /// silent. The shell lent it the terminal as it found it at the start, and
