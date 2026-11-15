@@ -1654,6 +1654,10 @@ pub struct App {
     recorded_as: Option<String>,
     /// A walk back through earlier prompts with Up and Down, while one is on.
     recall: Option<Recall>,
+    /// What the composer held as the walk's last step left it: the prompt
+    /// as the editor shows it, which drops a `\r` before a line break, so
+    /// that a recorded prompt holding one is still the step it was.
+    recall_shown: String,
     /// The draft the walk on set aside, which its images belong to.
     walk_draft: DraftId,
     /// Drafts a walk set aside and an edit ended it before giving them back,
@@ -2371,6 +2375,7 @@ impl App {
             history_wanted: true,
             recorded_as: None,
             recall: None,
+            recall_shown: String::new(),
             walk_draft: DraftId::default(),
             drafts: Vec::new(),
             browser: None,
@@ -10767,7 +10772,7 @@ impl App {
         let edited = self
             .recall
             .as_ref()
-            .is_some_and(|recall| recall.current() != self.composed());
+            .is_some_and(|_| self.recall_shown != self.composed());
         if edited && let Some(draft) = self.end_walk() {
             self.set_aside(draft);
         }
@@ -10780,7 +10785,7 @@ impl App {
     pub fn recalled(&self) -> Option<(usize, usize)> {
         self.recall
             .as_ref()
-            .filter(|recall| recall.current() == self.composed())
+            .filter(|_| self.recall_shown == self.composed())
             .map(Recall::place)
     }
 
@@ -10878,6 +10883,7 @@ impl App {
     fn show_recalled(&mut self, text: &str, at_top: bool) {
         self.images.compose_anew();
         self.show_in_composer(text, at_top);
+        self.recall_shown = self.composed();
     }
 
     /// Puts `draft`, set aside earlier, back in the composer, with the images
@@ -23428,6 +23434,27 @@ mod tests {
 
         app.on_key(key(KeyCode::Up));
         assert_eq!(app.composed(), "newest", "a new walk starts on the newest");
+    }
+
+    /// A prompt can be recorded with Windows line ends — `niobe -p` keeps its
+    /// argument as given, and an imported transcript as the CLI wrote it —
+    /// which the composer shows as plain line breaks.
+    #[test]
+    fn a_recalled_prompt_with_windows_line_ends_is_a_step_of_the_walk_not_an_edit() {
+        let mut app = remembering(&[("newer\r\nline", "3"), ("older", "3")], &["3"]);
+        typed(&mut app, "half");
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(app.composed(), "newer\nline");
+        assert!(
+            app.recall_label().is_some(),
+            "the composer says it is recalled"
+        );
+
+        app.on_key(key(KeyCode::Up));
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(app.composed(), "older");
+        app.on_key(key(KeyCode::Esc));
+        assert_eq!(app.composed(), "half");
     }
 
     #[test]
