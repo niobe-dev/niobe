@@ -1786,14 +1786,15 @@ mod tests {
         let work = dir.path().join("work");
         let opened: u64 = 4_000_000_000;
         // A stand-in for gpg that signs anything and, asked for anything
-        // else — a check of a signature — leaves a mark that it ran.
+        // else — a check of a signature — leaves a mark that it ran. Its
+        // status line follows a line break: older gits find it only there.
         let marker = dir.path().join("gpg-ran");
         let gpg = dir.path().join("gpg.sh");
         std::fs::write(
             &gpg,
             format!(
                 "#!/bin/sh\nfor arg; do case \"$arg\" in -bsau) \
-                 echo '[GNUPG:] SIG_CREATED D 1 8 00 0 0' >&2; \
+                 printf '\\n[GNUPG:] SIG_CREATED D 1 8 00 0 0\\n' >&2; \
                  printf -- '-----BEGIN PGP SIGNATURE-----\\n\\nZmFrZQ==\\n-----END PGP SIGNATURE-----\\n'; \
                  exit 0;; esac; done\ntouch '{}'\n",
                 marker.display()
