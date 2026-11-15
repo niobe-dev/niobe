@@ -613,6 +613,17 @@ pub struct TurnRecord {
     pub compacted: Option<CompactTrigger>,
 }
 
+/// Something a process spent before it said how it is billed, which waits to
+/// join the metered part or not until it does.
+#[derive(Debug, Clone, PartialEq)]
+enum Unbilled {
+    /// A usage record.
+    Usage(Usage),
+    /// A sub-agent at work, whose spend no record holds until the next bill:
+    /// see [`Totals::agent_work_unbilled`].
+    AgentWork,
+}
+
 /// Where a turn began: what the session had spent, and the window as last
 /// reported, at that moment.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -648,10 +659,21 @@ pub struct SessionState {
     /// Whether the session has been billed more than one way: resumed under
     /// a profile billed differently from the one it was recorded under.
     billing_changed: bool,
-    /// Whether usage has been folded since `billing` was last said, so that
-    /// a billing put right before anything was spent under it — the
+    /// Whether usage has been billed under `billing` since it was last said,
+    /// so that a billing put right before anything was spent under it — the
     /// profile's, said at spawn, then the backend's — is not a second way.
     billed_since_said: bool,
+    /// Whether the process the session runs in now has said how it is
+    /// billed, or ended a turn without saying and so is taken to be billed
+    /// as the session last was. `false` at the start, after the process
+    /// leaves and after a clear, which the backend says it again after.
+    process_billed: bool,
+    /// What the process spent before it said how it is billed, in the order
+    /// it arrived: billed the way it says once it does. A backend can learn
+    /// that only at a turn's end — the Claude bridge reads a plan login off
+    /// the turn's result — while a resumed session's last billing is a
+    /// process's that has gone, which may have been billed the other way.
+    unbilled: Vec<Unbilled>,
     /// The usage folded while the session was billed by use.
     metered: Totals,
     /// The main agent's last request. `None` until one has been reported.
@@ -1037,10 +1059,10 @@ impl SessionState {
             }
 
             Event::Usage(usage) => {
-                self.billed_since_said = true;
                 self.totals.add(usage);
-                if self.billing == Some(Billing::Metered) {
-                    self.metered.add(usage);
+                match self.process_billed {
+                    true => self.bill_usage(usage),
+                    false => self.unbilled.push(Unbilled::Usage(usage.clone())),
                 }
                 self.usage_reported = true;
             }
@@ -1076,7 +1098,9 @@ impl SessionState {
             }
 
             // The last report stands for what the session is billed from here
-            // on; what was spent before a change was spent the other way.
+            // on; what was spent before a change was spent the other way,
+            // but for what this process spent before it said, which is
+            // billed the way it says.
             Event::Billing { billing } => {
                 if self.billed_since_said && self.billing.is_some_and(|before| before != *billing) {
                     self.billing_changed = true;
@@ -1085,6 +1109,7 @@ impl SessionState {
                     self.billed_since_said = false;
                 }
                 self.billing = Some(*billing);
+                self.bill_what_waited();
             }
 
             // A level again, and the last one stands — including after a
@@ -1369,20 +1394,62 @@ impl SessionState {
     }
 
     /// Notes that the process the session ran in has ended, taking with it
-    /// any bill of what is still owed for: see [`Totals::strand`].
+    /// any bill of what is still owed for: see [`Totals::strand`]. What it
+    /// spent before saying how it is billed is billed as the session last
+    /// was, since no later process says it for this one; the next process
+    /// is heard from afresh.
     fn process_ended(&mut self) {
+        self.bill_what_waited();
         self.totals.strand();
         self.metered.strand();
+        self.process_billed = false;
     }
 
     /// Notes that a sub-agent did something a backend bills for — wrote a
     /// message or called a tool — which no usage record may hold until the
-    /// next bill: see [`Totals::agent_work_unbilled`]. Usage is taken to be
-    /// billed the way the session was last said to be, as each record is.
+    /// next bill: see [`Totals::agent_work_unbilled`]. The work is billed
+    /// the way its process says, as each record is.
     fn agent_worked(&mut self) {
         self.totals.agent_work_unbilled = true;
+        match self.process_billed {
+            true => self.bill_agent_work(),
+            // One mark stands for any run of work: what it says is only
+            // that the next bill is short, wherever in the run it falls.
+            false if self.unbilled.last() == Some(&Unbilled::AgentWork) => {}
+            false => self.unbilled.push(Unbilled::AgentWork),
+        }
+    }
+
+    /// Bills a record the way the session was last said to be billed.
+    fn bill_usage(&mut self, usage: &Usage) {
+        self.billed_since_said = true;
+        if self.billing == Some(Billing::Metered) {
+            self.metered.add(usage);
+        }
+    }
+
+    /// Bills a sub-agent's work the way the session was last said to be
+    /// billed.
+    fn bill_agent_work(&mut self) {
         if self.billing == Some(Billing::Metered) {
             self.metered.agent_work_unbilled = true;
+        }
+    }
+
+    /// Bills what the process spent before it said how it is billed, in the
+    /// order it was spent, the way the session was last said to be, and
+    /// takes that as what the process says from here on.
+    ///
+    /// Called where the process says, and where it has run a turn to its end
+    /// or ended without saying: then the billing last said is the one thing
+    /// known, and a record held for ever would be in no part.
+    fn bill_what_waited(&mut self) {
+        self.process_billed = true;
+        for waited in std::mem::take(&mut self.unbilled) {
+            match waited {
+                Unbilled::Usage(usage) => self.bill_usage(&usage),
+                Unbilled::AgentWork => self.bill_agent_work(),
+            }
         }
     }
 
@@ -1488,6 +1555,9 @@ impl SessionState {
     /// as a turn.
     fn close_what_the_turn_left(&mut self) {
         self.clear_open = false;
+        // A process that ran a turn to its end without saying how it is
+        // billed is not going to say for that turn.
+        self.bill_what_waited();
         // Nothing more of the turn comes until the next prompt, so a question
         // it left open waits on nobody: an answer to it would reach nothing.
         // A sub-agent still running is not the turn: one launched in the
@@ -1666,9 +1736,15 @@ impl SessionState {
     /// spent. A plan's part is left out, because its figure is what the work
     /// would have cost on the API and not what anyone paid.
     ///
-    /// Usage is taken to be billed the way the session was last said to be
-    /// when it arrived, so a record folded before anything said is in no
-    /// part. A turn's cost settles only the records of its own part.
+    /// Usage is taken to be billed the way its own process says: a record
+    /// that arrives once the process has said is billed as the session was
+    /// last said to be, and one that arrives before — at the session's start,
+    /// after a process takes it up again, after a clear — waits for the
+    /// process to say, since a backend may learn it only from a turn's end.
+    /// Where the process ends a turn, or itself, without saying, what waited
+    /// is billed as the session was last said to be, and so in no part where
+    /// nothing has said. A turn's cost settles only the records of its own
+    /// part.
     pub fn metered_totals(&self) -> &Totals {
         &self.metered
     }
@@ -2429,6 +2505,208 @@ mod tests {
 
             assert_eq!(state.metered_totals(), &Totals::default(), "{billing:?}");
         }
+    }
+
+    fn billed(billing: Billing) -> Event {
+        Event::Billing { billing }
+    }
+
+    fn prompted(text: &str) -> Event {
+        Event::UserMessage {
+            text: text.to_owned(),
+        }
+    }
+
+    /// A session last billed by use and taken up again on a plan login: the
+    /// Claude bridge learns the plan only from the turn's result, after the
+    /// turn's own records, which were spent on the plan all the same.
+    #[test]
+    fn what_a_resumed_process_spends_before_it_says_it_is_on_a_plan_is_not_metered() {
+        let state = SessionState::replay(&[
+            billed(Billing::Metered),
+            prompted("a"),
+            usage(1_000, 0, None),
+            settlement("opus-5", 0.05),
+            Event::TurnEnded,
+            Event::SessionLeft,
+            prompted("b"),
+            usage(200_000, 0, None),
+            billed(Billing::Plan),
+            settlement("opus-5", 1.0),
+            Event::TurnEnded,
+        ]);
+
+        let metered = state.metered_totals();
+        assert_eq!(metered.input, 1_000);
+        assert_eq!(metered.records, 2);
+        assert_eq!(metered.records_unsettled, 0);
+        assert!(metered.cost_fully_reported());
+        assert_eq!(metered.reported_cost_usd, 0.05);
+        assert_eq!(state.totals().input, 201_000);
+        assert_eq!(state.billing(), Some(Billing::Plan));
+        assert!(state.billing_changed());
+    }
+
+    /// A process whose billing by use is learned only at its first turn's
+    /// end — a cloud provider behind a login that names no key — spent that
+    /// turn by use from its first record.
+    #[test]
+    fn a_first_turn_learned_to_be_metered_only_at_its_end_is_metered_whole() {
+        let state = SessionState::replay(&[
+            prompted("a"),
+            usage(1_000, 10, None),
+            billed(Billing::Metered),
+            settlement("opus-5", 0.25),
+            Event::TurnEnded,
+        ]);
+
+        let metered = state.metered_totals();
+        assert_eq!(metered.tokens(), 1_010);
+        assert_eq!(metered.records, 2);
+        assert!(metered.cost_fully_reported());
+        assert_eq!(metered.reported_cost_usd, 0.25);
+        assert!(!state.billing_changed(), "nothing was spent any other way");
+    }
+
+    /// A key the new process starts on is said at its start, so what it
+    /// spends is money from its first record, and the plan's part before it
+    /// stays out.
+    #[test]
+    fn a_process_resumed_on_a_key_bills_its_records_by_use_from_its_start() {
+        let state = SessionState::replay(&[
+            prompted("a"),
+            usage(1_000, 0, None),
+            billed(Billing::Plan),
+            settlement("opus-5", 0.05),
+            Event::TurnEnded,
+            Event::SessionLeft,
+            billed(Billing::Metered),
+            prompted("b"),
+            usage(300, 0, None),
+            settlement("opus-5", 0.5),
+            Event::TurnEnded,
+        ]);
+
+        let metered = state.metered_totals();
+        assert_eq!(metered.input, 300);
+        assert_eq!(metered.records, 2);
+        assert!(metered.cost_fully_reported());
+        assert_eq!(metered.reported_cost_usd, 0.5);
+        assert!(state.billing_changed());
+    }
+
+    /// A process that ends a turn without a word of how it is billed is taken
+    /// to be billed as the session last was, which is the one thing known.
+    #[test]
+    fn a_process_that_never_says_how_it_is_billed_is_billed_as_the_session_last_was() {
+        let mut state = SessionState::replay(&[
+            billed(Billing::Metered),
+            prompted("a"),
+            usage(1_000, 0, None),
+            settlement("opus-5", 0.05),
+            Event::TurnEnded,
+            Event::SessionLeft,
+            prompted("b"),
+            usage(300, 0, None),
+        ]);
+        assert_eq!(
+            state.metered_totals().input,
+            1_000,
+            "the new process has not said yet"
+        );
+
+        state.apply(&settlement("opus-5", 0.5));
+        state.apply(&Event::TurnEnded);
+        let metered = state.metered_totals();
+        assert_eq!(metered.input, 1_300);
+        assert_eq!(metered.records, 4);
+        assert!(metered.cost_fully_reported());
+        assert!((metered.reported_cost_usd - 0.55).abs() < 1e-9);
+        assert!(!state.billing_changed());
+
+        // Taken as said for that process: its next records are billed as
+        // they arrive.
+        state.apply(&prompted("c"));
+        state.apply(&usage(40, 0, None));
+        assert_eq!(state.metered_totals().input, 1_340);
+    }
+
+    /// A process that leaves before a turn of its ends, or before it says
+    /// how it is billed, spent what it spent the way the session last was
+    /// billed: no later process says it for it.
+    #[test]
+    fn a_process_that_leaves_without_saying_is_billed_as_the_session_last_was() {
+        for ended in [
+            Event::SessionLeft,
+            Event::Error {
+                message: "the `claude` session ended while a turn was running".to_owned(),
+                fatal: true,
+            },
+        ] {
+            let state = SessionState::replay(&[
+                billed(Billing::Metered),
+                Event::SessionLeft,
+                usage(70, 0, None),
+                ended.clone(),
+                billed(Billing::Plan),
+                usage(5_000, 0, None),
+            ]);
+            assert_eq!(state.metered_totals().input, 70, "{ended:?}");
+            assert_eq!(state.metered_totals().records_unsettled, 1, "{ended:?}");
+        }
+    }
+
+    /// A clear starts the money over, and what a process had spent before
+    /// it said how it is billed goes with it.
+    #[test]
+    fn a_clear_drops_what_waited_on_the_process_saying_how_it_is_billed() {
+        let state = SessionState::replay(&[
+            billed(Billing::Metered),
+            Event::SessionLeft,
+            prompted("a"),
+            usage(1_000, 0, None),
+            Event::Cleared,
+            billed(Billing::Metered),
+            prompted("b"),
+            usage(200, 0, None),
+            settlement("opus-5", 0.1),
+            Event::TurnEnded,
+        ]);
+
+        let metered = state.metered_totals();
+        assert_eq!(metered.input, 200);
+        assert_eq!(metered.records, 2);
+        assert!(metered.cost_fully_reported());
+    }
+
+    /// A sub-agent's work is money the same way its process's records are:
+    /// work done before a resumed process says it is on a plan leaves the
+    /// metered part whole.
+    #[test]
+    fn an_agents_work_before_its_process_says_it_is_on_a_plan_leaves_the_metered_part_whole() {
+        let state = SessionState::replay(&[
+            billed(Billing::Metered),
+            prompted("a"),
+            usage(1_000, 0, None),
+            settlement("opus-5", 0.05),
+            Event::TurnEnded,
+            Event::SessionLeft,
+            prompted("b"),
+            agent_said("reading"),
+            billed(Billing::Plan),
+        ]);
+        assert!(state.totals().agent_work_unbilled);
+        assert!(!state.metered_totals().agent_work_unbilled);
+        assert!(state.metered_totals().cost_fully_reported());
+
+        // And where it is learned to be by use, the metered part is short
+        // until the next bill.
+        let metered = SessionState::replay(&[
+            prompted("a"),
+            agent_said("reading"),
+            billed(Billing::Metered),
+        ]);
+        assert!(metered.metered_totals().agent_work_unbilled);
     }
 
     /// Who spent the session's tokens is a different question from what is

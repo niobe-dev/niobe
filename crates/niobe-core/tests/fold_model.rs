@@ -296,8 +296,20 @@ struct Model {
     /// Per model, the records that reported no money and no settlement has
     /// covered since: how many a process that ended left, and how many in all.
     owed: std::collections::BTreeMap<String, (u64, u64)>,
-    /// Tokens folded while the session was last said to be billed by use.
+    /// Tokens billed by use: each record billed the way the session was last
+    /// said to be once its own process has said, or has ended a turn or
+    /// itself without saying.
     metered: u64,
+    /// Whether the running process has said how it is billed, or ended a
+    /// turn without saying. Not at the start, after a process ends, or after
+    /// a clear.
+    process_billed: bool,
+    /// Tokens the running process spent before that.
+    waiting: u64,
+    /// Whether the last event that happened in the conversation ended a turn
+    /// or the process, so that an end straight after it is the same end
+    /// said again, and no turn of the process that follows.
+    ended_last: bool,
     /// The last request's prompt and model, or a compaction's floor.
     context: Option<(u64, String)>,
     /// The five-hour window as last reported, which a clear keeps.
@@ -346,7 +358,10 @@ impl Model {
                 };
                 self.clear_open = true;
             }
-            Event::Billing { billing } => self.billing = Some(*billing),
+            Event::Billing { billing } => {
+                self.billing = Some(*billing);
+                self.bill_what_waited();
+            }
             Event::Context(context) => {
                 self.context = Some((context.tokens, context.model.clone()));
             }
@@ -398,10 +413,15 @@ impl Model {
                 for (stranded, all) in self.owed.values_mut() {
                     *stranded = *all;
                 }
+                self.bill_what_waited();
+                self.process_billed = false;
             }
             Event::TurnEnded => {
                 self.clear_open = false;
                 self.close_turn_calls();
+                if !self.ended_last {
+                    self.bill_what_waited();
+                }
             }
             Event::UserMessage { .. } if !before.turn_running() && !self.clear_open => {
                 self.began_at = Some(self.five_hour.filter(|_| !self.left));
@@ -424,8 +444,12 @@ impl Model {
                     self.owed.entry(usage.model.clone()).or_default().1 += 1;
                 }
                 *self.by_model.entry(usage.model.clone()).or_default() += tokens(usage);
-                if self.billing == Some(Billing::Metered) {
-                    self.metered += tokens(usage);
+                match self.process_billed {
+                    true if self.billing == Some(Billing::Metered) => {
+                        self.metered += tokens(usage);
+                    }
+                    true => {}
+                    false => self.waiting += tokens(usage),
                 }
                 self.usage_records += 1;
                 match before.turn_running() {
@@ -448,6 +472,27 @@ impl Model {
             }
             _ => {}
         }
+        // A prompt that reached nothing, the operator looking, a turn
+        // forecast and a prompt taken in happen in no conversation.
+        if !matches!(
+            event,
+            Event::PromptNotSent { .. } | Event::Looked | Event::TurnFollows | Event::PromptTaken
+        ) {
+            self.ended_last = matches!(
+                event,
+                Event::TurnEnded | Event::SessionLeft | Event::Error { fatal: true, .. }
+            );
+        }
+    }
+
+    /// Bills what the running process spent before it said how it is billed
+    /// the way the session was last said to be, and takes that as said.
+    fn bill_what_waited(&mut self) {
+        if self.billing == Some(Billing::Metered) {
+            self.metered += self.waiting;
+        }
+        self.waiting = 0;
+        self.process_billed = true;
     }
 
     /// Drops the calls an ended turn leaves no one to end, whether or not it
