@@ -25,7 +25,7 @@
 //!   the order the filesystem lists them; they are listed here by name;
 //! * under each of those, the files it imports with `@path`, relative to the
 //!   importing file, from `~` or absolute, less than [`IMPORT_DEPTH`] deep, and
-//!   not inside a code span or a fenced block;
+//!   not inside a code span, a fenced block, an HTML block or an HTML comment;
 //! * the CLI's auto-memory index, `MEMORY.md` in the project's directory under
 //!   the configuration directory — the main checkout's, for a session in a
 //!   linked git worktree, as the CLI keeps it — and the entries it links to.
@@ -762,40 +762,427 @@ fn globs(list: &str) -> Vec<String> {
         .collect()
 }
 
-/// Every `@path` in `text` that is an import: a word that starts with `@`,
-/// outside a fenced block and a code span.
+/// Every `@path` in `text` that is an import, in the order it is written,
+/// read as Claude Code 2.1.325 reads one.
 ///
-/// An address such as `someone@example.com` is not one, because its `@` does
-/// not start the word; a word that names no file is passed over when it is
-/// resolved.
+/// The CLI lexes the file as markdown and looks for imports in its prose
+/// alone: a fenced block, a code span and an HTML block are passed over, and
+/// an HTML comment is read past, with what follows it on the line that
+/// closes it still read. In that prose an import is an `@` that opens the
+/// text or follows a space, and every character after it up to the next
+/// space or backslash, `\ ` taken as a space — so punctuation after a path is
+/// part of it, as the CLI asks for it — cut at a `#` and kept only where it
+/// opens as a path does ([`names_a_path`]).
+///
+/// The lexing is the CLI's where it decides an import here, and no more: an
+/// indented code block, a table and a word that opens right after emphasis
+/// or a link's bracket are read as prose, as the CLI does not.
 fn imports(text: &str) -> Vec<String> {
+    prose(text).iter().flat_map(|run| at_paths(run)).collect()
+}
+
+/// The block a line of a memory file is in, as the CLI's markdown lexer
+/// reads it.
+enum Block<'a> {
+    /// Prose, or between blocks.
+    Prose,
+    /// A fenced block, opened by `run` at `indent` columns.
+    Fence { indent: usize, run: &'a str },
+    /// An HTML comment that opened a block and has not closed, as written so
+    /// far.
+    Comment(String),
+    /// An HTML block of `<script>`, `<pre>`, `<style>` or `<textarea>`,
+    /// which ends on the line holding `until`, the closing tag.
+    Raw { until: &'static str },
+    /// Any other HTML block, which ends at a blank line.
+    UntilBlank,
+}
+
+/// The prose of `text` the CLI looks for imports in: each paragraph, with its
+/// code spans and inline HTML left out, and what follows an HTML comment that
+/// closes a block.
+fn prose(text: &str) -> Vec<String> {
     let mut found = Vec::new();
-    let mut fenced = false;
+    let mut paragraph = String::new();
+    let mut block = Block::Prose;
     for line in text.lines() {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
-            fenced = !fenced;
+        block = match block {
+            Block::Fence { indent, run } => match closes_fence(line, indent, run) {
+                true => Block::Prose,
+                false => Block::Fence { indent, run },
+            },
+            Block::Comment(mut raw) => {
+                raw.push('\n');
+                raw.push_str(line);
+                comment_closed(raw, line, &mut found)
+            }
+            Block::Raw { until } => match line.to_ascii_lowercase().contains(until) {
+                true => Block::Prose,
+                false => Block::Raw { until },
+            },
+            Block::UntilBlank => match line.trim().is_empty() {
+                true => Block::Prose,
+                false => Block::UntilBlank,
+            },
+            Block::Prose => prose_line(line, &mut paragraph, &mut found),
+        };
+    }
+    found.push(inline_prose(&paragraph));
+    found
+}
+
+/// The block `line` leaves the reading in, read between blocks or in the
+/// middle of `paragraph`: a line that opens a block ends the paragraph, and
+/// any other one goes on with it, or ends it where it is blank.
+fn prose_line<'a>(line: &'a str, paragraph: &mut String, found: &mut Vec<String>) -> Block<'a> {
+    let opened = opens(line, paragraph.is_empty());
+    if matches!(opened, Block::Prose) && !line.trim().is_empty() {
+        paragraph.push_str(line);
+        paragraph.push('\n');
+        return Block::Prose;
+    }
+    found.push(inline_prose(&std::mem::take(paragraph)));
+    match opened {
+        Block::Comment(raw) => {
+            let opened = line.find("<!--").map_or(line.len(), |at| at + 2);
+            comment_closed(raw, &line[opened..], found)
+        }
+        Block::Raw { until } if line.to_ascii_lowercase().contains(until) => Block::Prose,
+        other => other,
+    }
+}
+
+/// The block `line` opens, or [`Block::Prose`] where it opens none.
+/// `between` says no paragraph is open, which only a lone tag needs to open
+/// its block.
+///
+/// A fence opens at any indentation, where the CLI's lexer takes one indented
+/// by at most three columns from the list item it is in, which this reading
+/// does not track; a fence indented more than that outside a list is an
+/// indented code block, which the CLI passes over too.
+fn opens(line: &str, between: bool) -> Block<'_> {
+    let indent = indentation(line);
+    let rest = line.trim_start();
+    if let Some(run) = fence_opening(rest) {
+        return Block::Fence { indent, run };
+    }
+    if indent > 3 || !rest.starts_with('<') {
+        return Block::Prose;
+    }
+    let lower = rest.to_ascii_lowercase();
+    if lower.starts_with("<!--") {
+        return Block::Comment(line.to_owned());
+    }
+    if let Some((_, until)) = RAW_TAGS.iter().find(|(tag, _)| {
+        lower[1..]
+            .strip_prefix(tag)
+            .is_some_and(|after| after.is_empty() || after.starts_with([' ', '\t', '>']))
+    }) {
+        return Block::Raw { until };
+    }
+    match opens_html_block(&lower) || (between && is_lone_tag(&lower)) {
+        true => Block::UntilBlank,
+        false => Block::Prose,
+    }
+}
+
+/// The tags whose HTML block runs to its closing tag, blank lines and all.
+const RAW_TAGS: [(&str, &str); 4] = [
+    ("script", "</script>"),
+    ("pre", "</pre>"),
+    ("style", "</style>"),
+    ("textarea", "</textarea>"),
+];
+
+/// The tags that open an HTML block wherever they start a line, as the CLI's
+/// lexer lists them.
+const BLOCK_TAGS: [&str; 63] = [
+    "address",
+    "article",
+    "aside",
+    "base",
+    "basefont",
+    "blockquote",
+    "body",
+    "caption",
+    "center",
+    "col",
+    "colgroup",
+    "dd",
+    "details",
+    "dialog",
+    "dir",
+    "div",
+    "dl",
+    "dt",
+    "fieldset",
+    "figcaption",
+    "figure",
+    "footer",
+    "form",
+    "frame",
+    "frameset",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "head",
+    "header",
+    "hr",
+    "html",
+    "iframe",
+    "legend",
+    "li",
+    "link",
+    "main",
+    "menu",
+    "menuitem",
+    "meta",
+    "nav",
+    "noframes",
+    "ol",
+    "optgroup",
+    "option",
+    "p",
+    "param",
+    "search",
+    "section",
+    "summary",
+    "table",
+    "tbody",
+    "td",
+    "tfoot",
+    "th",
+    "thead",
+    "title",
+    "tr",
+    "track",
+    "ul",
+];
+
+/// Whether `lower`, a line's text lowercased, opens or closes one of the
+/// [`BLOCK_TAGS`]: its name followed by a space, `>`, `/>` or the line's end.
+fn opens_html_block(lower: &str) -> bool {
+    let Some(tag) = lower.strip_prefix('<') else {
+        return false;
+    };
+    let tag = tag.strip_prefix('/').unwrap_or(tag);
+    let name_ends = tag
+        .find(|c: char| !c.is_ascii_alphanumeric())
+        .unwrap_or(tag.len());
+    let (name, after) = tag.split_at(name_ends);
+    BLOCK_TAGS.contains(&name)
+        && (after.is_empty() || after.starts_with([' ', '>']) || after.starts_with("/>"))
+}
+
+/// Whether `lower`, a line's text lowercased, is one opening or closing tag
+/// and nothing after it, which opens an HTML block where no paragraph is open.
+fn is_lone_tag(lower: &str) -> bool {
+    let Some(inner) = lower
+        .trim_end_matches([' ', '\t'])
+        .strip_prefix('<')
+        .and_then(|tag| tag.strip_suffix('>'))
+    else {
+        return false;
+    };
+    let (closing, tag) = match inner.strip_prefix('/') {
+        Some(tag) => (true, tag),
+        None => (false, inner.strip_suffix('/').unwrap_or(inner)),
+    };
+    let name_ends = tag
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+        .unwrap_or(tag.len());
+    let (name, after) = tag.split_at(name_ends);
+    let attributes = match closing {
+        true => after.trim().is_empty(),
+        false => after.is_empty() || after.starts_with(char::is_whitespace),
+    };
+    name.starts_with(|c: char| c.is_ascii_alphabetic())
+        && !RAW_TAGS.iter().any(|(raw, _)| name.starts_with(raw))
+        && attributes
+        && !after.contains(['<', '>'])
+}
+
+/// How many columns `line` is indented by, a tab counted as four.
+fn indentation(line: &str) -> usize {
+    line.chars()
+        .map_while(|c| match c {
+            ' ' => Some(1),
+            '\t' => Some(4),
+            _ => None,
+        })
+        .sum()
+}
+
+/// The run of three or more backticks or tildes that `rest`, a line with its
+/// indentation taken off, opens a fence with. A backtick fence's words after
+/// it hold no backtick, or the line is prose with a code span in it.
+fn fence_opening(rest: &str) -> Option<&str> {
+    let mark = rest.chars().next().filter(|c| matches!(c, '`' | '~'))?;
+    let run = &rest[..rest.find(|c| c != mark).unwrap_or(rest.len())];
+    let words = &rest[run.len()..];
+    (run.len() >= 3 && !(mark == '`' && words.contains('`'))).then_some(run)
+}
+
+/// Whether `line` closes the fence `run` opened at `indent` columns: at most
+/// three columns further in, the run again, and nothing after it but more of
+/// the fence characters and spaces, as the CLI's lexer closes one.
+fn closes_fence(line: &str, indent: usize, run: &str) -> bool {
+    if indentation(line) > indent.saturating_add(3) {
+        return false;
+    }
+    line.trim_start().strip_prefix(run).is_some_and(|after| {
+        after
+            .trim_start_matches(['`', '~'])
+            .trim_end_matches(' ')
+            .is_empty()
+    })
+}
+
+/// What an HTML comment's block leaves the reading in once `raw` holds it as
+/// written so far, `line` the part of it just read — its last line, or on
+/// the line that opened it what follows the `<!` — prose, where `line` closes
+/// the comment, and what is left of `raw` once its comments are taken out is
+/// read for imports; or the comment still. Only `line` is searched, so a
+/// comment that never closes is read once rather than once a line.
+fn comment_closed(raw: String, line: &str, found: &mut Vec<String>) -> Block<'static> {
+    match line.contains("-->") {
+        true => {
+            found.push(without_comments(&raw));
+            Block::Prose
+        }
+        false => Block::Comment(raw),
+    }
+}
+
+/// `text` with each HTML comment in it taken out, and an unclosed one left as
+/// written, as the CLI takes them out of an HTML block.
+fn without_comments(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(open) = rest.find("<!--") {
+        let Some(close) = rest[open + 4..].find("-->") else {
+            break;
+        };
+        out.push_str(&rest[..open]);
+        rest = &rest[open + 4 + close + 3..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// A paragraph's text with its code spans and inline HTML each left out as a
+/// space, since the CLI reads the text between them as text of its own: a
+/// path right after a tag or a span opens it, and one inside either is none.
+fn inline_prose(paragraph: &str) -> String {
+    let text = outside_code_spans(paragraph);
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text.as_str();
+    while let Some(open) = rest.find('<') {
+        out.push_str(&rest[..open]);
+        let tail = &rest[open..];
+        match inline_html_len(tail) {
+            Some(len) => {
+                out.push(' ');
+                rest = &tail[len..];
+            }
+            None => {
+                out.push('<');
+                rest = &tail[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// How long the inline HTML `tail` opens with is, in bytes: a comment —
+/// one never closed runs to the paragraph's end, which the CLI then reads
+/// nothing of — or an opening or closing tag. Nothing where `tail` opens with
+/// a `<` that starts none.
+fn inline_html_len(tail: &str) -> Option<usize> {
+    if let Some(comment) = tail.strip_prefix("<!--") {
+        let short = ["->", ">"].iter().find(|end| comment.starts_with(**end));
+        return Some(match (short, comment.find("-->")) {
+            (Some(end), _) => 4 + end.len(),
+            (None, Some(close)) => 4 + close + 3,
+            (None, None) => tail.len(),
+        });
+    }
+    let tag = tail[1..].strip_prefix('/').unwrap_or(&tail[1..]);
+    let opened = tail.len() - tag.len();
+    if !tag.starts_with(|c: char| c.is_ascii_alphabetic()) {
+        return None;
+    }
+    let name = tag
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+        .unwrap_or(tag.len());
+    let after = &tag[name..];
+    if !(after.starts_with(char::is_whitespace) || after.starts_with(['/', '>'])) {
+        return None;
+    }
+    // Searching to the next `<` as well keeps a paragraph of `<a <a <a` read
+    // once: a tag holds no `<`, and the next one is where the search
+    // starts again.
+    let close = after.find(['<', '>'])?;
+    after[close..]
+        .starts_with('>')
+        .then_some(opened + name + close + 1)
+}
+
+/// The paths `prose` imports, by the CLI's pattern `(?:^|\s)@((?:[^\s\\]|\\ )+)`.
+fn at_paths(prose: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut after_space = true;
+    let mut chars = prose.char_indices().peekable();
+    while let Some((at, c)) = chars.next() {
+        if c != '@' || !after_space {
+            after_space = c.is_whitespace();
             continue;
         }
-        if fenced {
-            continue;
+        let mut end = at + 1;
+        while let Some(&(next, c)) = chars.peek() {
+            let escaped_space = c == '\\' && prose[next + 1..].starts_with(' ');
+            if c.is_whitespace() || (c == '\\' && !escaped_space) {
+                break;
+            }
+            let width = if escaped_space { 2 } else { c.len_utf8() };
+            chars.next();
+            if escaped_space {
+                chars.next();
+            }
+            end = next + width;
         }
-        found.extend(
-            outside_code_spans(line)
-                .split_whitespace()
-                .filter_map(|word| word.strip_prefix('@'))
-                .map(|path| path.trim_end_matches([',', ';', ':', '!', '?', ')', '.']))
-                .filter(|path| !path.is_empty())
-                .map(str::to_owned),
-        );
+        found.extend(import_named(&prose[at + 1..end]));
+        after_space = false;
     }
     found
 }
 
-/// `line` with each code span replaced by a space: a run of backticks opens
-/// one, and the next run of exactly as many closes it, so that ``` `` a`b `` ```
-/// is one span with a backtick in it. A run with no run of its length after it
-/// is not a span, and stays as it was written.
+/// The path a match of the CLI's pattern names: cut at its `#`, its `\ `
+/// read as a space, and kept only where it [`names_a_path`].
+fn import_named(matched: &str) -> Option<String> {
+    let path = matched.split('#').next().unwrap_or_default();
+    let path = path.replace("\\ ", " ");
+    names_a_path(&path).then_some(path)
+}
+
+/// Whether the CLI follows `path`: one that opens with `./`, `~/` or `/`, but
+/// for `/` alone, or with a letter, a digit, `.`, `_` or `-`.
+fn names_a_path(path: &str) -> bool {
+    path.starts_with("./")
+        || path.starts_with("~/")
+        || (path.starts_with('/') && path != "/")
+        || path.starts_with(|c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
+/// `line` — a paragraph, whose spans may run across its lines — with each
+/// code span replaced by a space: a run of backticks opens one, and the next
+/// run of exactly as many closes it, so that ``` `` a`b `` ``` is one span with
+/// a backtick in it. A run with no run of its length after it is not a span,
+/// and stays as it was written.
 fn outside_code_spans(line: &str) -> String {
     let runs = |text: &str| -> Vec<(usize, usize)> {
         let mut found = Vec::new();
@@ -1035,12 +1422,81 @@ mod tests {
         );
     }
 
+    /// The comma stays on the first path: the CLI's pattern takes every
+    /// character up to the next space and trims no punctuation, so it asks
+    /// for `one.md,`, which names no file, and lists nothing for it.
     #[test]
     fn an_import_inside_code_or_in_an_address_is_not_one() {
         assert_eq!(
             imports("see @one.md, and `@two.md`\n```\n@three.md\n```\nme@four.md @~/five.md\n"),
-            ["one.md", "~/five.md"]
+            ["one.md,", "~/five.md"]
         );
+    }
+
+    /// The CLI cuts a path at its `#`, so a heading named after it imports
+    /// the file, and reads `\ ` as a space in the name.
+    #[test]
+    fn an_import_is_cut_at_its_fragment_and_its_escaped_spaces_are_spaces() {
+        assert_eq!(imports("@notes.md#setup"), ["notes.md"]);
+        assert_eq!(imports("see @my\\ notes.md here"), ["my notes.md"]);
+        assert!(imports("@#only-a-fragment").is_empty());
+    }
+
+    /// Nothing after the path's last character is trimmed: the CLI asks for
+    /// `a.md.` and `(b.md)` names no path at all, since it opens with a
+    /// character no path the CLI follows opens with.
+    #[test]
+    fn an_import_keeps_the_punctuation_after_it_as_the_cli_does() {
+        assert_eq!(imports("see @a.md."), ["a.md."]);
+        assert!(imports("see @(b.md)").is_empty());
+        assert_eq!(imports("@./c.md @/d.md @/"), ["./c.md", "/d.md"]);
+    }
+
+    /// The CLI reads past an HTML comment, whether it fills its block or sits
+    /// in a line of prose, and skips any other HTML block whole, but still
+    /// reads what follows a comment on the line that closes it.
+    #[test]
+    fn an_import_inside_html_is_not_one_but_one_after_a_comment_is() {
+        assert!(imports("<!-- @old.md -->").is_empty());
+        assert!(imports("<!--\n@old.md\n-->\n").is_empty());
+        assert_eq!(imports("<!-- a --> @b.md"), ["b.md"]);
+        assert_eq!(imports("see <!-- @c.md --> @d.md"), ["d.md"]);
+        assert!(imports("<!-- never closed\n\n@e.md").is_empty());
+        assert_eq!(imports("<details>\n@f.md\n</details>\n\n@g.md"), ["g.md"]);
+        assert_eq!(imports("<pre>\n@h.md\n\n@i.md\n</pre>\n@j.md"), ["j.md"]);
+        assert_eq!(imports("<b>@k.md</b>"), ["k.md"]);
+    }
+
+    /// A fence closes only on a bare run of its own character at least as
+    /// long as the one that opened it, so a four-backtick fence holds a
+    /// three-backtick block whole, and a tilde never closes a backtick fence.
+    #[test]
+    fn a_fence_holds_a_shorter_fence_inside_it() {
+        assert_eq!(imports("````\n```\n@x.md\n```\n````\n@y.md"), ["y.md"]);
+        assert_eq!(imports("```\n~~~\n@x.md\n~~~\n```\n@y.md"), ["y.md"]);
+        assert_eq!(imports("```\n``` not bare\n@x.md\n```\n@y.md"), ["y.md"]);
+        assert_eq!(imports("```js `x`\n@z.md"), ["z.md"]);
+    }
+
+    /// A fence in a list item is indented by the item, and closes at the
+    /// item's indentation.
+    #[test]
+    fn a_fence_in_a_list_item_holds_its_block() {
+        assert_eq!(
+            imports("- one\n  - two\n    ```\n    @x.md\n    ```\n@y.md"),
+            ["y.md"]
+        );
+    }
+
+    /// A repository's memory file is read by its imports whole, so a comment
+    /// that never closes and a paragraph of tags that never close are each
+    /// read once, rather than once for every line or every `<` in them.
+    #[test]
+    fn a_megabyte_of_unclosed_html_imports_nothing_and_is_read_once() {
+        let comment = format!("<!--{}", "\n@x.md".repeat(LIMIT as usize / 6));
+        assert!(imports(&comment).is_empty());
+        let tags = "<a @x.md ".repeat(LIMIT as usize / 9);
+        assert_eq!(imports(&tags).len(), LIMIT as usize / 9);
     }
 
     /// The name the CLI keeps its sign-in under, put together here because
