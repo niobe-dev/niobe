@@ -1788,12 +1788,16 @@ mod tests {
         // A stand-in for gpg that signs anything and, asked for anything
         // else — a check of a signature — leaves a mark that it ran. Its
         // status line follows a line break: older gits find it only there.
+        // It reads what git hands it to sign first: one that exits before
+        // git has written it fails git's write, which git reports as a
+        // signature that failed.
         let marker = dir.path().join("gpg-ran");
         let gpg = dir.path().join("gpg.sh");
         std::fs::write(
             &gpg,
             format!(
                 "#!/bin/sh\nfor arg; do case \"$arg\" in -bsau) \
+                 cat >/dev/null; \
                  printf '\\n[GNUPG:] SIG_CREATED D 1 8 00 0 0\\n' >&2; \
                  printf -- '-----BEGIN PGP SIGNATURE-----\\n\\nZmFrZQ==\\n-----END PGP SIGNATURE-----\\n'; \
                  exit 0;; esac; done\ntouch '{}'\n",
