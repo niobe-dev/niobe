@@ -211,7 +211,11 @@ pub(crate) fn proposed(
             continue;
         }
         if rows.len() > ceiling {
-            uncounted += 1;
+            // Counted as it would be laid out: the row that marks the lines
+            // left out before it, and every row it wraps to, which is what
+            // the marker says Ctrl+T adds.
+            uncounted += usize::from(dropped) + rows_of(line, width);
+            dropped = false;
             continue;
         }
         if dropped && !rows.is_empty() {
@@ -265,6 +269,18 @@ fn capped_marker(beyond: usize, width: usize, theme: &Theme) -> Line<'static> {
     ))
 }
 
+/// The cells a proposed line's text has on a row `width` wide, after its
+/// sign and the space after it.
+fn row_room(width: usize) -> usize {
+    width.saturating_sub(2).max(1)
+}
+
+/// How many rows a proposed line wraps to on a row `width` wide. An empty
+/// line is still a row of the change.
+fn rows_of(line: &DiffLine, width: usize) -> usize {
+    text::wrap_words_exact_rows(line.text(), row_room(width)).max(1)
+}
+
 /// One line of a proposed change as the first `rows` of the rows it wraps
 /// to — its sign on the first, and the rest under its text — and how many
 /// rows it wraps to in all, counted without laying out the ones not drawn.
@@ -275,9 +291,8 @@ fn wrapped_row(
     theme: &Theme,
 ) -> (Vec<Line<'static>>, usize) {
     let (sign, sign_colour, text_colour, bg) = look(line, theme);
-    let room = width.saturating_sub(2).max(1);
-    // An empty line is still a row of the change.
-    let all = text::wrap_words_exact_rows(line.text(), room).max(1);
+    let room = row_room(width);
+    let all = rows_of(line, width);
     let mut parts = text::wrap_words_exact_first(line.text(), room, rows);
     if parts.is_empty() && rows > 0 {
         parts.push(String::new());
@@ -758,6 +773,30 @@ mod tests {
         );
         assert_eq!(open[35], format!("  {}", "x".repeat(20)));
         assert_eq!(beyond, 0);
+    }
+
+    /// The marker under a cut question says how many rows Ctrl+T adds, so
+    /// a line past the cut counts every row it wraps to, as one before it
+    /// does, and so does the row that marks lines left out.
+    #[test]
+    fn lines_past_the_cut_count_every_row_they_wrap_to() {
+        let wide = [added(&"x".repeat(700)), added(&"x".repeat(700))];
+        let (open, _) = proposed(&wide, 22, true, &CLASSIC);
+        assert_eq!(open.len(), 70 + 1, "every row of both lines and the marker");
+
+        let (_, beyond) = proposed(&wide, 22, false, &CLASSIC);
+        assert_eq!(beyond, 70 - MAX_ROWS);
+
+        let mut apart = vec![added(&"x".repeat(700))];
+        apart.extend((0..2 * CONTEXT_LINES + 1).map(|_| context("same")));
+        apart.push(added("y"));
+        let (open, _) = proposed(&apart, 22, true, &CLASSIC);
+        let (_, beyond) = proposed(&apart, 22, false, &CLASSIC);
+        assert_eq!(
+            beyond,
+            open.len() - 1 - MAX_ROWS,
+            "the elided row is a row too"
+        );
     }
 
     #[test]
