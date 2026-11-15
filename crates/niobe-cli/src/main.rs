@@ -489,7 +489,7 @@ fn shell(profile: Option<&str>, asked: &Asked, opening: Opening) -> Result<Optio
         std::env::var_os(niobe_bridge_claude::transcript::CONFIG_DIR_VAR),
         std::env::var_os("HOME"),
     );
-    let (mut backend, app) = attached_or_noticed(&loaded, attempt, app)?;
+    let (backend, app) = attached_or_noticed(&loaded, attempt, app)?;
     let app = say_tap(app, tap.as_deref()).with_effort(effort);
     let app = if backend.attached() {
         app.attached()
@@ -509,18 +509,18 @@ fn shell(profile: Option<&str>, asked: &Asked, opening: Opening) -> Result<Optio
     // Started with the shell and stopped with it: the thread behind it reads
     // the repository while the session runs, and a piped run never gets here.
     let mut watching = repo::watch(&root);
-    let mut commands = commands_for(&root, &mut backend);
+    let mut started = Started::beside(&root, backend);
     let ended = niobe_tui::run(
         app,
         niobe_tui::Around {
             journal: &mut journal,
-            backend: backend.bridge(),
+            backend: started.backend.bridge(),
             rules: &mut rules,
             preferences: &mut preferences::ChoicesFile::for_profile(
                 selected.as_ref().map(|selected| selected.name),
             ),
             watch: &mut watching,
-            shell: &mut commands,
+            shell: &mut started.commands,
             images: &mut images_for(&root),
             desktop: &mut desktop_for(&root),
             history: &mut history_for(&root, selected.as_ref()),
@@ -605,6 +605,30 @@ fn images_for(root: &Path) -> images::Clipboard {
 fn desktop_for(root: &Path) -> desktop::System {
     let root = root.to_path_buf();
     desktop::System::new().reporting(move || doctor::block(&root, backend::claude_release_recorded))
+}
+
+/// The backend a session started and the operator's `!` commands beside it,
+/// held so that they are let go of in the one order that leaves nothing
+/// running however the process ends.
+///
+/// The backend first, as fields drop in the order they are declared: letting
+/// go of it waits for the CLI to leave and then stops the CLI's process
+/// group, and the shell has handed the terminal back by then, so a second
+/// SIGTERM or Ctrl+C in that wait ends the process outright. What ends the
+/// CLI's group then is the reaper behind the commands, told of that group, so
+/// it has to outlive the wait: let go of first, it is killed as a session
+/// ending by its own way out kills it, and the group is left running.
+struct Started {
+    backend: backend::Attachment,
+    commands: commands::Commands,
+}
+
+impl Started {
+    /// `backend`, with the `!` commands run at `root` beside it.
+    fn beside(root: &Path, mut backend: backend::Attachment) -> Self {
+        let commands = commands_for(root, &mut backend);
+        Self { backend, commands }
+    }
 }
 
 /// The operator's `!` commands, run at `root` — where the agent runs, so a
@@ -790,7 +814,7 @@ fn resume(
         std::env::var_os(niobe_bridge_claude::transcript::CONFIG_DIR_VAR),
         std::env::var_os("HOME"),
     );
-    let (mut backend, app) = attached_or_noticed(&loaded, attempt, app)?;
+    let (backend, app) = attached_or_noticed(&loaded, attempt, app)?;
     let app = say_tap(app, tap.as_deref()).with_effort(effort);
     let app = if backend.attached() {
         app.attached()
@@ -805,18 +829,18 @@ fn resume(
     journal.keep_taking_up(&mut app);
     let mut rules = ConfigRules::at(&root).withheld(loaded.untrusted.is_some());
     let mut watching = repo::watch(&root);
-    let mut commands = commands_for(&root, &mut backend);
+    let mut started = Started::beside(&root, backend);
     let ended = niobe_tui::run(
         app,
         niobe_tui::Around {
             journal: &mut journal,
-            backend: backend.bridge(),
+            backend: started.backend.bridge(),
             rules: &mut rules,
             preferences: &mut preferences::ChoicesFile::for_profile(
                 selected.as_ref().map(|selected| selected.name),
             ),
             watch: &mut watching,
-            shell: &mut commands,
+            shell: &mut started.commands,
             images: &mut images_for(&root),
             desktop: &mut desktop_for(&root),
             history: &mut history_for(&root, selected.as_ref()),
@@ -1022,7 +1046,7 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<Option<
         std::env::var_os(niobe_bridge_claude::transcript::CONFIG_DIR_VAR),
         std::env::var_os("HOME"),
     );
-    let (mut backend, app) = attached_or_noticed(&loaded, attempt, app)?;
+    let (backend, app) = attached_or_noticed(&loaded, attempt, app)?;
     let mut app = say_tap(app, tap.as_deref()).with_effort(effort);
 
     // Recorded only once there is a terminal to continue it on and a backend
@@ -1056,18 +1080,18 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<Option<
     journal.keep_taking_up(&mut app);
     let mut rules = ConfigRules::at(&root).withheld(loaded.untrusted.is_some());
     let mut watching = repo::watch(&root);
-    let mut commands = commands_for(&root, &mut backend);
+    let mut started = Started::beside(&root, backend);
     let ended = niobe_tui::run(
         app,
         niobe_tui::Around {
             journal: &mut journal,
-            backend: backend.bridge(),
+            backend: started.backend.bridge(),
             rules: &mut rules,
             preferences: &mut preferences::ChoicesFile::for_profile(
                 selected.as_ref().map(|selected| selected.name),
             ),
             watch: &mut watching,
-            shell: &mut commands,
+            shell: &mut started.commands,
             images: &mut images_for(&root),
             desktop: &mut desktop_for(&root),
             history: &mut history_for(&root, selected.as_ref()),
@@ -1137,7 +1161,7 @@ fn print_turn(
     }
     let tap = backend::stream_tap(&root, std::env::var_os(backend::STREAM_DIR_VAR))?;
     let terse = asked.terse.unwrap_or(loaded.config.terse());
-    let mut backend = backend::attach(
+    let backend = backend::attach(
         &root,
         selected.as_ref(),
         &backend::Attach {
@@ -1178,20 +1202,20 @@ fn print_turn(
     // never answers — a CI job's timeout, or `niobe bench` at a task's
     // deadline — so that what the agent started is not left running with
     // nobody to see it. Each pause lets go of a group the CLI left empty.
-    let mut reaped = commands_for(&root, &mut backend);
+    let mut started = Started::beside(&root, backend);
     // Caught from here, so that a CI job's timeout or Ctrl+C stops the turn
     // and the run still records, prints and reports it; see `signals`.
     let signals = signals::Signals::watch()
         .map_err(|error| format!("the signals that stop a run could not be caught: {error}"))?;
     let mut journal = StoreJournal::pending(root.clone());
     let turn = headless::run(
-        backend.bridge(),
+        started.backend.bridge(),
         &mut journal,
         &allowed,
         prompt,
         asked.budget,
         &mut || {
-            let _ = niobe_tui::shell::Shell::drain(&mut reaped);
+            let _ = niobe_tui::shell::Shell::drain(&mut started.commands);
             std::thread::sleep(Duration::from_millis(10));
         },
         &mut || {
@@ -1201,10 +1225,9 @@ fn print_turn(
         },
     );
     // The backend is ended before the journal is closed, so that nothing it
-    // says while going is written into a session the store has finished; it
-    // stops its own group, so the reaper is let go of after it.
-    drop(backend);
-    drop(reaped);
+    // says while going is written into a session the store has finished; the
+    // reaper is let go of after it, as `Started` holds them.
+    drop(started);
     let finished = journal.finish();
     if finished.unsaved > 0 {
         note(&format!(

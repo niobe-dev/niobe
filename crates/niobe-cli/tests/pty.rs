@@ -4291,6 +4291,79 @@ fn a_sigkill_to_the_sessions_whole_group_leaves_nothing_it_started_running() {
     });
 }
 
+/// A `claude` that starts something in its own process group that SIGTERM
+/// does not end, answers one turn, and once its standard input closes takes
+/// its time to leave, as one writing its session out does: the shell's quit
+/// is still waiting on it when the next signal comes.
+const SLOW_TO_LEAVE_CLAUDE: &str = "#!/bin/sh\n\
+    echo $$ > claude.pid\n\
+    (trap '' TERM; exec sleep 77108) </dev/null >/dev/null 2>&1 &\n\
+    echo $! > started.pid\n\
+    read -r first\n\
+    read -r turn\n\
+    printf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"model\":\"claude-opus-5\",\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"replied-and-slow-to-leave\"}]}}'\n\
+    printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"done\"}'\n\
+    while read -r line; do :; done\n\
+    sleep 5\n";
+
+/// A SIGTERM that comes while a quit waits on the CLI to leave — the terminal
+/// already handed back, so the signal does what it would without the shell —
+/// ends the process there, and what the CLI's group still runs is ended by
+/// what outlives the session, which is still there to hear it go.
+#[test]
+fn a_sigterm_while_the_quit_waits_on_the_cli_leaves_nothing_of_its_group_running() {
+    let repo = repo();
+    let home = stand_in(repo.path(), SLOW_TO_LEAVE_CLAUDE);
+    let (terminal, slave) = Terminal::open();
+    let mut shell = Reaped(
+        shell_driving_the_stand_in(&slave, repo.path(), home.path())
+            .process_group(0)
+            .spawn()
+            .expect("the niobe binary runs"),
+    );
+    terminal.shows(OPENING_FRAME);
+    terminal.typed(b"say something\r");
+    terminal.shows("replied-and-slow-to-leave");
+    let pid = |file: &str| -> Pid {
+        let raw: i32 = std::fs::read_to_string(repo.path().join(file))
+            .expect("the stand-in wrote down its processes before it answered")
+            .trim()
+            .parse()
+            .expect("a pid is a number");
+        Pid::from_raw(raw).expect("a pid is positive")
+    };
+    let (cli, started) = (pid("claude.pid"), pid("started.pid"));
+
+    let quitting = terminal.mark();
+    terminal.typed(CTRL_Q);
+    // The last line a quit prints, after which the session lets go of what it
+    // started: the CLI is given half a second to leave on its own, and what
+    // its group runs a quarter of a second more to end on SIGTERM.
+    terminal.shows_since(quitting, "saved in");
+    std::thread::sleep(Duration::from_millis(150));
+    signal(&shell, Signal::TERM);
+
+    ended(&mut shell);
+    drop(slave);
+    terminal.drained();
+    let deadline = Instant::now() + DEADLINE;
+    let left = || {
+        rustix::process::test_kill_process(started).is_ok()
+            || rustix::process::test_kill_process_group(cli).is_ok()
+    };
+    while left() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let still_running = left();
+    // Whatever this test finds, it leaves nothing of the stand-in behind.
+    let _ = rustix::process::kill_process_group(cli, Signal::KILL);
+    let _ = rustix::process::kill_process(started, Signal::KILL);
+    assert!(
+        !still_running,
+        "{DEADLINE:?} after a SIGTERM during the quit, the CLI's group was still running"
+    );
+}
+
 /// A `!` command line whose `sh` traps SIGTERM goes on to its next step once
 /// the step it waits on has ended. SIGKILL leaves the shell no way to end that
 /// `sh` itself, so what outlives the session has to end it outright before it
