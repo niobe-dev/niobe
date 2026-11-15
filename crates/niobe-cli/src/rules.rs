@@ -31,6 +31,10 @@ pub struct ConfigRules {
     /// text, a file it names or a profile it replaces was not trusted as it
     /// stood, and the next load withholds it for as long as that holds.
     withheld: bool,
+    /// Whether the record trusted the file's text when the load withheld it,
+    /// so that something else it names was what was not trusted. Where the
+    /// text was not, a record that trusts it now is `niobe trust` run since.
+    text_trusted_when_withheld: bool,
 }
 
 impl ConfigRules {
@@ -42,6 +46,7 @@ impl ConfigRules {
             path: crate::repo::config_path(root),
             trust: crate::config::trust_path(),
             withheld: false,
+            text_trusted_when_withheld: false,
         }
     }
 
@@ -53,19 +58,30 @@ impl ConfigRules {
     /// would hash a plugin directory and wait on `git` on the loop that
     /// draws the screen. A file withheld at the start stays withheld until
     /// the operator trusts it, which `niobe trust` does outside the session.
+    ///
+    /// Read once, as the session starts: whether the record trusted the
+    /// file's text then, which tells `niobe trust` run since from a file
+    /// that names something still untrusted.
     pub fn withheld(mut self, withheld: bool) -> Self {
         self.withheld = withheld;
+        self.text_trusted_when_withheld = withheld
+            && niobe_config::read::text(&self.path).is_ok_and(|text| self.record_trusts(&text));
         self
     }
 
     /// Whether the next session lays the file on whole, holding `text`: the
-    /// load did not withhold it, and the record trusts this text.
+    /// record trusts this text, and the load did not withhold the file, or
+    /// withheld it for its text alone, which the operator has trusted since.
     fn trusted(&self, text: &str) -> bool {
+        self.record_trusts(text) && (!self.withheld || !self.text_trusted_when_withheld)
+    }
+
+    /// Whether the record trusts the file holding `text`.
+    fn record_trusts(&self, text: &str) -> bool {
         let Some(record) = &self.trust else {
             return false;
         };
-        !self.withheld
-            && Trusted::read(record).is_ok_and(|trusted| trusted.trusts(&self.path, text))
+        Trusted::read(record).is_ok_and(|trusted| trusted.trusts(&self.path, text))
     }
 
     /// Records the file, holding exactly `text`, as trusted.
@@ -156,6 +172,7 @@ mod tests {
                 path: crate::repo::config_path(self.dir.path()),
                 trust: Some(self.record.clone()),
                 withheld: false,
+                text_trusted_when_withheld: false,
             }
         }
 
@@ -184,6 +201,7 @@ mod tests {
             path: crate::repo::config_path(dir.path()),
             trust: Some(dir.path().join("trusted.list")),
             withheld: false,
+            text_trusted_when_withheld: false,
         };
 
         rules
@@ -244,6 +262,23 @@ mod tests {
             .expect("the config is written");
 
         assert_eq!(reach, Reach::UntilTrusted);
+    }
+
+    /// The session opened on a file nobody trusted, and the operator ran
+    /// `niobe trust` on it while the session ran: a rule written after that
+    /// keeps their decision rather than undoing it.
+    #[test]
+    fn a_rule_written_after_niobe_trust_ran_mid_session_reaches_the_next_session() {
+        let repo = Repo::with_config("[profiles.p]\nbackend = \"claude\"\n");
+        let rules = repo.rules().withheld(true);
+        repo.trust();
+
+        let reach = { rules }
+            .remember(&Rule::tool("Read"))
+            .expect("the config is written");
+
+        assert_eq!(reach, Reach::NextSession);
+        assert!(repo.is_trusted(), "the new text is trusted as the old was");
     }
 
     #[test]
@@ -377,6 +412,7 @@ mod tests {
             path: path.clone(),
             trust: Some(record.clone()),
             withheld: false,
+            text_trusted_when_withheld: false,
         };
 
         let (done, finished) = std::sync::mpsc::channel();
@@ -455,6 +491,7 @@ mod tests {
             path: crate::repo::config_path(dir.path()),
             trust: Some(dir.path().join("trusted.list")),
             withheld: false,
+            text_trusted_when_withheld: false,
         }
         .remember(&Rule::tool("Read"))
         .expect("the temporary directory is writable");
