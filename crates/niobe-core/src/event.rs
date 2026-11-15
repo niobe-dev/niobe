@@ -1365,6 +1365,67 @@ pub enum Event {
     },
 }
 
+impl Event {
+    /// Whether this is a report the backend makes of itself — what it offers,
+    /// the account it is signed in with, how that is billed, where the plan's
+    /// windows stand, the model it starts on — which a backend makes as it
+    /// starts, whether or not anything is then done in the session.
+    ///
+    /// A session that holds nothing else is one the operator opened and left:
+    /// the journal keeps such reports back until something else happens, so
+    /// that it lists no session nobody used.
+    pub fn reports_the_backend_alone(&self) -> bool {
+        match self {
+            Event::UsageWindows(_)
+            | Event::Billing { .. }
+            | Event::Account { .. }
+            | Event::ModelConfigured { .. }
+            | Event::Commands { .. }
+            | Event::McpServers { .. }
+            | Event::Models { .. } => true,
+            Event::SessionMeta(_)
+            | Event::UserMessage { .. }
+            | Event::PromptNotSent { .. }
+            | Event::Titled { .. }
+            | Event::AssistantDelta { .. }
+            | Event::AssistantMessage { .. }
+            | Event::Narration { .. }
+            | Event::ToolCallStart { .. }
+            | Event::ToolCallEnd { .. }
+            | Event::TurnEnded
+            | Event::TurnFollows
+            | Event::PromptTaken
+            | Event::Usage(_)
+            | Event::Context(_)
+            | Event::Cleared
+            | Event::CompactionStarted
+            | Event::CompactionEnded
+            | Event::Compacted { .. }
+            | Event::SessionLeft
+            | Event::PermissionRequest { .. }
+            | Event::PermissionResponse { .. }
+            | Event::PermissionWithdrawn { .. }
+            | Event::ModeSelected { .. }
+            | Event::ModeUnknown
+            | Event::ModelSelected { .. }
+            | Event::ModelRefused { .. }
+            | Event::FileChange { .. }
+            | Event::TestRun { .. }
+            | Event::AgentSpawn { .. }
+            | Event::AgentProgress { .. }
+            | Event::AgentExit { .. }
+            | Event::BackgroundCommandStarted { .. }
+            | Event::BackgroundCommandEnded { .. }
+            | Event::TurnTotalDiffers { .. }
+            | Event::Notice { .. }
+            | Event::LimitReached { .. }
+            | Event::Looked
+            | Event::Goal { .. }
+            | Event::Error { .. } => false,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
 

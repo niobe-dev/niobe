@@ -27,9 +27,10 @@ use crate::repo;
 /// they were handed over, dates each by when it was, and answers for every
 /// one through [`Journal::settled`].
 ///
-/// For a new session the store is opened on the first event, not when the
-/// shell opens: looking at the shell and quitting leaves no `.niobe` directory
-/// behind and no empty session in the list.
+/// For a new session the store is opened on the first event that is more than
+/// the backend's report of itself, not when the shell opens: looking at the
+/// shell and quitting leaves no `.niobe` directory behind and no empty session
+/// in the list, though the backend said what it offers as it started.
 #[derive(Debug)]
 pub struct StoreJournal {
     /// Where events go to be written; taken when the journal is finished.
@@ -60,8 +61,10 @@ type Written = Result<Option<SessionId>, JournalError>;
 #[derive(Debug)]
 enum Target {
     /// Nothing recorded yet; the store of this repository root is opened on the
-    /// first event.
-    Pending(PathBuf),
+    /// first event that is not one of the backend's reports of itself
+    /// ([`Event::reports_the_backend_alone`]). Those that came before it are
+    /// held here, with when they happened, and written ahead of it.
+    Pending { root: PathBuf, held: Vec<Handed> },
     /// Recording.
     Open(Recorder),
 }
@@ -80,9 +83,16 @@ pub struct Finished {
 
 impl StoreJournal {
     /// A journal that opens the store of the repository at `root` on its first
-    /// event and records a new session there.
+    /// event that is more than the backend's report of itself, and records a
+    /// new session there, beginning with the reports it held.
     pub fn pending(root: PathBuf) -> Self {
-        Self::start(Target::Pending(root), None)
+        Self::start(
+            Target::Pending {
+                root,
+                held: Vec::new(),
+            },
+            None,
+        )
     }
 
     /// A journal that goes on recording into `recorder`'s session.
@@ -226,41 +236,77 @@ fn write(
     closing: &AtomicBool,
 ) {
     let mut given_up: Option<String> = None;
-    for Handed { event, at } in handed {
-        let outcome = match &given_up {
-            Some(reason) => Err(reason.clone().into()),
-            None => target.record(&event, at),
+    for handed_over in handed {
+        let outcomes = match &given_up {
+            Some(reason) => vec![Err(reason.clone().into())],
+            None => target.record(handed_over),
         };
-        if let Err(error) = &outcome
-            && closing.load(Ordering::Acquire)
-        {
-            given_up.get_or_insert_with(|| error.to_string());
+        for outcome in outcomes {
+            if let Err(error) = &outcome
+                && closing.load(Ordering::Acquire)
+            {
+                given_up.get_or_insert_with(|| error.to_string());
+            }
+            // A journal dropped without being finished has stopped listening,
+            // and the events are written all the same.
+            drop(written.send(outcome));
         }
-        // A journal dropped without being finished has stopped listening, and
-        // the events are written all the same.
-        drop(written.send(outcome));
+    }
+    // What is still held is the backend describing itself in a session
+    // nobody used, which is left unrecorded on purpose rather than lost.
+    if let Target::Pending { held, .. } = target {
+        for _ in held {
+            drop(written.send(Ok(None)));
+        }
     }
 }
 
 impl Target {
-    fn record(&mut self, event: &Event, at: SystemTime) -> Written {
-        // A store that failed to open stays pending, so the next event tries
-        // again rather than the whole session going unrecorded.
-        if let Self::Pending(root) = self {
-            *self = Self::Open(Recorder::new(repo::open_or_create_store(root)?));
+    /// Records `handed`, and answers for it and for every event held until it
+    /// came; answers for nothing while it is itself held.
+    fn record(&mut self, handed: Handed) -> Vec<Written> {
+        match self {
+            Self::Open(recorder) => vec![keep(recorder, &handed)],
+            Self::Pending { root, held } => {
+                held.push(handed);
+                if held
+                    .iter()
+                    .all(|held| held.event.reports_the_backend_alone())
+                {
+                    return Vec::new();
+                }
+                match repo::open_or_create_store(root) {
+                    Ok(store) => {
+                        let held = std::mem::take(held);
+                        let mut recorder = Recorder::new(store);
+                        let written = held.iter().map(|held| keep(&mut recorder, held)).collect();
+                        *self = Self::Open(recorder);
+                        written
+                    }
+                    // A store that failed to open stays pending, so the next
+                    // event tries again rather than the whole session going
+                    // unrecorded. The event that tried is refused; the
+                    // backend's reports before it are held on.
+                    Err(error) => {
+                        held.pop();
+                        vec![Err(error.into())]
+                    }
+                }
+            }
         }
-        let Self::Open(recorder) = self else {
-            return Err("the session store was not opened".into());
-        };
-        // A conversation started over is a session of its own, whose first
-        // record says so: the session before it keeps its own figures, and
-        // can be opened again.
-        if matches!(event, Event::Cleared) {
-            recorder.start_over();
-        }
-        recorder.record_at(event, at)?;
-        Ok(recorder.session())
     }
+}
+
+/// Records one event into `recorder`'s session, and says which session that is.
+fn keep(recorder: &mut Recorder, handed: &Handed) -> Written {
+    // A conversation started over is a session of its own, whose first
+    // record says so: the session before it keeps its own figures, and
+    // can be opened again.
+    if matches!(handed.event, Event::Cleared) {
+        recorder.start_over();
+    }
+    recorder.record_at(&handed.event, handed.at)?;
+    Ok(recorder.session())
 }
 
 /// The variable that asks for the panic below.
@@ -388,6 +434,69 @@ mod tests {
 
         assert_eq!(journal.session(), None);
         assert!(!dir.path().join(".niobe").exists());
+    }
+
+    /// What the `claude` driver reports of the CLI as it starts, before the
+    /// operator has done anything.
+    fn startup_reports() -> Vec<Event> {
+        vec![
+            Event::Commands {
+                commands: Vec::new(),
+            },
+            Event::Account {
+                plan: Some("Claude Max".to_owned()),
+            },
+            Event::ModelConfigured {
+                model: "claude-opus-4-1".to_owned(),
+            },
+            Event::Models { models: Vec::new() },
+        ]
+    }
+
+    #[test]
+    fn a_shell_quit_with_nothing_done_records_no_session() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let mut journal = StoreJournal::pending(dir.path().to_path_buf());
+        for event in startup_reports() {
+            journal.append(&event);
+        }
+
+        let finished = journal.finish();
+
+        assert_eq!(finished.session, None);
+        assert_eq!(finished.unsaved, 0, "{:?}", finished.error);
+        assert!(!dir.path().join(".niobe").exists());
+    }
+
+    #[test]
+    fn the_backends_startup_reports_are_kept_once_something_is_done() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let root = dir.path().to_path_buf();
+        let mut journal = StoreJournal::pending(root.clone());
+        for event in startup_reports() {
+            journal.append(&event);
+        }
+        let prompt = Event::UserMessage {
+            text: "add etag support".to_owned(),
+        };
+        journal.append(&prompt);
+        let session = journal
+            .finish()
+            .session
+            .expect("the prompt opened a session");
+
+        let store = repo::open_existing_store(&root)
+            .expect("the store opens")
+            .expect("the store exists");
+        let stored: Vec<Event> = store
+            .events(session)
+            .expect("the session loads")
+            .into_iter()
+            .map(|stored| stored.event)
+            .collect();
+        let mut expected = startup_reports();
+        expected.push(prompt);
+        assert_eq!(stored, expected);
     }
 
     #[test]
