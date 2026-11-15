@@ -1744,6 +1744,10 @@ pub struct App {
     /// The effort level last chosen here, or the one the backend was started
     /// with; the backend does not report the level in force.
     effort: Option<String>,
+    /// The effort in force before the one just chosen, while the prompt that
+    /// chooses it has not reached the backend: one it never reaches is no
+    /// choice, and the level before it comes back.
+    effort_before_sent: Option<Option<String>>,
     /// Events the operator produced that have not been handed out to be kept.
     produced: Vec<Event>,
     /// The images attached to prompts, and the ones asked for.
@@ -2405,6 +2409,7 @@ impl App {
             preferred: Vec::new(),
             model_chosen_here: false,
             effort: None,
+            effort_before_sent: None,
             produced: Vec::new(),
             images: Attachments::default(),
             picking: None,
@@ -2478,9 +2483,15 @@ impl App {
         // A model the backend refused is not what the next session should
         // open on: it keeps the one the backend went back to, where a change
         // it took put it there, and otherwise none, leaving the backend's own.
-        if let Event::ModelRefused { back_to } = event
-            && self.model_chosen_here
-        {
+        if let Event::ModelRefused { back_to } = event {
+            self.model_refused(back_to);
+        }
+    }
+
+    /// Keeps for the next session the model the backend went back to, in
+    /// place of the one chosen here that it refused, or none.
+    fn model_refused(&mut self, back_to: &Option<String>) {
+        if self.model_chosen_here {
             self.preferred.push(Preference::Model(back_to.clone()));
         }
     }
@@ -4763,8 +4774,25 @@ impl App {
     /// Notes `effort` as the level in force, and keeps it for the next
     /// session.
     fn chose_effort(&mut self, effort: &str) {
-        self.effort = Some(effort.to_owned());
+        let before = self.effort.replace(effort.to_owned());
+        self.effort_before_sent = Some(before);
         self.preferred.push(Preference::Effort(effort.to_owned()));
+    }
+
+    /// Takes back the effort chosen with a prompt that never reached the
+    /// backend, and the preference it would have kept for the next session.
+    fn effort_not_sent(&mut self) {
+        let Some(before) = self.effort_before_sent.take() else {
+            return;
+        };
+        self.effort = before;
+        if let Some(at) = self
+            .preferred
+            .iter()
+            .rposition(|preference| matches!(preference, Preference::Effort(_)))
+        {
+            self.preferred.remove(at);
+        }
     }
 
     /// Says in the transcript that a standing answer will not outlive the
@@ -4924,6 +4952,7 @@ impl App {
         self.not_changed("model", error);
         let back = Event::ModelRefused { back_to: None };
         self.fold_event(&back);
+        self.model_refused(&None);
         back
     }
 
@@ -6117,6 +6146,7 @@ impl App {
     /// Records that the loop handed `prompt` to the backend: it is one F6
     /// can put the files back before.
     pub fn sent_to_backend(&mut self, prompt: &str) {
+        self.effort_before_sent = None;
         let first = prompt.trim().lines().next().unwrap_or_default();
         self.sent.push(crate::text::truncate(first, REWIND_LABEL));
     }
@@ -10197,6 +10227,7 @@ impl App {
             }
         };
         self.unqueue_unsent();
+        self.effort_not_sent();
         self.say_not_sent(error);
         self.scroll_to_tail();
         taken_back

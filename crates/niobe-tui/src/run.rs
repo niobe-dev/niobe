@@ -2451,6 +2451,43 @@ mod tests {
                 .iter()
                 .any(|entry| entry.head == "not changed" && entry.meta == "model")
         );
+        let mut chosen = Chosen::default();
+        keep_preferences(&mut app, &mut chosen);
+        assert_ne!(
+            chosen.kept.last(),
+            Some(&crate::preferences::Preference::Model(Some(
+                "haiku".to_owned()
+            ))),
+            "a model the backend never took is not the next session's: {:?}",
+            chosen.kept
+        );
+    }
+
+    #[test]
+    fn an_effort_that_never_reached_the_backend_is_not_kept_or_marked() {
+        let mut app = App::new(Repo::default()).attached();
+        app.apply(&SessionEvent::Commands {
+            commands: vec![niobe_core::event::SlashCommand {
+                name: "effort".to_owned(),
+                description: String::new(),
+                argument_hint: None,
+                mid_prompt: false,
+            }],
+        });
+        let mut journal = Kept::default();
+        let mut backend = Attached {
+            refuse: true,
+            ..Attached::default()
+        };
+        for c in "/effort low".chars() {
+            app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        send_produced(&mut app, &mut journal, &mut backend, &mut Forgotten);
+        let mut chosen = Chosen::default();
+        keep_preferences(&mut app, &mut chosen);
+
+        assert_eq!(chosen.kept, []);
     }
 
     #[test]
