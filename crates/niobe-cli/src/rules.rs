@@ -27,10 +27,10 @@ pub struct ConfigRules {
     /// Where this machine records the config files it has trusted, so that a
     /// file Niobe itself edits does not lose the operator's decision about it.
     trust: Option<PathBuf>,
-    /// The user's own config, whose profiles the file may replace, and the
-    /// home directory: what the next session's load decides trust by.
-    user: Option<PathBuf>,
-    home: Option<std::ffi::OsString>,
+    /// Whether the load this session started with withheld the file: its
+    /// text, a file it names or a profile it replaces was not trusted as it
+    /// stood, and the next load withholds it for as long as that holds.
+    withheld: bool,
 }
 
 impl ConfigRules {
@@ -41,28 +41,31 @@ impl ConfigRules {
             root: root.to_path_buf(),
             path: crate::repo::config_path(root),
             trust: crate::config::trust_path(),
-            user: crate::config::user_path(
-                std::env::var_os("XDG_CONFIG_HOME"),
-                std::env::var_os("HOME"),
-            ),
-            home: std::env::var_os("HOME"),
+            withheld: false,
         }
     }
 
-    /// Whether the next session would lay the file on whole, holding `text`:
-    /// trusted as text, with the files it names and the profiles it
-    /// replaces as they now are. A record or a file that cannot be read
-    /// leaves it untrusted, as it leaves the load.
+    /// These rules, for a session whose load withheld the file where
+    /// `withheld` says so.
+    ///
+    /// The load decides on the file's text, the files it names as they then
+    /// were and the profiles it replaces; asked again on every answer, that
+    /// would hash a plugin directory and wait on `git` on the loop that
+    /// draws the screen. A file withheld at the start stays withheld until
+    /// the operator trusts it, which `niobe trust` does outside the session.
+    pub fn withheld(mut self, withheld: bool) -> Self {
+        self.withheld = withheld;
+        self
+    }
+
+    /// Whether the next session lays the file on whole, holding `text`: the
+    /// load did not withhold it, and the record trusts this text.
     fn trusted(&self, text: &str) -> bool {
-        crate::config::trusted_whole(
-            self.trust.as_deref(),
-            &self.root,
-            &self.path,
-            text,
-            self.user.as_deref(),
-            self.home.as_deref(),
-        )
-        .unwrap_or(false)
+        let Some(record) = &self.trust else {
+            return false;
+        };
+        !self.withheld
+            && Trusted::read(record).is_ok_and(|trusted| trusted.trusts(&self.path, text))
     }
 
     /// Records the file, holding exactly `text`, as trusted.
@@ -152,8 +155,7 @@ mod tests {
                 root: self.dir.path().to_path_buf(),
                 path: crate::repo::config_path(self.dir.path()),
                 trust: Some(self.record.clone()),
-                user: None,
-                home: None,
+                withheld: false,
             }
         }
 
@@ -181,8 +183,7 @@ mod tests {
             root: dir.path().to_path_buf(),
             path: crate::repo::config_path(dir.path()),
             trust: Some(dir.path().join("trusted.list")),
-            user: None,
-            home: None,
+            withheld: false,
         };
 
         rules
@@ -229,54 +230,20 @@ mod tests {
         assert!(said.contains("no `allow` array"), "{said}");
     }
 
-    /// The config at `repo`, holding a profile that names `claude.json` as
-    /// its settings file, trusted as `niobe trust` records it: its text and
-    /// the settings file as they now are.
-    fn trusted_with_a_settings_file(repo: &Repo) {
-        let path = crate::repo::config_path(repo.dir.path());
-        let text = std::fs::read_to_string(&path).expect("the config reads");
-        let config = niobe_config::Config::parse(&text, &path).expect("the config parses");
-        let untrusted = crate::config::Untrusted {
-            path,
-            attached: crate::config::attached(&config, repo.dir.path(), None),
-            text,
-            config,
-            replaces: Vec::new(),
-        };
-        crate::config::record_trust(&repo.record, &untrusted).expect("the record is written");
-    }
-
-    const NAMES_A_SETTINGS_FILE: &str =
-        "[profiles.p]\nbackend = \"claude\"\nsettings = \"claude.json\"\n";
-
+    /// A config whose text is trusted can still be withheld at load: a
+    /// settings file it names changed since, or a profile it replaces is new.
     #[test]
-    fn a_rule_in_a_config_whose_settings_file_changed_since_it_was_trusted_waits_on_trust() {
-        let repo = Repo::with_config(NAMES_A_SETTINGS_FILE);
-        std::fs::write(repo.dir.path().join("claude.json"), "{}").expect("the settings file");
-        trusted_with_a_settings_file(&repo);
-        std::fs::write(repo.dir.path().join("claude.json"), r#"{"env":{}}"#)
-            .expect("a pull changes the settings file");
+    fn a_rule_in_a_config_the_session_loaded_withheld_waits_on_trust() {
+        let repo = Repo::with_config("[profiles.p]\nbackend = \"claude\"\n");
+        repo.trust();
 
         let reach = repo
             .rules()
+            .withheld(true)
             .remember(&Rule::tool("Read"))
             .expect("the config is written");
 
         assert_eq!(reach, Reach::UntilTrusted);
-    }
-
-    #[test]
-    fn a_rule_in_a_config_trusted_with_its_settings_file_reaches_the_next_session() {
-        let repo = Repo::with_config(NAMES_A_SETTINGS_FILE);
-        std::fs::write(repo.dir.path().join("claude.json"), "{}").expect("the settings file");
-        trusted_with_a_settings_file(&repo);
-
-        let reach = repo
-            .rules()
-            .remember(&Rule::tool("Read"))
-            .expect("the config is written");
-
-        assert_eq!(reach, Reach::NextSession);
     }
 
     #[test]
@@ -409,8 +376,7 @@ mod tests {
             root: repo.dir.path().to_path_buf(),
             path: path.clone(),
             trust: Some(record.clone()),
-            user: None,
-            home: None,
+            withheld: false,
         };
 
         let (done, finished) = std::sync::mpsc::channel();
@@ -488,8 +454,7 @@ mod tests {
             root: dir.path().to_path_buf(),
             path: crate::repo::config_path(dir.path()),
             trust: Some(dir.path().join("trusted.list")),
-            user: None,
-            home: None,
+            withheld: false,
         }
         .remember(&Rule::tool("Read"))
         .expect("the temporary directory is writable");

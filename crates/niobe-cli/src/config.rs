@@ -450,33 +450,6 @@ pub fn as_written(path: &Path, text: String) -> Result<Untrusted, String> {
     })
 }
 
-/// Whether [`load`] would lay the repository's config at `path`, holding
-/// `text`, on whole rather than gated: its text, the files it names as they
-/// now are and the profiles it replaces of the user's config at `user`, all
-/// as the record at `record` trusts them.
-///
-/// What a write into the file asks before it says a rule reaches the next
-/// session: the text's digest alone says nothing of a settings file a pull
-/// changed since, which gates the file all the same.
-pub fn trusted_whole(
-    record: Option<&Path>,
-    root: &Path,
-    path: &Path,
-    text: &str,
-    user: Option<&Path>,
-    home: Option<&OsStr>,
-) -> Result<bool, String> {
-    let config = Config::parse(text, path).map_err(|e| e.to_string())?;
-    let user = user_config(user)?;
-    trusted(
-        record,
-        path,
-        text,
-        &attached(&config, root, home),
-        &replaced(&user, &config),
-    )
-}
-
 /// The user's config at `user`, or none where there is no such file or
 /// nowhere it could be.
 fn user_config(user: Option<&Path>) -> Result<Config, String> {

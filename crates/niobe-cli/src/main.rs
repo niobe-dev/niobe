@@ -505,7 +505,7 @@ fn shell(profile: Option<&str>, asked: &Asked, opening: Opening) -> Result<Optio
     };
 
     let mut journal = StoreJournal::pending(root.clone());
-    let mut rules = ConfigRules::at(&root);
+    let mut rules = ConfigRules::at(&root).withheld(loaded.untrusted.is_some());
     // Started with the shell and stopped with it: the thread behind it reads
     // the repository while the session runs, and a piped run never gets here.
     let mut watching = repo::watch(&root);
@@ -803,7 +803,7 @@ fn resume(
 
     let mut journal = StoreJournal::open(recorder);
     journal.keep_taking_up(&mut app);
-    let mut rules = ConfigRules::at(&root);
+    let mut rules = ConfigRules::at(&root).withheld(loaded.untrusted.is_some());
     let mut watching = repo::watch(&root);
     let mut commands = commands_for(&root, &mut backend);
     let ended = niobe_tui::run(
@@ -1054,7 +1054,7 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<Option<
 
     let mut journal = StoreJournal::open(recorder);
     journal.keep_taking_up(&mut app);
-    let mut rules = ConfigRules::at(&root);
+    let mut rules = ConfigRules::at(&root).withheld(loaded.untrusted.is_some());
     let mut watching = repo::watch(&root);
     let mut commands = commands_for(&root, &mut backend);
     let ended = niobe_tui::run(
