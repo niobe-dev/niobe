@@ -1,23 +1,23 @@
  Niobe  Session  Context  Model  View  Help           opus-5  claude · default
 ╔════ > add etag support to the catalog fetcher so we stop re-downloading… ════╗
 ║                                                                              ║
-║ ✗ Notion·update… {}                                                   failed ║
-║   └ 404 object_not_found — the page is not shared with the integration       ║
+║ ◆ Caching the etag beside the body so a 304 can be answered from the LRU.    ║
 ║                                                                              ║
-║ ◆ ╔═════════════════════════════ Tool calls ═════════════════════════════╗   ║
-║   ║                                                                      ║   ║
+║   Edited 1 file +6 −2                                                        ║
+║   ╔═════════════════════════════ Tool calls ═════════════════════════════╗   ║
+║ ◆ ║                                                                      ║   ║
 ║   ║    Read                   catalog/fetch.ts · 7.2 kB                  ║   █
-║   ║    Read                   catalog/cache.ts · 3.1 kB                  ║   █
-║ ◆ ║    Read                   tests/fetch.test.ts · 4.9 kB               ║   █
-║   ║    Notion·search          {} · 1.1 kB                                ║   █
-║ ◆ ║    Notion·fetch           {} · 2.5 kB                                ║   █
+║ ◆ ║    Read                   catalog/cache.ts · 3.1 kB                  ║   █
+║   ║    Read                   tests/fetch.test.ts · 4.9 kB               ║   █
+║ ✗ ║    Notion·search          {} · 1.1 kB                                ║4s █
+║   ║    Notion·fetch           {} · 2.5 kB                                ║   █
 ║   ║    Notion·update-page     {} · 96 B                                  ║   █
-║ ✗ ║    Edit                   catalog/fetch.ts · 640 B                   ║4s █
+║ ◆ ║    Edit                   catalog/fetch.ts · 640 B                   ║4  █
 ║   ║  › Bash                   npm test -- fetch · 2.0 kB                 ║   █
 ║   ║                                                                      ║   █
-║ ◆ ║  ↑↓ choose · Enter read · Esc close                                  ║4  █
-║   ╚════════════════════════════ oldest first ════════════════════════════╝   █
-║                                                                              █
+║ st║  ↑↓ choose · Enter read · Esc close                                  ║   ║
+║   ╚════════════════════════════ oldest first ════════════════════════════╝2s ║
+║       └ Reading tests/stream.rs                                              ║
 ║ ──────────────────────────────────────────────────────────────────────────── ║
 ║  ask  >  Ask for a change · @ file · Ctrl+F find              Ctrl+J newline ║
 ╚══════════════════════════════════════════════════════════════════════════════╝

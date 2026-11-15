@@ -1193,52 +1193,49 @@ fn a_huge_working_tree_redraws_inside_a_frame_budget() {
     );
 }
 
-/// A session busy enough that the Activity pane has to build every row it
-/// holds: four sub-agents and a dozen tools.
-///
-/// The pane builds them all on every frame, because that is what tells it
-/// how far it can be scrolled, so what it costs is timed rather than assumed.
-const BUSY_AGENTS: usize = 4;
-const BUSY_TOOLS: usize = 12;
+/// A session busy enough that the foot of the transcript lists a branch for
+/// each of a dozen sub-agents at work, each with the calls it has made so
+/// far, counted again on every frame.
+const BUSY_AGENTS: usize = 12;
+
+/// The calls each busy agent has made.
+const BUSY_CALLS: usize = 40;
 
 #[test]
 #[cfg_attr(debug_assertions, ignore = "a frame is timed in an optimised build")]
-fn a_busy_activity_pane_redraws_inside_a_frame_budget() {
+fn a_session_busy_with_sub_agents_redraws_inside_a_frame_budget() {
     let _alone = ALONE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut app = running_session();
 
     for n in 0..BUSY_AGENTS {
+        let agent: niobe_core::AgentId = format!("busy-{n}").into();
         app.apply(&Event::AgentSpawn {
-            id: format!("busy-{n}").into(),
+            id: agent.clone(),
             parent: None,
             kind: None,
             label: format!("explorer-{n} → crates/niobe-core/src/session.rs"),
         });
+        for call in 0..BUSY_CALLS {
+            app.apply(&Event::ToolCallStart {
+                id: format!("busy-{n}-{call}").into(),
+                name: "Read".to_owned(),
+                input: "{}".to_owned(),
+                summary: Some(format!("src/file{call}.rs")),
+                agent: Some(agent.clone()),
+            });
+        }
     }
-    for n in 0..BUSY_TOOLS {
-        app.apply(&Event::ToolCallEnd {
-            id: format!("busy-t{n}").into(),
-            name: format!("mcp__claude_ai_Server{n}__do-the-thing"),
-            input: "{}".to_owned(),
-            output: String::new(),
-            bytes: 1_024,
-            outcome: niobe_core::event::ToolOutcome::Ok,
-            summary: None,
-            exit_code: None,
-            error: None,
-            command: None,
-            untrimmed: None,
-        });
-    }
-    let _ = screen(&mut app, 200, 60);
+    let frame = screen(&mut app, 200, 60);
+    assert!(frame.contains("more at work"), "{frame}");
 
     let median = median_frame(&mut app, &[(200, 60)]);
 
     assert!(
         median <= FRAME_BUDGET,
-        "the median frame with {BUSY_AGENTS} agents and {BUSY_TOOLS} tools at 200x60 took {median:?}, over the {FRAME_BUDGET:?} budget"
+        "the median frame with {BUSY_AGENTS} agents of {BUSY_CALLS} calls each at 200x60 \
+         took {median:?}, over the {FRAME_BUDGET:?} budget"
     );
 }
 

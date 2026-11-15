@@ -16,25 +16,25 @@
  ┃   │     ## Report                                         │ █ │       lru.ts           +31  −9 █
  ┃   │     The fetcher downloads every manifest again.       │ █ │       index.ts         +12  −0 █
  ┃   │     … 5 more lines                                    │ █ │     fetch.ts          +149 −12 █
- ┃   │   properties:                                         │ █ │     etag.ts            +88 −41 │
- ┃   │     Name: Etag support                                │ █ │   ▾ docs/                      │
- ┃   │     Priority: High                                    │ █ │     ▾ adr/                     │
- ┃   │     Status: Not started                               │ █ │       0004-etags.md    +34  −1 │
- ┃   │     date:Due:start: 2026-10-04                        │ █ │     ▾ diagrams/                │
- ┃   │     date:Due:is_datetime: 0                           │ █ │       cache.png          —   — │
- ┃   │ … 3 more lines · Ctrl+T shows the arguments as sent   │ █ │     caching.md         +64 −22 │
- ┃   │                                                       │ █ │   ▾ server/                    │
- ┃   │ ▶ 1. Allow once                        this call only │ █ │     ▾ handlers/                │
- ┃   │   2. Always allow Notion·create-pages  saved in this… │ █ │       manifest.ts      +97  −4 │
- ┃   │   3. Deny                       the call does not run │ █ └────────────────────────────────┘
- ┃   │                                                       │ █ ┌─────────── Activity ───────────┐
- ┃   │ 2. saved in this repo's config                        │ █ │ ▾ Sub-agents  1 running        │
- ┃   │                                                       │ █ │ ◆ test Cover tests/fet… 1m 42s │
- ┃   │ ↑↓ move · 1-3 jump · Enter confirm                    │ █ │   └ Reading tests/stream.rs    │
- ┃   │ Tab type your own · Esc decide later                  │ █ │ ▾ Tools  8 calls ✗ 2           │
- ┃   └───────────────────────────────────────────────────────┘ █ │   Exploring code   3 ▓▓▓▓      │
- ┃                                                             █ │   Notion           3 ▓▓▓▓ ✗ 1  │
- ┃ ─────────────────────────────────────────────────────────── ┃ │   Editing files    1 ▓         │
- ┃  ask  >  Ask for a change · @ file           Ctrl+J newline ┃ │   Build and test   1 ▓    ✗ 1  │
+ ┃   │   properties:                                         │ █ │     etag.ts            +88 −41 █
+ ┃   │     Name: Etag support                                │ █ │   ▾ docs/                      █
+ ┃   │     Priority: High                                    │ █ │     ▾ adr/                     █
+ ┃   │     Status: Not started                               │ █ │       0004-etags.md    +34  −1 █
+ ┃   │     date:Due:start: 2026-10-04                        │ █ │     ▾ diagrams/                █
+ ┃   │     date:Due:is_datetime: 0                           │ █ │       cache.png          —   — █
+ ┃   │ … 3 more lines · Ctrl+T shows the arguments as sent   │ █ │     caching.md         +64 −22 █
+ ┃   │                                                       │ █ │   ▾ server/                    █
+ ┃   │ ▶ 1. Allow once                        this call only │ █ │     ▾ handlers/                █
+ ┃   │   2. Always allow Notion·create-pages  saved in this… │ █ │       manifest.ts      +97  −4 █
+ ┃   │   3. Deny                       the call does not run │ █ │       health.ts         +3 −19 █
+ ┃   │                                                       │ █ │     ▾ middleware/              █
+ ┃   │ 2. saved in this repo's config                        │ █ │       etag.ts          +41 −37 │
+ ┃   │                                                       │ █ │     index.ts            +8  −6 │
+ ┃   │ ↑↓ move · 1-3 jump · Enter confirm                    │ █ │   ▾ tests/                     │
+ ┃   │ Tab type your own · Esc decide later                  │ █ │     ▾ fixtures/                │
+ ┃   └───────────────────────────────────────────────────────┘ █ │       …_modified.json  +97  −0 │
+ ┃                                                             █ │     etag.test.ts      +122  −8 │
+ ┃ ─────────────────────────────────────────────────────────── ┃ │     fetch.test.ts      +76 −14 │
+ ┃  ask  >  Ask for a change · @ file           Ctrl+J newline ┃ │     helpers.ts          +5  −2 │
  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ └────────────────────────────────┘
 EscStop 1Help   2Compact   3Clear   4Model   5Diff   6Rewind   7MCP   8Memory   9Settings   0Quit

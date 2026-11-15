@@ -11,20 +11,20 @@
  ┃   still red — the 304 path asserts a body that is no longer ┃ ┌─────────── Changes ────────────┐
  ┃   sent.                                                     ┃ │ ⎇ main ↑3                      █
  ┃                                                             █ │ ▾ Working tree  +≥977 −≥259    █
- ┃   ┌─ ? claude asks ──────────────────────── blocks turn 1 ┐ █ │   ▾ catalog/                   │
- ┃   │ Build · question 2 of 2                               │ █ │     ▾ cache/                   │
- ┃   │ Which platforms?                                      │ █ │       lru.ts           +31  −9 │
- ┃   │                                                       │ █ │       index.ts         +12  −0 │
- ┃   │ ▶ 1. [x] macOS                                        │ █ │     fetch.ts          +149 −12 │
+ ┃   ┌─ ? claude asks ──────────────────────── blocks turn 1 ┐ █ │   ▾ catalog/                   █
+ ┃   │ Build · question 2 of 2                               │ █ │     ▾ cache/                   █
+ ┃   │ Which platforms?                                      │ █ │       lru.ts           +31  −9 █
+ ┃   │                                                       │ █ │       index.ts         +12  −0 █
+ ┃   │ ▶ 1. [x] macOS                                        │ █ │     fetch.ts          +149 −12 █
  ┃   │   2. [ ] Linux                                        │ █ │     etag.ts            +88 −41 │
  ┃   │   3. [ ] Windows                                      │ █ │   ▾ docs/                      │
- ┃   │   4. Don't answer            the agent gets no answer │ █ └────────────────────────────────┘
- ┃   │                                                       │ █ ┌─────────── Activity ───────────┐
- ┃   │ ↑↓ move · 1-4 jump · Space tick · Enter answer        │ █ │ ▾ Sub-agents  1 running        █
- ┃   │ Tab write your own · Esc decide later                 │ █ │ ◆ test Cover tests/fe… running █
- ┃   └───────────────────────────────────────────────────────┘ █ │   └ Reading tests/stream.rs    █
- ┃                                                             █ │ ▾ Tools  8 calls ✗ 2           █
- ┃ ─────────────────────────────────────────────────────────── ┃ │   Exploring code   3 ▓▓▓▓      █
- ┃  ask  >  Ask for a change · @ file           Ctrl+J newline ┃ │   Notion           3 ▓▓▓▓ ✗ 1  │
+ ┃   │   4. Don't answer            the agent gets no answer │ █ │     ▾ adr/                     │
+ ┃   │                                                       │ █ │       0004-etags.md    +34  −1 │
+ ┃   │ ↑↓ move · 1-4 jump · Space tick · Enter answer        │ █ │     ▾ diagrams/                │
+ ┃   │ Tab write your own · Esc decide later                 │ █ │       cache.png          —   — │
+ ┃   └───────────────────────────────────────────────────────┘ █ │     caching.md         +64 −22 │
+ ┃                                                             █ │   ▾ server/                    │
+ ┃ ─────────────────────────────────────────────────────────── ┃ │     ▾ handlers/                │
+ ┃  ask  >  Ask for a change · @ file           Ctrl+J newline ┃ │       manifest.ts      +97  −4 │
  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ └────────────────────────────────┘
 EscStop 1Help   2Compact   3Clear   4Model   5Diff   6Rewind   7MCP   8Memory   9Settings   0Quit

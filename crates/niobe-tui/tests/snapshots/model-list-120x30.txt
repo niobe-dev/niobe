@@ -1,30 +1,30 @@
  Niobe  Session  Context  Model  View  Help                                 opus-5  claude · default  ○ idle 0s  13:41
  ┏━━ > add etag support to the catalog fetcher so we stop re-downloading… ━━━┓ ┌─────────────── Usage ────────────────┐
- ┃                     ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀  ┃ │ 5h         62% ▓▓░░ resets 16:40     │
+ ┃   test file.                                                              ┃ │ 5h         62% ▓▓░░ resets 16:40     │
  ┃                                                                           ┃ │ 7d         18% ▓░░░ resets Tue 15:00 │
- ┃ ◆ Reading catalog/fetch.ts and its callers first. Two call sites, one     █ │ ──────────────────────────────────── │
- ┃   test file.                                                              █ │ opus-5    100% ▓▓▓▓▓▓▓▓▓▓▓▓   49k    │
- ┃                                                                           █ │ cache hit  86% ▓▓▓▓▓▓▓▓▓▓░░   40k    │
- ┃   Read 3 files, used Notion 2 times                                       █ │ ──────────────────────────────────── │
+ ┃   Read 3 files, used Notion 2 times                                       ┃ │ ──────────────────────────────────── │
+ ┃                                                                           ┃ │ opus-5    100% ▓▓▓▓▓▓▓▓▓▓▓▓   49k    │
+ ┃ ✗ Notion·update… {}                                                failed █ │ cache hit  86% ▓▓▓▓▓▓▓▓▓▓░░   40k    │
+ ┃   └ 404 object_not_found — the page is not shared with the integration    █ │ ──────────────────────────────────── │
  ┃                                                                           █ │ context    13% ▓░░░░░░░░░ 25k / 200k │
- ┃ ✗ Notion·update… {}                                                failed █ └──────────────────────────────────────┘
- ┃   └ 404 object_not_found — the page is not shared with the integration    █ ┌────────────── Changes ───────────────┐
- ┃                                    ┏━━━━━━━━━━━━━━━━━ Model ━━━━━━━━━━━━━━━━━━┓ main ↑3                            █
- ┃ ◆ Caching the etag beside the body ┃                                          ┃ Working tree  +≥977 −≥259          █
- ┃                                    ┃  › opus-5                                ┃ ▾ catalog/                         │
- ┃   Edited 1 file +6 −2              ┃    sonnet-5                              ┃   ▾ cache/                         │
- ┃                                    ┃                                          ┃     lru.ts                 +31  −9 │
- ┃ ◆ Rewriting the 304 test around the┃  ↑↓ choose · Enter switch · Esc keep     ┃     index.ts               +12  −0 │
- ┃                                    ┃  this one                                ┃   fetch.ts                +149 −12 │
- ┃ ◆ The notebook that demonstrates th┗━━━━━━━ applied from the next turn ━━━━━━━┛   etag.ts                  +88 −41 │
+ ┃ ◆ Caching the etag beside the body so a 304 can be answered from the LRU. █ └──────────────────────────────────────┘
+ ┃                                                                           █ ┌────────────── Changes ───────────────┐
+ ┃   Edited 1 file +6 −2              ┏━━━━━━━━━━━━━━━━━ Model ━━━━━━━━━━━━━━━━━━┓ main ↑3                            █
+ ┃                                    ┃                                          ┃ Working tree  +≥977 −≥259          █
+ ┃ ◆ Rewriting the 304 test around the┃  › opus-5                                ┃ ▾ catalog/                         █
+ ┃                                    ┃    sonnet-5                              ┃   ▾ cache/                         █
+ ┃ ◆ The notebook that demonstrates th┃                                          ┃     lru.ts                 +31  −9 █
+ ┃                                    ┃  ↑↓ choose · Enter switch · Esc keep     ┃     index.ts               +12  −0 █
+ ┃ ✗ Bash           npm test          ┃  this one                                ┃   fetch.ts                +149 −12 █
+ ┃   └ 1 failing: fetch returns the ca┗━━━━━━━ applied from the next turn ━━━━━━━┛   etag.ts                  +88 −41 │
  ┃                                                                           █ │   ▾ docs/                            │
- ┃ ✗ Bash           npm test                                   exit 1 · 0.4s █ └──────────────────────────────────────┘
- ┃   └ 1 failing: fetch returns the cached body on a 304                     █ ┌────────────── Activity ──────────────┐
- ┃                                                                           █ │ ▾ Sub-agents  1 running · 1 failed   █
- ┃ ◆ Etags cached in the LRU; 304s short-circuit. One test still red — the   █ │ ◆ test Cover tests/fe… sonnet 1m 42s █
- ┃   304 path asserts a body that is no longer sent.                         █ │   └ Reading tests/stream.rs          █
- ┃                                                                           █ │ ▾ Tools  8 calls ✗ 2 · 0 denied      █
- ┃ ───────────────────────────────────────────────────────────────────────── ┃ │   Exploring code   3 ▓▓▓▓▓▓▓▓▓▓      █
- ┃  ask  >  Ask for a change · @ file · Ctrl+F find           Ctrl+J newline ┃ │   Notion           3 ▓▓▓▓▓▓▓▓▓▓ ✗ 1  │
+ ┃ ◆ Etags cached in the LRU; 304s short-circuit. One test still red — the   █ │     ▾ adr/                           │
+ ┃   304 path asserts a body that is no longer sent.                         █ │       0004-etags.md          +34  −1 │
+ ┃                                                                           █ │     ▾ diagrams/                      │
+ ┃ still running                                                             ┃ │       cache.png                —   — │
+ ┃   └ ◆ test Cover tests/fetch.test.ts                        sonnet 1m 42s ┃ │     caching.md               +64 −22 │
+ ┃       └ Reading tests/stream.rs                                           ┃ │   ▾ server/                          │
+ ┃ ───────────────────────────────────────────────────────────────────────── ┃ │     ▾ handlers/                      │
+ ┃  ask  >  Ask for a change · @ file · Ctrl+F find           Ctrl+J newline ┃ │       manifest.ts            +97  −4 │
  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ └──────────────────────────────────────┘
 EscStop 1Help     2Compact     3Clear     4Model     5Diff     6Rewind     7MCP     8Memory     9Settings     0Quit

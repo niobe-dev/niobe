@@ -46,15 +46,15 @@
  ┃                                                                                                                                               ┃ │                                                  │
  ┃                                                                                                                                               ┃ │                                                  │
  ┃                                                                                                                                               ┃ │                                                  │
- ┃                                                                                                                                               ┃ └──────────────────────────────────────────────────┘
- ┃                                                                                                                                               ┃ ┌──────────────────── Activity ────────────────────┐
- ┃                                                                                                                                               ┃ │ ▾ Sub-agents  1 running · 3 spawned · 1 failed   │
- ┃                                                                                                                                               ┃ │ ◆ test Cover tests/fetch.test.ts   sonnet 1m 42s │
- ┃                                                                                                                                               ┃ │   └ Reading tests/stream.rs                      │
- ┃                                                                                                                                               ┃ │ ▾ Tools  8 calls ✗ 2 · 0 denied · 21.6 kB out    │
- ┃                                                                                                                                               ┃ │   Exploring code   3 ▓▓▓▓▓▓▓▓▓▓▓▓                │
- ┃                                                                                                                                               ┃ │   Notion           3 ▓▓▓▓▓▓▓▓▓▓▓▓ ✗ 1            │
- ┃ ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ┃ │   Editing files    1 ▓▓▓▓                        │
- ┃  ask  >  Ask for a change · @ file · Ctrl+F find                                                Shift+Tab cycles · Ctrl+J newline · Tab panes ┃ │   Build and test   1 ▓▓▓▓         ✗ 1            │
+ ┃                                                                                                                                               ┃ │                                                  │
+ ┃                                                                                                                                               ┃ │                                                  │
+ ┃                                                                                                                                               ┃ │                                                  │
+ ┃                                                                                                                                               ┃ │                                                  │
+ ┃                                                                                                                                               ┃ │                                                  │
+ ┃ still running                                                                                                                                 ┃ │                                                  │
+ ┃   └ ◆ test Cover tests/fetch.test.ts                                                                                            sonnet 1m 42s ┃ │                                                  │
+ ┃       └ Reading tests/stream.rs                                                                                                               ┃ │                                                  │
+ ┃ ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ┃ │                                                  │
+ ┃  ask  >  Ask for a change · @ file · Ctrl+F find                                                Shift+Tab cycles · Ctrl+J newline · Tab panes ┃ │                                                  │
  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ └──────────────────────────────────────────────────┘
 EscStop 1Help             2Compact             3Clear             4Model             5Diff             6Rewind             7MCP             8Memory             9Settings             0Quit

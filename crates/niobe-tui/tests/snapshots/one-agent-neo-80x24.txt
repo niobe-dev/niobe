@@ -13,11 +13,11 @@
 ║                                                                              ║
 ║                                                                              ║
 ║                                                                              ║
-║                                                                              ║
-║                                                                              ║
-║                                                                              ║
-║                                                                              ║
-║                                                                              ║
+║ still running                                                                ║
+║   ├ ◆ test  Cover tests/fetch.test.ts                          sonnet 1m 42s ║
+║   │   └ Reading tests/stream.rs                                              ║
+║   ├ ◆ deep1 Review fetch.py                                     2 calls · 0s ║
+║   └ ◆ deep2 Review cache.py                                      1 call · 0s ║
 ║ ──────────────────────────────────────────────────────────────────────────── ║
 ║  ask  >  Ask for a change · @ file · Ctrl+F find              Ctrl+J newline ║
 ╚══════════════════════════════════════════════════════════════════════════════╝

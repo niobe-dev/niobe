@@ -16,8 +16,8 @@
 ┃                                                                              ┃
 ┃                                                                              ┃
 ┃                                                                              ┃
-┃                                                                              ┃
 ┃ ⠋ running Bash  npm test -- fetch · 1m 15s                                   ┃
+┃   └ $ npm test -- fetch                                              running ┃
 ┃ ──────────────────────────────────────────────────────────────────────────── ┃
 ┃  —  >  Ask for a change · Ctrl+F find        Shift+Tab mode · Ctrl+J newline ┃
 ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛

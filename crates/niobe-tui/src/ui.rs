@@ -3,9 +3,10 @@
 
 //! Drawing the three regions: menu bar, panes, F-key bar.
 //!
-//! The main view draws the session pane beside a stack of the Usage, Changes
-//! and Activity panes, each of which the View menu hides; the Activity pane
-//! is drawn only while it has something in it.
+//! The main view draws the session pane beside a stack of the Usage and
+//! Changes panes, each of which the View menu hides. What is at work — the
+//! turn, the shell commands running and the sub-agents running — is drawn at
+//! the foot of the session pane, under the words that started it.
 //!
 //! There is no status line. What one carried is spread across the menu row —
 //! the session's identity, what it is doing and the time of day — and the
@@ -19,8 +20,7 @@
 //! gone.
 //!
 //! Neither pane shows a cost per edit or per tool: that needs spend attributed
-//! to individual calls, which the ledger does not do yet. The Activity pane
-//! shows the tool mix instead, which is measured.
+//! to individual calls, which the ledger does not do yet.
 
 use std::collections::BTreeMap;
 
@@ -1098,12 +1098,12 @@ fn segment_spans(segments: Vec<Segment>) -> Vec<Span<'static>> {
 fn draw_body(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
     use crate::menu::SidePane;
 
-    // The Activity pane takes its room only while it has something in it;
-    // otherwise the panes above it have the column.
+    // The Activity pane is not in the stack: what it listed running is drawn
+    // at the foot of the transcript, and the keyboard passes it by.
+    app.pane_not_drawn(Pane::Activity);
     let shown: Vec<SidePane> = SidePane::ALL
         .into_iter()
         .filter(|pane| app.shows(*pane))
-        .filter(|pane| *pane != SidePane::Activity || has_activity(app))
         .collect();
     if area.width < WIDE_COLUMNS || shown.is_empty() {
         app.right_stack_hidden();
@@ -1126,47 +1126,27 @@ fn draw_body(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
 
     draw_session(frame, left, true, app, theme);
 
-    // Usage takes the rows its figures need and no more. Activity takes the
-    // rows it holds, up to ten parts in twenty-three of what is left, so a
-    // pane with a few rows of tools leaves the rest to the files the session
-    // changed; it scrolls beyond that. Changes takes what remains. A pane the
-    // operator hid gives its rows to the others, and Usage alone leaves
-    // desktop under it.
+    // Usage takes the rows its figures need and no more, and Changes takes
+    // what remains. A pane the operator hid gives its rows to the other, and
+    // Usage alone leaves desktop under it.
     let usage_rows = usage_height(app).min(right.height);
-    let activity_rows = {
-        let held = activity_rows(app, usize::from(right.width.saturating_sub(4)), theme)
-            .rows
-            .len();
-        let share = right.height.saturating_sub(usage_rows).saturating_mul(10) / 23;
-        u16::try_from(held + 2).unwrap_or(u16::MAX).min(share)
-    };
     let mut constraints: Vec<Constraint> = shown
         .iter()
         .map(|pane| match pane {
             SidePane::Usage => Constraint::Length(usage_rows),
             SidePane::Changes => Constraint::Fill(1),
-            SidePane::Activity => Constraint::Length(activity_rows),
         })
         .collect();
     if !shown.contains(&SidePane::Changes) {
         constraints.push(Constraint::Fill(1));
+        app.pane_not_drawn(Pane::Changes);
     }
     let areas = Layout::vertical(constraints).split(right);
 
-    for pane in [Pane::Changes, Pane::Activity] {
-        let side = match pane {
-            Pane::Changes => SidePane::Changes,
-            Pane::Activity => SidePane::Activity,
-        };
-        if !shown.contains(&side) {
-            app.pane_not_drawn(pane);
-        }
-    }
     for (pane, at) in shown.iter().zip(areas.iter()) {
         match pane {
             SidePane::Usage => draw_usage(frame, *at, app, theme),
             SidePane::Changes => draw_changes(frame, *at, app, theme),
-            SidePane::Activity => draw_activity(frame, *at, app, theme),
         }
     }
 }
@@ -2204,17 +2184,29 @@ fn draw_transcript(
     app: &mut App,
     theme: &Theme,
 ) {
-    // A running turn keeps the bottom row, whatever is scrolled into view
-    // above it: whether the session is at work is the question the operator
-    // looks down to answer, and a line that scrolled away would not answer it.
-    let area = match app.activity() {
-        Some(activity) if area.height > 1 => {
-            let [area, working] =
-                Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
+    // What is at work keeps the foot of the transcript, whatever is scrolled
+    // into view above it: whether the session is at work, and on what, is the
+    // question the operator looks down to answer, and rows that scrolled away
+    // would not answer it.
+    // A question waiting on the operator is what the pane is for while it
+    // waits, and what else is at work is not: the working line alone says
+    // the turn waits on them, and without a turn nothing is drawn.
+    let live = match app.asking() {
+        Some(_) => app.activity().map(|activity| Live {
+            head: working_line(&activity, usize::from(area.width), theme),
+            items: Vec::new(),
+        }),
+        None => live_rows(app, usize::from(area.width), theme),
+    };
+    let area = match live {
+        Some(live) if area.height > 1 => {
+            let rows = live_height(live.rows(), area.height);
+            let [area, at_work] =
+                Layout::vertical([Constraint::Min(1), Constraint::Length(rows)]).areas(area);
             frame.render_widget(
-                Paragraph::new(working_line(&activity, usize::from(working.width), theme))
+                Paragraph::new(fit_live(live, usize::from(rows), theme))
                     .style(Style::new().bg(theme.pane_bg)),
-                working,
+                at_work,
             );
             area
         }
@@ -3573,6 +3565,204 @@ fn working_line(activity: &Activity, width: usize, theme: &Theme) -> Line<'stati
         Span::styled(clock, Style::new().fg(theme.dim)),
     ])
 }
+
+/// What is at work, for the foot of the transcript, `width` columns wide:
+/// a head — the working line while a turn runs, `still running` otherwise —
+/// and under it each shell command running — the agent's, the backend's
+/// background ones and the operator's own — and each sub-agent running, a
+/// group of rows apiece. `None` where nothing is at work.
+///
+/// Drawn in the session pane rather than in a pane beside it, because the
+/// transcript is where the operator reads what the session is doing: a
+/// command that has run for ten minutes belongs with the words that started
+/// it, not in a corner the eye has to go looking in.
+fn live_rows(app: &App, width: usize, theme: &Theme) -> Option<Live> {
+    let room = width.saturating_sub(text::width(LIVE_INDENT) + text::width(LIVE_BRANCH));
+    let mut items: Vec<Vec<Line<'static>>> = app
+        .running_shells()
+        .iter()
+        .map(|shell| {
+            let ran = shell
+                .since
+                .zip(app.stamp())
+                .and_then(|(since, now)| now.since(since));
+            vec![live_shell_row(shell, ran, room, theme)]
+        })
+        .collect();
+    items.extend(running_agent_groups(app, room, theme));
+    let head = match app.activity() {
+        Some(activity) => working_line(&activity, width, theme),
+        None if items.is_empty() => return None,
+        None => Line::from(Span::styled(STILL_RUNNING, Style::new().fg(theme.dim))),
+    };
+    Some(Live { head, items })
+}
+
+/// What is at work, as [`live_rows`] lists it.
+struct Live {
+    /// The row the rest hang from.
+    head: Line<'static>,
+    /// Each thing at work, its rows together.
+    items: Vec<Vec<Line<'static>>>,
+}
+
+impl Live {
+    /// How many rows it holds.
+    fn rows(&self) -> usize {
+        1 + self.items.iter().map(Vec::len).sum::<usize>()
+    }
+}
+
+/// What heads the things at work where no turn is running: a background
+/// command, or the operator's own, outlives the turn that started it.
+const STILL_RUNNING: &str = "still running";
+
+/// What stands before the branch each thing at work hangs from, so that it
+/// hangs under the text of the head rather than its spinner.
+const LIVE_INDENT: &str = "  ";
+
+/// The branch a thing at work hangs from, and the one the last of them does.
+const LIVE_BRANCH: &str = "├ ";
+const LIVE_LAST: &str = "└ ";
+
+/// What stands before the rows of a thing at work after its first, beside
+/// the branch the things after it hang from, and where none does.
+const LIVE_STEM: &str = "│ ";
+const LIVE_NONE: &str = "  ";
+
+/// The rows the foot of a transcript `height` rows tall gives to `held` rows
+/// of what is at work: all of them, up to a third of it, so the words above
+/// keep most of the pane.
+fn live_height(held: usize, height: u16) -> u16 {
+    let most = (height / 3).max(1);
+    u16::try_from(held).unwrap_or(u16::MAX).min(most)
+}
+
+/// `live` in `rows`: its head, then the things at work that fit, whole and in
+/// order, each hung from a branch, and where some do not fit, a last branch
+/// counting how many more are at work — never a thing cut in half, whose
+/// agent would be drawn without its sub-line or a sub-line without its agent.
+fn fit_live(live: Live, rows: usize, theme: &Theme) -> Vec<Line<'static>> {
+    let total = live.items.len();
+    let fits = live.rows() <= rows;
+    let mut shown: Vec<Vec<Line<'static>>> = Vec::new();
+    let mut used = 1;
+    for item in live.items {
+        // A row is kept for the count of the rest wherever not all fit.
+        let reserve = usize::from(!fits);
+        if used + item.len() + reserve > rows {
+            break;
+        }
+        used += item.len();
+        shown.push(item);
+    }
+    let more = total - shown.len();
+    let branch = Style::new().fg(theme.dim);
+    let hung = |branch_text: &'static str, line: Line<'static>| {
+        let mut spans = vec![Span::raw(LIVE_INDENT), Span::styled(branch_text, branch)];
+        spans.extend(line.spans);
+        Line::from(spans).style(line.style)
+    };
+    let count = shown.len();
+    let mut lines = vec![live.head];
+    for (at, item) in shown.into_iter().enumerate() {
+        let last = at + 1 == count && more == 0;
+        let (first, rest) = match last {
+            true => (LIVE_LAST, LIVE_NONE),
+            false => (LIVE_BRANCH, LIVE_STEM),
+        };
+        for (row, line) in item.into_iter().enumerate() {
+            lines.push(hung(if row == 0 { first } else { rest }, line));
+        }
+    }
+    if more > 0 && rows > 1 {
+        lines.push(hung(
+            LIVE_LAST,
+            Line::from(Span::styled(format!("+{more} more at work"), branch)),
+        ));
+    }
+    lines.truncate(rows);
+    lines
+}
+
+/// `$ cargo test --workspace   testing ▓▓▓▓░░░░ ~40% of last 2m 30s · 1m 12s`:
+/// a shell command running, `width` columns wide — what it runs, cut to fit,
+/// and on the right how long it has run and, where the same command ran to
+/// the end earlier in the session, a bar of this run's time against that
+/// one's. A test run says so before its bar.
+///
+/// The backend says nothing of a command's progress until it ends, so the
+/// bar is the clock against the last run, said as `~` and named as such.
+/// Where the row is narrow the bar's words give way first, then the bar, and
+/// the time last: a row that loses its clock no longer says it is alive.
+fn live_shell_row(
+    shell: &crate::app::RunningShell,
+    ran: Option<std::time::Duration>,
+    width: usize,
+    theme: &Theme,
+) -> Line<'static> {
+    let mark = match shell.background {
+        true => "& ",
+        false => "$ ",
+    };
+    let time = ran.map_or_else(|| "running".to_owned(), clock::spent);
+    let testing = niobe_core::test_run::is_test_run(&shell.command);
+    let share = ran
+        .zip(shell.last_run)
+        .map(|(ran, last)| match last.as_millis() {
+            0 => 1.0,
+            last => ran.as_millis() as f64 / last as f64,
+        });
+    let said = share
+        .zip(shell.last_run)
+        .map(|(share, last)| match share >= 1.0 {
+            true => format!(" past last {} ·", clock::took(last)),
+            false => format!(
+                " ~{}% of last {} ·",
+                (share * 100.0).floor(),
+                clock::took(last)
+            ),
+        });
+    let word = match testing {
+        true => "testing ",
+        false => "",
+    };
+    let fixed = text::width(mark) + 1 + text::width(&time);
+    let fits = |extra: usize| width.saturating_sub(fixed + extra) >= LIVE_COMMAND_LEAST;
+    let bar = share.map_or(0, |_| SHELL_BAR + 1);
+    let said_width = said.as_deref().map_or(0, text::width);
+    let (bar, said, word) = match (fits(text::width(word) + bar + said_width), fits(bar)) {
+        (true, _) => (bar, said, word),
+        (false, true) => (bar, None, ""),
+        (false, false) => (0, None, ""),
+    };
+    let right = text::width(word) + bar + said.as_deref().map_or(0, text::width);
+    let room = width.saturating_sub(fixed + right);
+    let command = text::truncate(&shell.command, room);
+    let pad = room.saturating_sub(text::width(&command));
+    let mut spans = vec![
+        Span::styled(mark, Style::new().fg(theme.hot).bold()),
+        Span::styled(command, Style::new().fg(theme.fg)),
+        Span::raw(" ".repeat(pad + 1)),
+        Span::styled(word, Style::new().fg(theme.tool)),
+    ];
+    if let (Some(share), true) = (share, bar > 0) {
+        let (filled, track) = crate::meter::meter(share.min(1.0), SHELL_BAR);
+        spans.push(Span::styled(filled, Style::new().fg(theme.hot)));
+        spans.push(Span::styled(track, Style::new().fg(theme.dim)));
+        spans.push(Span::styled(
+            said.unwrap_or_default(),
+            Style::new().fg(theme.dim),
+        ));
+        spans.push(Span::raw(" "));
+    }
+    spans.push(Span::styled(time, Style::new().fg(theme.hot)));
+    Line::from(spans)
+}
+
+/// The least of a running command's text its row keeps before its bar gives
+/// way: fewer cells than this and the row no longer says what is running.
+const LIVE_COMMAND_LEAST: usize = 16;
 
 /// The rows a cleared conversation opens with, over the foot of the idle
 /// scene: at the foot rather than the top, where the transcript's newest
@@ -5834,15 +6024,24 @@ fn bar_line(
     ])
 }
 
-/// The Activity pane: what is at work now — the sub-agents running and the
-/// shell commands running — and the tools the session called, by the kind
-/// of work they did. It scrolls, and its sections fold on the same mechanism
-/// the Changes pane uses.
+/// The Activity pane, in `area`: what is at work now — the sub-agents
+/// running and the shell commands running — and the tools the session
+/// called, by the kind of work they did. It scrolls, and its sections fold on
+/// the same mechanism the Changes pane uses.
 ///
 /// A section with nothing in it is left out rather than drawn empty, and a
 /// pane with no section at all is not drawn: `0 running` and `none spawned`
 /// are rows the operator reads to learn nothing.
-fn draw_activity(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
+///
+/// The main view does not draw it: what it lists running is drawn at the foot
+/// of the transcript instead (see [`live_rows`]), where the operator reads
+/// what the session is doing. It is public so that a view of its own can draw
+/// it whole — its sections, their folding and the tool mix — and the tests do.
+pub fn draw_activity(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
+    if !has_activity(app) {
+        app.pane_not_drawn(Pane::Activity);
+        return;
+    }
     draw_scrolling_pane(
         frame,
         area,
@@ -6090,7 +6289,20 @@ fn agent_rows(
 /// A row for each sub-agent running now, and under it what it is doing
 /// where something said: see [`agent_rows`]. Nothing where none is running.
 pub(crate) fn running_agent_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
-    let mut rows = Vec::new();
+    running_agent_groups(app, width, theme)
+        .into_iter()
+        .flatten()
+        .collect()
+}
+
+/// The rows of [`running_agent_lines`], each agent's row and its sub-line
+/// together, so that what lays them out can keep the two together.
+///
+/// Each agent's status says how many calls it has made so far beside how
+/// long it has run: the backend reports no share of an agent's task done, and
+/// a count that keeps rising is what says it is getting on with it.
+fn running_agent_groups(app: &App, width: usize, theme: &Theme) -> Vec<Vec<Line<'static>>> {
+    let mut groups = Vec::new();
     // Tagged among every agent the session spawned, so that an agent keeps
     // the tag the transcript names it by when another one stops.
     let (running, tags): (Vec<&SubAgent>, Vec<String>) = app
@@ -6109,7 +6321,11 @@ pub(crate) fn running_agent_lines(app: &App, width: usize, theme: &Theme) -> Vec
         .unwrap_or(0);
 
     for ((agent, tag), model) in running.into_iter().zip(tags).zip(models) {
-        let status = agent_status(agent, app.stamp());
+        let status = match app.agent_calls(&agent.id) {
+            0 => agent_status(agent, app.stamp()),
+            1 => format!("1 call · {}", agent_status(agent, app.stamp())),
+            calls => format!("{calls} calls · {}", agent_status(agent, app.stamp())),
+        };
         // The status is right-aligned at the pane's edge, so it needs no
         // column of its own: one as wide as `12m 40s` on every row would take
         // the room of another agent's task.
@@ -6119,23 +6335,24 @@ pub(crate) fn running_agent_lines(app: &App, width: usize, theme: &Theme) -> Vec
             status: text::width(&status),
             task: 0,
         };
-        rows.push(agent_row(
+        let mut group = vec![agent_row(
             &tag,
             agent.task(),
             (model, &status),
             columns.fitted(width),
             theme,
-        ));
+        )];
 
         if let Some(doing) = app.agent_doing(&agent.id).or_else(|| agent.latest.clone()) {
             let room = width.saturating_sub(AGENT_SUBLINE).max(1);
-            rows.push(
+            group.push(
                 Line::from(format!("  └ {}", text::truncate(&doing, room)))
                     .style(Style::new().fg(theme.dim)),
             );
         }
+        groups.push(group);
     }
-    rows
+    groups
 }
 
 /// The columns an agent's row is drawn in. The task takes what the others
@@ -11081,5 +11298,104 @@ mod tests {
             "Go ahead with the plan"
         );
         assert_eq!(option_words(Answer::No, &ask, false).0, "Keep planning");
+    }
+
+    fn live_of(head: &str, items: &[&[&str]]) -> Live {
+        Live {
+            head: Line::from(head.to_owned()),
+            items: items
+                .iter()
+                .map(|rows| {
+                    rows.iter()
+                        .map(|row| Line::from((*row).to_owned()))
+                        .collect()
+                })
+                .collect(),
+        }
+    }
+
+    /// Every thing at work hangs from a branch under the head, the last from
+    /// the last branch, and the rows after a thing's first hang beside the
+    /// stem the things after it hang from.
+    #[test]
+    fn what_is_at_work_hangs_from_branches_under_its_head() {
+        let theme = crate::theme::MODERN;
+        let live = live_of("head", &[&["$ make"], &["◆ test", "└ Reading"], &["& dev"]]);
+        let rows: Vec<String> = fit_live(live, 10, &theme).iter().map(line_text).collect();
+        assert_eq!(
+            rows,
+            [
+                "head",
+                "  ├ $ make",
+                "  ├ ◆ test",
+                "  │ └ Reading",
+                "  └ & dev"
+            ]
+        );
+    }
+
+    /// Short of rows, what is at work is cut between things, never inside
+    /// one, and the last row counts what it left out; one row is the head.
+    #[test]
+    fn what_is_at_work_is_cut_between_things_and_counts_the_rest() {
+        let theme = crate::theme::MODERN;
+        let live = || live_of("head", &[&["$ make"], &["◆ test", "└ Reading"], &["& dev"]]);
+        let rows: Vec<String> = fit_live(live(), 4, &theme).iter().map(line_text).collect();
+        assert_eq!(rows, ["head", "  ├ $ make", "  └ +2 more at work"]);
+        let rows: Vec<String> = fit_live(live(), 1, &theme).iter().map(line_text).collect();
+        assert_eq!(rows, ["head"]);
+        assert_eq!(live_height(5, 30), 5);
+        assert_eq!(live_height(50, 30), 10, "a third of the transcript at most");
+        assert_eq!(live_height(5, 2), 1);
+    }
+
+    fn shell(command: &str, last_run: Option<u64>) -> crate::app::RunningShell {
+        crate::app::RunningShell {
+            command: command.to_owned(),
+            since: None,
+            last_run: last_run.map(std::time::Duration::from_secs),
+            background: false,
+        }
+    }
+
+    /// A running command's row says how long it has run at its right edge,
+    /// and against the last whole run of it, a bar and the share said as an
+    /// estimate; a test run says it is testing. Narrowed, the words give way
+    /// first, then the bar, and the clock never.
+    #[test]
+    fn a_running_commands_row_gives_up_its_bar_before_its_clock() {
+        let theme = crate::theme::MODERN;
+        let ran = Some(std::time::Duration::from_secs(60));
+        let tests = shell("cargo test --workspace", Some(150));
+        let row = |width| line_text(&live_shell_row(&tests, ran, width, &theme));
+
+        let wide = row(90);
+        assert!(wide.starts_with("$ cargo test --workspace"), "{wide:?}");
+        assert!(wide.contains("testing ▓▓▓▓"), "{wide:?}");
+        assert!(wide.ends_with("~40% of last 2m 30s · 1m 00s"), "{wide:?}");
+        assert_eq!(text::width(&wide), 90);
+
+        let barred = row(40);
+        assert!(!barred.contains('%') && barred.contains('▓'), "{barred:?}");
+        assert!(barred.ends_with("1m 00s"), "{barred:?}");
+        assert_eq!(text::width(&barred), 40);
+
+        let bare = row(26);
+        assert!(!bare.contains('▓'), "{bare:?}");
+        assert!(bare.ends_with("1m 00s"), "{bare:?}");
+
+        let build = line_text(&live_shell_row(
+            &shell("cargo build", None),
+            ran,
+            90,
+            &theme,
+        ));
+        assert!(
+            !build.contains("testing") && !build.contains('▓'),
+            "{build:?}"
+        );
+        assert!(build.ends_with(" 1m 00s"), "{build:?}");
+        let unclocked = line_text(&live_shell_row(&shell("make", None), None, 30, &theme));
+        assert!(unclocked.ends_with(" running"), "{unclocked:?}");
     }
 }

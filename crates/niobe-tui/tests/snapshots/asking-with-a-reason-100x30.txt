@@ -11,20 +11,20 @@
  ┃   │ # x                                                   │ ┃ ┌─────────── Changes ────────────┐
  ┃   │ print(1)'                                             │ ┃ │ ⎇ main ↑3                      █
  ┃   │                                                       │ ┃ │ ▾ Working tree  +≥977 −≥259    █
- ┃   │ ▶ 1. Allow once                        this call only │ ┃ │   ▾ catalog/                   │
- ┃   │   2. Always allow Bash               niobe saves Bash │ █ │     ▾ cache/                   │
- ┃   │   3. Always allow this target  niobe saves Bash(grep… │ █ │       lru.ts           +31  −9 │
- ┃   │   4. Deny                       the call does not run │ █ │       index.ts         +12  −0 │
- ┃   │                                                       │ █ │     fetch.ts          +149 −12 │
+ ┃   │ ▶ 1. Allow once                        this call only │ ┃ │   ▾ catalog/                   █
+ ┃   │   2. Always allow Bash               niobe saves Bash │ █ │     ▾ cache/                   █
+ ┃   │   3. Always allow this target  niobe saves Bash(grep… │ █ │       lru.ts           +31  −9 █
+ ┃   │   4. Deny                       the call does not run │ █ │       index.ts         +12  −0 █
+ ┃   │                                                       │ █ │     fetch.ts          +149 −12 █
  ┃   │ 3. niobe saves Bash(grep -rn "cache" . ; python3 -c ' │ █ │     etag.ts            +88 −41 │
  ┃   │ # x                                                   │ █ │   ▾ docs/                      │
- ┃   │ print(1)')                                            │ █ └────────────────────────────────┘
- ┃   │                                                       │ █ ┌─────────── Activity ───────────┐
- ┃   │ ↑↓ move · 1-4 jump · Enter confirm                    │ █ │ ▾ Sub-agents  1 running        █
- ┃   │ Tab type your own · Esc decide later                  │ █ │ ◆ test Cover tests/fet… 1m 42s █
- ┃   └───────────────────────────────────────────────────────┘ █ │   └ Reading tests/stream.rs    █
- ┃                                                             █ │ ▾ Tools  8 calls ✗ 2           █
- ┃ ─────────────────────────────────────────────────────────── ┃ │   Exploring code   3 ▓▓▓▓      █
- ┃  ask  >  Ask for a change · @ file           Ctrl+J newline ┃ │   Notion           3 ▓▓▓▓ ✗ 1  │
+ ┃   │ print(1)')                                            │ █ │     ▾ adr/                     │
+ ┃   │                                                       │ █ │       0004-etags.md    +34  −1 │
+ ┃   │ ↑↓ move · 1-4 jump · Enter confirm                    │ █ │     ▾ diagrams/                │
+ ┃   │ Tab type your own · Esc decide later                  │ █ │       cache.png          —   — │
+ ┃   └───────────────────────────────────────────────────────┘ █ │     caching.md         +64 −22 │
+ ┃                                                             █ │   ▾ server/                    │
+ ┃ ─────────────────────────────────────────────────────────── ┃ │     ▾ handlers/                │
+ ┃  ask  >  Ask for a change · @ file           Ctrl+J newline ┃ │       manifest.ts      +97  −4 │
  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ └────────────────────────────────┘
 EscStop 1Help   2Compact   3Clear   4Model   5Diff   6Rewind   7MCP   8Memory   9Settings   0Quit

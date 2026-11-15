@@ -1139,6 +1139,18 @@ fn drawn(app: &mut App, width: u16, height: u16) -> Terminal<TestBackend> {
     terminal
 }
 
+/// The Activity pane alone, `width` by `height`, in the session's theme, as
+/// a view that holds it draws it: the main view does not.
+pub fn activity_pane(app: &mut App, width: u16, height: u16) -> String {
+    let mut terminal =
+        Terminal::new(TestBackend::new(width, height)).expect("a test backend cannot fail");
+    let theme = *app.theme();
+    terminal
+        .draw(|frame| ui::draw_activity(frame, frame.area(), app, &theme))
+        .expect("a test backend cannot fail");
+    render(terminal.backend().buffer())
+}
+
 fn render(buffer: &Buffer) -> String {
     (0..buffer.area.height)
         .map(|y| {

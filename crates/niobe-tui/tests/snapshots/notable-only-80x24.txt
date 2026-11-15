@@ -1,14 +1,11 @@
  Niobe  Session  Context  Model  View  Help           opus-5  claude · default
 ┏━━━━ > add etag support to the catalog fetcher so we stop re-downloading… ━━━━┓
-┃                                                                              ┃
-┃   Read 3 files, used Notion 2 times                                          ┃
-┃                                                                              ┃
 ┃ … 1 routine entry hidden                                                     ┃
-┃                                                                              █
-┃ ◆ Caching the etag beside the body so a 304 can be answered from the LRU.    █
-┃                                                                              █
-┃   Edited 1 file +6 −2                                                        █
-┃                                                                              █
+┃                                                                              ┃
+┃ ◆ Caching the etag beside the body so a 304 can be answered from the LRU.    ┃
+┃                                                                              ┃
+┃   Edited 1 file +6 −2                                                        ┃
+┃                                                                              ┃
 ┃ ◆ Rewriting the 304 test around the cached body.                             █
 ┃                                                                              █
 ┃ ◆ The notebook that demonstrates the fetcher needs the new call shape.       █
@@ -18,6 +15,9 @@
 ┃ ◆ Etags cached in the LRU; 304s short-circuit. One test still red — the 304  █
 ┃   path asserts a body that is no longer sent.                                █
 ┃                                                                              █
+┃ still running                                                                ┃
+┃   └ ◆ test Cover tests/fetch.test.ts                           sonnet 1m 42s ┃
+┃       └ Reading tests/stream.rs                                              ┃
 ┃ ──────────────────────────────────────────────────────────────────────────── ┃
 ┃  ask  >  Ask for a change · @ file · Ctrl+F find              Ctrl+J newline ┃
 ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛

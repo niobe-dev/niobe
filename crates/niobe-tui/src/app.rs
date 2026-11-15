@@ -121,7 +121,9 @@ pub enum Pane {
     /// What the repository has not committed yet: the branch and the working
     /// tree.
     Changes,
-    /// What the session is doing: its sub-agents and tools.
+    /// What the session is doing: its sub-agents, shell commands and tools.
+    /// No view of the shell draws it, so focus passes it by; see
+    /// [`crate::ui::draw_activity`].
     Activity,
 }
 
@@ -904,7 +906,7 @@ pub struct Entry {
     pub queued: bool,
 }
 
-/// A shell command running now, as the Activity pane lists it.
+/// A shell command running now, as the foot of the transcript lists it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunningShell {
     /// What it runs, in one line.
@@ -1324,8 +1326,8 @@ pub enum Gate {
 /// has.
 ///
 /// A finished agent is kept rather than dropped: the transcript's rows name it
-/// by a tag worked out among every agent the session spawned, and the
-/// Activity pane lists the ones still running.
+/// by a tag worked out among every agent the session spawned, and the foot of
+/// the transcript lists the ones still running.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubAgent {
     /// The agent, as the backend named it.
@@ -3840,7 +3842,7 @@ impl App {
     }
 
     /// What sub-agent `id` is called where its words are drawn: the name the
-    /// Activity pane lists it by, or its id where its spawn was never seen.
+    /// foot of the transcript lists it by, or its id where its spawn was never seen.
     fn sub_agent_label(&self, id: &AgentId) -> String {
         self.agents
             .iter()
@@ -3888,8 +3890,19 @@ impl App {
             })
     }
 
+    /// How many tool calls sub-agent `id` has made so far, running ones
+    /// included, as the transcript holds them under its entries.
+    pub fn agent_calls(&self, id: &AgentId) -> usize {
+        self.agent_entries
+            .iter()
+            .filter(|(_, agent)| *agent == id)
+            .filter_map(|(&at, _)| self.entries.get(at))
+            .map(|entry| entry.calls.len())
+            .sum()
+    }
+
     /// Every sub-agent's tag, in the order [`App::agents`] lists them: the
-    /// word the transcript's rows and the Activity pane name it by.
+    /// word the transcript's rows name it by.
     pub fn agent_tags(&self) -> Vec<String> {
         self.tags().to_vec()
     }
@@ -5869,19 +5882,18 @@ impl App {
         }
     }
 
-    /// Gives the keyboard to the pane the sub-agents are listed in, or says
-    /// why it cannot.
+    /// Gives the keyboard to the session pane, at whose foot the sub-agents
+    /// running are listed, and says so.
     fn show_sub_agents(&mut self) {
-        let activity = Focus::Pane(Pane::Activity);
-        if self.shows(crate::menu::SidePane::Activity) && self.on_screen(activity) {
-            self.focus = activity;
-            return;
-        }
-        self.hint = Some(
-            "The sub-agents are listed in the Activity pane, which is not on screen: View \
-             shows it, on a terminal at least 100 columns wide"
-                .to_owned(),
-        );
+        self.focus = Focus::Session;
+        let said = match self.agents.iter().any(SubAgent::is_running) {
+            true => "The sub-agents running are listed at the foot of the transcript",
+            false => {
+                "No sub-agent is running: the ones running are listed at the foot of the \
+                 transcript, and View › Just one agent… shows one's entries alone"
+            }
+        };
+        self.hint = Some(said.to_owned());
     }
 
     /// Starts naming a file at the cursor, with the list of files open.
@@ -22472,7 +22484,7 @@ mod tests {
         app.on_key(key(KeyCode::Char('c')));
         app.on_key(key(KeyCode::Enter));
         assert!(!app.shows(SidePane::Changes));
-        assert!(app.shows(SidePane::Activity));
+        assert!(app.shows(SidePane::Usage));
 
         app.on_key(alt('v'));
         app.on_key(key(KeyCode::Char('c')));
@@ -24003,7 +24015,7 @@ mod tests {
         use crate::menu::{Action, SidePane};
 
         let mut app = app();
-        for pane in [SidePane::Usage, SidePane::Changes, SidePane::Activity] {
+        for pane in SidePane::ALL {
             assert!(app.shows(pane), "{pane:?} starts shown");
         }
 

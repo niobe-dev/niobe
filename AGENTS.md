@@ -154,12 +154,15 @@ reviewers that encode both, for an agent working in this tree.
   dim, saying so, until the backend says it took one in or the turn they waited behind ends — `ui.rs`
   draws it, leaving the routine entries out where `n` is pressed in a side pane, each run of them
   a row that counts them, beside the session a stack a third of the body wide, between 34 and
-  52 columns, of the Usage pane, the Changes pane and — only while it has something in it — the
-  Activity pane: the sub-agents running, the shell commands running — the agent's calls the
-  session waits on, the operator's `!` commands and the backend's background ones — each with how
-  long it has run and, where the same command ran to the end earlier, a bar of this run against
-  that one marked as an estimate, and the tool calls counted by kind of work, or by the tools'
-  own names where `t` is pressed in that pane, `run.rs` is the event loop, `journal.rs` is the trait the loop hands the
+  52 columns, of the Usage pane and the Changes pane, and at the foot of the transcript, under
+  the working line or `still running` once no turn is, a branch for each thing at work: the shell
+  commands running — the agent's calls the session waits on, the operator's `!` commands and the
+  backend's background ones — each with how long it has run and, where the same command ran to
+  the end earlier, a bar of this run against that one marked as an estimate, a test run saying
+  so, and the sub-agents running, each with its calls so far, how long it has run and what it is
+  doing; while a question waits only the working line is drawn there. The Activity pane — those,
+  and the tool calls counted by kind of work, or by the tools' own names where `t` is pressed in
+  it — is drawn by no view of the shell, and `ui::draw_activity` draws it alone, `run.rs` is the event loop, `journal.rs` is the trait the loop hands the
   operator's events to and `rules.rs` the one it hands their standing answers to, `preferences.rs`
   the one it hands the theme, model and effort they pick to, kept for the next session, `bridge.rs`
   the one it sends turns to and takes events from, `watch.rs` the one it asks what the

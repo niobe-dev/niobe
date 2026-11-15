@@ -1,0 +1,40 @@
+┌──────────────────── Activity ────────────────────┐
+│ ▾ Sub-agents  1 running · 3 spawned · 1 failed   │
+│ ◆ test Cover tests/fetch.test.ts   sonnet 1m 42s │
+│   └ Reading tests/stream.rs                      │
+│ ▾ Tools  8 calls ✗ 2 · 0 denied · 21.6 kB out    │
+│   Exploring code   3 ▓▓▓▓▓▓▓▓▓▓▓▓                │
+│   Notion           3 ▓▓▓▓▓▓▓▓▓▓▓▓ ✗ 1            │
+│   Editing files    1 ▓▓▓▓                        │
+│   Build and test   1 ▓▓▓▓         ✗ 1            │
+│                                                  │
+│                                                  │
+│                                                  │
+│                                                  │
+│                                                  │
+│                                                  │
+│                                                  │
+│                                                  │
+│                                                  │
+│                                                  │
+│                                                  │
+│                                                  │
+│                                                  │
+│                                                  │
+│                                                  │
+│                                                  │
+│                                                  │
+│                                                  │
+│                                                  │
+│                                                  │
+│                                                  │
+│                                                  │
+│                                                  │
+│                                                  │
+│                                                  │
+│                                                  │
+│                                                  │
+│                                                  │
+│                                                  │
+│                                                  │
+└──────────────────────────────────────────────────┘

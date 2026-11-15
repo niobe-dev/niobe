@@ -117,7 +117,7 @@ impl Action {
             Action::Memory => "show what the agent is told and remembers",
             Action::AddFile => "name a file for the prompt",
             Action::Mcp => "list the MCP servers, why one failed, and reconnect one",
-            Action::SubAgents => "the pane the sub-agents are listed in",
+            Action::SubAgents => "say where the sub-agents running are listed",
             Action::Hooks => "the backend's hooks, as /hooks",
             Action::SwitchModel => "pick one of the models the backend offers",
             Action::CycleMode => "the next permission mode",
@@ -146,16 +146,14 @@ impl Action {
 pub enum SidePane {
     /// The plan's windows, the tokens and the context.
     Usage,
-    /// The branch and the working tree.
+    /// The branch, the commits made since the shell opened and the working
+    /// tree.
     Changes,
-    /// The sub-agents and shell commands running now, and the tools; drawn
-    /// only while it has something in it.
-    Activity,
 }
 
 impl SidePane {
     /// Every pane of the stack, top to bottom.
-    pub const ALL: [SidePane; 3] = [SidePane::Usage, SidePane::Changes, SidePane::Activity];
+    pub const ALL: [SidePane; 2] = [SidePane::Usage, SidePane::Changes];
 }
 
 /// One line of a menu.
@@ -271,7 +269,6 @@ pub const MENUS: [Menu; 6] = [
             item("Project overview…", 0, "o", Action::Overview),
             item("Usage pane", 0, "", Action::Pane(SidePane::Usage)),
             item("Changes pane", 0, "", Action::Pane(SidePane::Changes)),
-            item("Activity pane", 0, "", Action::Pane(SidePane::Activity)),
             ruled("Theme…", 0, "", Action::Theme),
         ],
     },

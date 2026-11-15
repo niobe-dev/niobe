@@ -961,7 +961,7 @@ that spawned it, and the tests in `tests/stream.rs` assert them as follows:
 - **Its step** is `task_progress`'s `description`, which the CLI words from
   the tool call the agent last made: `Reading catalog/cache.py`, `Running
   Show fetch.py diff`. When it stops, its own answer is the `summary` of its
-  `task_notification`; the first line of it is what the Activity pane shows.
+  `task_notification`; the first line of it is what the shell shows.
 - **Its token count** is `usage.total_tokens` on both. It is one number, and
   it is **the size of the agent's conversation at its latest message**, not
   what the agent was billed. The summariser's two messages report 10 + 5714 +
@@ -1117,8 +1117,8 @@ sub-agent:
   over. It is not the rare case: 1,841 such attachments, from 2.1.241 to
   2.1.281, stood in the transcripts on the machine this was recorded on.
 - **The notice's `<summary>` is the CLI's, not the agent's.** It reads `Agent
-  "Summarize catalog/cache.py" finished` for every agent. What the Activity
-  pane shows under a finished agent is the first line of the agent's own last
+  "Summarize catalog/cache.py" finished` for every agent. What the shell
+  shows under a finished agent is the first line of the agent's own last
   message: `The cache is a bounded least-recently-used map over an
   OrderedDict.` and `fetch() stores a 304 response's empty body over the cached
   page.`

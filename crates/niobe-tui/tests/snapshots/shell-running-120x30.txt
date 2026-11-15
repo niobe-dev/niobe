@@ -19,12 +19,12 @@
  ┃                                                                           ┃ │                                      │
  ┃                                                                           ┃ │                                      │
  ┃                                                                           ┃ │                                      │
- ┃                                                                           ┃ └──────────────────────────────────────┘
- ┃                                                                           ┃ ┌────────────── Activity ──────────────┐
- ┃                                                                           ┃ │ ▾ Shells  1 running                  │
- ┃                                                                           ┃ │ $ cargo build --release       1m 00s │
- ┃                                                                           ┃ │   ▓▓▓▓▓░░░░░░░ ~40% of last 2m 30s   │
- ┃ ───────────────────────────────────────────────────────────────────────── ┃ │ ▾ Tools  1 call · 0 denied · 0 B out │
- ┃  —  >  Ask for a change · Ctrl+F find     Shift+Tab mode · Ctrl+J newline ┃ │   Other   1 ▓▓▓▓▓▓▓▓▓▓▓▓             │
+ ┃                                                                           ┃ │                                      │
+ ┃                                                                           ┃ │                                      │
+ ┃                                                                           ┃ │                                      │
+ ┃ still running                                                             ┃ │                                      │
+ ┃   └ $ cargo build --release     ▓▓▓▓▓░░░░░░░ ~40% of last 2m 30s · 1m 00s ┃ │                                      │
+ ┃ ───────────────────────────────────────────────────────────────────────── ┃ │                                      │
+ ┃  —  >  Ask for a change · Ctrl+F find     Shift+Tab mode · Ctrl+J newline ┃ │                                      │
  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ └──────────────────────────────────────┘
 EscStop 1Help     2Compact     3Clear     4Model     5Diff     6Rewind     7MCP     8Memory     9Settings     0Quit

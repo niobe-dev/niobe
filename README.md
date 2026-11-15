@@ -76,11 +76,14 @@ give a question the agent asks stays there the same way, with the question quote
 On a terminal at least 100 columns wide, a column beside the session shows what it stands at.
 Usage has the plan's windows or the money, the tokens by model and the context. Changes has the
 branch and the working tree as a tree of its directories, each of which Enter folds once Tab has
-put the keyboard in the pane. Activity, drawn only while it has something in it, has the
-sub-agents and shell commands running now — each command with how long it has run and, where
-the same command ran to the end earlier, a bar of this run against that one, marked as an
-estimate since the backend reports no progress of its own — and the tool calls by kind of work.
-The View menu hides and shows each.
+put the keyboard in the pane. The View menu hides and shows each.
+
+What is at work is drawn at the foot of the session, under the line that says what the turn is
+doing: each shell command running — with how long it has run and, where the same command ran to
+the end earlier, a bar of this run against that one, marked as an estimate since the backend
+reports no progress of its own — and each sub-agent running, with the calls it has made, how long
+it has run and what it is doing. A command the backend moved to the background stays listed,
+under `still running`, after the turn that started it ends.
 
 With no config file naming a profile it runs the `claude` on your `PATH` with that CLI's own
 settings, under a profile it calls `claude`; the `[permissions]` rules niobe writes into the

@@ -28,10 +28,10 @@ mod common;
 use std::path::PathBuf;
 
 use common::{
-    at_work, metered_session, paint, running_session, screen, session_whose_turn_total_differs,
-    session_with_a_long_write, session_with_a_markdown_reply, session_with_a_tab_indented_reply,
-    session_with_finished_turns, session_with_test_records, session_with_two_agents_at_work,
-    style_at, styles, styles_at, svg, unmetered_session,
+    activity_pane, at_work, metered_session, paint, running_session, screen,
+    session_whose_turn_total_differs, session_with_a_long_write, session_with_a_markdown_reply,
+    session_with_a_tab_indented_reply, session_with_finished_turns, session_with_test_records,
+    session_with_two_agents_at_work, style_at, styles, styles_at, svg, unmetered_session,
 };
 use niobe_core::event::{
     AgentId, Backend, CompactTrigger, Event, Mode, PermissionDecision, Usage, UsageWindow,
@@ -649,16 +649,15 @@ fn summed_up_the_sub_agents_work_is_left_to_their_hand_off_rows() {
     assert_snapshot("agents-summed-120x30", &frame);
 }
 
-/// Grouped by agent from the Activity pane, each agent's rows read top to
-/// bottom under a heading with its tag and task, and the bar says the key
-/// that ungroups them.
+/// Grouped by agent from a side pane, each agent's rows read top to bottom
+/// under a heading with its tag and task, and the bar says the key that
+/// ungroups them.
 #[test]
 fn grouped_by_agent_each_agents_rows_stand_under_its_heading() {
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     let mut app = session_with_two_agents_at_work();
     screen(&mut app, 120, 30);
     let press = |app: &mut App, code| app.on_key(KeyEvent::new(code, KeyModifiers::NONE));
-    press(&mut app, KeyCode::Tab);
     press(&mut app, KeyCode::Tab);
     // The bar has room for the pane's keys at full width.
     let focused = screen(&mut app, 200, 60);
@@ -3891,7 +3890,8 @@ fn the_right_stack_collapses_below_a_hundred_columns() {
     // Matched on the border the title sits in, so the menu bar's own `Usage`
     // and `Files` entries cannot stand in for a pane. None of them has the
     // keyboard, so each is in a single line.
-    for pane in ["─ Usage ", "─ Activity ", "─ Changes "] {
+    assert!(!wide.contains("─ Activity "), "{wide}");
+    for pane in ["─ Usage ", "─ Changes "] {
         assert!(
             !narrow.contains(pane),
             "the {pane:?} pane is still drawn at 99 columns:\n{narrow}"
@@ -3976,8 +3976,7 @@ fn the_body_is_cut_in_the_proportions_the_layout_is_drawn_to() {
         );
     }
 
-    // Usage takes what its figures need, Activity what it holds up to ten
-    // parts in twenty-three of the rest, and Changes the remainder.
+    // Usage takes what its figures need, and Changes the remainder.
     let frame = screen(&mut running_session(), 200, 60);
     let first = frame.lines().nth(1).unwrap_or_default();
     let gap = first
@@ -3986,16 +3985,10 @@ fn the_body_is_cut_in_the_proportions_the_layout_is_drawn_to() {
         .unwrap_or(0)
         + 1;
     let tops = pane_tops(&frame, gap);
-    let [usage, changes, activity] = tops[..] else {
-        panic!("the right-hand stack is not three panes: {tops:?}");
+    let [usage, changes] = tops[..] else {
+        panic!("the right-hand stack is not two panes: {tops:?}");
     };
-    let bottom = frame.lines().count() - 1;
-    let (changes_rows, activity_rows) = (activity - changes, bottom - activity);
-    assert!(
-        activity_rows * 23 <= (changes_rows + activity_rows) * 10 + 23,
-        "Activity took more than its share: {activity_rows} of {}",
-        changes_rows + activity_rows
-    );
+    let changes_rows = frame.lines().count() - 1 - changes;
     assert!(
         changes - usage < changes_rows,
         "Usage took more rows than its figures need: {} of them",
@@ -4309,12 +4302,13 @@ fn a_session_outside_a_repository_draws_no_branch_and_no_working_tree() {
 #[test]
 fn a_wheel_notch_over_the_changes_pane_leaves_the_transcript_where_it_was() {
     let mut app = session_with_a_markdown_reply();
-    let _ = screen(&mut app, 200, 60);
+    let _ = screen(&mut app, 120, 30);
     app.scroll_to_head();
     let transcript = app.scroll();
 
-    // Inside the Changes pane: the right-hand column, a third of the way down.
-    app.on_mouse(wheel_at(170, 25));
+    // Inside the Changes pane: the right-hand column, two thirds of the way
+    // down, where a terminal this short leaves the files below the fold.
+    app.on_mouse(wheel_at(100, 20));
 
     assert_eq!(
         app.scroll(),
@@ -4341,7 +4335,7 @@ fn wheel_at(column: u16, row: u16) -> ratatui::crossterm::event::MouseEvent {
 /// reads it by.
 #[test]
 fn the_activity_pane_holds_the_sub_agents_and_the_tools() {
-    let frame = screen(&mut running_session(), 200, 60);
+    let frame = activity_pane(&mut running_session(), 52, 40);
 
     assert!(frame.contains("─ Activity "), "{frame}");
     for section in ["▾ Sub-agents", "▾ Tools"] {
@@ -4356,7 +4350,7 @@ fn the_activity_pane_holds_the_sub_agents_and_the_tools() {
 }
 
 /// What the running session's three agents were spawned to do, which is
-/// what their rows in the Activity pane are found by.
+/// what their rows at the foot of the transcript are found by.
 const TESTS_TASK: &str = "Cover tests/fetch.test.ts";
 const REVIEW_TASK: &str = "Review catalog/cache.ts";
 const DOCS_TASK: &str = "Write docs/etags.md";
@@ -4401,13 +4395,14 @@ fn a_session_that_ended_draws_nothing_as_still_running() {
     );
 }
 
-/// The pane lists what is running now. An agent that finished, failed or was
-/// cancelled leaves the list, and the header's counts are where it went: a
-/// list of every agent a long session spawned buries the one at work under
-/// the ones that stopped.
+/// The foot of the transcript lists what is running now. An agent that
+/// finished, failed or was cancelled leaves the list, and the Activity pane's
+/// counts are where it went: a list of every agent a long session spawned
+/// buries the one at work under the ones that stopped.
 #[test]
 fn only_a_running_agent_is_listed_and_a_finished_one_is_counted() {
-    let frame = screen(&mut running_session(), 200, 60);
+    let mut app = running_session();
+    let frame = screen(&mut app, 200, 60);
 
     assert!(frame.contains("◆ test "), "running:\n{frame}");
     for finished in [REVIEW_TASK, DOCS_TASK] {
@@ -4416,10 +4411,16 @@ fn only_a_running_agent_is_listed_and_a_finished_one_is_counted() {
             "{finished} has stopped and is still listed:\n{frame}"
         );
     }
-    assert!(
-        frame.contains("1 running · 3 spawned · 1 failed"),
-        "{frame}"
-    );
+    let pane = activity_pane(&mut app, 52, 40);
+    assert!(pane.contains("1 running · 3 spawned · 1 failed"), "{pane}");
+}
+
+/// What a row of the screen holds inside the session pane, between its
+/// borders — drawn heavy while the pane has the keyboard — and the column of
+/// padding inside each.
+fn in_session(row: &str) -> &str {
+    let inside = row.split(['┃', '│']).nth(1).unwrap_or_default();
+    inside.strip_prefix(' ').unwrap_or(inside).trim_end()
 }
 
 /// A running agent's status column is an elapsed time, measured from the
@@ -4433,7 +4434,7 @@ fn a_running_agent_is_timed() {
         .find(|line| line.contains(TESTS_TASK))
         .unwrap_or_default();
     assert!(
-        running.trim_end_matches(['│', ' ']).ends_with(" 1m 42s"),
+        in_session(running).ends_with(" 1m 42s"),
         "the session ran for 102 seconds before it was read:\n{running:?}"
     );
     assert!(!running.contains("ctx"), "{running:?}");
@@ -4494,17 +4495,19 @@ fn under_each_agent_is_the_last_thing_it_was_seen_doing() {
         under("◆ test ").contains("└ Reading tests/stream.rs"),
         "{frame}"
     );
-    // The transcript hangs rows of its own from a `└`; in the column to its
-    // right, every one is under an agent.
-    let under_agents: usize = frame
-        .lines()
-        .filter_map(|line| {
-            line.split_once(&format!("{FOCUS_SIDE} │"))
-                .map(|(_, right)| right)
-        })
-        .map(|right| right.matches('└').count())
-        .sum();
-    assert_eq!(under_agents, 1, "{frame}");
+    // The agent drawn last hangs from the last branch, and nothing hangs
+    // from it, since its backend said nothing of what it is doing.
+    assert!(
+        in_session(
+            lines
+                .iter()
+                .find(|line| line.contains(PLAN_TASK))
+                .expect("the agent has a row")
+        )
+        .contains("└ ◆ plan"),
+        "{frame}"
+    );
+    assert!(!under(PLAN_TASK).contains('└'), "{frame}");
 }
 
 /// A session reaches for one MCP server a dozen ways, and a row each says
@@ -4514,7 +4517,7 @@ fn under_each_agent_is_the_last_thing_it_was_seen_doing() {
 fn the_tools_of_one_mcp_server_are_counted_as_one_family() {
     let mut app = running_session();
     app.count_tools_by_name();
-    let frame = screen(&mut app, 200, 60);
+    let frame = activity_pane(&mut app, 52, 40);
 
     let row = frame
         .lines()
@@ -4569,7 +4572,7 @@ fn a_refused_call_is_marked_on_its_tools_row_as_on_its_kind_of_work() {
             untrimmed: None,
         });
     }
-    let kinds = screen(&mut app, 200, 60);
+    let kinds = activity_pane(&mut app, 52, 40);
     let editing = kinds
         .lines()
         .find(|line| line.contains("Editing"))
@@ -4577,7 +4580,7 @@ fn a_refused_call_is_marked_on_its_tools_row_as_on_its_kind_of_work() {
     assert!(editing.contains("2 denied"), "{editing:?}");
 
     app.count_tools_by_name();
-    let names = screen(&mut app, 200, 60);
+    let names = activity_pane(&mut app, 52, 40);
     let write = names
         .lines()
         .find(|line| line.contains("Write ") && line.contains('▓'))
@@ -4622,7 +4625,7 @@ fn a_stopped_call_is_marked_in_the_tools_header_and_on_its_rows() {
             untrimmed: None,
         });
     }
-    let kinds = screen(&mut app, 200, 60);
+    let kinds = activity_pane(&mut app, 52, 40);
     let header = kinds
         .lines()
         .find(|line| line.contains("Tools") && line.contains("calls"))
@@ -4635,7 +4638,7 @@ fn a_stopped_call_is_marked_in_the_tools_header_and_on_its_rows() {
     assert!(editing.contains("2 stopped"), "{editing:?}");
 
     app.count_tools_by_name();
-    let names = screen(&mut app, 200, 60);
+    let names = activity_pane(&mut app, 52, 40);
     let write = names
         .lines()
         .find(|line| line.contains("Write ") && line.contains('▓'))
@@ -4656,8 +4659,11 @@ fn a_stopped_call_is_marked_in_the_tools_header_and_on_its_rows() {
 /// it to the tools' own names and back.
 #[test]
 fn the_tools_are_counted_by_kind_of_work_and_t_turns_them_to_tool_names() {
+    use niobe_tui::app::Focus;
+    use ratatui::crossterm::event::{KeyCode, KeyEvent};
+
     let mut app = running_session();
-    let wide = screen(&mut app, 200, 60);
+    let wide = activity_pane(&mut app, 52, 40);
     assert!(!wide.contains("Notion·*"), "{wide}");
     let notion = wide
         .lines()
@@ -4668,32 +4674,23 @@ fn the_tools_are_counted_by_kind_of_work_and_t_turns_them_to_tool_names() {
         !under.contains("search"),
         "no line of what did it: {under:?}"
     );
-    assert_snapshot("tools-by-work-200x60", &wide);
-    // Drawn once so the pane knows how tall it is, then scrolled to its end,
-    // where the tools are.
+    assert_snapshot("activity-tools-by-work-52x40", &wide);
+
+    // Drawn beside the main view's panes, it is one Tab past the Changes
+    // pane.
     let _ = screen(&mut app, 120, 30);
-    app.scroll_pane(Pane::Activity, 40);
-    let narrow = screen(&mut app, 120, 30);
-    assert_snapshot("tools-by-work-120x30", &narrow);
-
+    let _ = activity_pane(&mut app, 52, 40);
     for _ in 0..2 {
-        app.on_key(ratatui::crossterm::event::KeyEvent::from(
-            ratatui::crossterm::event::KeyCode::Tab,
-        ));
+        app.on_key(KeyEvent::from(KeyCode::Tab));
     }
-    app.on_key(ratatui::crossterm::event::KeyEvent::from(
-        ratatui::crossterm::event::KeyCode::Char('t'),
-    ));
+    assert_eq!(app.focus(), Focus::Pane(Pane::Activity));
+    app.on_key(KeyEvent::from(KeyCode::Char('t')));
     assert!(app.tools_by_name());
-    let raw = screen(&mut app, 200, 60);
-    assert!(raw.contains("Notion·*"), "{raw}");
-    assert!(raw.contains("t kinds of work"), "{raw}");
+    assert!(activity_pane(&mut app, 52, 40).contains("Notion·*"));
 
-    app.on_key(ratatui::crossterm::event::KeyEvent::from(
-        ratatui::crossterm::event::KeyCode::Char('t'),
-    ));
+    app.on_key(KeyEvent::from(KeyCode::Char('t')));
     assert!(!app.tools_by_name());
-    assert!(!screen(&mut app, 200, 60).contains("Notion·*"));
+    assert!(!activity_pane(&mut app, 52, 40).contains("Notion·*"));
 }
 
 /// Nothing having happened reads as nothing having happened: with no agent
@@ -4702,12 +4699,33 @@ fn the_tools_are_counted_by_kind_of_work_and_t_turns_them_to_tool_names() {
 /// the Changes pane has its rows.
 #[test]
 fn an_untouched_session_draws_no_activity_pane() {
-    let frame = screen(&mut empty_session(), 120, 30);
+    let mut app = empty_session();
+    let frame = screen(&mut app, 120, 30);
 
     assert!(!frame.contains("Activity"), "{frame}");
     assert!(!frame.contains("none spawned"), "{frame}");
     assert!(!frame.contains("none called"), "{frame}");
     assert!(frame.contains("Changes"), "{frame}");
+    assert!(
+        activity_pane(&mut app, 52, 40).trim().is_empty(),
+        "and drawn alone it draws nothing"
+    );
+}
+
+/// The main view draws no Activity pane, whatever is at work: what it lists
+/// running is at the foot of the transcript, and Tab passes it by.
+#[test]
+fn the_main_view_draws_no_activity_pane_and_tab_passes_it_by() {
+    use niobe_tui::app::Focus;
+    use ratatui::crossterm::event::{KeyCode, KeyEvent};
+
+    let mut app = running_session();
+    let frame = screen(&mut app, 200, 60);
+    assert!(!frame.contains("─ Activity "), "{frame}");
+    app.on_key(KeyEvent::from(KeyCode::Tab));
+    assert_eq!(app.focus(), Focus::Pane(Pane::Changes));
+    app.on_key(KeyEvent::from(KeyCode::Tab));
+    assert_eq!(app.focus(), Focus::Session, "back round past the pane");
 }
 
 /// The pane scrolls rather than truncating: the tools are below the
@@ -4715,17 +4733,12 @@ fn an_untouched_session_draws_no_activity_pane() {
 #[test]
 fn the_activity_pane_scrolls_to_what_is_below_the_agents() {
     let mut app = running_session();
-    // Draw once so the pane knows how tall it is and how much it holds. At
-    // 200x60 it holds everything it has; a terminal half that tall is where the
-    // pane has to scroll.
-    let _ = screen(&mut app, 120, 30);
+    // Drawn once so the pane knows how tall it is and how much it holds.
+    let _ = activity_pane(&mut app, 52, 8);
     app.scroll_pane(Pane::Activity, 40);
-    let frame = screen(&mut app, 120, 30);
+    let frame = activity_pane(&mut app, 52, 8);
 
-    assert_snapshot("activity-scrolled-120x30", &frame);
-    // The section's rows rather than its header: scrolled to its end, the
-    // pane shows the last rows it holds, and how many of them fit above the
-    // tools depends on how tall the panes over it are.
+    assert_snapshot("activity-scrolled-52x8", &frame);
     assert!(
         frame.contains("Notion"),
         "the tools section is what the pane was scrolled to:\n{frame}"
@@ -4742,41 +4755,25 @@ fn the_activity_pane_scrolls_to_what_is_below_the_agents() {
 fn the_activity_pane_folds_a_section_away() {
     let mut app = running_session();
     app.fold(Section::SubAgents);
-    let frame = screen(&mut app, 200, 60);
+    let pane = activity_pane(&mut app, 52, 40);
 
     assert!(
-        frame.contains("▸ Sub-agents"),
-        "a folded section still has to say that it is folded:\n{frame}"
+        pane.contains("▸ Sub-agents"),
+        "a folded section still has to say that it is folded:\n{pane}"
     );
     assert!(
-        !frame.contains(TESTS_TASK),
-        "the agents are folded away, not merely scrolled past:\n{frame}"
+        !pane.contains(TESTS_TASK),
+        "the agents are folded away, not merely scrolled past:\n{pane}"
     );
-    assert!(frame.contains("▾ Tools"), "{frame}");
+    assert!(pane.contains("▾ Tools"), "{pane}");
+    let frame = screen(&mut app, 200, 60);
     assert!(
         frame.contains("▾ Working tree"),
         "folding a section of one pane left the other alone:\n{frame}"
     );
-}
-
-/// The wheel goes to whatever the pointer is over. Three panes scroll now, and
-/// a notch over the Activity pane must move neither of the other two.
-#[test]
-fn a_wheel_notch_over_the_activity_pane_moves_only_that_pane() {
-    let mut app = running_session();
-    let _ = screen(&mut app, 120, 30);
-    app.scroll_to_head();
-    let transcript = app.scroll();
-    let changes = app.pane_scroll(Pane::Changes);
-
-    // Inside the Activity pane: the right-hand column, near the bottom.
-    app.on_mouse(wheel_at(100, 26));
-
-    assert_eq!(app.scroll(), transcript, "the transcript moved");
-    assert_eq!(app.pane_scroll(Pane::Changes), changes, "the Changes moved");
     assert!(
-        app.pane_scroll(Pane::Activity) > 0,
-        "and the pane the pointer was over did not"
+        frame.contains(TESTS_TASK),
+        "nor the agents at the foot of the transcript:\n{frame}"
     );
 }
 
@@ -5412,35 +5409,28 @@ fn the_pane_with_the_keyboard_is_the_one_drawn_in_the_focus_line() {
     let mut app = running_session();
     let _ = screen(&mut app, 120, 30);
     press(&mut app, KeyCode::Tab);
-    press(&mut app, KeyCode::Tab);
     let frame = screen(&mut app, 120, 30);
 
-    assert_snapshot("activity-focused-120x30", &frame);
-    let focused: Vec<&str> = ["add etag support", "Usage", "Changes", "Activity"]
+    assert_snapshot("changes-focused-120x30", &frame);
+    let focused: Vec<&str> = ["add etag support", "Usage", "Changes"]
         .into_iter()
         .filter(|title| title_row(&frame, title).contains(&format!("{FOCUS_EDGE} ")))
         .collect();
-    assert_eq!(focused, ["Activity"], "{frame}");
+    assert_eq!(focused, ["Changes"], "{frame}");
 
-    let title = style_at(&mut app, 120, 30, " Activity ").expect("the title is drawn");
-    let other = style_at(&mut app, 120, 30, " Changes ").expect("the title is drawn");
+    let title = style_at(&mut app, 120, 30, " Changes ").expect("the title is drawn");
+    let other = style_at(&mut app, 120, 30, " Usage ").expect("the title is drawn");
     assert!(
         !title.add_modifier.contains(Modifier::REVERSED),
         "the focused title is a bar: {title:?}"
     );
     assert_eq!(title, other);
 
-    // The section cursor is on the pane's first header, drawn the same way,
-    // and nowhere in the pane that does not have the keyboard.
-    let cursor = style_at(&mut app, 120, 30, "▾ Sub-agents").expect("the header is drawn");
+    // The section cursor is on the pane's first header, drawn the same way.
+    let cursor = style_at(&mut app, 120, 30, "▾ Working tree").expect("the header is drawn");
     assert!(
         cursor.add_modifier.contains(Modifier::REVERSED),
         "{cursor:?}"
-    );
-    let header = style_at(&mut app, 120, 30, "▾ Working tree").expect("the header is drawn");
-    assert!(
-        !header.add_modifier.contains(Modifier::REVERSED),
-        "{header:?}"
     );
 }
 
@@ -5465,16 +5455,14 @@ fn a_focused_pane_folds_the_section_under_its_cursor() {
     let mut app = running_session();
     let _ = screen(&mut app, 200, 60);
     press(&mut app, KeyCode::Tab);
-    press(&mut app, KeyCode::Tab);
     let _ = screen(&mut app, 200, 60);
-    press(&mut app, KeyCode::Down);
     press(&mut app, KeyCode::Down);
     press(&mut app, KeyCode::Enter);
     let frame = screen(&mut app, 200, 60);
 
-    assert!(frame.contains("▸ Tools"), "{frame}");
+    assert!(frame.contains("▸ catalog/"), "{frame}");
     assert!(
-        !app.folded(Section::SubAgents),
+        !app.folded(Section::WorkingTree),
         "one section, the one under the cursor"
     );
     assert_eq!(app.composed(), "", "Enter folded rather than typed");
@@ -7339,18 +7327,15 @@ fn a_pane_hidden_from_the_view_menu_gives_its_rows_to_the_others() {
     ));
     let frame = screen(&mut app, 120, 30);
     assert!(!frame.contains(" Changes "), "{frame}");
-    assert!(frame.contains(" Activity "), "{frame}");
+    assert!(frame.contains(" Usage "), "{frame}");
     assert_snapshot("changes-hidden-120x30", &frame);
 
-    for pane in [
+    app.perform(niobe_tui::menu::Action::Pane(
         niobe_tui::menu::SidePane::Usage,
-        niobe_tui::menu::SidePane::Activity,
-    ] {
-        app.perform(niobe_tui::menu::Action::Pane(pane));
-    }
+    ));
     let frame = screen(&mut app, 120, 30);
     assert!(
-        !frame.contains(" Usage ") && !frame.contains(" Activity "),
+        !frame.contains(" Usage ") && !frame.contains(" Changes "),
         "with every pane hidden the session takes the width: {frame}"
     );
 }
@@ -8159,10 +8144,10 @@ fn a_goal_stands_on_the_rule_above_the_composer_until_the_prompt_after_it_ended(
     assert!(frame.contains("Goal met after 3 checks"), "{frame}");
 }
 
-/// A shell command running is listed in the Activity pane while the
-/// session waits on it, with how long it has run; where the same command ran
-/// to the end earlier, a bar measures this run against that one, said as an
-/// estimate, and full once it has gone on past it.
+/// A shell command running is listed at the foot of the transcript while
+/// the session waits on it, with how long it has run; where the same command
+/// ran to the end earlier, a bar on its row measures this run against that
+/// one, said as an estimate, and full once it has gone on past it.
 #[test]
 fn a_running_shell_command_is_timed_and_measured_against_its_last_run() {
     use std::time::{Duration, Instant, UNIX_EPOCH};
@@ -8208,17 +8193,67 @@ fn a_running_shell_command_is_timed_and_measured_against_its_last_run() {
         .lines()
         .find(|line| line.contains("$ cargo build --release"))
         .unwrap_or_else(|| panic!("the command has a row:\n{frame}"));
-    assert!(
-        row.trim_end_matches(['│', ' ']).ends_with("1m 00s"),
-        "{row:?}"
-    );
-    assert!(frame.contains("Shells  1 running"), "{frame}");
-    assert!(frame.contains("~40% of last 2m 30s"), "{frame}");
+    assert!(in_session(row).ends_with("1m 00s"), "{row:?}");
+    assert!(row.contains("~40% of last 2m 30s"), "on its row: {row:?}");
     assert_snapshot("shell-running-120x30", &frame);
 
     app.tick(Instant::now(), Some(at(1_200)));
     let past = screen(&mut app, 120, 30);
     assert!(past.contains("past last 2m 30s"), "{past}");
+}
+
+/// A command the backend moved to the background outlives the turn that
+/// started it, and the foot of the transcript still lists it once the turn
+/// has ended, under a head that says so rather than a working line; once it
+/// ends, nothing is drawn there.
+#[test]
+fn a_background_command_is_listed_as_still_running_after_its_turn() {
+    let mut app = App::new(Repo {
+        name: "niobe".to_owned(),
+        branch: Some("main".to_owned()),
+        ..Repo::default()
+    })
+    .attached();
+    app.apply(&Event::UserMessage {
+        text: "start the dev server".to_owned(),
+    });
+    app.apply(&Event::ToolCallStart {
+        id: "b1".into(),
+        name: "Bash".to_owned(),
+        input: r#"{"command":"npm run dev"}"#.to_owned(),
+        summary: Some("npm run dev".to_owned()),
+        agent: None,
+    });
+    app.apply(&Event::ToolCallEnd {
+        id: "b1".into(),
+        name: "Bash".to_owned(),
+        input: "{}".to_owned(),
+        output: String::new(),
+        bytes: 0,
+        outcome: niobe_core::event::ToolOutcome::Ok,
+        summary: None,
+        exit_code: None,
+        error: None,
+        command: None,
+        untrimmed: None,
+    });
+    app.apply(&Event::BackgroundCommandStarted { id: "b1".into() });
+    app.apply(&Event::TurnEnded);
+
+    let frame = screen(&mut app, 120, 30);
+    let lines: Vec<&str> = frame.lines().collect();
+    let at = lines
+        .iter()
+        .position(|line| in_session(line) == "still running")
+        .unwrap_or_else(|| panic!("no head over what is still running:\n{frame}"));
+    assert!(
+        in_session(lines[at + 1]).starts_with("  └ & npm run dev"),
+        "{frame}"
+    );
+
+    app.apply(&Event::BackgroundCommandEnded { id: "b1".into() });
+    let ended = screen(&mut app, 120, 30);
+    assert!(!ended.contains("still running"), "{ended}");
 }
 
 /// A directory of the working tree is a node the cursor walks to, and Enter
