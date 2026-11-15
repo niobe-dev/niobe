@@ -10175,10 +10175,7 @@ impl App {
     /// Takes the mark off the prompt just folded in, where it was drawn
     /// queued: it never reached the backend, so nothing holds it.
     fn unqueue_unsent(&mut self) {
-        let last_prompt = self
-            .entries
-            .iter()
-            .rposition(|entry| entry.kind == EntryKind::User);
+        let last_prompt = self.entries.iter().rposition(is_prompt);
         if last_prompt.is_some() && self.queued_prompts.back().copied() == last_prompt {
             self.queued_prompts.pop_back();
             if let Some(at) = last_prompt {
@@ -10424,9 +10421,7 @@ impl App {
 
     /// This session's prompts, oldest first, with when each was sent.
     fn own_prompts(&self) -> impl DoubleEndedIterator<Item = &Entry> {
-        self.entries
-            .iter()
-            .filter(|entry| entry.kind == EntryKind::User)
+        self.entries.iter().filter(|entry| is_prompt(entry))
     }
 
     /// Every prompt there is to go back to, newest first: this session's, then
@@ -11781,6 +11776,13 @@ pub fn human_bytes(bytes: u64) -> String {
     format!("{scaled:.1} {unit}")
 }
 
+/// Whether `entry` is a prompt the operator sent, and not their answer to a
+/// question the agent put, which is drawn as their message too but carries
+/// the question it answers as its head: the store reads back only what was
+/// sent as a prompt, so the history offers nothing else.
+fn is_prompt(entry: &Entry) -> bool {
+    entry.kind == EntryKind::User && entry.head.is_empty()
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -13865,6 +13867,30 @@ mod tests {
                 ],
             }]
         );
+    }
+
+    /// The store reads back only what was sent as a prompt, so the walk
+    /// through earlier prompts must not offer an answer live that it would
+    /// not offer once the session is read back.
+    #[test]
+    fn an_answer_to_the_agents_question_is_not_recalled_as_a_prompt() {
+        use ratatui::crossterm::event::KeyCode;
+        let mut app = app().attached();
+        app.apply(&Event::UserMessage {
+            text: "release it".to_owned(),
+        });
+        app.apply(&questions_asked());
+        app.apply(&Event::PermissionResponse {
+            id: "q1".into(),
+            decision: PermissionDecision::Allow,
+            message: None,
+            answers: vec![answer_to("Which platforms?", "macOS, Windows")],
+        });
+        app.apply(&Event::TurnEnded);
+
+        assert_eq!(app.every_prompt_text(), ["release it"]);
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(app.composed(), "release it");
     }
 
     #[test]
