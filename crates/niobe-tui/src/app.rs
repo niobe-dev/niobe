@@ -3043,6 +3043,11 @@ impl App {
             && let Some(at) = self.queued_prompts.pop_front()
         {
             self.set_queued(at, false);
+            // Taken into the turn running, it waits on no end: the next turn
+            // starts at an end only where a prompt still does.
+            if self.queued_prompts.is_empty() {
+                self.prompt_queued = false;
+            }
         }
         if matches!(
             event,
@@ -18585,6 +18590,25 @@ mod tests {
             .map(|(_, rule)| (rule.calls, rule.took))
             .collect();
         assert_eq!(counted, [(3, Some(Duration::from_secs(30))), (1, None)]);
+    }
+
+    /// A prompt the backend took into the turn running is no longer waiting
+    /// on its end: the turn after it, one the backend starts of itself, is
+    /// not timed across the idle before it.
+    #[test]
+    fn a_prompt_taken_into_the_running_turn_leaves_the_next_end_untimed() {
+        let mut app = app();
+        app.apply_at(&said("run it"), at(100, 14, 0));
+        app.apply_at(&start("t1", "Bash", "{}", None), at(101, 14, 0));
+        app.apply_at(&said("then say kiwi"), at(102, 14, 0));
+        app.apply_at(&Event::PromptTaken, at(110, 14, 0));
+        app.apply_at(&Event::TurnEnded, at(130, 14, 0));
+        app.apply_at(&start("t2", "Read", "{}", None), at(730, 14, 10));
+        app.apply_at(&Event::TurnEnded, at(735, 14, 10));
+
+        let took: Vec<Option<Duration>> =
+            rules(&app).into_iter().map(|(_, rule)| rule.took).collect();
+        assert_eq!(took, [Some(Duration::from_secs(30)), None]);
     }
 
     /// A prompt sent before the turn that typed a clear has ended joins that
