@@ -2723,11 +2723,20 @@ impl App {
             // A question a standing rule answers asked nobody: the rules
             // answer it after it is folded in, so it is read off them here.
             Event::PermissionRequest {
-                id, tool, target, ..
-            } => match self.allowed.allows(tool, target.as_deref()) {
-                true => None,
-                false => self.tool_entries.get(id).map(|&(at, _)| at),
-            },
+                id,
+                tool,
+                target,
+                proposal,
+                ..
+            } => {
+                let asks = proposal
+                    .as_ref()
+                    .is_some_and(niobe_core::Proposal::asks_the_operator);
+                match self.a_rule_answers(tool, target.as_deref(), asks) {
+                    true => None,
+                    false => self.tool_entries.get(id).map(|&(at, _)| at),
+                }
+            }
             Event::SessionMeta(_)
             | Event::UserMessage { .. }
             | Event::PromptNotSent { .. }
@@ -4556,6 +4565,14 @@ impl App {
         &self.allowed
     }
 
+    /// Whether a standing rule answers a call of `tool` on `target`: one
+    /// names it, and it is not a question put to the operator, which only
+    /// they answer. The one test the rules, the call back and the
+    /// transcript's attention share.
+    fn a_rule_answers(&self, tool: &str, target: Option<&str>, asks_the_operator: bool) -> bool {
+        !asks_the_operator && self.allowed.allows(tool, target)
+    }
+
     /// Answers every waiting prompt a standing rule already covers.
     ///
     /// Called by the event loop and never by [`App::apply`], which is also how
@@ -4576,8 +4593,9 @@ impl App {
         let covered: Vec<ToolCallId> = self
             .asks
             .iter()
-            .filter(|ask| !ask.asks_the_operator())
-            .filter(|ask| self.allowed.allows(&ask.tool, ask.target.as_deref()))
+            .filter(|ask| {
+                self.a_rule_answers(&ask.tool, ask.target.as_deref(), ask.asks_the_operator())
+            })
             .map(|ask| ask.id.clone())
             .collect();
         for id in covered {
@@ -6992,7 +7010,7 @@ impl App {
     pub fn take_alert(&mut self) -> Option<Alert> {
         let new_ask = self.asks.iter().any(|ask| {
             !self.called.asks.contains(&ask.id)
-                && !self.allowed.allows(&ask.tool, ask.target.as_deref())
+                && !self.a_rule_answers(&ask.tool, ask.target.as_deref(), ask.asks_the_operator())
         });
         // Only the questions still waiting are remembered, so the set is as
         // long as the queue and a call id the backend reuses later is rung for.
@@ -13817,6 +13835,23 @@ mod tests {
             question: question.to_owned(),
             answer: answer.to_owned(),
         }
+    }
+
+    /// No rule answers a question put to the operator, so one waits on them
+    /// whatever rule names its tool, and they are called back to it.
+    #[test]
+    fn a_question_put_to_the_operator_calls_them_back_under_a_rule_naming_its_tool() {
+        let mut allowed = Allowlist::new();
+        allowed.insert(Rule::tool("AskUserQuestion"));
+        let mut app = sent(app().attached().with_rules(allowed), "go");
+        app.take_produced();
+        assert_eq!(app.take_alert(), None);
+
+        app.apply(&questions_asked());
+        app.settle_rules();
+
+        assert!(app.asking().is_some(), "the question still waits");
+        assert_eq!(app.take_alert(), Some(Alert::NeedsYou));
     }
 
     /// A rule's answer is leave to go ahead, and a question let through with
