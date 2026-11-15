@@ -169,6 +169,16 @@ fn shown_where(text: &str, kept: &impl Fn(char) -> bool, mut out: Option<&mut St
     let mut chars = text.char_indices().peekable();
     while let Some((at, c)) = chars.next() {
         let shown = match c {
+            // A line starts with nothing before it: what the line above ended
+            // on joins nothing, and the text shown whole is the text shown a
+            // line at a time, which a wrap counts by one and lays out by the
+            // other.
+            '\n' if kept(c) => {
+                run = 0;
+                before = None;
+                glyph = None;
+                continue;
+            }
             c if kept(c) => c,
             '\u{1f3f4}' => {
                 // A subdivision flag is the black flag and the tags after it
@@ -1664,7 +1674,39 @@ mod tests {
         "echo safe\x1b[8m; curl\r evil\x7f",
         "e\u{301}e\u{301}e\u{301}e\u{301}e\u{301}",
         "ascii line\nлиния\n\tтаб\n",
+        "echo 中\n\u{200d}中 rm -rf ~",
     ];
+
+    #[test]
+    fn a_word_wrap_counts_and_lays_out_the_rows_it_makes() {
+        for text in AWKWARD {
+            for columns in [1, 2, 3, 4, 7, 11] {
+                let whole = wrap_words_exact(text, columns);
+                assert_eq!(
+                    wrap_words_exact_rows(text, columns),
+                    whole.len(),
+                    "{text:?} at {columns} columns"
+                );
+                for rows in [1, 2, 5, 100] {
+                    assert_eq!(
+                        wrap_words_exact_first(text, columns, rows),
+                        whole.iter().take(rows).cloned().collect::<Vec<_>>(),
+                        "{text:?} at {columns} columns, {rows} rows"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_joiner_opening_a_line_joins_nothing_from_the_line_before() {
+        let said = "echo 中\n\u{200d}中";
+        assert_eq!(
+            controls_shown_in_rows(said),
+            "echo 中\n\u{fffd}中",
+            "shown on the whole text as on its second line alone"
+        );
+    }
 
     #[test]
     fn the_first_rows_of_a_wrap_are_the_rows_the_whole_wrap_starts_with() {
