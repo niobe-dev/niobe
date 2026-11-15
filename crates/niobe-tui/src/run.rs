@@ -2463,6 +2463,56 @@ mod tests {
         );
     }
 
+    /// A change the backend could not be handed takes back that change
+    /// alone: an earlier pick the backend took stays the next session's.
+    #[test]
+    fn a_model_change_never_handed_over_keeps_the_pick_taken_before_it() {
+        let mut app =
+            App::new(Repo::default())
+                .attached()
+                .with_profile(crate::app::SelectedProfile {
+                    name: "max".to_owned(),
+                    backend: niobe_core::event::Backend::Claude,
+                    models: vec!["opus".to_owned(), "haiku".to_owned()],
+                    billing: None,
+                });
+        let mut journal = Kept::default();
+        let mut chosen = Chosen::default();
+        let pick = |app: &mut App, downs: usize| {
+            app.on_key(KeyEvent::new(KeyCode::F(4), KeyModifiers::NONE));
+            for _ in 0..downs {
+                app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+            }
+            app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        };
+        pick(&mut app, 0);
+        send_produced(
+            &mut app,
+            &mut journal,
+            &mut Attached::default(),
+            &mut Forgotten,
+        );
+        keep_preferences(&mut app, &mut chosen);
+        let taken = chosen.kept.clone();
+        assert!(
+            matches!(
+                taken.last(),
+                Some(crate::preferences::Preference::Model(Some(_)))
+            ),
+            "{taken:?}"
+        );
+
+        pick(&mut app, 1);
+        let mut refusing = Attached {
+            refuse: true,
+            ..Attached::default()
+        };
+        send_produced(&mut app, &mut journal, &mut refusing, &mut Forgotten);
+        keep_preferences(&mut app, &mut chosen);
+
+        assert_eq!(chosen.kept, taken, "nothing kept over the pick taken");
+    }
+
     #[test]
     fn an_effort_that_never_reached_the_backend_is_not_kept_or_marked() {
         let mut app = App::new(Repo::default()).attached();

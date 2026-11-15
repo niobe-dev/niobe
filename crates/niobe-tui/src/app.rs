@@ -4957,7 +4957,16 @@ impl App {
         self.not_changed("model", error);
         let back = Event::ModelRefused { back_to: None };
         self.fold_event(&back);
-        self.model_refused(&None);
+        // The change never reached the backend, so the model it is still on
+        // is the one chosen before it, if any was: the choice is taken back
+        // before it is kept, rather than kept as none over that one.
+        if let Some(at) = self
+            .preferred
+            .iter()
+            .rposition(|preference| matches!(preference, Preference::Model(_)))
+        {
+            self.preferred.remove(at);
+        }
         back
     }
 
