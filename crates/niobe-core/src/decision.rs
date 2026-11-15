@@ -52,7 +52,10 @@ pub fn decisions(reply: &str) -> Vec<String> {
 /// A fenced code block that is open: what closes it, and the quote and the
 /// list item it was opened in, which close it too where they end.
 struct Fence {
-    marker: &'static str,
+    /// The character the fence is a run of, `` ` `` or `~`.
+    mark: char,
+    /// How long the run that opened it is: a closing run is at least as long.
+    run: usize,
     quotes: usize,
     /// The column a line must be indented to inside the quotes to be in the
     /// list item the fence opened in; 0 where it opened in none.
@@ -62,11 +65,16 @@ struct Fence {
 impl Fence {
     /// The fence `held` opens, if its content opens one.
     fn opened(held: &Held) -> Option<Self> {
-        let marker = ["```", "~~~"]
+        let mark = ['`', '~']
             .into_iter()
-            .find(|marker| held.content.starts_with(marker))?;
+            .find(|mark| held.content.starts_with(*mark))?;
+        let run = run_of(held.content, mark);
+        if run < 3 {
+            return None;
+        }
         Some(Self {
-            marker,
+            mark,
+            run,
             quotes: held.quotes,
             indent: if held.listed { held.indent } else { 0 },
         })
@@ -80,11 +88,27 @@ impl Fence {
         held.quotes >= self.quotes && (line.trim().is_empty() || held.lead >= self.indent)
     }
 
-    /// Whether `held`, a line inside this fence, closes it: its marker, in
-    /// the quote it was opened in. A line quoted deeper is the code's own.
+    /// Whether `held`, a line inside this fence, closes it: in the quote it
+    /// was opened in, a run of its character at least as long as the one
+    /// that opened it, and nothing after the run but blanks, as CommonMark
+    /// reads a closing fence and the transcript draws one. A line quoted
+    /// deeper is the code's own, and so is `` ```sh `` inside `` ```` ``.
     fn closed_by(&self, held: &Held) -> bool {
-        held.quotes == self.quotes && !held.listed && held.content.starts_with(self.marker)
+        let run = run_of(held.content, self.mark);
+        held.quotes == self.quotes
+            && !held.listed
+            && run >= self.run
+            && held
+                .content
+                .get(run..)
+                .is_some_and(|rest| rest.trim().is_empty())
     }
+}
+
+/// How many of `mark` `text` opens with, in bytes, which for `` ` `` and `~`
+/// is characters.
+fn run_of(text: &str, mark: char) -> usize {
+    text.chars().take_while(|c| *c == mark).count()
 }
 
 /// A line read past the containers it sits in, as markdown nests them: the
@@ -228,6 +252,24 @@ mod tests {
                      DECISION: the real one";
 
         assert_eq!(decisions(reply), ["the real one"]);
+    }
+
+    /// As CommonMark reads a fence, and as the transcript draws one: closed
+    /// only by a run of its own character at least as long as the one that
+    /// opened it, with nothing after it.
+    #[test]
+    fn a_fence_is_closed_only_by_a_bare_run_at_least_as_long_as_its_own() {
+        let nested = "````markdown\n```sh\nDECISION: from the quoted script\n```\n````\nDECISION: the real one";
+        assert_eq!(decisions(nested), ["the real one"]);
+
+        let info = "```\n```rust\nDECISION: still code\n```\nDECISION: after";
+        assert_eq!(decisions(info), ["after"]);
+
+        let tildes = "~~~~\n~~~\nDECISION: still code\n~~~~~\nDECISION: after";
+        assert_eq!(decisions(tildes), ["after"]);
+
+        let other = "```\n~~~\nDECISION: still code\n```\nDECISION: after";
+        assert_eq!(decisions(other), ["after"]);
     }
 
     #[test]
