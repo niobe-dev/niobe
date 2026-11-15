@@ -55,10 +55,9 @@ use crate::usage;
 /// Smallest terminal the shell draws in, as (columns, rows).
 pub const MIN_SIZE: (u16, u16) = (80, 24);
 
-/// The width at which the right stack fits beside the session pane, and the
-/// info panel over its corner. Below it the session pane takes the whole body
-/// with nothing beside it or over it: three more panes squeezed into forty
-/// columns each, or a panel of forty over a transcript of eighty, is less
+/// The width at which the right stack fits beside the session pane. Below it
+/// the session pane takes the whole body with nothing beside it: more panes
+/// squeezed into forty columns each beside a transcript of eighty are less
 /// readable than the transcript they were taken from.
 pub const WIDE_COLUMNS: u16 = 100;
 
@@ -3821,8 +3820,7 @@ const LIVE_COMMAND_LEAST: usize = 16;
 
 /// The rows a cleared conversation opens with, over the foot of the idle
 /// scene: at the foot rather than the top, where the transcript's newest
-/// line is read and where the info panel over the top-right corner cannot
-/// hide them.
+/// line is read.
 fn draw_under_scene(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let width = usize::from(area.width);
     let mut lines: Vec<Line<'static>> = app
@@ -3864,9 +3862,9 @@ const WELCOME: [&str; 2] = [
     "Start by entering your prompt down below.",
 ];
 
-/// How wide the greeting is let run before it wraps: narrow enough that the
-/// info panel, at its widest over the pane's other corner, leaves it whole on
-/// a terminal wide enough to draw the panel at all.
+/// How wide the greeting is let run before it wraps: a short measure reads as
+/// a greeting rather than a paragraph, and leaves most of the scene in view
+/// beside it.
 const WELCOME_COLUMNS: usize = 44;
 
 /// The greeting over the scene's top-left corner, on the pane's own colour
