@@ -2827,6 +2827,44 @@ fn a_turn_at_work_says_so_under_the_transcript_until_it_ends() {
 /// and to — the floor the backend reported until the next request measures
 /// the second, as the Usage pane's context row does — and the rule under the
 /// turn names it as a compaction.
+/// A prompt sent while a clear waits on the backend is held until the
+/// conversation has started over, and the rule above the composer says so
+/// while the transcript, which is the conversation being put away, does not
+/// show it.
+#[test]
+fn a_prompt_held_behind_a_clear_is_said_on_the_rule_above_the_composer() {
+    let mut app = App::new(Repo::default()).attached();
+    app.apply(&Event::Commands {
+        commands: vec![niobe_core::event::SlashCommand {
+            name: "clear".to_owned(),
+            description: String::new(),
+            argument_hint: None,
+            mid_prompt: false,
+        }],
+    });
+    for prompt in ["/clear", "say kiwi"] {
+        for c in prompt.chars() {
+            app.type_into_composer(ratatui_textarea::Input {
+                key: ratatui_textarea::Key::Char(c),
+                ..Default::default()
+            });
+        }
+        app.submit();
+    }
+    let held = screen(&mut app, 80, 24);
+    assert!(
+        held.contains("1 prompt waits for the conversation to start over"),
+        "{held}"
+    );
+    assert!(!held.contains("say kiwi"), "{held}");
+
+    app.apply(&Event::Cleared);
+    app.settle_clear();
+    let sent = screen(&mut app, 80, 24);
+    assert!(!sent.contains("waits for the conversation"), "{sent}");
+    assert!(sent.contains("say kiwi"), "{sent}");
+}
+
 #[test]
 fn a_compaction_is_shown_as_one_while_it_runs_and_after() {
     use std::time::{Duration, Instant};

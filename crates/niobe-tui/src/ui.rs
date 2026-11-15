@@ -1326,7 +1326,7 @@ fn draw_session(frame: &mut Frame, area: Rect, panes: bool, app: &mut App, theme
 
     frame.render_widget(
         Paragraph::new(divider_line(
-            app.recall_label(),
+            app.recall_label().or_else(|| app.held_label()),
             app.session().goal(),
             divider.width,
             theme,
@@ -1340,8 +1340,9 @@ fn draw_session(frame: &mut Frame, area: Rect, panes: bool, app: &mut App, theme
 }
 
 /// The rule between the transcript and the composer, `width` columns wide,
-/// with `label` set into it where the composer holds a recalled prompt, and
-/// after it where the session's goal stands while one is set.
+/// with `label` set into it where the composer holds a recalled prompt or
+/// prompts wait behind a clear, and after it where the session's goal
+/// stands while one is set.
 ///
 /// The label is on the divider rather than on the bar beside the prompt: a
 /// recalled prompt can fill every column of the bar, and this is the one

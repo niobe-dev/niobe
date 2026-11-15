@@ -1409,6 +1409,10 @@ const COMPACTING: &str = "compacting context";
 /// What a prompt the backend has not taken in yet says beside its head.
 const QUEUED: &str = "queued — the agent has not taken it in yet";
 
+/// Why a prompt held behind a clear was not sent, where the session ended
+/// before the backend answered that clear.
+const HELD_AT_THE_END: &str = "the session ended before the conversation started over";
+
 /// Whether a turn is running, and how long the session has been that way.
 ///
 /// The menu row's state segment, which is the one place the shell says the
@@ -1803,6 +1807,21 @@ pub struct App {
     /// prompt before a clear belongs to a conversation the backend has put
     /// away, with whatever it kept of the files.
     sent_since: usize,
+    /// Whether a clear sent from here waits on the backend: from the
+    /// `/clear` until the backend starts the conversation over, or the turn
+    /// it runs as, or the session, ends without that.
+    clear_sent: bool,
+    /// Whether the backend owes a turn of its own: the turn that ended said
+    /// another follows, on work that ended under it that no request took in,
+    /// and that turn has not begun. The backend holds what it is sent until
+    /// that turn is done, so a command waits for it as for a running turn.
+    turn_owed: bool,
+    /// The prompts sent while a clear waits, oldest first, which the shell
+    /// holds until it has been answered: the backend takes a prompt that
+    /// arrives behind a clear into the conversation the clear starts, and
+    /// folded and recorded before the backend says it started that one, the
+    /// prompt would go with the conversation put away.
+    after_clear: Vec<String>,
     /// A prompt opening with a command the backend did not list, held back
     /// once: Enter on it again sends it.
     unlisted_held: Option<String>,
@@ -2429,6 +2448,9 @@ impl App {
             mcp_reconnects: Vec::new(),
             sent: Vec::new(),
             sent_since: 0,
+            clear_sent: false,
+            turn_owed: false,
+            after_clear: Vec::new(),
             rewinds: Vec::new(),
             rewinding: None,
             unlisted_held: None,
@@ -2480,6 +2502,8 @@ impl App {
     pub fn apply(&mut self, event: &Event) {
         self.heard = true;
         self.fold_event(event);
+        self.clear_answered(event);
+        self.follow_owed_turn(event);
         // A model the backend refused is not what the next session should
         // open on: it keeps the one the backend went back to, where a change
         // it took put it there, and otherwise none, leaving the backend's own.
@@ -2880,7 +2904,8 @@ impl App {
     /// that ends in the middle of a turn, or between turns while an agent
     /// worked on in the background, taken up again. The turn ends there, cut,
     /// so the next prompt opens a turn of its own, and every agent still
-    /// running is cut short with it.
+    /// running is cut short with it. A prompt still held behind a clear is
+    /// recorded as one that reached no backend.
     ///
     /// An agent in the background outlives its turn but not the process, and
     /// a backend started again does not carry it on, so nothing would ever
@@ -2898,6 +2923,14 @@ impl App {
     /// stops, so that is where it is folded, as [`App::left_at`] says it is
     /// to be kept.
     pub fn leave(&mut self) {
+        // Held behind a clear the backend never answered, they reached no
+        // backend, and the record says so rather than losing them.
+        for text in std::mem::take(&mut self.after_clear) {
+            self.produce(Event::PromptNotSent {
+                text,
+                why: Some(HELD_AT_THE_END.to_owned()),
+            });
+        }
         let taking_up = std::mem::take(&mut self.taken_up);
         let taken_up = taking_up && self.heard && !self.session.left();
         if taken_up || self.session.turn_running() || !self.session.running_agents().is_empty() {
@@ -5912,6 +5945,11 @@ impl App {
                 "/{name} waits for the running turn: let it end, or Esc to stop it"
             ));
         }
+        if self.turn_owed {
+            return Err(format!(
+                "/{name} waits for the turn the backend starts on work that just ended"
+            ));
+        }
         // A question can wait with no turn of this shell's running: one a
         // sub-agent asks while it works on in the background, or one in a
         // turn the backend started on its own. The backend is still holding
@@ -5942,6 +5980,8 @@ impl App {
         self.focus = Focus::Session;
         self.produce_prompt(text);
         self.sent_here = true;
+        // The menu's New session, F3 and a typed `/clear` all send it here.
+        self.clear_sent |= name == "clear";
         self.scroll_to_tail();
     }
 
@@ -10078,6 +10118,8 @@ impl App {
     /// With nothing attached, the shell says so plainly rather than leaving a
     /// prompt on screen that looks sent. While an image asked for is still
     /// being read, nothing is sent: it would land in the next prompt instead.
+    /// While a clear sent from here waits on the backend, the prompt is held
+    /// until it has been answered: see [`App::settle_clear`].
     pub fn submit(&mut self) {
         let text = self.composed();
         if text.trim().is_empty() {
@@ -10112,12 +10154,73 @@ impl App {
         let kept = kept_with(&draft, &self.drafts);
         self.images.send(&text, &kept);
         self.sent_here = self.attached;
-        match self.attached {
-            true => self.produce_prompt(text),
-            false => self.produce(Event::PromptNotSent { text, why: None }),
+        match (
+            self.attached,
+            self.clear_sent || !self.after_clear.is_empty(),
+        ) {
+            (true, true) => self.after_clear.push(text),
+            (true, false) => self.produce_prompt(text),
+            (false, _) => self.produce(Event::PromptNotSent { text, why: None }),
         }
         self.give_back(&draft);
         self.scroll_to_tail();
+    }
+
+    /// Notes that the clear sent from here no longer waits on the backend:
+    /// it started the conversation over, or the turn the clear ran as or the
+    /// session ended without that, and nothing will start it over now.
+    fn clear_answered(&mut self, event: &Event) {
+        if matches!(
+            event,
+            Event::Cleared
+                | Event::TurnEnded
+                | Event::SessionLeft
+                | Event::Error { fatal: true, .. }
+        ) {
+            self.clear_sent = false;
+        }
+    }
+
+    /// Keeps [`App::turn_owed`] as the backend's events say: owed from a
+    /// turn's word that another follows, until that turn begins or the
+    /// conversation or the session ends.
+    fn follow_owed_turn(&mut self, event: &Event) {
+        self.turn_owed = match event {
+            Event::TurnFollows => true,
+            Event::Cleared | Event::SessionLeft | Event::Error { fatal: true, .. } => false,
+            _ => self.turn_owed && !self.session.turn_running(),
+        };
+    }
+
+    /// Sends the oldest prompt held behind a clear, once it no longer waits
+    /// on the backend. Called by the event loop after it has folded and
+    /// recorded what the backend said, and never inside the fold: the record
+    /// keeps a prompt after the clear it was held behind, and the fold takes
+    /// it in at the same place, so the conversation read back from its record
+    /// is the one the shell showed live.
+    ///
+    /// One a pass, so that each is the last prompt folded in when the loop
+    /// hands it on: one the backend cannot be handed is taken back as that,
+    /// and the next goes on the pass after, behind it as any prompt sent
+    /// while a turn runs does.
+    pub fn settle_clear(&mut self) {
+        if self.clear_sent || self.after_clear.is_empty() {
+            return;
+        }
+        let text = self.after_clear.remove(0);
+        self.produce_prompt(text);
+    }
+
+    /// What the rule above the composer says while prompts are held behind
+    /// a clear, which the transcript does not show until they are sent.
+    pub fn held_label(&self) -> Option<String> {
+        match self.after_clear.len() {
+            0 => None,
+            1 => Some("1 prompt waits for the conversation to start over".to_owned()),
+            held => Some(format!(
+                "{held} prompts wait for the conversation to start over"
+            )),
+        }
     }
 
     /// Whether `text` is held back rather than sent: a prompt that opens
@@ -10244,6 +10347,8 @@ impl App {
     /// record keeps it as sent.
     pub fn not_sent(&mut self, error: &str) -> bool {
         self.sent_here = false;
+        // A clear that did not reach the backend will not be answered.
+        self.clear_sent = false;
         let taken_back = match self.before_prompt.take() {
             Some(before) => {
                 self.session = before.session;
@@ -22830,6 +22935,246 @@ mod tests {
             picker.options[0].value, "1",
             "counted among every prompt sent"
         );
+    }
+
+    /// Hands what the shell produced on as the event loop does: a prompt to
+    /// the backend, and everything to the record, in the order it came.
+    fn hand_on(app: &mut App, recorded: &mut Vec<Event>) {
+        app.settle_clear();
+        for event in app.take_produced() {
+            if let Event::UserMessage { text } = &event {
+                app.sent_to_backend(text);
+            }
+            recorded.push(event);
+        }
+    }
+
+    /// A prompt sent after a clear and before the backend has started the
+    /// conversation over is taken by the backend into the new conversation,
+    /// so it is that conversation's: in its transcript, its count of prompts
+    /// and what F6 offers, after the clear in the record, and the same read
+    /// back from that record as live.
+    #[test]
+    fn a_prompt_sent_before_the_clear_is_taken_is_the_new_conversations() {
+        use ratatui::crossterm::event::KeyCode;
+        let mut app = offering(&["clear"]);
+        let mut recorded = Vec::new();
+        app.perform(crate::menu::Action::NewSession);
+        hand_on(&mut app, &mut recorded);
+        typed(&mut app, "foo");
+        app.on_key(key(KeyCode::Enter));
+        hand_on(&mut app, &mut recorded);
+        for event in [
+            Event::Cleared,
+            Event::TurnEnded,
+            Event::AssistantMessage {
+                text: "bar".to_owned(),
+                agent: None,
+            },
+            Event::TurnEnded,
+        ] {
+            app.apply(&event);
+            recorded.push(event);
+            hand_on(&mut app, &mut recorded);
+        }
+
+        let foo = Event::UserMessage {
+            text: "foo".to_owned(),
+        };
+        let cleared = recorded.iter().position(|event| *event == Event::Cleared);
+        let sent = recorded.iter().position(|event| *event == foo);
+        assert!(
+            cleared.is_some() && sent > cleared,
+            "the record keeps the prompt in the conversation it went to: {recorded:?}"
+        );
+        let prompts = |app: &App| -> Vec<String> {
+            app.entries()
+                .iter()
+                .filter(|entry| entry.kind == EntryKind::User)
+                .map(|entry| entry.body.clone())
+                .collect()
+        };
+        assert_eq!(prompts(&app), ["foo"]);
+        assert_eq!(app.session().user_messages(), 1);
+        app.perform(crate::menu::Action::Rewind);
+        let offered: Vec<_> = app
+            .picking()
+            .map(|picker| picker.options.iter().map(|c| c.name.clone()).collect())
+            .unwrap_or_default();
+        assert_eq!(offered, [Some("foo".to_owned())]);
+
+        let mut read_back = App::new(Repo::default());
+        read_back.extend(cleared.map_or(&recorded[..0], |at| &recorded[at..]));
+        assert_eq!(prompts(&read_back), prompts(&app));
+        assert_eq!(read_back.session().turns(), app.session().turns());
+        assert_eq!(
+            read_back.session().user_messages(),
+            app.session().user_messages()
+        );
+    }
+
+    /// Sends `/clear` from a session that offers it, and then `prompt`.
+    fn held_behind_a_clear(prompt: &str) -> (App, Vec<Event>) {
+        use ratatui::crossterm::event::KeyCode;
+        let mut app = offering(&["clear"]);
+        let mut recorded = Vec::new();
+        app.perform(crate::menu::Action::NewSession);
+        hand_on(&mut app, &mut recorded);
+        typed(&mut app, prompt);
+        app.on_key(key(KeyCode::Enter));
+        hand_on(&mut app, &mut recorded);
+        (app, recorded)
+    }
+
+    /// The backend runs a turn of its own once background work it was told
+    /// of ends, and holds a command sent before that turn starts behind it:
+    /// a clear sent in that gap is refused as one sent while a turn runs.
+    #[test]
+    fn a_clear_waits_for_the_turn_the_backend_owes_on_work_that_ended() {
+        let mut app = offering(&["clear"]);
+        let mut recorded = Vec::new();
+        app.apply(&said("go"));
+        app.apply(&Event::TurnFollows);
+        app.apply(&Event::TurnEnded);
+
+        app.perform(crate::menu::Action::NewSession);
+        hand_on(&mut app, &mut recorded);
+        assert_eq!(
+            recorded,
+            [],
+            "the clear went before the turn the backend owes"
+        );
+
+        app.apply(&Event::AssistantMessage {
+            text: "the work is done".to_owned(),
+            agent: None,
+        });
+        app.apply(&Event::TurnEnded);
+        app.perform(crate::menu::Action::NewSession);
+        hand_on(&mut app, &mut recorded);
+        assert_eq!(
+            recorded,
+            [Event::UserMessage {
+                text: "/clear".to_owned()
+            }]
+        );
+    }
+
+    /// Prompts held behind a clear go one a pass, so that one the backend
+    /// could not be handed is taken back as the last prompt folded in, as
+    /// the record says it was.
+    #[test]
+    fn prompts_held_behind_a_clear_that_never_reach_the_backend_are_each_taken_back() {
+        use ratatui::crossterm::event::KeyCode;
+        let (mut app, _) = held_behind_a_clear("a");
+        typed(&mut app, "b");
+        app.on_key(key(KeyCode::Enter));
+        app.apply(&Event::Error {
+            message: "crashed".to_owned(),
+            fatal: true,
+        });
+        let counted = app.session().user_messages();
+
+        let mut taken_back = Vec::new();
+        for _ in 0..3 {
+            app.settle_clear();
+            for event in app.take_produced() {
+                if matches!(event, Event::UserMessage { .. }) {
+                    taken_back.push(app.not_sent("the session has ended"));
+                }
+            }
+        }
+        assert_eq!(taken_back, [true, true]);
+        assert_eq!(
+            app.session().user_messages(),
+            counted,
+            "neither held prompt is counted, as neither is in the record"
+        );
+    }
+
+    #[test]
+    fn a_prompt_held_behind_a_clear_is_said_on_the_rule_until_it_is_sent() {
+        let (mut app, recorded) = held_behind_a_clear("foo");
+        assert_eq!(
+            recorded,
+            [Event::UserMessage {
+                text: "/clear".to_owned()
+            }]
+        );
+        assert_eq!(
+            app.held_label().as_deref(),
+            Some("1 prompt waits for the conversation to start over")
+        );
+        assert!(
+            app.entries().iter().all(|entry| entry.body != "foo"),
+            "the conversation being put away does not show it"
+        );
+
+        app.apply(&Event::Cleared);
+        app.settle_clear();
+        assert_eq!(app.held_label(), None);
+        assert_eq!(
+            app.take_produced(),
+            [Event::UserMessage {
+                text: "foo".to_owned()
+            }]
+        );
+    }
+
+    /// A clear whose turn ends without the backend starting the conversation
+    /// over will not start it over: what was held behind it goes to the
+    /// conversation there is.
+    #[test]
+    fn a_clear_that_ends_without_starting_over_sends_what_waited_on_it() {
+        let (mut app, mut recorded) = held_behind_a_clear("foo");
+        app.apply(&Event::TurnEnded);
+        hand_on(&mut app, &mut recorded);
+
+        assert_eq!(
+            recorded.last(),
+            Some(&Event::UserMessage {
+                text: "foo".to_owned()
+            })
+        );
+        assert_eq!(app.session().user_messages(), 2);
+    }
+
+    /// A clear that never reached the backend holds nothing back.
+    #[test]
+    fn a_prompt_after_a_clear_that_was_not_sent_is_sent_at_once() {
+        use ratatui::crossterm::event::KeyCode;
+        let mut app = offering(&["clear"]);
+        app.perform(crate::menu::Action::NewSession);
+        app.take_produced();
+        app.not_sent("the CLI is not running");
+        typed(&mut app, "foo");
+        app.on_key(key(KeyCode::Enter));
+
+        assert_eq!(
+            app.take_produced(),
+            [Event::UserMessage {
+                text: "foo".to_owned()
+            }]
+        );
+    }
+
+    /// A session left while a prompt waits behind a clear keeps that prompt,
+    /// as one that reached no backend.
+    #[test]
+    fn a_prompt_held_behind_a_clear_when_the_session_ends_is_kept_as_not_sent() {
+        let (mut app, _) = held_behind_a_clear("foo");
+        app.leave();
+
+        let produced = app.take_produced();
+        assert_eq!(
+            produced.first(),
+            Some(&Event::PromptNotSent {
+                text: "foo".to_owned(),
+                why: Some(HELD_AT_THE_END.to_owned()),
+            }),
+            "{produced:?}"
+        );
+        assert_eq!(app.held_label(), None);
     }
 
     #[test]

@@ -452,6 +452,90 @@ mod tests {
         );
     }
 
+    /// Hands on what the shell produced as the event loop does, once the
+    /// prompts held behind a clear have been settled.
+    fn hand_on(app: &mut App, journal: &mut StoreJournal) {
+        app.settle_clear();
+        for event in app.take_produced() {
+            journal.append(&event);
+        }
+    }
+
+    /// A prompt sent after `/clear` and before the backend started the
+    /// conversation over is recorded in the session the clear opens, after
+    /// the clear, and that session read back is the one the shell showed.
+    #[test]
+    fn a_prompt_sent_while_a_clear_waits_is_recorded_in_the_conversation_it_opens() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let root = dir.path().to_path_buf();
+        let mut live = App::new(Repo::default()).attached();
+        live.apply(&Event::Commands {
+            commands: vec![niobe_core::event::SlashCommand {
+                name: "clear".to_owned(),
+                description: String::new(),
+                argument_hint: None,
+                mid_prompt: false,
+            }],
+        });
+        let mut journal = StoreJournal::pending(root.clone());
+        send(&mut live, &mut journal, "/clear");
+        send(&mut live, &mut journal, "foo");
+        for event in [
+            Event::Cleared,
+            Event::TurnEnded,
+            Event::AssistantMessage {
+                text: "bar".to_owned(),
+                agent: None,
+            },
+            Event::TurnEnded,
+        ] {
+            live.apply(&event);
+            journal.append(&event);
+            hand_on(&mut live, &mut journal);
+        }
+        let last = journal.finish().session.expect("something was recorded");
+
+        let store = repo::open_existing_store(&root)
+            .expect("the store opens")
+            .expect("the store exists");
+        let sessions = store.sessions().expect("the sessions list");
+        assert_eq!(sessions.len(), 2, "{sessions:?}");
+        let first = sessions
+            .iter()
+            .map(|s| s.id)
+            .find(|id| *id != last)
+            .expect("an earlier session");
+        assert_eq!(texts(&root, first), [said("/clear")]);
+        let opened = store.events(last).expect("the session loads");
+        assert_eq!(
+            opened.iter().map(|s| s.event.clone()).collect::<Vec<_>>(),
+            [
+                Event::Cleared,
+                said("foo"),
+                Event::TurnEnded,
+                Event::AssistantMessage {
+                    text: "bar".to_owned(),
+                    agent: None,
+                },
+                Event::TurnEnded,
+            ]
+        );
+        assert!(
+            opened.windows(2).all(|pair| pair[0].at <= pair[1].at),
+            "the session's events are dated in the order they are kept"
+        );
+
+        let mut read_back = App::new(Repo::default());
+        read_back.extend(opened.iter().map(|s| &s.event));
+        assert_eq!(live.session().user_messages(), 1);
+        assert_eq!(
+            read_back.session().user_messages(),
+            live.session().user_messages()
+        );
+        assert_eq!(read_back.session().turns(), live.session().turns());
+        assert_eq!(timeline(&read_back), timeline(&live));
+    }
+
     #[test]
     fn nothing_is_created_until_the_first_event() {
         let dir = tempfile::tempdir().expect("a temporary directory can be created");

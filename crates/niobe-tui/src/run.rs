@@ -427,6 +427,9 @@ fn event_loop<B: Backend<Error = io::Error>>(
             // Before the draw, so that a prompt a standing rule already answers is
             // never on screen for the frame it takes to answer it.
             app.settle_rules();
+            // After the backend's events have been recorded, so a prompt held
+            // behind a clear is recorded after the clear, as it is folded.
+            app.settle_clear();
             // After the fold and never inside it: the warning is about what this
             // session has spent under the budget this run was given, not about
             // what a recording being read back spent under one it knew nothing of.

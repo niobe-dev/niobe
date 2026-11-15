@@ -151,7 +151,9 @@ reviewers that encode both, for an agent working in this tree.
   row moves the cursor there, a click on the cursor's row chooses it as Enter does and a click
   outside closes the dialog, and each transcript entry's attention, the highest of the events that built it, and
   which prompts are queued — sent while a turn ran or the conversation was being compacted, and drawn
-  dim, saying so, until the backend says it took one in or the turn they waited behind ends — `ui.rs`
+  dim, saying so, until the backend says it took one in or the turn they waited behind ends, and
+  which are held behind a clear the backend has not answered yet, said on the rule above the
+  composer and sent once it has, so they are the new conversation's — `ui.rs`
   draws it, leaving the routine entries out where `n` is pressed in a side pane, each run of them
   a row that counts them, beside the session a stack a third of the body wide, between 34 and
   52 columns, of the Usage pane and the Changes pane — the branch, the commits made since the
