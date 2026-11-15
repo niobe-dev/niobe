@@ -938,6 +938,94 @@ fn showing_every_call_while_scrolled_back_keeps_the_lines_being_read() {
     assert_eq!(first_row_with(&full, "reply line"), Some(top), "{full}");
 }
 
+/// A reply, a call each to four tools — each its own row, all of them
+/// routine and summed up a line where the calls are folded — and a reply long
+/// enough under them to scroll back through.
+fn four_calls_between_two_replies() -> App {
+    let mut app = running_session();
+    app.apply(&Event::AssistantMessage {
+        text: "Looking through the catalog first.".to_owned(),
+        agent: None,
+    });
+    for (id, name, summary) in [
+        ("c1", "Read", "catalog/index.ts"),
+        ("c2", "Grep", "fetchCatalog"),
+        ("c3", "Glob", "catalog/**/*.ts"),
+        ("c4", "Bash", "cargo build"),
+    ] {
+        app.apply(&Event::ToolCallStart {
+            id: id.into(),
+            name: name.to_owned(),
+            input: summary.to_owned(),
+            summary: Some(summary.to_owned()),
+            agent: None,
+        });
+        app.apply(&Event::ToolCallEnd {
+            id: id.into(),
+            name: name.to_owned(),
+            input: summary.to_owned(),
+            output: String::new(),
+            bytes: 40,
+            outcome: niobe_core::event::ToolOutcome::Ok,
+            summary: Some(summary.to_owned()),
+            exit_code: None,
+            error: None,
+            command: None,
+            untrimmed: None,
+        });
+    }
+    let reply: String = (1..=60).map(|n| format!("- reply line {n:02}\n")).collect();
+    app.apply(&Event::AssistantMessage {
+        text: reply,
+        agent: None,
+    });
+    app
+}
+
+#[test]
+fn folding_the_calls_back_while_one_inside_a_run_is_read_keeps_the_run_in_view() {
+    let mut app = four_calls_between_two_replies();
+    app.show_every_call();
+    let before = scroll_until_first(&mut app, "fetchCatalog", 120);
+    assert_eq!(
+        first_row_with(&before, "fetchCatalog").map(|(at, _)| at),
+        Some(TRANSCRIPT_TOP),
+        "{before}"
+    );
+
+    app.show_every_call();
+    let folded = screen(&mut app, 120, 40);
+    // The row read is gone into the line that sums up its run, which is the
+    // nearest line above it still drawn.
+    assert!(!folded.contains("fetchCatalog"), "{folded}");
+    assert_eq!(
+        first_row_with(&folded, "ran 1 shell command").map(|(at, _)| at),
+        Some(TRANSCRIPT_TOP),
+        "{folded}"
+    );
+}
+
+#[test]
+fn hiding_the_routine_entries_while_one_inside_a_run_is_read_keeps_the_run_in_view() {
+    let mut app = four_calls_between_two_replies();
+    app.show_every_call();
+    let before = scroll_until_first(&mut app, "fetchCatalog", 120);
+    assert_eq!(
+        first_row_with(&before, "fetchCatalog").map(|(at, _)| at),
+        Some(TRANSCRIPT_TOP),
+        "{before}"
+    );
+
+    app.show_notable_only();
+    let notable = screen(&mut app, 120, 40);
+    assert!(!notable.contains("fetchCatalog"), "{notable}");
+    assert_eq!(
+        first_row_with(&notable, "routine entr").map(|(at, _)| at),
+        Some(TRANSCRIPT_TOP),
+        "{notable}"
+    );
+}
+
 #[test]
 fn a_line_cut_away_leaves_the_view_on_the_nearest_line_above_it_still_drawn() {
     let mut app = long_write_under_a_long_reply();

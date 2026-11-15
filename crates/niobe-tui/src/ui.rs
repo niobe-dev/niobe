@@ -2475,6 +2475,9 @@ struct Drawn {
     /// The entry drawn, or for a heading the first entry under it.
     entry: usize,
     heading: bool,
+    /// What the lines stand for, which for a run of entries counted or
+    /// summed up is every entry of the run and not only `entry`, its first.
+    slot: Slot,
     /// Whether this is the row that counts a run of routine entries left
     /// out, or the line that sums up a run of calls, rather than an entry
     /// drawn.
@@ -2513,9 +2516,10 @@ pub(crate) enum Slot {
         calls: usize,
     },
     /// A run of routine entries left out, where the transcript shows only
-    /// what is notable: the first of them, and how many.
+    /// what is notable: the first of them, the last, and how many.
     Hidden {
         first: usize,
+        last: usize,
         count: usize,
     },
     /// A run of the session's own calls drawn as the one line that says
@@ -2527,6 +2531,27 @@ pub(crate) enum Slot {
         first: usize,
         last: usize,
     },
+}
+
+impl Slot {
+    /// Whether the entry at `at` is one of the run of entries drawn as this
+    /// slot's lines, as [`DrawnEntries::line_of`] needs to find a line gone
+    /// into that run. Where the rows are `grouped`, a run of routine entries
+    /// is one agent's or the session's, so another's entry between its first
+    /// and its last is drawn in another place. Every entry between a summed
+    /// run's first and its last is in it: those it does not sum are the
+    /// sub-agents' entries, which are left out with it.
+    fn stands_for(self, at: usize, entries: &[Entry], grouped: bool) -> bool {
+        let agent = |at: usize| entries.get(at).and_then(|entry| entry.agent.as_deref());
+        match self {
+            Slot::Entry(entry) => entry == at,
+            Slot::Heading { .. } => false,
+            Slot::Hidden { first, last, .. } => {
+                (first..=last).contains(&at) && (!grouped || agent(first) == agent(at))
+            }
+            Slot::Summary { first, last } => (first..=last).contains(&at),
+        }
+    }
 }
 
 impl DrawnEntries {
@@ -2592,7 +2617,9 @@ impl DrawnEntries {
                         true,
                     )
                 }
-                Slot::Hidden { first, count } => (hidden_key(count, width, theme), first, false),
+                Slot::Hidden { first, count, .. } => {
+                    (hidden_key(count, width, theme), first, false)
+                }
                 Slot::Summary { first, last } => (
                     summary_key(&summary_of(entries, first, last), width, theme),
                     first,
@@ -2648,6 +2675,7 @@ impl DrawnEntries {
                 Some(drawn)
                     if drawn.key == key && drawn.entry == entry && drawn.heading == heading =>
                 {
+                    drawn.slot = *slot;
                     drawn.hidden = counted;
                     drawn.summed = summed;
                     drawn.marked = marked;
@@ -2659,6 +2687,7 @@ impl DrawnEntries {
                         key,
                         entry,
                         heading,
+                        slot: *slot,
                         hidden: counted,
                         summed,
                         marked,
@@ -2674,6 +2703,7 @@ impl DrawnEntries {
                         key,
                         entry,
                         heading,
+                        slot: *slot,
                         hidden: counted,
                         summed,
                         marked,
@@ -2816,9 +2846,11 @@ impl DrawnEntries {
     /// view stops on what led up to the line rather than past it. Where the
     /// pane's width changed, the line its first word is wrapped on to now. A
     /// heading no longer drawn — the rows were ungrouped — is found as the
-    /// first row that was under it.
-    pub(crate) fn line_of(&self, anchor: &Anchor) -> Option<usize> {
-        let at = self
+    /// first row that was under it. An entry gone into a run summed up or
+    /// counted as routine, other than the run's first, is found as the run's
+    /// first line: the run is drawn under its first entry alone.
+    pub(crate) fn line_of(&self, anchor: &Anchor, entries: &[Entry]) -> Option<usize> {
+        let own = self
             .drawn
             .iter()
             .position(|drawn| drawn.entry == anchor.entry && drawn.heading == anchor.heading)
@@ -2826,7 +2858,17 @@ impl DrawnEntries {
                 self.drawn
                     .iter()
                     .position(|drawn| drawn.entry == anchor.entry)
-            })?;
+            });
+        let grouped = self.detail.grouped;
+        let (at, in_run) = match own {
+            Some(at) => (at, false),
+            None => (
+                self.drawn
+                    .iter()
+                    .position(|drawn| drawn.slot.stands_for(anchor.entry, entries, grouped))?,
+                true,
+            ),
+        };
         let lines = &self.drawn.get(at)?.lines;
         let last = lines.len().checked_sub(1)?;
         let first: usize = self
@@ -2835,9 +2877,10 @@ impl DrawnEntries {
             .take(at)
             .map(|drawn| drawn.lines.len())
             .sum();
-        let offset = match anchor.width == self.width {
-            true => same_line(anchor, lines),
-            false => rewrapped_line(anchor, lines),
+        let offset = match (in_run, anchor.width == self.width) {
+            (true, _) => Some(0),
+            (false, true) => same_line(anchor, lines),
+            (false, false) => rewrapped_line(anchor, lines),
         }
         .unwrap_or(anchor.offset.min(last));
         Some(first.saturating_add(offset))
@@ -3195,12 +3238,17 @@ fn notable(entries: &[Entry], order: Vec<Slot>, grouped: bool) -> Vec<Slot> {
             Slot::Heading { .. } | Slot::Hidden { .. } | Slot::Summary { .. } => false,
         };
         match (routine, slot, shown.last_mut()) {
-            (true, Slot::Entry(at), Some(Slot::Hidden { first, count }))
+            (true, Slot::Entry(at), Some(Slot::Hidden { first, last, count }))
                 if !grouped || agent(*first) == agent(at) =>
             {
+                *last = at;
                 *count = count.saturating_add(1);
             }
-            (true, Slot::Entry(first), _) => shown.push(Slot::Hidden { first, count: 1 }),
+            (true, Slot::Entry(first), _) => shown.push(Slot::Hidden {
+                first,
+                last: first,
+                count: 1,
+            }),
             _ => shown.push(slot),
         }
     }
@@ -10669,6 +10717,7 @@ mod tests {
                 },
                 Slot::Hidden {
                     first: agents,
+                    last: agents,
                     count: 1
                 },
             ],
@@ -10678,10 +10727,70 @@ mod tests {
             order.get(3),
             Some(&Slot::Hidden {
                 first: session,
+                last: session,
                 count: 1
             }),
             "the session's own row is counted on its own: {order:?}"
         );
+    }
+
+    /// A count of routine rows stands for every row it counts, from its
+    /// first to its last; grouped by agent, a session's row between an
+    /// agent's two is counted in another place and is not among them.
+    #[test]
+    fn a_count_of_routine_rows_stands_for_the_rows_it_counts_alone() {
+        use niobe_core::event::{AgentId, Event};
+        let mut app = App::new(crate::app::Repo::default());
+        app.apply(&Event::UserMessage {
+            text: "go".to_owned(),
+        });
+        app.apply(&Event::AgentSpawn {
+            id: AgentId::new("toolu_a"),
+            parent: None,
+            kind: Some("Explore".to_owned()),
+            label: "Explore: look".to_owned(),
+        });
+        for (id, name, agent) in [
+            ("a1", "Read", Some("toolu_a")),
+            ("m1", "Grep", None),
+            ("a2", "Glob", Some("toolu_a")),
+        ] {
+            app.apply(&Event::ToolCallStart {
+                id: id.into(),
+                name: name.to_owned(),
+                input: String::new(),
+                summary: Some(format!("{id}.rs")),
+                agent: agent.map(AgentId::new),
+            });
+        }
+        let at = |head: &str| {
+            app.entries()
+                .iter()
+                .position(|entry| entry.head == head)
+                .expect("the entry is in the transcript")
+        };
+        let (first, session, last) = (at("Read"), at("Grep"), at("Glob"));
+        let entries = app.entries();
+
+        let grouped = order(entries, true, true, None, true);
+        let agents = Slot::Hidden {
+            first,
+            last,
+            count: 2,
+        };
+        assert!(grouped.contains(&agents), "{grouped:?}");
+        assert!(agents.stands_for(last, entries, true));
+        assert!(!agents.stands_for(session, entries, true));
+
+        let flat = order(entries, false, true, None, false);
+        let all = Slot::Hidden {
+            first,
+            last,
+            count: 3,
+        };
+        assert!(flat.contains(&all), "{flat:?}");
+        assert!(all.stands_for(session, entries, false));
+        assert!(!all.stands_for(last.saturating_add(1), entries, false));
     }
 
     /// Grouped by agent, each agent's rows in a turn are drawn together

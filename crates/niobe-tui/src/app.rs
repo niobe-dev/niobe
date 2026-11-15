@@ -4225,7 +4225,11 @@ impl App {
                 .find(|(was, _)| *was == line)
                 .and_then(|(_, place)| drawn.line_at(place))
         };
-        if let Some(line) = self.held.take().and_then(|held| drawn.line_of(&held)) {
+        if let Some(line) = self
+            .held
+            .take()
+            .and_then(|held| drawn.line_of(&held, &self.entries))
+        {
             self.scroll = line;
         } else if !self.follow
             && let Some(line) = now(self.scroll)
@@ -8445,7 +8449,7 @@ impl App {
         let top = find
             .from_anchor
             .as_ref()
-            .and_then(|anchor| self.drawn.line_of(anchor))
+            .and_then(|anchor| self.drawn.line_of(anchor, &self.entries))
             .unwrap_or(find.from.0);
         let bottom = top.saturating_add(viewport);
         let at = match find.current {
