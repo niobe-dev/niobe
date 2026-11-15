@@ -1077,6 +1077,11 @@ impl Session {
             id,
             label: label_of(prompt),
         });
+        // The CLI sets the effort for its own process only, so one started
+        // again on the conversation is started at the effort chosen here.
+        if let Some(level) = effort_set_by(prompt) {
+            self.next.effort = Some(level.to_owned());
+        }
         self.turn_open = true;
         self.sent_after_ends = ends_before;
         // The turn went in. A title that could not follow it is no reason to
@@ -2451,6 +2456,21 @@ fn add_saturating(counter: &AtomicU64, by: u64) {
             Err(now) => read = now,
         }
     }
+}
+
+/// The levels the CLI's `/effort` command and its `--effort` flag take.
+const EFFORT_LEVELS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+
+/// The level `prompt` sets the effort to, where it is the CLI's `/effort`
+/// command with one of [`EFFORT_LEVELS`] and nothing else: anything else
+/// typed after it is no level the CLI would start at.
+fn effort_set_by(prompt: &str) -> Option<&str> {
+    let mut words = prompt.split_whitespace();
+    let level = match (words.next(), words.next(), words.next()) {
+        (Some("/effort"), Some(level), None) => level,
+        _ => return None,
+    };
+    EFFORT_LEVELS.contains(&level).then_some(level)
 }
 
 #[cfg(test)]
@@ -4536,6 +4556,42 @@ read -r rest
         assert_eq!(next.mode, Mode::Plan);
         assert_eq!(next.model.as_deref(), Some("haiku"));
         assert!(next.spent.is_empty(), "the spend is the caller's to read");
+    }
+
+    /// The effort the operator picks is sent to the CLI as its `/effort`
+    /// command, which sets it for the process that reads it; the CLI started
+    /// again would otherwise start at the effort the session began with.
+    #[cfg(unix)]
+    #[test]
+    fn an_effort_chosen_in_the_session_is_the_one_a_cli_started_again_starts_at() {
+        let (mut session, _, _dir) = carried_on(
+            &format!(
+                "read -r initialize\nread -r turn\n{ONE_TURN}\nread -r effort\n{ONE_TURN}\nexit 143\n"
+            ),
+            true,
+        );
+        session
+            .send("/effort low", &[])
+            .expect("the line is queued");
+        drained_to_the_end(&mut session);
+
+        let next = session.next().expect("the session can carry on");
+        assert_eq!(next.effort.as_deref(), Some("low"));
+    }
+
+    #[test]
+    fn only_an_effort_the_cli_takes_is_kept_for_a_cli_started_again() {
+        for (prompt, kept) in [
+            ("/effort max", Some("max")),
+            ("  /effort xhigh  ", Some("xhigh")),
+            ("/effort", None),
+            ("/effort fast", None),
+            ("/effort low please", None),
+            ("/efforts low", None),
+            ("tell me about /effort low", None),
+        ] {
+            assert_eq!(effort_set_by(prompt), kept, "{prompt:?}");
+        }
     }
 
     #[cfg(unix)]
