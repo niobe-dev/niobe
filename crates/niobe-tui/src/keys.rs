@@ -84,6 +84,11 @@ pub(crate) struct Decoder {
     pasting: Option<Vec<u8>>,
     /// When the open paste last had bytes added to it.
     pasted_at: Option<std::time::Instant>,
+    /// How long the open paste's text is up to a closing marker read at the
+    /// end of what a read that filled the buffer held. The rest of the paste
+    /// may be in the next read, its own closing marker with it, so the paste
+    /// is closed there only once nothing else closes it: see [`closes_later`].
+    closing_at: Option<usize>,
     /// Whether the bytes are the rest of a sequence too long to wait out,
     /// which are passed over up to the byte that ends it.
     discarding: bool,
@@ -113,11 +118,26 @@ impl Decoder {
                 self.pasted_at = Some(now);
                 pasted.push(*byte);
                 if pasted.ends_with(PASTE_END) && !closes_later(&bytes[index + 1..]) {
-                    pasted.truncate(pasted.len() - PASTE_END.len());
-                    let text = String::from_utf8_lossy(pasted).into_owned();
-                    events.push(Event::Paste(text));
-                    self.pasting = None;
-                    self.pasted_at = None;
+                    let text = pasted.len() - PASTE_END.len();
+                    match more {
+                        true => self.closing_at = Some(text),
+                        false => {
+                            pasted.truncate(text);
+                            let text = String::from_utf8_lossy(pasted).into_owned();
+                            events.push(Event::Paste(text));
+                            self.pasting = None;
+                            self.pasted_at = None;
+                            self.closing_at = None;
+                        }
+                    }
+                } else if self.closing_at.is_some_and(|at| {
+                    pasted
+                        .get(at.saturating_add(PASTE_END.len())..)
+                        .is_some_and(|after| after.ends_with(PASTE_START))
+                }) {
+                    // A paste opened after the marker held: that marker was
+                    // the terminal's own, and the new paste is one of its own.
+                    self.close_at_the_held_end(more || index + 1 < bytes.len(), now, events);
                 }
                 continue;
             }
@@ -137,6 +157,11 @@ impl Decoder {
             self.pending.push(*byte);
             let more = more || index + 1 < bytes.len();
             self.read_pending(more, now, events);
+        }
+        // A read that did not fill the buffer is all there was: no later
+        // marker is on its way to close the paste a held one was read in.
+        if !more {
+            self.close_at_the_held_end(false, now, events);
         }
     }
 
@@ -186,13 +211,36 @@ impl Decoder {
         let stalled = self
             .pasted_at
             .is_some_and(|at| now.saturating_duration_since(at) >= PASTE_QUIET);
-        if !stalled {
+        if !stalled || self.close_at_the_held_end(false, now, events) {
             return;
         }
         if let Some(pasted) = self.pasting.take() {
             events.push(Event::Paste(String::from_utf8_lossy(&pasted).into_owned()));
         }
         self.pasted_at = None;
+    }
+
+    /// Closes the open paste at the marker [`Decoder::closing_at`] holds, and
+    /// reads what came after that marker again as what it is: keys, or a
+    /// paste of its own. Says whether there was such a marker.
+    fn close_at_the_held_end(
+        &mut self,
+        more: bool,
+        now: std::time::Instant,
+        events: &mut Vec<Event>,
+    ) -> bool {
+        let Some(at) = self.closing_at.take() else {
+            return false;
+        };
+        let Some(mut pasted) = self.pasting.take() else {
+            return false;
+        };
+        let after = pasted.split_off(at.saturating_add(PASTE_END.len()).min(pasted.len()));
+        pasted.truncate(at);
+        events.push(Event::Paste(String::from_utf8_lossy(&pasted).into_owned()));
+        self.pasted_at = None;
+        self.feed_at(&after, more, now, events);
+        true
     }
 }
 
@@ -203,7 +251,9 @@ impl Decoder {
 /// Read as the end, it would cut the paste short and type everything after
 /// it as keys — `\r` as Enter included, which runs a command or sends a
 /// prompt nobody pressed Enter on. The terminal writes a paste in one go, so
-/// its own closing marker is in the same read as the text's.
+/// its own closing marker is in the same read as the text's, or, where that
+/// read filled the buffer, in a read after it: [`Decoder::closing_at`] holds
+/// the marker until one of them closes the paste or nothing more comes.
 fn closes_later(rest: &[u8]) -> bool {
     let Some(end) = find(rest, PASTE_END) else {
         return false;
@@ -233,6 +283,9 @@ impl Decoder {
 
     /// [`Decoder::settle`], at `now`.
     fn settle_at(&mut self, now: std::time::Instant, events: &mut Vec<Event>) {
+        // Nothing more is on its way, so no later marker will close the paste
+        // the held one was read in.
+        self.close_at_the_held_end(false, now, events);
         self.end_a_stalled_paste(now, events);
         // Two Escs are the one Esc, as when they are read with nothing after.
         if self.pasting.is_none() && matches!(self.pending[..], [0x1b] | [0x1b, 0x1b]) {
@@ -866,6 +919,68 @@ mod tests {
         assert_eq!(
             read(b"\x1b[200~safe\x1b[201~\rrm -rf\r\x1b[201~"),
             [Event::Paste("safe\x1b[201~\rrm -rf\r".to_owned())]
+        );
+    }
+
+    /// A paste longer than one read: the terminal's own closing marker is in
+    /// a later read than the one the text's marker ended up in.
+    #[test]
+    fn a_paste_holding_its_own_end_marker_across_reads_is_pasted_whole() {
+        let mut decoder = Decoder::default();
+        let mut events = Vec::new();
+        decoder.feed(b"\x1b[200~safe\x1b[201~\x11rest", true, &mut events);
+        decoder.feed(b"\x1b[201~", false, &mut events);
+        decoder.settle(&mut events);
+
+        assert_eq!(events, [Event::Paste("safe\x1b[201~\x11rest".to_owned())]);
+    }
+
+    #[test]
+    fn a_paste_ended_where_a_full_read_ended_is_handed_over_once_nothing_follows() {
+        let mut decoder = Decoder::default();
+        let mut events = Vec::new();
+        decoder.feed(b"\x1b[200~text\x1b[201~", true, &mut events);
+        decoder.settle(&mut events);
+        decoder.feed(b"x", false, &mut events);
+
+        assert_eq!(
+            events,
+            [
+                Event::Paste("text".to_owned()),
+                Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)),
+            ]
+        );
+    }
+
+    #[test]
+    fn keys_read_after_a_paste_that_ended_a_full_read_are_keys() {
+        let mut decoder = Decoder::default();
+        let mut events = Vec::new();
+        decoder.feed(b"\x1b[200~text\x1b[201~a", true, &mut events);
+        decoder.feed(b"b", false, &mut events);
+        decoder.settle(&mut events);
+
+        let key = |c| Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        assert_eq!(
+            events,
+            [Event::Paste("text".to_owned()), key('a'), key('b')]
+        );
+    }
+
+    #[test]
+    fn a_second_paste_after_one_that_ended_a_full_read_is_a_paste_of_its_own() {
+        let mut decoder = Decoder::default();
+        let mut events = Vec::new();
+        decoder.feed(b"\x1b[200~one\x1b[201~", true, &mut events);
+        decoder.feed(b"\x1b[200~two\x1b[201~", false, &mut events);
+        decoder.settle(&mut events);
+
+        assert_eq!(
+            events,
+            [
+                Event::Paste("one".to_owned()),
+                Event::Paste("two".to_owned())
+            ]
         );
     }
 
