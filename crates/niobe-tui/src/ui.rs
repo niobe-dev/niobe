@@ -6649,6 +6649,7 @@ fn changes_rows(app: &App, width: usize, theme: &Theme) -> PaneRows {
     match &repo.branch {
         Some(branch) => {
             rows.extend([branch_row(branch, repo, width, theme)]);
+            commit_rows(app, repo, width, theme, &mut rows);
             working_tree_rows(app, repo, width, theme, &mut rows);
         }
         None => rows.extend([Line::from(Span::styled(
@@ -6657,6 +6658,73 @@ fn changes_rows(app: &App, width: usize, theme: &Theme) -> PaneRows {
         ))]),
     }
     rows
+}
+
+/// The commits made on the branch since the shell opened, the oldest first:
+/// a row each of its short hash and its subject, cut to fit. A session that
+/// has made none has no section, rather than one saying so.
+///
+/// The subject is drawn without the conventional prefix — `feat(tui): ` —
+/// which says what kind of change it was rather than what changed, and takes
+/// the columns of a pane a third of the screen wide that the rest needs.
+fn commit_rows(
+    app: &App,
+    repo: &crate::app::Repo,
+    width: usize,
+    theme: &Theme,
+    rows: &mut PaneRows,
+) {
+    if repo.commits.is_empty() {
+        return;
+    }
+    let folded = app.folded(Section::Commits);
+    let summary = vec![Figure::lead(
+        0,
+        Span::styled(
+            format!("{} this session", repo.commits.len()),
+            Style::new().fg(theme.fg),
+        ),
+    )];
+    rows.header(
+        Section::Commits,
+        section_header(folded, "Commits", summary, width, theme),
+    );
+    if folded {
+        return;
+    }
+    rows.extend(repo.commits.iter().map(|commit| {
+        let hash = text::truncate(&commit.hash, width.saturating_sub(ROW_INDENT.len()));
+        let room = width.saturating_sub(ROW_INDENT.len() + text::width(&hash) + 1);
+        Line::from(vec![
+            Span::raw(ROW_INDENT),
+            Span::styled(hash, Style::new().fg(theme.warn)),
+            Span::raw(" "),
+            Span::styled(
+                text::truncate(unprefixed(&commit.subject), room),
+                Style::new().fg(theme.fg),
+            ),
+        ])
+    }));
+}
+
+/// `subject` without the conventional-commit prefix it opens with — a type,
+/// a scope in parentheses, a `!` and the colon and space after them — or
+/// whole where it opens with none.
+fn unprefixed(subject: &str) -> &str {
+    let Some((prefix, rest)) = subject.split_once(": ") else {
+        return subject;
+    };
+    let prefix = prefix.strip_suffix('!').unwrap_or(prefix);
+    let (kind, scope) = match prefix.split_once('(') {
+        Some((kind, scope)) => (kind, scope.strip_suffix(')')),
+        None => (prefix, Some("")),
+    };
+    let is_type = !kind.is_empty() && kind.chars().all(|c| c.is_ascii_lowercase());
+    let is_scope = scope.is_some_and(|scope| !scope.contains(['(', ')']));
+    match is_type && is_scope && !rest.trim().is_empty() {
+        true => rest,
+        false => subject,
+    }
 }
 
 /// What the Changes pane says where the session is not in a repository.
@@ -11397,5 +11465,32 @@ mod tests {
         assert!(build.ends_with(" 1m 00s"), "{build:?}");
         let unclocked = line_text(&live_shell_row(&shell("make", None), None, 30, &theme));
         assert!(unclocked.ends_with(" running"), "{unclocked:?}");
+    }
+
+    /// A commit's subject is drawn without its conventional prefix, and
+    /// whole where what opens it is not one.
+    #[test]
+    fn a_commits_conventional_prefix_is_left_off_its_subject() {
+        for (subject, drawn) in [
+            (
+                "feat(tui): draw the cyborg in pixels",
+                "draw the cyborg in pixels",
+            ),
+            ("fix: open on a tower", "open on a tower"),
+            ("refactor(core)!: rename the fold", "rename the fold"),
+            ("chore!: drop the old flag", "drop the old flag"),
+            (
+                "skyline starts on a building",
+                "skyline starts on a building",
+            ),
+            ("Merge branch 'x': y", "Merge branch 'x': y"),
+            ("feat(a(b)): nested", "feat(a(b)): nested"),
+            ("feat(tui): ", "feat(tui): "),
+            ("Fix: capitalised", "Fix: capitalised"),
+            ("v2: the ratio", "v2: the ratio"),
+            (": nothing before", ": nothing before"),
+        ] {
+            assert_eq!(unprefixed(subject), drawn, "{subject:?}");
+        }
     }
 }

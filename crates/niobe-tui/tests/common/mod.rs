@@ -465,6 +465,7 @@ fn read_repository() -> Repo {
             .collect(),
         head: None,
         began: None,
+        commits: Vec::new(),
     }
 }
 

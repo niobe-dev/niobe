@@ -4297,6 +4297,67 @@ fn a_session_outside_a_repository_draws_no_branch_and_no_working_tree() {
     assert!(frame.contains("not a git repository"), "{frame}");
 }
 
+/// The commits made since the shell opened are listed in the Changes pane,
+/// under the branch, the oldest first, each by its short hash and its subject
+/// without the conventional prefix, which says the kind of change rather
+/// than the change; a session that has made none has no section for them.
+#[test]
+fn the_commits_made_since_the_shell_opened_are_listed_in_the_changes_pane() {
+    use niobe_tui::app::Commit;
+
+    let repo = |commits: Vec<Commit>| Repo {
+        name: "niobe".to_owned(),
+        branch: Some("main".to_owned()),
+        read: true,
+        commits,
+        ..Repo::default()
+    };
+    let none = screen(&mut App::new(repo(Vec::new())), 120, 30);
+    assert!(!none.contains("Commits"), "{none}");
+
+    let mut app = App::new(repo(vec![
+        Commit {
+            hash: "abfdd03".to_owned(),
+            subject: "feat(tui): draw modern's cyborg in shaded pixels".to_owned(),
+        },
+        Commit {
+            hash: "f18f976".to_owned(),
+            subject: "skyline starts on a building".to_owned(),
+        },
+    ]));
+    let frame = screen(&mut app, 200, 60);
+    let lines: Vec<&str> = frame.lines().collect();
+    let header = lines
+        .iter()
+        .position(|line| line.contains("▾ Commits  2 this session"))
+        .unwrap_or_else(|| panic!("no section for the commits:\n{frame}"));
+    assert!(
+        lines[header - 1].contains("⎇ main"),
+        "under the branch:\n{frame}"
+    );
+    assert!(
+        lines[header + 1].contains("  abfdd03 draw modern's cyborg in shaded pixels "),
+        "{frame}"
+    );
+    assert!(
+        lines[header + 2].contains("  f18f976 skyline starts on a building "),
+        "{frame}"
+    );
+    assert!(lines[header + 3].contains("▾ Working tree"), "{frame}");
+    // Narrower, a subject is cut to the pane, and says so.
+    let narrow = screen(&mut app, 120, 30);
+    assert!(
+        narrow.contains("  abfdd03 draw modern's cyborg in s… │"),
+        "{narrow}"
+    );
+    assert_snapshot("changes-commits-120x30", &narrow);
+
+    app.fold(Section::Commits);
+    let folded = screen(&mut app, 120, 30);
+    assert!(folded.contains("▸ Commits  2 this session"), "{folded}");
+    assert!(!folded.contains("abfdd03"), "{folded}");
+}
+
 /// The wheel goes to whatever the pointer is over. Two panes scroll, and a
 /// notch over one of them must not move the other.
 #[test]

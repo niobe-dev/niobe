@@ -75,8 +75,8 @@ give a question the agent asks stays there the same way, with the question quote
 
 On a terminal at least 100 columns wide, a column beside the session shows what it stands at.
 Usage has the plan's windows or the money, the tokens by model and the context. Changes has the
-branch and the working tree as a tree of its directories, each of which Enter folds once Tab has
-put the keyboard in the pane. The View menu hides and shows each.
+branch, the commits made since niobe opened, and the working tree as a tree of its directories,
+each of which Enter folds once Tab has put the keyboard in the pane. The View menu hides and shows each.
 
 What is at work is drawn at the foot of the session, under the line that says what the turn is
 doing: each shell command running — with how long it has run and, where the same command ran to

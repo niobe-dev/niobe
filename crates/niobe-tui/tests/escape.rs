@@ -360,6 +360,10 @@ fn no_content_puts_a_control_or_a_direction_mark_on_the_terminal() {
             files: vec![],
             head: None,
             began: None,
+            commits: vec![niobe_tui::app::Commit {
+                hash: format!("ab{p}"),
+                subject: format!("feat: commit {p} made"),
+            }],
         });
         app.apply(&Event::UserMessage { text: "hi".into() });
         app

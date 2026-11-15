@@ -154,7 +154,9 @@ reviewers that encode both, for an agent working in this tree.
   dim, saying so, until the backend says it took one in or the turn they waited behind ends — `ui.rs`
   draws it, leaving the routine entries out where `n` is pressed in a side pane, each run of them
   a row that counts them, beside the session a stack a third of the body wide, between 34 and
-  52 columns, of the Usage pane and the Changes pane, and at the foot of the transcript, under
+  52 columns, of the Usage pane and the Changes pane — the branch, the commits made since the
+  shell opened, oldest first by short hash and subject without its conventional prefix, and the
+  working tree — and at the foot of the transcript, under
   the working line or `still running` once no turn is, a branch for each thing at work: the shell
   commands running — the agent's calls the session waits on, the operator's `!` commands and the
   backend's background ones — each with how long it has run and, where the same command ran to
@@ -461,7 +463,10 @@ reviewers that encode both, for an agent working in this tree.
   file there would leave the settings copy or an output for a commit, refused where it tracks a
   file — and
   the `git` reads of the working tree made on a thread of its own as the shell's `Watch`,
-  each dated by when it began and, where the shell asked for it, sent though nothing changed;
+  each dated by when it began and, where the shell asked for it, sent though nothing changed,
+  and each listing the commits on `HEAD` committed since the shell opened, read by committer
+  date with `git log`, whose signature check, which runs the program the config names, is
+  turned off;
   `preferences.rs` keeps the shell's picks in the user's `choices.toml`, under the session's
   profile, and reads them back so that a new shell opens on the theme last picked — over the
   config's, under `--theme` — and starts its backend with the model and effort last picked under

@@ -87,6 +87,19 @@ pub struct Repo {
     /// shell compares a turn's end with: only a read that began after the
     /// turn ended says what the turn left behind.
     pub began: Option<Instant>,
+    /// The commits on the checked-out branch made since the shell opened,
+    /// the oldest first, as the repository names them; empty where none
+    /// were, or nobody has read it.
+    pub commits: Vec<Commit>,
+}
+
+/// A commit made since the shell opened, as the Changes pane lists it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Commit {
+    /// Its hash, as short as the repository abbreviates it.
+    pub hash: String,
+    /// The first line of its message.
+    pub subject: String,
 }
 
 /// One file the working tree has changed, measured from the repository.
@@ -163,6 +176,8 @@ pub enum Section {
     /// root with its trailing slash: it folds the files and directories
     /// under it away.
     Directory(String),
+    /// The commits made since the shell opened.
+    Commits,
     /// The sub-agents running now.
     SubAgents,
     /// The shell commands running now.
@@ -175,7 +190,7 @@ impl Section {
     /// The pane this section is drawn in.
     pub fn pane(&self) -> Pane {
         match self {
-            Section::WorkingTree | Section::Directory(_) => Pane::Changes,
+            Section::WorkingTree | Section::Directory(_) | Section::Commits => Pane::Changes,
             Section::SubAgents | Section::Shells | Section::Tools => Pane::Activity,
         }
     }

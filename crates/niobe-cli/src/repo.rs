@@ -13,7 +13,7 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::time::{Duration, Instant, SystemTime};
 
 use niobe_store::Store;
-use niobe_tui::app::{Repo, WorkingFile};
+use niobe_tui::app::{Commit, Repo, WorkingFile};
 use niobe_tui::watch::Watch;
 
 /// The directory in a repository that holds Niobe's own files.
@@ -691,13 +691,17 @@ impl Watch for Watcher {
 /// The name comes from `cwd` — the directory the operator opened the session
 /// in — and everything else from the repository that encloses it, so a session
 /// started in a subdirectory reports the whole tree it is part of.
+///
+/// The commits each read lists are those made since this was called, which
+/// is when the shell opened.
 pub fn watch(root: &Path) -> Watcher {
     let (reads, from_reads) = channel();
     let (nudge, nudged) = channel();
     let root = root.to_path_buf();
     let name = describe(&root).name;
+    let opened = SystemTime::now();
 
-    std::thread::spawn(move || keep_reading(&root, &name, &reads, &nudged));
+    std::thread::spawn(move || keep_reading(&root, (&name, opened), &reads, &nudged));
 
     Watcher {
         reads: from_reads,
@@ -720,7 +724,12 @@ enum Read {
 /// A read that failed sends nothing, which is what leaves the last read that
 /// worked on screen: an emptied pane and a repository with nothing in it would
 /// look the same, and only one of them would be true.
-fn keep_reading(root: &Path, name: &str, reads: &Sender<Read>, nudged: &Receiver<()>) {
+fn keep_reading(
+    root: &Path,
+    (name, opened): (&str, SystemTime),
+    reads: &Sender<Read>,
+    nudged: &Receiver<()>,
+) {
     let mut last: Option<Repo> = None;
     let mut counts = Counts::default();
     // Whether this read was asked for. One that was is sent even where the
@@ -730,7 +739,7 @@ fn keep_reading(root: &Path, name: &str, reads: &Sender<Read>, nudged: &Receiver
 
     loop {
         let began = Instant::now();
-        let sent = match read(root, name, &mut counts) {
+        let sent = match read(root, (name, opened), &mut counts) {
             Ok(repo) if asked || !last.as_ref().is_some_and(|last| unchanged(last, &repo)) => {
                 let sent = reads.send(Read::Done(repo.clone()));
                 last = Some(repo);
@@ -824,11 +833,16 @@ const LISTED: &[&str] = &[
     "--exclude-standard",
 ];
 
-/// Everything the shell shows about the repository at `root`, in one pass.
+/// Everything the shell shows about the repository at `root`, in one pass,
+/// with the commits made since `opened`.
 ///
 /// `counts` is what the last read counted in the files git does not track,
 /// and leaves holding what this one did.
-fn read(root: &Path, name: &str, counts: &mut Counts) -> Result<Repo, String> {
+fn read(
+    root: &Path,
+    (name, opened): (&str, SystemTime),
+    counts: &mut Counts,
+) -> Result<Repo, String> {
     let started = Instant::now();
     let began = SystemTime::now();
     let status = branch_status(&git(root, STATUS)?);
@@ -867,6 +881,10 @@ fn read(root: &Path, name: &str, counts: &mut Counts) -> Result<Repo, String> {
     }));
     working.sort_by(|one, other| one.path.cmp(&other.path));
     let files = files(tree.into_iter().map(|(_, path)| path));
+    let commits = match &status.head {
+        Some(_) => commits_since(root, opened)?,
+        None => Vec::new(),
+    };
     Ok(Repo {
         name: name.to_owned(),
         branch: status.branch,
@@ -877,7 +895,58 @@ fn read(root: &Path, name: &str, counts: &mut Counts) -> Result<Repo, String> {
         head: status.head,
         files,
         began: Some(started),
+        commits,
     })
+}
+
+/// The most commits a read lists: a session that made more has its newest
+/// listed, and the pane is not the place to read a history that long.
+const COMMITS_LISTED: usize = 200;
+
+/// The commits on `HEAD` its committer made at `opened` or after, the oldest
+/// first: what was committed while the shell was open, whoever ran the
+/// commit. A commit rebased or amended in that time is listed by the hash it
+/// has now, which is the one the branch holds.
+///
+/// Read by committer date rather than as what `HEAD` gained since `opened`:
+/// a branch checked out in the meantime would otherwise list every commit it
+/// holds that the old one did not.
+fn commits_since(root: &Path, opened: SystemTime) -> Result<Vec<Commit>, String> {
+    let since = opened
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs());
+    let printed = git(
+        root,
+        &[
+            // A signature is checked by the program the config names, and a
+            // read runs nothing the repository configures.
+            "-c",
+            "log.showSignature=false",
+            "log",
+            "-z",
+            "--no-show-signature",
+            "--no-mailmap",
+            "--format=%h%x1f%s",
+            &format!("--since=@{since}"),
+            &format!("--max-count={COMMITS_LISTED}"),
+            "--reverse",
+            "HEAD",
+            "--",
+        ],
+    )?;
+    Ok(listed_commits(&printed))
+}
+
+/// The commits `git log -z --format=%h%x1f%s` printed, in its order.
+fn listed_commits(printed: &str) -> Vec<Commit> {
+    printed
+        .split('\0')
+        .filter_map(|record| record.split_once('\u{1f}'))
+        .map(|(hash, subject)| Commit {
+            hash: hash.to_owned(),
+            subject: subject.to_owned(),
+        })
+        .collect()
 }
 
 /// What the working tree did to each file git tracks, against the tree
@@ -1687,6 +1756,85 @@ mod tests {
         assert_eq!(files[1].added, Some(1));
     }
 
+    /// Commits `message` in `work` as made at `epoch` seconds, by its
+    /// committer's clock, signed by the repository's `gpg.program` where
+    /// `signed`.
+    fn commit_at(work: &Path, message: &str, epoch: u64, signed: bool) {
+        std::fs::write(work.join("kept.txt"), message).expect("the file is written");
+        run(work, &["add", "kept.txt"]);
+        let output = std::process::Command::new("git")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_COMMITTER_DATE", format!("@{epoch} +0000"))
+            .env("GIT_AUTHOR_DATE", format!("@{epoch} +0000"))
+            .args(["commit", "-m", message])
+            .args(signed.then_some("-S"))
+            .current_dir(work)
+            .stdin(Stdio::null())
+            .output()
+            .expect("git runs");
+        assert!(output.status.success(), "{output:?}");
+    }
+
+    /// A read lists the commits made since the shell opened, the oldest
+    /// first, by short hash and subject, and none made before; and the
+    /// signature check a repository's config asks of `git log`, which runs
+    /// the program it names, is never run by it.
+    #[test]
+    fn the_commits_made_since_the_shell_opened_are_read_and_nothing_they_name_is_run() {
+        let dir = repository();
+        let work = dir.path().join("work");
+        let opened: u64 = 4_000_000_000;
+        // A stand-in for gpg that signs anything and, asked for anything
+        // else — a check of a signature — leaves a mark that it ran.
+        let marker = dir.path().join("gpg-ran");
+        let gpg = dir.path().join("gpg.sh");
+        std::fs::write(
+            &gpg,
+            format!(
+                "#!/bin/sh\nfor arg; do case \"$arg\" in -bsau) \
+                 echo '[GNUPG:] SIG_CREATED D 1 8 00 0 0' >&2; \
+                 printf -- '-----BEGIN PGP SIGNATURE-----\\n\\nZmFrZQ==\\n-----END PGP SIGNATURE-----\\n'; \
+                 exit 0;; esac; done\ntouch '{}'\n",
+                marker.display()
+            ),
+        )
+        .expect("the script is written");
+        std::fs::set_permissions(&gpg, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .expect("the script is made runnable");
+        run(
+            &work,
+            &["config", "gpg.program", &gpg.display().to_string()],
+        );
+        run(&work, &["config", "gpg.format", "openpgp"]);
+        commit_at(&work, "fix: before it opened", opened - 60, false);
+        commit_at(&work, "feat(tui): one", opened, true);
+        commit_at(&work, "two\u{1f}and a separator", opened + 60, false);
+        run(&work, &["config", "log.showSignature", "true"]);
+        assert!(!marker.exists(), "signing is not checking");
+
+        let at = SystemTime::UNIX_EPOCH + Duration::from_secs(opened);
+        let read = read(&work, ("work", at), &mut Counts::default()).expect("the repository reads");
+
+        let subjects: Vec<&str> = read
+            .commits
+            .iter()
+            .map(|commit| commit.subject.as_str())
+            .collect();
+        assert_eq!(subjects, ["feat(tui): one", "two\u{1f}and a separator"]);
+        assert!(
+            read.commits.iter().all(|commit| commit.hash.len() >= 7
+                && commit.hash.chars().all(|c| c.is_ascii_hexdigit())),
+            "{:?}",
+            read.commits
+        );
+        assert!(!marker.exists(), "the repository's gpg program ran");
+
+        let later = SystemTime::UNIX_EPOCH + Duration::from_secs(opened + 3_600);
+        let none = super::read(&work, ("work", later), &mut Counts::default()).expect("it reads");
+        assert!(none.commits.is_empty(), "{:?}", none.commits);
+    }
+
     /// A repository with one commit and an origin it has been pushed to, so
     /// that a read has an upstream to measure against.
     fn repository() -> tempfile::TempDir {
@@ -1753,7 +1901,8 @@ mod tests {
         let work = dir.path().join("work");
         std::fs::write(work.join("kept.txt"), "a\nb\nc\nd\ne\n").expect("the file is written");
 
-        let read = read(&work, "work", &mut Counts::default()).expect("the repository reads");
+        let read = read(&work, ("work", SystemTime::now()), &mut Counts::default())
+            .expect("the repository reads");
 
         assert_eq!(read.branch.as_deref(), Some("main"));
         assert_eq!(read.ahead, Some(0));
@@ -1791,7 +1940,8 @@ mod tests {
         .expect("the temporary directory is writable");
         std::fs::write(work.join("noise.log"), "ignored\n").expect("the file is written");
 
-        let read = read(&work, "work", &mut Counts::default()).expect("the repository reads");
+        let read = read(&work, ("work", SystemTime::now()), &mut Counts::default())
+            .expect("the repository reads");
 
         assert_eq!(
             read.working,
@@ -1857,7 +2007,8 @@ mod tests {
             std::fs::write(work.join(name), contents).expect("the file is written");
         }
 
-        let read = read(&work, "work", &mut Counts::default()).expect("the repository reads");
+        let read = read(&work, ("work", SystemTime::now()), &mut Counts::default())
+            .expect("the repository reads");
         let ours: Vec<(String, Option<u64>)> = read
             .working
             .iter()
@@ -1935,13 +2086,15 @@ mod tests {
         let then = SystemTime::now() - Duration::from_secs(60);
         write_as_of(&work.join("new.txt"), "abcde\n", then);
         let mut counts = Counts::default();
-        let first = read(&work, "work", &mut counts).expect("the repository reads");
+        let first =
+            read(&work, ("work", SystemTime::now()), &mut counts).expect("the repository reads");
         assert_eq!(counted(&first, "new.txt"), Some(1));
 
         // The same size and the same modification time: what a file that was
         // not touched looks like without opening it.
         write_as_of(&work.join("new.txt"), "a\nb\nc\n", then);
-        let again = read(&work, "work", &mut counts).expect("the repository reads");
+        let again =
+            read(&work, ("work", SystemTime::now()), &mut counts).expect("the repository reads");
 
         assert_eq!(
             counted(&again, "new.txt"),
@@ -1957,10 +2110,11 @@ mod tests {
         let then = SystemTime::now() - Duration::from_secs(60);
         write_as_of(&work.join("new.txt"), "a\n", then);
         let mut counts = Counts::default();
-        read(&work, "work", &mut counts).expect("the repository reads");
+        read(&work, ("work", SystemTime::now()), &mut counts).expect("the repository reads");
 
         write_as_of(&work.join("new.txt"), "a\nb\nc\n", then);
-        let again = read(&work, "work", &mut counts).expect("the repository reads");
+        let again =
+            read(&work, ("work", SystemTime::now()), &mut counts).expect("the repository reads");
 
         assert_eq!(counted(&again, "new.txt"), Some(3));
     }
@@ -1978,10 +2132,11 @@ mod tests {
         let recent = SystemTime::now() + Duration::from_secs(60);
         write_as_of(&work.join("new.txt"), "abcde\n", recent);
         let mut counts = Counts::default();
-        read(&work, "work", &mut counts).expect("the repository reads");
+        read(&work, ("work", SystemTime::now()), &mut counts).expect("the repository reads");
 
         write_as_of(&work.join("new.txt"), "a\nb\nc\n", recent);
-        let again = read(&work, "work", &mut counts).expect("the repository reads");
+        let again =
+            read(&work, ("work", SystemTime::now()), &mut counts).expect("the repository reads");
 
         assert_eq!(counted(&again, "new.txt"), Some(3));
     }
@@ -1994,10 +2149,10 @@ mod tests {
         write_as_of(&work.join("gone.txt"), "a\n", then);
         write_as_of(&work.join("kept.new"), "a\n", then);
         let mut counts = Counts::default();
-        read(&work, "work", &mut counts).expect("the repository reads");
+        read(&work, ("work", SystemTime::now()), &mut counts).expect("the repository reads");
 
         std::fs::remove_file(work.join("gone.txt")).expect("the file is removed");
-        read(&work, "work", &mut counts).expect("the repository reads");
+        read(&work, ("work", SystemTime::now()), &mut counts).expect("the repository reads");
 
         assert_eq!(counts.paths(), ["kept.new"]);
     }
@@ -2012,7 +2167,8 @@ mod tests {
         std::fs::write(work.join("scratch.log"), "noise\n").expect("the file is written");
         std::fs::write(work.join(".gitignore"), "*.log\n").expect("the file is written");
 
-        let whole = read(&work, "work", &mut Counts::default()).expect("the repository reads");
+        let whole = read(&work, ("work", SystemTime::now()), &mut Counts::default())
+            .expect("the repository reads");
 
         assert_eq!(
             whole.files,
@@ -2027,7 +2183,12 @@ mod tests {
         run(dir.path(), &["init", "--initial-branch=main", "."]);
         std::fs::write(dir.path().join("new.txt"), "a\n").expect("the file is written");
 
-        let read = read(dir.path(), "work", &mut Counts::default()).expect("the repository reads");
+        let read = read(
+            dir.path(),
+            ("work", SystemTime::now()),
+            &mut Counts::default(),
+        )
+        .expect("the repository reads");
 
         assert_eq!(read.branch.as_deref(), Some("main"));
         assert_eq!(
@@ -2053,11 +2214,13 @@ mod tests {
         run(work, &["config", "user.name", "A Test"]);
         pin_the_config(work);
         std::fs::write(work.join("new.txt"), "a\n").expect("the file is written");
-        let unborn = read(work, "work", &mut Counts::default()).expect("the repository reads");
+        let unborn = read(work, ("work", SystemTime::now()), &mut Counts::default())
+            .expect("the repository reads");
 
         run(work, &["add", "new.txt"]);
         run(work, &["commit", "-m", "first"]);
-        let committed = read(work, "work", &mut Counts::default()).expect("the repository reads");
+        let committed = read(work, ("work", SystemTime::now()), &mut Counts::default())
+            .expect("the repository reads");
 
         let out = std::process::Command::new("git")
             .args(["rev-parse", "HEAD"])
@@ -2079,7 +2242,8 @@ mod tests {
         std::fs::write(work.join("HEAD"), "not a commit\n").expect("the file is written");
         std::fs::write(work.join("kept.txt"), "a\nb\nc\nd\n").expect("the file is written");
 
-        let read = read(&work, "work", &mut Counts::default()).expect("the repository reads");
+        let read = read(&work, ("work", SystemTime::now()), &mut Counts::default())
+            .expect("the repository reads");
 
         assert_eq!(
             read.working,
@@ -2109,7 +2273,8 @@ mod tests {
         run(&work, &["mv", "kept.txt", "moved.txt"]);
         std::fs::write(work.join("loose.txt"), "x\n").expect("the file is written");
 
-        let pane = read(&work, "work", &mut Counts::default()).expect("the repository reads");
+        let pane = read(&work, ("work", SystemTime::now()), &mut Counts::default())
+            .expect("the repository reads");
         let paths: Vec<String> = pane.working.into_iter().map(|file| file.path).collect();
         assert_eq!(paths, ["kept.txt => moved.txt", "loose.txt"]);
 
@@ -2131,7 +2296,12 @@ mod tests {
         std::fs::write(dir.path().join("staged.txt"), "a\nb\nc\nd\n").expect("the file is written");
         std::fs::write(dir.path().join("untracked.txt"), "x\n").expect("the file is written");
 
-        let read = read(dir.path(), "work", &mut Counts::default()).expect("the repository reads");
+        let read = read(
+            dir.path(),
+            ("work", SystemTime::now()),
+            &mut Counts::default(),
+        )
+        .expect("the repository reads");
 
         assert_eq!(
             read.working,
@@ -2156,8 +2326,12 @@ mod tests {
     fn a_directory_that_is_not_a_repository_is_a_failed_read_and_not_a_panic() {
         let dir = tempfile::tempdir().expect("a temporary directory can be created");
 
-        let failed =
-            read(dir.path(), "work", &mut Counts::default()).expect_err("there is no repository");
+        let failed = read(
+            dir.path(),
+            ("work", SystemTime::now()),
+            &mut Counts::default(),
+        )
+        .expect_err("there is no repository");
 
         assert!(failed.starts_with("git status"), "{failed}");
     }
@@ -2246,7 +2420,8 @@ mod tests {
         );
         std::fs::write(checkout.join("kept.txt"), "a\n").expect("the file is written");
 
-        let read = read(&checkout, "wt", &mut Counts::default()).expect("the worktree reads");
+        let read = read(&checkout, ("wt", SystemTime::now()), &mut Counts::default())
+            .expect("the worktree reads");
 
         assert_eq!(read.branch.as_deref(), Some("side"));
         assert_eq!(read.ahead, None, "a branch made here has no upstream yet");
@@ -2262,7 +2437,8 @@ mod tests {
         let head = head.trim();
         run(&work, &["checkout", "--detach", head]);
 
-        let read = read(&work, "work", &mut Counts::default()).expect("a detached head reads");
+        let read = read(&work, ("work", SystemTime::now()), &mut Counts::default())
+            .expect("a detached head reads");
 
         assert_eq!(read.branch.as_deref(), Some(&head[..7]));
         assert_eq!(read.ahead, None, "a commit has no upstream");
@@ -2377,7 +2553,8 @@ mod tests {
             std::fs::write(work.join(name), "a\nc\n").expect("the file is written");
         }
 
-        let read = read(&work, "work", &mut Counts::default()).expect("the repository reads");
+        let read = read(&work, ("work", SystemTime::now()), &mut Counts::default())
+            .expect("the repository reads");
 
         none_ran(&[monitored, cleaned, processed, converted, diffed]);
         let changed = |path: &str| WorkingFile {
@@ -2417,7 +2594,8 @@ mod tests {
         let index = work.join(".git").join("index");
         let before = std::fs::read(&index).expect("the index is read");
 
-        let read = read(&work, "work", &mut Counts::default()).expect("the repository reads");
+        let read = read(&work, ("work", SystemTime::now()), &mut Counts::default())
+            .expect("the repository reads");
 
         assert_eq!(read.working, []);
         assert_eq!(
@@ -2489,7 +2667,8 @@ mod tests {
             .expect("the attributes are written");
         std::fs::write(work.join("kept.txt"), "a\nb\nd\n").expect("the file is written");
 
-        read(&work, "work", &mut Counts::default()).expect("the repository reads");
+        read(&work, ("work", SystemTime::now()), &mut Counts::default())
+            .expect("the repository reads");
 
         none_ran(&[cleaned]);
     }
@@ -2527,7 +2706,8 @@ mod tests {
         .expect("the attributes are written");
         std::fs::write(sub.join("kept.txt"), "a\nb\nd\n").expect("the file is written");
 
-        read(&work, "work", &mut Counts::default()).expect("the repository reads");
+        read(&work, ("work", SystemTime::now()), &mut Counts::default())
+            .expect("the repository reads");
 
         none_ran(&[cleaned]);
     }
@@ -2556,7 +2736,7 @@ mod tests {
             .expect("the blob is a loose object");
         std::fs::write(work.join("kept.txt"), "a\nb\nd\n").expect("the file is written");
 
-        let _ = read(&work, "work", &mut Counts::default());
+        let _ = read(&work, ("work", SystemTime::now()), &mut Counts::default());
 
         none_ran(&[connected]);
     }
