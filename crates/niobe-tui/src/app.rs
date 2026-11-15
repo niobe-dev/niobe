@@ -5188,7 +5188,9 @@ impl App {
             1 => "1 file".to_owned(),
             n => format!("{n} files"),
         };
-        self.push(Entry {
+        // Said by the shell, not the agent: a reply streaming as it comes is
+        // not ended by it, as it is not in the record read back.
+        self.say(Entry {
             queued: false,
             attention: Attention::Notable,
             kind: EntryKind::Notice,
@@ -5226,7 +5228,7 @@ impl App {
             .filter_map(|index| crate::spike::at(self.session.turns(), index))
             .collect();
         for spike in found {
-            self.push(Entry {
+            self.say(Entry {
                 queued: false,
                 attention: Attention::Notable,
                 kind: EntryKind::Notice,
@@ -18612,6 +18614,43 @@ mod tests {
             .map(|(_, rule)| (rule.calls, rule.took))
             .collect();
         assert_eq!(counted, [(3, Some(Duration::from_secs(30))), (1, None)]);
+    }
+
+    /// What the shell says of its own while a reply streams — files a turn
+    /// changed outside the edit tools, a turn that spent far more — is not
+    /// the reply's end: read back without it, the reply is one entry, and so
+    /// it is live.
+    #[test]
+    fn a_note_the_shell_adds_while_a_reply_streams_leaves_the_reply_whole() {
+        let mut app = app();
+        app.apply(&said("go"));
+        app.apply(&Event::AssistantDelta {
+            text: "Hel".to_owned(),
+        });
+        app.say_outside(
+            1,
+            &[Outside::Changed(WorkingFile {
+                path: "src/lib.rs".to_owned(),
+                added: Some(1),
+                removed: Some(0),
+                new: false,
+            })],
+        );
+        app.apply(&Event::AssistantDelta {
+            text: "lo".to_owned(),
+        });
+        app.apply(&Event::AssistantMessage {
+            text: "Hello".to_owned(),
+            agent: None,
+        });
+
+        let replies: Vec<(&str, bool)> = app
+            .entries()
+            .iter()
+            .filter(|entry| entry.kind == EntryKind::Agent)
+            .map(|entry| (entry.body.as_str(), entry.streaming))
+            .collect();
+        assert_eq!(replies, [("Hello", false)]);
     }
 
     /// A prompt the backend took into the turn running is no longer waiting
