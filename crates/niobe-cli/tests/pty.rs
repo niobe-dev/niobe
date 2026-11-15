@@ -544,9 +544,12 @@ fn shell_owning(slave: &File, cwd: &Path) -> Reaped {
     Reaped(command.spawn().expect("the niobe binary runs"))
 }
 
-/// Makes `command` lead a session of its own, with its standard input as the
-/// session's controlling terminal. A signal it sends to its process group
-/// then reaches nothing of the test runner's.
+/// Makes `command` lead a session of its own, with the terminal on its
+/// standard output as the session's controlling terminal. A signal it sends
+/// to its process group then reaches nothing of the test runner's.
+///
+/// Standard output rather than standard input, because the terminal a shell
+/// draws on is the one it is run on, and a test may give it another input.
 ///
 /// `unsafe` is allowed here for the reason the binary's own `!` commands
 /// allow it: `pre_exec` is the only hook between fork and exec,
@@ -555,12 +558,12 @@ fn shell_owning(slave: &File, cwd: &Path) -> Reaped {
 fn in_a_session_of_its_own(command: &mut Command) {
     // SAFETY: between fork and exec the child may make only async-signal-safe
     // calls. `setsid` and the `TIOCSCTTY` ioctl are single system calls that
-    // allocate nothing and take no lock, and fd 0 is `slave` by then: the
+    // allocate nothing and take no lock, and fd 1 is `slave` by then: the
     // standard streams are set before the closure runs.
     unsafe {
         std::os::unix::process::CommandExt::pre_exec(command, || {
             rustix::process::setsid()?;
-            rustix::process::ioctl_tiocsctty(rustix::stdio::stdin())?;
+            rustix::process::ioctl_tiocsctty(rustix::stdio::stdout())?;
             Ok(())
         });
     }
@@ -3219,6 +3222,92 @@ fn a_shell_with_no_keys_to_read_stops_before_it_starts_anything() {
     assert!(
         !repo.path().join("started").exists(),
         "the backend was started for a shell that could not read a key"
+    );
+}
+
+/// The shell on `slave` as its controlling terminal, drawing there, with its
+/// standard input from `input` instead — as `echo prompt | niobe` run in a
+/// terminal has it, or a task runner that gives its jobs no input.
+fn shell_on_its_terminal_reading(input: Stdio, slave: &File, cwd: &Path, home: &Path) -> Reaped {
+    let mut command = shell_driving_the_stand_in(slave, cwd, home);
+    command.stdin(input);
+    in_a_session_of_its_own(&mut command);
+    Reaped(command.spawn().expect("the niobe binary runs"))
+}
+
+/// Standard input on a pipe that has said all it will, inside a terminal:
+/// the shell reads its keys from the terminal it draws on, which is the one
+/// it is run in, and starts its backend as it would on that terminal.
+#[test]
+fn a_shell_whose_input_is_piped_reads_its_keys_from_the_terminal_it_draws_on() {
+    use std::io::Write;
+
+    let repo = repo();
+    let home = stand_in(repo.path(), MARKS_ITS_START_CLAUDE);
+    let (terminal, slave) = Terminal::open();
+    let (reader, mut writer) = std::io::pipe().expect("a pipe can be made");
+    writer.write_all(b"hi\n").expect("the pipe takes a line");
+    drop(writer);
+    let mut shell =
+        shell_on_its_terminal_reading(Stdio::from(reader), &slave, repo.path(), home.path());
+    terminal.shows(OPENING_FRAME);
+
+    terminal.typed(b"typed-at-the-terminal");
+    terminal.shows("typed-at-the-terminal");
+    // The stand-in is started before the shell opens, but on a loaded
+    // machine it may not have run its first line yet, and a quit would stop
+    // it before it did.
+    let started = repo.path().join("started");
+    let deadline = Instant::now() + PATIENCE;
+    while !started.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    terminal.typed(CTRL_Q);
+
+    let (_, status) = ended(&mut shell);
+    // Not read through `released`: the terminal of a session whose leader
+    // has ended is no terminal to ask for its modes.
+    drop(slave);
+    let drawn = terminal.drained();
+    assert!(status.success(), "the shell ended with {status}: {drawn:?}");
+    assert!(started.exists(), "the backend was never started");
+    assert_eq!(drawn.matches(RESTORED).count(), 1, "{drawn:?}");
+    // A terminal handed back is cooked and echoes what is typed into it, so
+    // the keys count as read only where the shell drew them first.
+    let typed = drawn
+        .find("typed-at-the-terminal")
+        .expect("the keys were waited for on screen");
+    let restored = drawn.find(RESTORED).expect("the terminal was handed back");
+    assert!(
+        typed < restored,
+        "the keys were echoed by a terminal the shell had let go of, not read: {drawn:?}"
+    );
+}
+
+/// The same shell, its input from `/dev/null`, ends when the terminal it
+/// reads its keys from goes away, as one reading them from standard input
+/// does: the session lost its screen, and did not fail.
+#[test]
+fn a_shell_whose_input_is_not_its_terminal_ends_when_that_terminal_goes_away() {
+    let repo = repo();
+    let home = stand_in(repo.path(), MARKS_ITS_START_CLAUDE);
+    let (terminal, slave) = Terminal::open();
+    let null = File::open("/dev/null").expect("/dev/null opens");
+    let mut shell =
+        shell_on_its_terminal_reading(Stdio::from(null), &slave, repo.path(), home.path());
+    terminal.shows(OPENING_FRAME);
+
+    drop(slave);
+    terminal.close();
+
+    let (took, status) = ended(&mut shell);
+    assert!(
+        took < DEADLINE,
+        "the shell took {took:?} to notice that its terminal had gone, over the {DEADLINE:?} it has"
+    );
+    assert!(
+        status.success(),
+        "a session that ended because its terminal went away exited with {status}"
     );
 }
 

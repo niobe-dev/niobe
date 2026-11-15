@@ -35,8 +35,10 @@ signal-hook.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 # Stopping a command the operator ran with `!`, and everything it started, as
-# the session ends: its process group is signalled, which std cannot do.
-rustix = { workspace = true, features = ["process", "termios"] }
+# the session ends: its process group is signalled, which std cannot do. And
+# a shell whose input is piped reads its keys from its controlling terminal,
+# opened by name and made its standard input, which std cannot do either.
+rustix = { workspace = true, features = ["fs", "process", "stdio", "termios"] }
 
 [dev-dependencies]
 # The shell's key events are ratatui's; the tests drive the shell with them.

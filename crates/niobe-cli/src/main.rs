@@ -1998,17 +1998,88 @@ fn print_summary(header: &str, app: &App) {
 /// Found out later, a backend would have been started and the screen taken
 /// for a frame, only for the shell to stop at its first read.
 ///
-/// Standard input that is not a terminal is fine where the process has one:
-/// the keys are read from `/dev/tty`, as in `echo prompt | niobe`.
+/// Standard input that is not a terminal is fine where the process has one,
+/// as in `echo prompt | niobe`: the terminal is made the standard input, by
+/// [`read_keys_from_the_screen`].
 fn keys_can_be_read() -> Result<(), String> {
-    if std::io::stdin().is_terminal() || std::fs::File::open("/dev/tty").is_ok() {
+    if std::io::stdin().is_terminal() {
         return Ok(());
     }
-    Err(
-        "standard input is not a terminal, and there is no terminal to read keys from; \
-         run niobe in one"
-            .to_owned(),
-    )
+    if !draws_on_its_controlling_terminal() {
+        return Err(
+            "standard input is not a terminal, and there is no terminal to read keys from; \
+             run niobe in one"
+                .to_owned(),
+        );
+    }
+    read_keys_from_the_screen().map_err(|error| {
+        format!(
+            "standard input is not a terminal, and the terminal niobe draws on cannot be read \
+             from: {error}"
+        )
+    })
+}
+
+/// Whether standard output is this process's controlling terminal.
+#[cfg(unix)]
+fn draws_on_its_controlling_terminal() -> bool {
+    rustix::termios::tcgetsid(std::io::stdout()).is_ok()
+}
+
+/// There is no controlling terminal off the POSIX side, and keys are read
+/// from standard input alone.
+#[cfg(not(unix))]
+fn draws_on_its_controlling_terminal() -> bool {
+    false
+}
+
+/// Makes the terminal standard output draws on, the controlling one, the
+/// standard input, opened by its own name.
+///
+/// The shell reads its keys from standard input. Left to read them from
+/// `/dev/tty`, it would hand that to crossterm, which cannot wait on it
+/// safely: macOS's kqueue refuses `/dev/tty`, so the shell failed at its first
+/// read with the backend started and the screen taken, and elsewhere crossterm
+/// reads a terminal that has closed for ever, at a whole core and deaf to
+/// SIGTERM, with the CLI and every `!` command still running. Through its own
+/// name the device is one `poll(2)` sees, and the shell's own wait reads it,
+/// keyboard query, hangup and stop included, as it reads a terminal on
+/// standard input. What came in on the pipe is read by nothing, as before.
+///
+/// Only the controlling terminal, and only where the screen is drawn on it
+/// ([`draws_on_its_controlling_terminal`]), so that the keys come from the
+/// terminal the shell is run in.
+#[cfg(unix)]
+fn read_keys_from_the_screen() -> std::io::Result<()> {
+    use rustix::fs::{Mode, OFlags};
+
+    let name = rustix::termios::ttyname(std::io::stdout(), Vec::new())?;
+    // Opened without blocking, since a serial line's open otherwise waits for
+    // its carrier, and made blocking again once open: this is the standard
+    // input the editor the terminal is lent to inherits, and reads.
+    let tty = rustix::fs::open(
+        name.as_c_str(),
+        OFlags::RDWR | OFlags::NOCTTY | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    if !rustix::termios::isatty(&tty) {
+        return Err(std::io::Error::other(format!(
+            "{} is not a terminal",
+            name.to_string_lossy()
+        )));
+    }
+    rustix::fs::fcntl_setfl(&tty, rustix::fs::fcntl_getfl(&tty)? - OFlags::NONBLOCK)?;
+    rustix::stdio::dup2_stdin(&tty)?;
+    Ok(())
+}
+
+/// Never asked off the POSIX side, where
+/// [`draws_on_its_controlling_terminal`] finds no controlling terminal.
+#[cfg(not(unix))]
+fn read_keys_from_the_screen() -> std::io::Result<()> {
+    Err(std::io::Error::other(
+        "standard input is the only place keys are read",
+    ))
 }
 
 /// The most of a log `niobe replay` reads. The longest recorded session in

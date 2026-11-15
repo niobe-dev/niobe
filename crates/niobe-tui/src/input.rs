@@ -70,12 +70,12 @@ const READ_SIZE: usize = 1024;
 impl Wait {
     /// Decides how this session waits.
     ///
-    /// The descriptor crossterm reads is standard input when that is a
-    /// terminal, and `/dev/tty` otherwise. Only the first can go away without a
-    /// signal: `/dev/tty` is the controlling terminal by definition, and losing
-    /// that arrives as SIGHUP, which [`crate::terminal::Shutdown`] already
-    /// reports as the terminal going away. So this wait covers standard input
-    /// and leaves the rest to crossterm.
+    /// The shell reads standard input, and the binary makes the terminal its
+    /// standard input before the shell opens where it was not: crossterm,
+    /// which reads `/dev/tty` instead, cannot wait on that safely — macOS's
+    /// kqueue refuses it, and a closed one is read for ever. crossterm waits
+    /// and reads only where standard input is a terminal `poll(2)` cannot
+    /// see, or still no terminal at all.
     pub(crate) fn on_the_terminal() -> Self {
         Self {
             #[cfg(unix)]

@@ -250,9 +250,9 @@ fn typed_around(heard: &[u8]) -> Vec<u8> {
 /// The answer is read before the shell reads any key, so whatever the
 /// operator types in the moment it takes is read with it; it is given back
 /// beside the answer, for the shell to take as the first keys it reads. Only
-/// standard input is asked: when it is not a terminal the keys come from
-/// `/dev/tty`, which `poll(2)` cannot wait on everywhere, and the legacy keys
-/// are what the shell falls back on.
+/// standard input is asked, which the binary makes the terminal where it was
+/// not; where it is still none, the keys come from wherever crossterm finds
+/// them, and the legacy keys are what the shell falls back on.
 #[cfg(unix)]
 fn reports_keys(out: &mut impl Write) -> (Answer, Vec<u8>) {
     use std::io::IsTerminal;
