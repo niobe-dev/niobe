@@ -978,8 +978,10 @@ fn decisions(sessions: &[Folded]) -> Vec<String> {
     if stated.is_empty() {
         return vec!["None stated.".to_owned()];
     }
-    // Stable, so two stated in one reply keep their order under the reverse.
-    stated.sort_by_key(|(at, id, _)| (*at, *id));
+    // Newest first, and stable, so two stated in one reply, dated alike,
+    // keep the order the reply gave them: reversing an oldest-first sort
+    // would turn them round too.
+    stated.sort_by(|(at, id, _), (other_at, other_id, _)| (other_at, other_id).cmp(&(at, id)));
     let mut lines = vec![
         "As each session's agent stated them in its replies: its own account of what it \
          chose, which nothing here checked. Newest first."
@@ -988,7 +990,7 @@ fn decisions(sessions: &[Folded]) -> Vec<String> {
     ];
     // A sub-agent's decision is that agent's account and not the session's,
     // and says so.
-    lines.extend(stated.into_iter().rev().map(|(at, id, decision)| {
+    lines.extend(stated.into_iter().map(|(at, id, decision)| {
         let by = match decision.agent {
             Some(_) => ", a sub-agent",
             None => "",
@@ -1183,6 +1185,31 @@ mod tests {
         assert_eq!(
             decisions(&[folded(3, &[said("No decision.")])]),
             ["None stated."]
+        );
+    }
+
+    /// Two decisions one reply stated are dated alike, and read in the order
+    /// the reply gave them; only between replies is the list newest first.
+    #[test]
+    fn decisions_stated_in_one_reply_are_listed_in_the_order_it_gave_them() {
+        let said = |text: &str| Event::AssistantMessage {
+            text: text.to_owned(),
+            agent: None,
+        };
+        let mut one = folded(1, &[said("DECISION: first\nDECISION: second")]);
+        let at = UNIX_EPOCH + Duration::from_secs(1_789_732_800);
+        one.decided_at = vec![at, at];
+
+        let lines = decisions(&[one]);
+
+        assert_eq!(
+            lines.get(2..),
+            Some(
+                &[
+                    "- 2026-09-18 12:00 UTC, session 1: first".to_owned(),
+                    "- 2026-09-18 12:00 UTC, session 1: second".to_owned(),
+                ][..]
+            )
         );
     }
 
