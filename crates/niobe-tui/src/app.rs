@@ -1811,11 +1811,11 @@ pub struct App {
     /// `/clear` until the backend starts the conversation over, or the turn
     /// it runs as, or the session, ends without that.
     clear_sent: bool,
-    /// Whether the backend owes a turn of its own: the turn that ended said
-    /// another follows, on work that ended under it that no request took in,
-    /// and that turn has not begun. The backend holds what it is sent until
-    /// that turn is done, so a command waits for it as for a running turn.
-    turn_owed: bool,
+    /// Where a turn the backend owes of its own stands: one a turn said
+    /// follows it, on work that ended under it that no request took in. The
+    /// backend holds what it is sent until that turn is done, so a command
+    /// waits for it as for a running turn.
+    owed: Owed,
     /// The prompts sent while a clear waits, oldest first, which the shell
     /// holds until it has been answered: the backend takes a prompt that
     /// arrives behind a clear into the conversation the clear starts, and
@@ -2070,6 +2070,17 @@ struct TreeWatch {
 /// How many files a notice of changes outside the edit tools names before it
 /// counts the rest.
 const OUTSIDE_LISTED: usize = 8;
+
+/// Where a turn the backend owes of its own stands, as [`App`] follows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Owed {
+    /// None is owed.
+    Nothing,
+    /// A turn still running said another follows it.
+    Announced,
+    /// The turn that said so has ended, and the one it owes has not begun.
+    Due,
+}
 
 /// A file a turn changed that no edit call reported.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2449,7 +2460,7 @@ impl App {
             sent: Vec::new(),
             sent_since: 0,
             clear_sent: false,
-            turn_owed: false,
+            owed: Owed::Nothing,
             after_clear: Vec::new(),
             rewinds: Vec::new(),
             rewinding: None,
@@ -2950,6 +2961,9 @@ impl App {
     /// until the backend reports again. See [`App::plan_windows`].
     pub fn resumed(&mut self) {
         self.windows_recorded = self.session.usage_windows().is_some();
+        // The process that owed a turn of its own is gone with the record;
+        // the one taken up now owes none.
+        self.owed = Owed::Nothing;
         // A command the operator ran that the record never saw end was
         // stopped with the session that ran it, which nothing outlives: the
         // processes it started are in groups the session's reaper ends. Left
@@ -5945,7 +5959,7 @@ impl App {
                 "/{name} waits for the running turn: let it end, or Esc to stop it"
             ));
         }
-        if self.turn_owed {
+        if self.owed == Owed::Due {
             return Err(format!(
                 "/{name} waits for the turn the backend starts on work that just ended"
             ));
@@ -10181,14 +10195,25 @@ impl App {
         }
     }
 
-    /// Keeps [`App::turn_owed`] as the backend's events say: owed from a
-    /// turn's word that another follows, until that turn begins or the
-    /// conversation or the session ends.
+    /// Keeps where a turn the backend owes stands, as its events say:
+    /// announced by a turn's word that another follows, due once that turn
+    /// has ended, and owed no longer once a turn begins, or ends, after it,
+    /// which an owed turn whose request failed does without opening, or
+    /// once the conversation or the session ends.
     fn follow_owed_turn(&mut self, event: &Event) {
-        self.turn_owed = match event {
-            Event::TurnFollows => true,
-            Event::Cleared | Event::SessionLeft | Event::Error { fatal: true, .. } => false,
-            _ => self.turn_owed && !self.session.turn_running(),
+        self.owed = match (event, self.owed) {
+            (Event::TurnFollows, _) => Owed::Announced,
+            (Event::Cleared | Event::SessionLeft | Event::Error { fatal: true, .. }, _) => {
+                Owed::Nothing
+            }
+            // The turn that said another follows has ended: the one it owes
+            // is due from here.
+            (Event::TurnEnded, Owed::Announced) => Owed::Due,
+            // Ended, though nothing opened it in the fold: a request that
+            // failed, or the plan's limit, ends a turn with no reply.
+            (Event::TurnEnded, Owed::Due) => Owed::Nothing,
+            (_, Owed::Due) if self.session.turn_running() => Owed::Nothing,
+            (_, owed) => owed,
         };
     }
 
@@ -23054,6 +23079,45 @@ mod tests {
         hand_on(&mut app, &mut recorded);
         assert_eq!(
             recorded,
+            [Event::UserMessage {
+                text: "/clear".to_owned()
+            }]
+        );
+    }
+
+    /// The turn the backend owes can end without anything the fold counts
+    /// as opening it — its request failed, or the plan's limit was hit — and
+    /// a process taken up again on `--resume` owes nothing the last one did:
+    /// neither leaves the commands refused.
+    #[test]
+    fn a_turn_owed_that_ended_unopened_or_a_resumed_session_refuses_no_command() {
+        let mut failed = offering(&["clear"]);
+        let mut recorded = Vec::new();
+        failed.apply(&said("go"));
+        failed.apply(&Event::TurnFollows);
+        failed.apply(&Event::TurnEnded);
+        failed.apply(&Event::Error {
+            message: "API Error: 529 Overloaded.".to_owned(),
+            fatal: false,
+        });
+        failed.apply(&Event::TurnEnded);
+        failed.perform(crate::menu::Action::NewSession);
+        hand_on(&mut failed, &mut recorded);
+        assert_eq!(
+            recorded,
+            [Event::UserMessage {
+                text: "/clear".to_owned()
+            }]
+        );
+
+        let mut resumed = offering(&["clear"]);
+        resumed.extend(&[said("go"), Event::TurnFollows, Event::TurnEnded]);
+        resumed.resumed();
+        resumed.leave();
+        resumed.take_produced();
+        resumed.perform(crate::menu::Action::NewSession);
+        assert_eq!(
+            resumed.take_produced(),
             [Event::UserMessage {
                 text: "/clear".to_owned()
             }]
