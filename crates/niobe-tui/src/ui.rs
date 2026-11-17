@@ -2236,13 +2236,12 @@ fn draw_transcript(
             app.scene_seed(),
             theme,
         );
-        draw_under_scene(frame, area, app, theme);
         // Not under the question whether to trust the repository's config:
         // the greeting would show round its edges, and the session has not
         // been let start yet.
-        let below = match app.entries().is_empty() && app.trusting().is_none() {
-            true => draw_welcome(frame, area, theme),
-            false => 0,
+        let below = match app.trusting() {
+            None => draw_welcome(frame, area, app, theme),
+            Some(_) => 0,
         };
         if !app.is_attached() && below < area.height {
             let notice = unattached(theme);
@@ -3819,44 +3818,9 @@ fn live_shell_row(
 /// way: fewer cells than this and the row no longer says what is running.
 const LIVE_COMMAND_LEAST: usize = 16;
 
-/// The rows a cleared conversation opens with, over the foot of the idle
-/// scene: at the foot rather than the top, where the transcript's newest
-/// line is read.
-fn draw_under_scene(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
-    let width = usize::from(area.width);
-    let mut lines: Vec<Line<'static>> = app
-        .entries()
-        .iter()
-        .flat_map(|entry| entry_lines(entry, width, transcript_detail(app), theme, &[]))
-        .collect();
-    // Each entry's lines end in the blank row that parts it from the next.
-    while lines.last().is_some_and(|line| line.width() == 0) {
-        lines.pop();
-    }
-    let rows = lines.len().min(usize::from(area.height));
-    let top = area.bottom() - u16::try_from(rows).unwrap_or(area.height);
-    for (y, line) in (top..area.bottom()).zip(lines) {
-        let row = Rect::new(
-            area.x,
-            y,
-            u16::try_from(line.width())
-                .unwrap_or(u16::MAX)
-                .min(area.width),
-            1,
-        );
-        // Cleared first: a style laid over a cell keeps the modifiers it
-        // had, and a scene's faint glyphs are dim.
-        frame.render_widget(Clear, row);
-        frame.render_widget(
-            Paragraph::new(line).style(Style::new().bg(theme.pane_bg)),
-            row,
-        );
-    }
-}
-
 /// What the session pane greets the operator with over its idle scene, in
-/// every theme, until the session's first entry: what Niobe is, then where to
-/// begin.
+/// every theme, until the session holds anything but the row a clear leaves:
+/// what Niobe is, then where to begin.
 const WELCOME: [&str; 2] = [
     "Welcome to Niobe, the coding agent that makes building things with agents \
      transparent and fun.",
@@ -3870,17 +3834,58 @@ const WELCOME_COLUMNS: usize = 44;
 
 /// The greeting over the scene's top-left corner, on the pane's own colour
 /// with a cell of it all round so the scene's glyphs do not run into the
-/// words, its name in the title colour. Returns the rows it took, none where
-/// the pane is too small to hold it whole: half a greeting reads as a fault.
-fn draw_welcome(frame: &mut Frame, area: Rect, theme: &Theme) -> u16 {
-    let lines = welcome_lines(usize::from(area.width).saturating_sub(2), theme);
+/// words, its name in the title colour, and under it in the same card what
+/// the session holds while the scene shows — the row a clear leaves — so no
+/// words are written over the scene itself. Returns the rows it took. Where
+/// the pane is too small to hold the card whole, the greeting gives way to
+/// what the session holds, and both to nothing: half a card reads as a fault.
+fn draw_welcome(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) -> u16 {
+    let columns = usize::from(area.width)
+        .saturating_sub(2)
+        .min(WELCOME_COLUMNS);
+    let held = held_lines(app, columns, theme);
+    let mut greeting = welcome_lines(columns, theme);
+    if !greeting.is_empty() && !held.is_empty() {
+        greeting.push(Line::default());
+    }
+    greeting.extend(held.iter().cloned());
+    [greeting, held]
+        .into_iter()
+        .find_map(|lines| draw_card(frame, area, lines, theme))
+        .unwrap_or(0)
+}
+
+/// What the session holds while its idle scene shows, wrapped to `columns`:
+/// the row a clear leaves, or nothing.
+fn held_lines(app: &App, columns: usize, theme: &Theme) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = app
+        .entries()
+        .iter()
+        .flat_map(|entry| entry_lines(entry, columns, transcript_detail(app), theme, &[]))
+        .collect();
+    // Each entry's lines end in the blank row that parts it from the next.
+    while lines.last().is_some_and(|line| line.width() == 0) {
+        lines.pop();
+    }
+    lines
+}
+
+/// `lines` on the pane's own colour in `area`'s top-left corner, a cell of it
+/// all round; the rows it took, or nothing where `lines` is empty or does not
+/// fit whole.
+fn draw_card(
+    frame: &mut Frame,
+    area: Rect,
+    lines: Vec<Line<'static>>,
+    theme: &Theme,
+) -> Option<u16> {
     let widest = lines.iter().map(Line::width).max().unwrap_or(0);
     let (Ok(rows), Ok(columns)) = (u16::try_from(lines.len() + 2), u16::try_from(widest + 2))
     else {
-        return 0;
+        return None;
     };
     if lines.is_empty() || rows > area.height || columns > area.width {
-        return 0;
+        return None;
     }
     let block = Rect::new(area.x, area.y, columns, rows);
     // Cleared first: a style laid over a cell keeps the modifiers it had, and
@@ -3893,7 +3898,7 @@ fn draw_welcome(frame: &mut Frame, area: Rect, theme: &Theme) -> u16 {
     frame
         .buffer_mut()
         .set_style(block, Style::new().bg(theme.pane_bg));
-    rows
+    Some(rows)
 }
 
 /// The greeting wrapped to `columns`, at most [`WELCOME_COLUMNS`]; nothing
@@ -10280,6 +10285,52 @@ mod tests {
         assert!(rows[0].contains("1 running"), "{rows:?}");
         assert_eq!(rows.len(), 2, "{rows:?}");
         assert!(rows[1].contains("explore a1"), "{rows:?}");
+    }
+
+    /// The greeting's card over a pane too short to hold the greeting and
+    /// the row a clear leaves together keeps that row, which says where the
+    /// conversation before it went, and over one too short for even that
+    /// draws nothing rather than half of it.
+    #[test]
+    fn a_short_pane_gives_the_greeting_up_before_the_row_a_clear_leaves() {
+        use niobe_core::event::Event;
+        let mut app = App::new(crate::app::Repo::default());
+        app.apply(&Event::Cleared);
+        let theme = Theme::default();
+        let shown = |height: u16| {
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, height))
+                    .expect("a test terminal");
+            let mut rows = 0;
+            terminal
+                .draw(|frame| rows = draw_welcome(frame, frame.area(), &app, &theme))
+                .expect("drawing never fails on a test backend");
+            let buffer = terminal.backend().buffer();
+            let text: String = (0..height)
+                .map(|y| {
+                    as_a_terminal_shows(buffer, y)
+                        .into_iter()
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            (rows, text)
+        };
+
+        let (rows, whole) = shown(14);
+        assert!(whole.contains("Welcome to Niobe"), "{whole}");
+        assert!(whole.contains("Resume opens it again"), "{whole}");
+        assert_eq!(rows, 13, "{whole}");
+
+        let (rows, short) = shown(12);
+        assert!(!short.contains("Welcome to Niobe"), "{short}");
+        assert!(short.contains("· cleared"), "{short}");
+        assert!(short.contains("Resume opens it again"), "{short}");
+        assert_eq!(rows, 8, "{short}");
+
+        let (rows, none) = shown(7);
+        assert_eq!(rows, 0, "{none}");
+        assert!(none.trim().is_empty(), "{none}");
     }
 
     fn line_text(line: &Line<'_>) -> String {

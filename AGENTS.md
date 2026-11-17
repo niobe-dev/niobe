@@ -269,8 +269,8 @@ reviewers that encode both, for an agent working in this tree.
   pane is drawn with, `tree.rs` hangs the working tree's files in a tree of their
   directories, a directory holding nothing but another joined with it into one node, each a
   section the cursor walks to and Enter folds to a row of its files' count and lines, `scene.rs` is the animation the session pane shows while nothing has happened in it since it
-  started or was cleared — the row a clear leaves drawn over its foot, and, on a session that
-  has just opened, a greeting over its top-left corner in every theme —
+  started or was cleared — a greeting over its top-left corner in every theme, and, on a
+  cleared session, the row the clear leaves in the same card under it —
   one per theme as `Theme::scene` names it and a user's theme keeps its base's — `scene/rain.rs`
   `neo`'s glyph rain, katakana, digits and marks written by falling heads and fading behind them
   in the accent; `scene/skyline.rs` `cyber`'s night city, two rows of towers standing still on

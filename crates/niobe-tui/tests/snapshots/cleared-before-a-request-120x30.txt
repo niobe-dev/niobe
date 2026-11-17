@@ -1,29 +1,29 @@
  Niobe  Session  Context  Model  View  Help                            opus-5  claude · default  ○ not attached  13:41
  ┏━━━━━━━━━━━━━━━━━━━━━━━━━━ Session ─ example-app ━━━━━━━━━━━━━━━━━━━━━━━━━━┓ ┌─────────────── Usage ────────────────┐
- ┃  No backend attached. `niobe profiles` shows what is defined.             ┃ │ 5h  15% ▓▓░░░░░░░░░░ resets 16:40    │
- ┃      .  ·                                                                 ┃ │ ──────────────────────────────────── │
- ┃                         .                                                 ┃ │ no tokens reported yet               │
- ┃                                    .                 .                    ┃ └──────────────────────────────────────┘
- ┃                                    .       .                           ·  ┃ ┌────────────── Changes ───────────────┐
- ┃                                       .                .               │  ┃ │ ⎇ main ↑3                            █
- ┃                                                                .       │  ┃ │ ▾ Working tree  +≥977 −≥259          █
- ┃                ░░░░░░      ░░░░░             NIOBE        HOTEL     ┌──── ┃ │   ▾ catalog/                         █
- ┃                ░░░<=-      ░░░░░        ░░░┌──────┐      ┌─────┐ .░░│     ┃ │     ▾ cache/                         █
- ┃           ░░░░ ░░░░░░      ░░░░░  ░░░░░ ░░░│      │    ░░│     │░░░░│   ▪ ┃ │       lru.ts                 +31  −9 █
- ┃           ░░░░ ░░░░░░      ░░░░░  ░░░░░ ░░░│   ▪ ｻ│   ░░░│ ▪ ▪ │░░░░│     ┃ │       index.ts               +12  −0 █
- ┃ .         ░░░░ ░░░░░░      ░░░░░  ░░░░░ ░░░│     ﾎ│   ░░░│     │░░┌─┘   ▪ ┃ │     fetch.ts                +149 −12 █
- ┃           ░░░░ ░░░░░░      ░░░░░  ░░░░░ ░░░│     ﾄ│   ░░░│ ▪ ▪ │░░│       ┃ │     etag.ts                  +88 −41 █
- ┃ ░░  ░░░░░┌───────┐░░░      ░░░░░  ░░░░░ ░░░│      │   ░░░│     │░░│     ▪ ┃ │   ▾ docs/                            █
+ ┃                                                                           ┃ │ 5h  15% ▓▓░░░░░░░░░░ resets 16:40    │
+ ┃  Welcome to Niobe, the coding agent that                                  ┃ │ ──────────────────────────────────── │
+ ┃  makes building things with agents                                        ┃ │ no tokens reported yet               │
+ ┃  transparent and fun.                                .                    ┃ └──────────────────────────────────────┘
+ ┃  Start by entering your prompt down below.                             ·  ┃ ┌────────────── Changes ───────────────┐
+ ┃                                                        .               │  ┃ │ ⎇ main ↑3                            █
+ ┃  · cleared                                                     .       │  ┃ │ ▾ Working tree  +≥977 −≥259          █
+ ┃    The conversation starts over here, as a    IOBE        HOTEL     ┌──── ┃ │   ▾ catalog/                         █
+ ┃    new session: nothing above this line is in ────┐      ┌─────┐ .░░│     ┃ │     ▾ cache/                         █
+ ┃    front of the model, and what came before       │    ░░│     │░░░░│   ▪ ┃ │       lru.ts                 +31  −9 █
+ ┃    is a session of its own, with its own       ▪ ｻ│   ░░░│ ▪ ▪ │░░░░│     ┃ │       index.ts               +12  −0 █
+ ┃    cost. Session › Resume opens it again.        ﾎ│   ░░░│     │░░┌─┘   ▪ ┃ │     fetch.ts                +149 −12 █
+ ┃                                                  ﾄ│   ░░░│ ▪ ▪ │░░│       ┃ │     etag.ts                  +88 −41 █
+ ┃  No backend attached. `niobe profiles` shows what is defined.  │░░│     ▪ ┃ │   ▾ docs/                            █
  ┃ ░░  ░░░░░│       │░░░      ░░░░░  ░░░░░ ░░░│      │   ░░░│ ▪ ▪ │░░│       ┃ │     ▾ adr/                           █
  ┃ ░░  ░░░░░│ ▪   ▪ │░░░      ░░░░░  ░░░░░ ░░░│      │   ░░░│     │░░│ ▪ ▪   ┃ │       0004-etags.md          +34  −1 █
  ┃ ░░  ░░░░░│       │░░░░░░░░░░░░░░  ░░░░░ ░░░│     ▪│ ░░░░░│     │░░│       ┃ │     ▾ diagrams/                      │
  ┃ ░░  ░░░░░│ ▪ ▪ ▪ │░░░┌────┐░░░░░  ░CAFE ░░░│      │ ░░░░░│     │░░│   ▪ ▪ ┃ │       cache.png                —   — │
  ┃ ──┐ ░░░░░│       │░░░│    │░░░░░┌────────┐░│ ▪ ▪  │ ░░░░░│ ▪ ▪ │░░│       ┃ │     caching.md               +64 −22 │
  ┃   │░░░░░░│   ▪   │░░░│ ▪ ▪│░░░░░│        │░│      │ ░░░░░│     │░░│ ▪   ▪ ┃ │   ▾ server/                          │
- ┃ · cleared│       │░░░│    │░░░░░│ ▪   ▪ ▪│░│   ▪ ▪│ ░░░░░│     │░░│       ┃ │     ▾ handlers/                      │
- ┃   The conversation starts over here, as a new session: nothing above this ┃ │       manifest.ts            +97  −4 │
- ┃   line is in front of the model, and what came before is a session of its ┃ │       health.ts               +3 −19 │
- ┃   own, with its own cost. Session › Resume opens it again.     │░░│ ▪   ▪ ┃ │     ▾ middleware/                    │
+ ┃ ▪ │░░░░░░│       │░░░│    │░░░░░│ ▪   ▪ ▪│░│   ▪ ▪│ ░░░░░│     │░░│       ┃ │     ▾ handlers/                      │
+ ┃   │░░░░░░│ ▪   ▪ │░░░│    │░░░░░│        │░│      │ ░░░░░│     │░░│ ▪ ▪ ▪ ┃ │       manifest.ts            +97  −4 │
+ ┃   │░░░░░░│       │░░░│    │░░░░░│       ▪│░│ ▪   ▪│ ░░░░░│ ▪   │░░│       ┃ │       health.ts               +3 −19 │
+ ┃   │░░░░░░│ ▪ ▪ ▪ │░░░│ ▪  │░░░░░│        │░│      │ ░░░░░│     │░░│ ▪   ▪ ┃ │     ▾ middleware/                    │
  ┃ ───────────────────────────────────────────────────────────────────────── ┃ │       etag.ts                +41 −37 │
  ┃  —  >  Ask for a change · @ file          Shift+Tab mode · Ctrl+J newline ┃ │     index.ts                  +8  −6 │
  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ └──────────────────────────────────────┘
