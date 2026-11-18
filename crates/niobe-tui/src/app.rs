@@ -114,9 +114,9 @@ pub struct Commit {
 pub struct ShownCommit {
     /// The commit's whole name, as it was asked for.
     pub id: String,
-    /// Who made it and when, its whole message, the files it changed and the
-    /// change itself, as lines to be read as written; or why it could not be
-    /// read.
+    /// Who made it and when, its whole message and the files it changed with
+    /// the lines each gained and lost, as lines to be read as written; or why
+    /// it could not be read.
     pub text: Result<String, String>,
 }
 

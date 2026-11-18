@@ -985,49 +985,137 @@ fn listed_commits(printed: &str) -> Vec<Commit> {
         .collect()
 }
 
-/// The most of one commit read for its dialog. A message, a list of files or
-/// a change can be any length, and a commit is read whole into memory to be
-/// paged.
+/// The most of each half of a commit read for its dialog — who made it with
+/// its message, and its list of files — that is kept. Either can be any
+/// length, and a commit is read whole into memory to be paged.
 const SHOWN_BYTES: usize = 4 * 1024 * 1024;
 
 /// The most of what a git that failed said about it that is kept.
 const SHOWN_ERROR_BYTES: u64 = 64 * 1024;
 
 /// The commit named `id` in the repository at `root`, read whole for its
-/// dialog: who made it and when, by whose clock and on whose behalf, its
-/// whole message, the files it changed with how many lines, and the change
-/// itself, as `git show --format=fuller --stat --summary --patch` prints it.
-/// Past [`SHOWN_BYTES`] the rest is left out, and the text says so.
+/// dialog: who made it and when, by whose clock and on whose behalf, and its
+/// whole message, as `git show --format=fuller` prints them; then the files
+/// it changed, a row each of the lines it added and removed, with the files
+/// and lines summed above them. A merge is counted against its first parent,
+/// the branch it was merged into. Past [`SHOWN_BYTES`] of either half the
+/// rest is left out, and the text says so.
 ///
 /// `id` is refused unless it is a commit's whole name, so that nothing the
 /// shell hands over reaches git as an option or a revision range. Run as the
 /// working tree's reads are, so nothing the repository configures runs: no
 /// signature check, no converter and no external diff.
 pub(crate) fn show_commit(root: &Path, id: &str) -> Result<String, String> {
-    use std::io::Read as _;
-
     if id.is_empty() || !id.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(format!("{id:?} is not the name of a commit"));
     }
-    let args = [
-        "-c",
-        "log.showSignature=false",
-        "show",
-        "--no-color",
-        "--no-show-signature",
-        "--no-mailmap",
-        "--no-textconv",
-        "--no-ext-diff",
+    let shown = |format: &str, rest: &[&str]| {
+        let mut args = vec![
+            "-c",
+            "log.showSignature=false",
+            "show",
+            "--no-color",
+            "--no-show-signature",
+            "--no-mailmap",
+            "--no-textconv",
+            "--no-ext-diff",
+            format,
+        ];
+        args.extend_from_slice(rest);
+        args.extend([id, "--"]);
+        bounded_git(root, &args)
+    };
+    let (about, about_cut) = shown(
         "--format=fuller",
-        "--date=format-local:%a %Y-%m-%d %H:%M",
-        "--stat=100",
-        "--summary",
-        "--patch",
-        id,
-        "--",
-    ];
+        &["--date=format-local:%a %Y-%m-%d %H:%M", "--no-patch"],
+    )?;
+    let (numstat, files_cut) = shown("--format=", &["--numstat", "-z", "-m", "--first-parent"])?;
+
+    let mut text = about.trim_end().to_owned();
+    if about_cut {
+        text.push_str(&left_out());
+    }
+    text.push_str("\n\n");
+    text.push_str(&file_list(&working_tree(whole_records(
+        &numstat, files_cut,
+    ))));
+    if files_cut {
+        text.push_str(&left_out());
+    }
+    text.push('\n');
+    Ok(text)
+}
+
+/// The records of `git show --numstat -z` that were read whole: where the
+/// read was `cut`, the one it ended part of the way through is left out,
+/// since it says a count or a path that is not the commit's. A rename's
+/// three fields are one record, so a cut between them leaves the rename
+/// unpaired, which the reader passes over.
+fn whole_records(numstat: &str, cut: bool) -> &str {
+    match cut {
+        true => numstat.rfind('\0').map_or("", |end| &numstat[..=end]),
+        false => numstat,
+    }
+}
+
+/// What a commit's dialog says where it left the rest of a read out.
+fn left_out() -> String {
+    format!(
+        "\n… the rest is left out: past {} MiB of it",
+        SHOWN_BYTES / (1024 * 1024)
+    )
+}
+
+/// `2 files changed  +31 −9`, then a row each of the lines a file gained and
+/// lost and its path, the counts lined up. A binary file, which git counts no
+/// lines in, has an em dash for each: no lines counted is not none.
+fn file_list(files: &[WorkingFile]) -> String {
+    let count = |n: Option<u64>| n.map_or_else(|| "—".to_owned(), |n| n.to_string());
+    let sum = |n: fn(&WorkingFile) -> Option<u64>| {
+        files.iter().filter_map(n).fold(0u64, u64::saturating_add)
+    };
+    let mut list = format!(
+        "{} {} changed  +{} −{}",
+        files.len(),
+        if files.len() == 1 { "file" } else { "files" },
+        sum(|file| file.added),
+        sum(|file| file.removed),
+    );
+    let rows: Vec<(String, String, &str)> = files
+        .iter()
+        .map(|file| {
+            (
+                format!("+{}", count(file.added)),
+                format!("−{}", count(file.removed)),
+                file.path.as_str(),
+            )
+        })
+        .collect();
+    let widest = |cells: &mut dyn Iterator<Item = &String>| {
+        cells.map(|cell| cell.chars().count()).max().unwrap_or(0)
+    };
+    let added = widest(&mut rows.iter().map(|row| &row.0));
+    let removed = widest(&mut rows.iter().map(|row| &row.1));
+    for (plus, minus, path) in &rows {
+        list.push_str(&format!("\n  {plus:>added$} {minus:>removed$}  {path}"));
+    }
+    list
+}
+
+/// What `git` with `args` printed in `root`, run as [`guarded`] runs it, and
+/// whether it printed more than [`SHOWN_BYTES`], past which it is cut off and
+/// not waited on.
+fn bounded_git(root: &Path, args: &[&str]) -> Result<(String, bool), String> {
+    use std::io::Read as _;
+
     let mut child = guarded(root)?
         .args(args)
+        // A date git words itself — a weekday, a month — in the words the
+        // rest of the shell is in, whatever the machine's language. `LC_ALL`
+        // would win over it, so it goes, and the rest of what git says is in
+        // whatever `LANG` and the other `LC_` settings name.
+        .env_remove("LC_ALL")
+        .env("LC_TIME", "C")
         .spawn()
         .map_err(|e| format!("cannot run git: {e}"))?;
     // Read on a thread of its own, so a git that fills the pipe it reports
@@ -1060,17 +1148,10 @@ pub(crate) fn show_commit(root: &Path, id: &str) -> Result<String, String> {
         .and_then(|reader| reader.join().ok())
         .unwrap_or_default();
     if !cut && !status.success() {
-        return Err(failed(&args, &said));
+        return Err(failed(args, &said));
     }
     printed.truncate(SHOWN_BYTES);
-    let mut text = String::from_utf8_lossy(&printed).into_owned();
-    if cut {
-        text.push_str(&format!(
-            "\n… the rest is left out: past {} MiB of it\n",
-            SHOWN_BYTES / (1024 * 1024)
-        ));
-    }
-    Ok(text)
+    Ok((String::from_utf8_lossy(&printed).into_owned(), cut))
 }
 
 /// What the working tree did to each file git tracks, against the tree
@@ -1970,9 +2051,10 @@ mod tests {
     }
 
     /// A commit opened from the pane is read whole — its author, its time,
-    /// every line of its message and the files it changed — with nothing the
-    /// repository configures run to read it, and nothing but a commit's whole
-    /// name taken as what to read.
+    /// every line of its message and the lines each file it changed gained
+    /// and lost, but not the change itself — with nothing the repository
+    /// configures run to read it, and nothing but a commit's whole name taken
+    /// as what to read.
     #[test]
     fn a_commit_is_read_whole_and_nothing_its_repository_names_is_run() {
         let dir = repository();
@@ -2004,17 +2086,21 @@ mod tests {
         for words in [
             id.trim(),
             "Author:     A Test <test@example.invalid>",
+            // 4,000,000,000 seconds is a Tuesday in 2096, in any language.
+            "AuthorDate: Tue 2096-",
             "feat: say more",
             "    The body, which the pane leaves out.",
             "    On two lines.",
-            "kept.txt",
-            ".gitattributes",
-            "2 files changed",
-            "diff --git a/kept.txt b/kept.txt",
-            "+feat: say more",
+            // Three lines replaced by the message's four, and one added.
+            "\n\n2 files changed  +5 −3\n  +1 −0  .gitattributes\n  +4 −3  kept.txt\n",
         ] {
             assert!(text.contains(words), "{words:?} in:\n{text}");
         }
+        assert!(!text.contains("diff --git"), "no change is shown:\n{text}");
+        assert!(
+            !text.contains("+feat: say more"),
+            "no change is shown:\n{text}"
+        );
         assert!(!marker.exists(), "the repository's diff program ran");
 
         for not_a_commit in ["", "--all", "HEAD", "HEAD~1", "abc..def", "-p"] {
@@ -2027,6 +2113,44 @@ mod tests {
             show_commit(&work, &"0".repeat(40)).is_err(),
             "no such commit"
         );
+    }
+
+    /// A commit's files are listed a row each, the counts lined up and
+    /// summed above them; a binary file, which git counts no lines in, reads
+    /// as an em dash rather than a zero, and adds nothing to the sums.
+    #[test]
+    fn a_commits_files_are_listed_with_the_lines_each_gained_and_lost() {
+        let files = working_tree(
+            "120\t3\tsrc/long.rs\0-\t-\tlogo.png\0\
+             0\t0\t\0old.rs\0new.rs\0",
+        );
+        assert_eq!(
+            file_list(&files),
+            concat!(
+                "3 files changed  +120 −3\n",
+                "  +120 −3  src/long.rs\n",
+                "    +— −—  logo.png\n",
+                "    +0 −0  old.rs => new.rs",
+            )
+        );
+        let one = working_tree("1\t0\tREADME.md\0");
+        assert_eq!(file_list(&one), "1 file changed  +1 −0\n  +1 −0  README.md");
+        assert_eq!(file_list(&[]), "0 files changed  +0 −0");
+    }
+
+    /// A list of files read only in part keeps the records it read whole
+    /// and none of the one it was cut off in.
+    #[test]
+    fn a_list_of_files_cut_off_keeps_only_its_whole_records() {
+        let cut = concat!("1\t0\ta.rs\0", "2\t1\tb.r");
+        assert_eq!(whole_records(cut, true), "1\t0\ta.rs\0");
+        assert_eq!(whole_records(cut, false), cut);
+        assert_eq!(whole_records("12\t3\tpart", true), "");
+        let paths: Vec<String> = working_tree(whole_records(cut, true))
+            .into_iter()
+            .map(|file| file.path)
+            .collect();
+        assert_eq!(paths, ["a.rs"]);
     }
 
     /// A repository with one commit and an origin it has been pushed to, so

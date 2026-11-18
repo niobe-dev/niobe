@@ -47,10 +47,10 @@ pub trait Watch {
     }
 
     /// Asks for the commit named `id` read whole — who made it and when, its
-    /// whole message, the files it changed and the change — for the dialog
-    /// the operator opened it in. Returns at once; the commit arrives through
-    /// [`Watch::shown`]. A watch that reads no repository answers nothing,
-    /// and has listed no commit to be opened.
+    /// whole message and the files it changed with the lines each gained and
+    /// lost — for the dialog the operator opened it in. Returns at once; the
+    /// commit arrives through [`Watch::shown`]. A watch that reads no
+    /// repository answers nothing, and has listed no commit to be opened.
     fn show(&mut self, id: &str) {
         let _ = id;
     }

@@ -472,10 +472,11 @@ reviewers that encode both, for an agent working in this tree.
   each dated by when it began and, where the shell asked for it, sent though nothing changed,
   and each listing the commits on `HEAD` committed since the shell opened, newest first, read
   by committer date with `git log`, whose signature check, which runs the program the config
-  names, is turned off; and a commit the operator opens read whole with `git show` on a thread
-  of its own — who made it, its message, its files and its change, with no converter or
+  names, is turned off; and a commit the operator opens read with `git show` on a thread of
+  its own — who made it, its whole message, and each file it changed with the lines it gained
+  and lost, against a merge's first parent, but not the change itself — with no converter or
   external diff the config names run, nothing taken but a commit's whole name, and no more
-  than four mebibytes of it;
+  than four mebibytes of either;
   `preferences.rs` keeps the shell's picks in the user's `choices.toml`, under the session's
   profile, and reads them back so that a new shell opens on the theme last picked — over the
   config's, under `--theme` — and starts its backend with the model and effort last picked under
