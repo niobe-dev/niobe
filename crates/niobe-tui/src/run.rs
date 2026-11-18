@@ -466,16 +466,7 @@ fn event_loop<B: Backend<Error = io::Error>>(
             // for is on screen by the time the bell reaches them.
             ring_for(app, machine.ring)?;
 
-            // An image asked for is looked for again soon, as a reply is: the
-            // operator is waiting to see it land in the prompt. The scene in an
-            // empty session pane is drawn as often, since at ten frames a
-            // second what moves in it steps rather than glides.
-            let tick = if producing || app.fetching_image() || app.showing_scene() {
-                BUSY_TICK
-            } else {
-                TICK
-            };
-            match machine.wait.input(tick)? {
+            match machine.wait.input(wait_for(producing, app))? {
                 Input::Ready => {
                     read_input(app, machine.wait)?;
                     run_commands(app, shell);
@@ -549,6 +540,19 @@ fn event_loop<B: Backend<Error = io::Error>>(
         ended = Ended::Open(target);
     }
     Ok(ended)
+}
+
+/// How long the loop waits for a key before it draws again.
+///
+/// An image asked for is looked for again soon, as a reply is: the operator
+/// is waiting to see it land in the prompt. The scene in an empty session
+/// pane is drawn at its own frame while it plays, and never less often than
+/// an idle shell draws.
+fn wait_for(producing: bool, app: &App) -> Duration {
+    if producing || app.fetching_image() {
+        return BUSY_TICK;
+    }
+    app.scene_frame().map_or(TICK, |frame| frame.min(TICK))
 }
 
 /// Quits on what a signal has asked of the session, if one has, and says in
@@ -2688,6 +2692,22 @@ mod tests {
             app.set_repo(repo);
         }
         assert_eq!(app.repo(), &read);
+    }
+
+    /// The loop waits as long as nothing needs it sooner: a reply arriving
+    /// at the busy tick, a scene playing at its own frame, a scene the
+    /// operator is typing over at the idle tick, as an empty shell does.
+    #[test]
+    fn the_loop_waits_only_as_briefly_as_what_moves_on_screen_needs() {
+        let scene = |theme| App::new(Repo::default()).attached().with_theme(theme);
+
+        assert_eq!(wait_for(false, &scene(crate::theme::NEO)), BUSY_TICK);
+        assert_eq!(wait_for(false, &scene(crate::theme::CYBER)), TICK);
+        assert_eq!(wait_for(true, &scene(crate::theme::CYBER)), BUSY_TICK);
+
+        let mut typing = scene(crate::theme::NEO);
+        typing.on_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        assert_eq!(wait_for(false, &typing), TICK);
     }
 
     #[test]

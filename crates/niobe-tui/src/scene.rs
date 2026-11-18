@@ -41,6 +41,22 @@ pub(crate) fn draw(buffer: &mut Buffer, area: Rect, clock: Duration, seed: u64, 
     }
 }
 
+/// How long one frame of `scene` lasts, which is how often the loop draws it
+/// while it plays.
+///
+/// Every frame is one the terminal repaints, and at thirty a second iTerm2
+/// spent 40 to 70% of a core on any scene, whatever it changed. The skyline
+/// moves only by lights going on and off and craft crossing at four to
+/// thirteen cells a second, which reads the same at ten frames; at ten,
+/// iTerm2 spent 15 to 25% on it. Falling glyphs, a generation of the Game of
+/// Life and a turning head step visibly at ten, so those keep thirty.
+pub(crate) fn frame(scene: Scene) -> Duration {
+    match scene {
+        Scene::Skyline => Duration::from_millis(100),
+        Scene::Rain | Scene::Life | Scene::Cyborg => Duration::from_millis(33),
+    }
+}
+
 /// Every cell of `area` reset whole rather than styled over: a style laid on
 /// a cell adds its modifiers to the ones already there, and a dim or bold
 /// left by what was drawn before would show through.

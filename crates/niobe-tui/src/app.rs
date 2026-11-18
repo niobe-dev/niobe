@@ -1932,6 +1932,10 @@ pub struct App {
     /// What the idle scene is drawn from: a fixed one, so a test draws the
     /// same scene, until the event loop gives the shell one of its own.
     scene_seed: u64,
+    /// The moment the idle scene stands still at while the composer holds
+    /// text: the one its last frame before the first key was drawn at.
+    /// `None` while it plays.
+    scene_held: Option<std::time::Duration>,
     /// Whether the transcript's first entry is the row a cleared
     /// conversation opens with, which the idle scene is drawn behind until
     /// something else happens.
@@ -2514,6 +2518,7 @@ impl App {
             clock: None,
             now: None,
             scene_seed: 0,
+            scene_held: None,
             cleared: false,
             at: None,
             unsaved: None,
@@ -7323,7 +7328,8 @@ impl App {
 
     /// Whether the session pane shows the theme's idle scene: nothing has
     /// happened in it since it started or was cleared, and no question waits
-    /// there. The loop draws faster while it does.
+    /// there. The loop draws it at its own frame while it plays, which
+    /// [`App::scene_frame`] says.
     ///
     /// A cleared conversation is a new session, and opens as one does; the
     /// row saying what was cleared is drawn over the scene's foot.
@@ -7333,11 +7339,37 @@ impl App {
 
     /// The moment the idle scene is drawn at: the wall clock the last tick
     /// handed in, as time since the epoch, so that two shells handed one
-    /// moment draw one frame of it; nothing where no tick named one.
+    /// moment draw one frame of it; nothing where no tick named one. While
+    /// the composer holds text, the moment the scene was held at.
     pub fn scene_clock(&self) -> std::time::Duration {
+        self.scene_held
+            .or_else(|| self.wall_clock())
+            .unwrap_or_default()
+    }
+
+    /// The wall clock the last tick handed in, as time since the epoch.
+    fn wall_clock(&self) -> Option<std::time::Duration> {
         self.at
             .and_then(|at| at.at().duration_since(std::time::UNIX_EPOCH).ok())
-            .unwrap_or_default()
+    }
+
+    /// How often the idle scene wants drawing while it plays: one frame of
+    /// it. `None` where it is not shown, or stands still because the
+    /// composer holds text — every frame is one the terminal repaints, and
+    /// keys typed wait behind those repaints.
+    pub fn scene_frame(&self) -> Option<std::time::Duration> {
+        (self.showing_scene() && self.composer.is_empty())
+            .then(|| crate::scene::frame(self.theme.scene))
+    }
+
+    /// Holds the idle scene at the moment it was last drawn at once the
+    /// composer holds text, and lets it go once it is empty. Called before
+    /// the tick hands in its clock, so the moment held is the last frame's.
+    fn hold_scene(&mut self) {
+        self.scene_held = match self.composer.is_empty() {
+            true => None,
+            false => self.scene_held.or_else(|| self.wall_clock()),
+        };
     }
 
     /// What the idle scene is drawn from.
@@ -10045,6 +10077,7 @@ impl App {
     /// a hundred milliseconds of slack against a figure drawn to the minute.
     pub fn tick(&mut self, now: Instant, at: Option<Stamp>) {
         self.now = Some(now);
+        self.hold_scene();
         self.at = at;
         self.expire_quit(now);
         // The trust question is up from the first tick, which draws it, and
@@ -24835,6 +24868,69 @@ mod tests {
             text: "format it".to_owned(),
         });
         assert!(!app.showing_scene());
+    }
+
+    /// Each frame of a scene is one the terminal repaints whole, so a scene
+    /// asks for no more of them than its motion needs: the skyline's lights
+    /// read the same at ten a second, the rest move at thirty. A session pane
+    /// that shows no scene asks for none.
+    #[test]
+    fn a_scene_asks_to_be_drawn_only_as_often_as_its_motion_needs() {
+        let frame = |theme: Theme| app().attached().with_theme(theme).scene_frame();
+
+        assert_eq!(frame(crate::theme::CYBER), Some(Duration::from_millis(100)));
+        for theme in [
+            crate::theme::NEO,
+            crate::theme::CLASSIC,
+            crate::theme::MODERN,
+        ] {
+            assert_eq!(
+                frame(theme),
+                Some(Duration::from_millis(33)),
+                "{}",
+                theme.name
+            );
+        }
+
+        let mut app = app().attached();
+        app.apply(&Event::UserMessage {
+            text: "explain the parser".to_owned(),
+        });
+        assert_eq!(app.scene_frame(), None, "no scene, no frames");
+    }
+
+    /// While the operator types, the scene stops where it stood when the
+    /// first key landed and asks for no frames, so a terminal repainting it
+    /// is not what the keys wait behind. Emptied, the composer lets it play
+    /// on from the time it is.
+    #[test]
+    fn the_scene_stands_still_while_the_composer_holds_text() {
+        let epoch = std::time::UNIX_EPOCH;
+        let at = |millis: u64| Some(Stamp::new(epoch + Duration::from_millis(millis), None));
+        let mut app = app().attached().with_theme(crate::theme::NEO);
+        let now = Instant::now();
+        app.tick(now, at(1_000));
+        assert_eq!(app.scene_clock(), Duration::from_millis(1_000));
+
+        typed(&mut app, "fix");
+        app.tick(now, at(1_033));
+        app.tick(now, at(1_500));
+
+        assert_eq!(
+            app.scene_clock(),
+            Duration::from_millis(1_000),
+            "held at the last frame drawn before the first key"
+        );
+        assert_eq!(app.scene_frame(), None);
+        assert!(app.showing_scene(), "still the scene, standing still");
+
+        for _ in 0..3 {
+            app.on_key(key(KeyCode::Backspace));
+        }
+        app.tick(now, at(2_000));
+
+        assert_eq!(app.scene_clock(), Duration::from_millis(2_000));
+        assert_eq!(app.scene_frame(), Some(Duration::from_millis(33)));
     }
 
     /// The shells at work are the agent's shell calls the session waits on,

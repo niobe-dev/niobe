@@ -70,7 +70,7 @@ fn a_resize_redraws_inside_a_frame_budget() {
 /// are nested, and how many lines are drawn inside them: a reply of 22 KB,
 /// which a model can write.
 /// The scene an empty session pane shows — each theme's own — is drawn on
-/// every tick of a loop that ticks thirty times a second while it plays, each frame a different
+/// every tick of a loop that ticks up to thirty times a second while it plays, each frame a different
 /// moment of it, in every theme at the depth a truecolour terminal draws. The moments are
 /// the last seconds of the Game of Life's era, the generations furthest from the soup
 /// they are worked out from, which cost the most.
