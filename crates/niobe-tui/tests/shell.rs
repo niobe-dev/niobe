@@ -123,6 +123,89 @@ fn a_question_about_a_skill_says_which_skill_and_what_it_is_for() {
     );
 }
 
+/// What the shell finds about a turn of its own — files it changed with no
+/// edit call reporting them, a turn that spent far more than the turns
+/// before it — is the panes' to show, not the conversation's: the Changes
+/// pane tags such a file `outside`, the Usage pane says the turn, and the
+/// transcript holds neither.
+#[test]
+fn a_turns_own_findings_are_drawn_in_the_panes_and_not_in_the_transcript() {
+    use niobe_tui::app::WorkingFile;
+    use std::time::{Duration, Instant};
+
+    let start = Instant::now();
+    let at = |ms| start + Duration::from_millis(ms);
+    let file = |path: &str, added, removed| WorkingFile {
+        path: path.to_owned(),
+        added: Some(added),
+        removed: Some(removed),
+        new: false,
+    };
+    let read = |ms, working: Vec<WorkingFile>| Repo {
+        name: "niobe".to_owned(),
+        branch: Some("main".to_owned()),
+        read: true,
+        began: Some(at(ms)),
+        working,
+        ..Repo::default()
+    };
+    let mut app = App::new(read(0, Vec::new()));
+    app.settle_spikes();
+    for (step, input) in [1_000_u64, 1_200, 5_000].into_iter().enumerate() {
+        let base = 10 * u64::try_from(step).expect("three steps");
+        app.apply(&Event::UserMessage {
+            text: "go on".to_owned(),
+        });
+        app.settle_tree(at(base));
+        app.set_repo(read(base + 1, vec![file("notes.md", 5, 0)]));
+        app.settle_tree(at(base + 2));
+        app.apply(&Event::Usage(Usage {
+            input,
+            output: 0,
+            cache_read: 0,
+            cache_write: 0,
+            cache_write_1h: Some(0),
+            reasoning: 0,
+            model: "opus-5".to_owned(),
+            cost_usd: None,
+            settles_model: Some(false),
+            fast: false,
+        }));
+        app.apply(&Event::TurnEnded);
+        app.settle_tree(at(base + 3));
+        let mut after = vec![file("notes.md", 5, 0)];
+        if step == 2 {
+            after.push(file("src/main.rs", 2, 2));
+        }
+        app.set_repo(read(base + 4, after));
+        app.settle_tree(at(base + 5));
+        app.settle_tree(at(base + 6));
+        app.settle_spikes();
+    }
+
+    let frame = screen(&mut app, 200, 60);
+    let row = |path: &str| {
+        frame
+            .lines()
+            .find(|line| line.contains(path))
+            .unwrap_or_else(|| panic!("no row for {path}:\n{frame}"))
+            .to_owned()
+    };
+    assert!(row("main.rs").contains("outside +2 −2"), "{frame}");
+    assert!(!row("notes.md").contains("outside"), "{frame}");
+    assert!(
+        frame.contains("turn 3 spent 4× the average (5000 vs 1100)"),
+        "{frame}"
+    );
+    assert!(
+        app.entries()
+            .iter()
+            .all(|entry| entry.head != "spike" && entry.head != "outside the edit tools"),
+        "{:?}",
+        app.entries()
+    );
+}
+
 fn empty_session() -> App {
     App::new(Repo {
         name: "niobe".to_owned(),

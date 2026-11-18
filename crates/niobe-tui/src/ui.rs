@@ -5540,7 +5540,21 @@ fn spend_rows(app: &App) -> usize {
         0 => 1,
         rows => rows + 1,
     };
-    models + usize::from(beyond_messages(app) > 0)
+    models + usize::from(beyond_messages(app) > 0) + usize::from(app.spike().is_some())
+}
+
+/// `turn 10 spent 3× the average`: the newest turn of the conversation that
+/// spent more than three times the tokens its turns before it averaged, in
+/// the theme's warning colour, cut to the pane.
+fn spike_line(spike: crate::spike::Spike, width: usize, theme: &Theme) -> Line<'static> {
+    let row = format!(
+        "turn {} spent {}× the average ({} vs {})",
+        spike.turn,
+        spike.times,
+        compact(spike.tokens),
+        compact(spike.average),
+    );
+    Line::from(text::truncate(&row, width)).style(Style::new().fg(theme.warn))
 }
 
 /// The tokens the backend's turn totals carried beyond what the turns'
@@ -5599,9 +5613,11 @@ fn spend_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
     let spent = models(app);
     let beyond = beyond_messages(app);
     let beyond = (beyond > 0).then(|| beyond_messages_line(beyond, width, theme));
+    let spike = app.spike().map(|spike| spike_line(spike, width, theme));
     if spent.is_empty() {
         let mut lines = vec![Line::from("no tokens reported yet").style(dim)];
         lines.extend(beyond);
+        lines.extend(spike);
         return lines;
     }
 
@@ -5687,6 +5703,7 @@ fn spend_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
         Style::new().fg(theme.add),
     ));
     lines.extend(beyond);
+    lines.extend(spike);
     lines
 }
 
@@ -6702,7 +6719,13 @@ impl PaneRow {
                 under,
                 columns,
             } => match app.repo().working.get(at) {
-                Some(file) => working_file_row(file, (depth, under), columns, width, theme),
+                Some(file) => working_file_row(
+                    (file, file_tag(app, file)),
+                    (depth, under),
+                    columns,
+                    width,
+                    theme,
+                ),
                 None => Line::default(),
             },
         }
@@ -7057,7 +7080,7 @@ fn working_tree_rows(
         return;
     }
 
-    let columns = Columns::of(&repo.working);
+    let columns = Columns::of(app, &repo.working);
     let shut = |path: &str| app.folded(Section::Directory(path.to_owned()));
     for node in app.tree().visible(shut) {
         match node {
@@ -7147,10 +7170,19 @@ fn working_counts(repo: &crate::app::Repo) -> (String, String) {
     (side(|file| file.added, '+'), side(|file| file.removed, '−'))
 }
 
+/// How a working-tree file's row is tagged: whether the repository tracks it,
+/// and whether a turn of this conversation changed it with no edit call
+/// reporting it. The second is looked up only where some turn did, so a tree
+/// of fifty thousand files that none did costs no lookup a file.
+fn file_tag(app: &App, file: &crate::app::WorkingFile) -> Tag {
+    let outside = app.any_changed_outside() && app.changed_outside_by(&file.path).is_some();
+    Tag::of(file.new, outside)
+}
+
 /// A working-tree file's row, its path less the `under` bytes the directory
 /// row above it already said.
 fn working_file_row(
-    file: &crate::app::WorkingFile,
+    (file, tag): (&crate::app::WorkingFile, Tag),
     (depth, under): (usize, usize),
     columns: Columns,
     width: usize,
@@ -7164,11 +7196,7 @@ fn working_file_row(
     counted_row(
         &tree_indent(depth),
         name,
-        (
-            Tag::new(file.new),
-            &measured('+', file.added),
-            &removed_of(file),
-        ),
+        (tag, &measured('+', file.added), &removed_of(file)),
         columns,
         width,
         theme,
@@ -7430,13 +7458,21 @@ enum Tag {
     None,
     /// `new`: a file the repository does not track yet.
     New,
+    /// `outside`: a file a turn changed with no edit call reporting it — a
+    /// shell command it ran, a formatter, something outside the session — so
+    /// the session's own edit figures leave it out.
+    Outside,
+    /// Both: a new file a turn wrote that way.
+    NewOutside,
 }
 
 impl Tag {
-    fn new(new: bool) -> Self {
-        match new {
-            true => Tag::New,
-            false => Tag::None,
+    fn of(new: bool, outside: bool) -> Self {
+        match (new, outside) {
+            (false, false) => Tag::None,
+            (true, false) => Tag::New,
+            (false, true) => Tag::Outside,
+            (true, true) => Tag::NewOutside,
         }
     }
 
@@ -7445,6 +7481,8 @@ impl Tag {
         match self {
             Tag::None => "",
             Tag::New => "new ",
+            Tag::Outside => "outside ",
+            Tag::NewOutside => "new outside ",
         }
     }
 }
@@ -7460,11 +7498,12 @@ struct Columns {
 }
 
 impl Columns {
-    /// The columns as wide as the widest of each part across `files`.
-    fn of(files: &[crate::app::WorkingFile]) -> Self {
+    /// The columns as wide as the widest of each part across `files`, each
+    /// tagged as [`file_tag`] tags it.
+    fn of(app: &App, files: &[crate::app::WorkingFile]) -> Self {
         files.iter().fold(Columns::default(), |columns, file| {
             columns.widened(
-                Tag::new(file.new),
+                file_tag(app, file),
                 &measured('+', file.added),
                 &removed_of(file),
             )

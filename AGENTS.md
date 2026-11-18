@@ -293,9 +293,10 @@ reviewers that encode both, for an agent working in this tree.
   wall clock the loop last read, so two draws
   at one moment draw one frame, drawn in the theme's values or its sixteen names with no shade a
   terminal could not draw, and drawn every 33 ms by the loop while it shows — and `spike.rs` finds a turn that spent more than three times the tokens the session's earlier
-  turns averaged, which the loop, never the fold, calls out by the turn's number; the loop also
-  has the app name the files a turn changed that no edit call reported, from a read of the
-  working tree that began after the turn started and one that began after it ended; and
+  turns averaged, which the loop, never the fold, keeps for the Usage pane to say by the turn's
+  number; the loop also has the app keep the files a turn changed that no edit call reported,
+  from a read of the working tree that began after the turn started and one that began after
+  it ended, which the Changes pane tags `outside` — neither is said in the transcript; and
   `clock.rs` is the time the shell draws by, read by the loop once a tick and handed
   in, and absent where the machine has no timezone or a log recorded no times. `alert.rs` is how
   the shell calls the operator back — the bell, and the `OSC 9` or `OSC 777` notification the

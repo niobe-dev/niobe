@@ -1898,6 +1898,12 @@ pub struct App {
     /// from the first time the event loop asked. `None` until then: the turns
     /// a session read back holds were spent before this run looked.
     spikes_judged: Option<usize>,
+    /// The newest turn of this conversation that spent more than three times
+    /// what the turns before it averaged, which the Usage pane says.
+    spike: Option<crate::spike::Spike>,
+    /// What each turn of this conversation changed that no edit call
+    /// reported, in the order the turns ended, which the Changes pane marks.
+    outside: Vec<OutsideTurn>,
     /// Whether a backend is listening. The shell holds no backend handle; this
     /// is the one bit of it the transcript needs, so that a prompt with nowhere
     /// to go says so instead of looking sent.
@@ -2102,9 +2108,14 @@ struct TreeWatch {
     acted_after_end: bool,
 }
 
-/// How many files a notice of changes outside the edit tools names before it
-/// counts the rest.
-const OUTSIDE_LISTED: usize = 8;
+/// What one turn changed that no edit call reported.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OutsideTurn {
+    /// The turn, numbered as the fold numbers turns.
+    turn: usize,
+    /// The files, as the working tree read after the turn ended has them.
+    changed: Vec<WorkingFile>,
+}
 
 /// Where a turn the backend owes of its own stands, as [`App`] follows it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2117,49 +2128,29 @@ enum Owed {
     Due,
 }
 
-/// A file a turn changed that no edit call reported.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum Outside {
-    /// Changed, or changed again, as the working tree now counts it.
-    Changed(WorkingFile),
-    /// Put back as the last commit holds it.
-    Restored(String),
-    /// Gone from the tree, where the last commit holds no such file to put
-    /// back: a file git did not track, or any file of a repository with no
-    /// commit yet. A tracked file that is deleted stays on the list, with its
-    /// lines removed, so it is never this.
-    Deleted(String),
-}
-
-/// The files whose counts differ between `before` and `after` — changed,
-/// newly changed, put back as committed, or deleted where nothing was
-/// committed to put back — that no path in `edited` names.
+/// The files whose counts differ between `before` and `after` — changed, or
+/// newly changed — that no path in `edited` names, as `after` counts them.
+///
+/// A file that left the list — put back as committed, or deleted where
+/// nothing was committed — is not among them: the working tree no longer
+/// lists it, so there is no row of it to mark.
 fn changed_outside(
     before: &[WorkingFile],
     after: &[WorkingFile],
     edited: &BTreeSet<String>,
-) -> Vec<Outside> {
+) -> Vec<WorkingFile> {
     let counts = |file: &WorkingFile| (file.added, file.removed, file.new);
     let was: BTreeMap<&str, _> = before
         .iter()
         .map(|f| (f.path.as_str(), counts(f)))
         .collect();
-    let now: BTreeSet<&str> = after.iter().map(|f| f.path.as_str()).collect();
     let unedited = |path: &str| !edited.iter().any(|named| same_file(path, named));
-    let moved = after
+    after
         .iter()
         .filter(|file| was.get(file.path.as_str()) != Some(&counts(file)))
         .filter(|file| unedited(&file.path))
         .cloned()
-        .map(Outside::Changed);
-    let left = before
-        .iter()
-        .filter(|file| !now.contains(file.path.as_str()) && unedited(&file.path))
-        .map(|file| match file.new {
-            true => Outside::Deleted(file.path.clone()),
-            false => Outside::Restored(file.path.clone()),
-        });
-    moved.chain(left).collect()
+        .collect()
 }
 
 /// Whether `decision` is a standing rule's answer, which asked nobody,
@@ -2511,6 +2502,8 @@ impl App {
             prices: None,
             budget_warned: false,
             spikes_judged: None,
+            spike: None,
+            outside: Vec::new(),
             tree_watch: None,
             turn_edits: BTreeSet::new(),
             attached: false,
@@ -2884,6 +2877,10 @@ impl App {
         self.cleared_prompts.extend(sent);
         self.entries.clear();
         self.cleared = false;
+        // Each names a turn, and the next conversation counts its turns from
+        // the first again.
+        self.spike = None;
+        self.outside.clear();
         self.queued_prompts.clear();
         self.tool_entries.clear();
         self.cut_entries.clear();
@@ -5221,7 +5218,7 @@ impl App {
         let turn = watch.ended_before.saturating_add(1);
         self.tree_watch = None;
         if !changed.is_empty() {
-            self.say_outside(turn, &changed);
+            self.kept_outside(turn, changed);
         }
         false
     }
@@ -5248,59 +5245,43 @@ impl App {
         }
     }
 
-    /// The notice of what `turn` changed outside the edit tools.
-    fn say_outside(&mut self, turn: usize, changed: &[Outside]) {
-        let side = |count: Option<u64>| count.map_or_else(|| "—".to_owned(), |n| n.to_string());
-        let named: Vec<String> = changed
-            .iter()
-            .take(OUTSIDE_LISTED)
-            .map(|outside| match outside {
-                Outside::Changed(file) => {
-                    format!(
-                        "{} +{} −{}",
-                        file.path,
-                        side(file.added),
-                        side(file.removed)
-                    )
-                }
-                Outside::Restored(path) => format!("{path} (put back as committed)"),
-                Outside::Deleted(path) => format!("{path} (deleted)"),
-            })
-            .collect();
-        let rest = changed.len().saturating_sub(OUTSIDE_LISTED);
-        let more = match rest {
-            0 => String::new(),
-            n => format!(", and {n} more"),
-        };
-        let files = match changed.len() {
-            1 => "1 file".to_owned(),
-            n => format!("{n} files"),
-        };
-        // Said by the shell, not the agent: a reply streaming as it comes is
-        // not ended by it, as it is not in the record read back.
-        self.say(Entry {
-            queued: false,
-            attention: Attention::Notable,
-            kind: EntryKind::Notice,
-            head: "outside the edit tools".to_owned(),
-            meta: format!("turn {turn} · {files}"),
-            body: format!(
-                "Turn {turn} changed {}{more} with no edit call saying so: a shell command \
-                 it ran, a formatter, or something outside the session. Each is counted \
-                 against the last commit, as the Working tree counts it; the session's own \
-                 edit figures leave them out.",
-                named.join(", "),
-            ),
-            streaming: false,
-            at: self.at,
-            calls: Vec::new(),
-            agent: None,
-        });
-        self.scroll_to_tail();
+    /// Keeps what `turn` changed outside the edit tools, for the Changes
+    /// pane to mark. Not said in the transcript: it is the working tree's,
+    /// which the pane already lists, and not something the agent said.
+    fn kept_outside(&mut self, turn: usize, changed: Vec<WorkingFile>) {
+        self.outside.push(OutsideTurn { turn, changed });
     }
 
-    /// Says so when a turn that ended since the last call spent more than
-    /// three times what the session's turns before it averaged.
+    /// The newest turn of this conversation that changed the file at `path`
+    /// with no edit call reporting it, where one did and the file is still
+    /// changed as that turn left it or since. Nothing is looked up where no
+    /// turn changed anything that way, which is nearly every frame.
+    pub fn changed_outside_by(&self, path: &str) -> Option<usize> {
+        self.outside.iter().rev().find_map(|outside| {
+            outside
+                .changed
+                .iter()
+                .any(|file| file.path == path)
+                .then_some(outside.turn)
+        })
+    }
+
+    /// Whether any turn of this conversation changed a file with no edit call
+    /// reporting it.
+    pub fn any_changed_outside(&self) -> bool {
+        !self.outside.is_empty()
+    }
+
+    /// The newest turn of this conversation that spent more than three times
+    /// what the turns before it averaged, where one did.
+    pub(crate) fn spike(&self) -> Option<crate::spike::Spike> {
+        self.spike
+    }
+
+    /// Keeps the newest turn that ended since the last call and spent more
+    /// than three times what the session's turns before it averaged, for the
+    /// Usage pane to say. Not said in the transcript: it is a figure about
+    /// the session's spending, which is the pane's to show.
     ///
     /// Called by the event loop and never by [`App::apply`], for the reason
     /// [`App::settle_budget`] is: the turns a session read back holds are
@@ -5312,29 +5293,11 @@ impl App {
         // its own first turn.
         let from = self.spikes_judged.map_or(ended, |judged| judged.min(ended));
         self.spikes_judged = Some(ended);
-        let found: Vec<crate::spike::Spike> = (from..ended)
-            .filter_map(|index| crate::spike::at(self.session.turns(), index))
-            .collect();
-        for spike in found {
-            self.say(Entry {
-                queued: false,
-                attention: Attention::Notable,
-                kind: EntryKind::Notice,
-                head: "spike".to_owned(),
-                meta: format!("turn {} · {}× the average", spike.turn, spike.times),
-                body: format!(
-                    "Turn {} spent {} tokens, against the {} the session's turns before it \
-                     averaged.",
-                    spike.turn,
-                    crate::ui::compact(spike.tokens),
-                    crate::ui::compact(spike.average),
-                ),
-                streaming: false,
-                at: self.at,
-                calls: Vec::new(),
-                agent: None,
-            });
-            self.scroll_to_tail();
+        if let Some(spike) = (from..ended)
+            .rev()
+            .find_map(|index| crate::spike::at(self.session.turns(), index))
+        {
+            self.spike = Some(spike);
         }
     }
 
@@ -16410,11 +16373,9 @@ mod tests {
         ]
     }
 
-    fn spikes(app: &App) -> Vec<&Entry> {
-        app.entries()
-            .iter()
-            .filter(|entry| entry.head == "spike")
-            .collect()
+    /// The spike the Usage pane says, where there is one.
+    fn spikes(app: &App) -> Vec<crate::spike::Spike> {
+        app.spike().into_iter().collect()
     }
 
     fn file(path: &str, added: u64, removed: u64) -> WorkingFile {
@@ -16436,10 +16397,39 @@ mod tests {
         }
     }
 
-    fn outside(app: &App) -> Vec<&Entry> {
-        app.entries()
+    /// One turn's files changed outside the edit tools, as the tests read
+    /// them: `turn 2 · 1 file`, and each file as `path +added −removed`.
+    #[derive(Debug)]
+    struct Kept {
+        meta: String,
+        body: String,
+    }
+
+    /// What the app keeps of the files each turn changed outside the edit
+    /// tools, which the Changes pane marks.
+    fn outside(app: &App) -> Vec<Kept> {
+        let side = |count: Option<u64>| count.map_or_else(|| "—".to_owned(), |n| n.to_string());
+        app.outside
             .iter()
-            .filter(|entry| entry.head == "outside the edit tools")
+            .map(|kept| Kept {
+                meta: match kept.changed.len() {
+                    1 => format!("turn {} · 1 file", kept.turn),
+                    n => format!("turn {} · {n} files", kept.turn),
+                },
+                body: kept
+                    .changed
+                    .iter()
+                    .map(|file| {
+                        format!(
+                            "{} +{} −{}",
+                            file.path,
+                            side(file.added),
+                            side(file.removed)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            })
             .collect()
     }
 
@@ -16495,6 +16485,21 @@ mod tests {
             "{}",
             said[0].body
         );
+        assert_eq!(app.changed_outside_by("src/main.rs"), Some(1));
+        assert_eq!(app.changed_outside_by("src/lib.rs"), None);
+        assert!(
+            app.entries()
+                .iter()
+                .all(|entry| entry.kind != EntryKind::Notice),
+            "the transcript is the conversation's: {:?}",
+            app.entries()
+        );
+
+        // The next conversation counts its turns from the first again, and
+        // what it keeps is its own.
+        app.apply(&Event::Cleared);
+        assert!(outside(&app).is_empty(), "{:?}", outside(&app));
+        assert_eq!(app.changed_outside_by("src/main.rs"), None);
     }
 
     #[test]
@@ -16879,11 +16884,11 @@ mod tests {
         );
     }
 
-    /// A file the last commit does not hold cannot be put back as it holds
-    /// it: gone from the tree, it was deleted. A tracked file that left the
-    /// list was put back; one that was deleted stays on it, as git counts it.
+    /// A file that left the working tree's list in a turn — a new one a
+    /// shell command removed, a tracked one put back as committed — has no
+    /// row left to mark, so nothing is kept of it.
     #[test]
-    fn a_new_file_a_shell_command_removed_is_named_deleted_not_put_back() {
+    fn a_file_a_turn_put_back_or_removed_is_not_kept_as_changed_outside() {
         let start = Instant::now();
         let at = |ms| start + Duration::from_millis(ms);
         let mut app = app();
@@ -16903,18 +16908,9 @@ mod tests {
         app.settle_tree(at(5));
         app.settle_tree(at(6));
 
-        let said = outside(&app);
-        assert_eq!(said.len(), 1, "{said:?}");
-        assert!(
-            said[0].body.contains("scratch.txt (deleted)"),
-            "{}",
-            said[0].body
-        );
-        assert!(
-            said[0].body.contains("src/lib.rs (put back as committed)"),
-            "{}",
-            said[0].body
-        );
+        assert!(outside(&app).is_empty(), "{:?}", outside(&app));
+        assert_eq!(app.changed_outside_by("scratch.txt"), None);
+        assert_eq!(app.changed_outside_by("src/lib.rs"), None);
     }
 
     /// A turn that commits moves what the tree is counted against: every file
@@ -16996,6 +16992,8 @@ mod tests {
         assert_eq!(errors, ["", "in turn 2"]);
     }
 
+    /// A turn past three times the average is kept for the Usage pane by its
+    /// number and figures, and nothing is said of it in the transcript.
     #[test]
     fn a_turn_past_three_times_the_average_is_named_once_by_its_number() {
         let mut app = app();
@@ -17009,12 +17007,21 @@ mod tests {
         app.settle_spikes();
 
         let spikes = spikes(&app);
-        assert_eq!(spikes.len(), 1, "{spikes:?}");
-        assert_eq!(spikes[0].meta, "turn 3 · 4× the average");
+        assert_eq!(
+            spikes,
+            [crate::spike::Spike {
+                turn: 3,
+                tokens: 5_000,
+                average: 1_100,
+                times: 4,
+            }]
+        );
         assert!(
-            spikes[0].body.contains("5000 tokens") && spikes[0].body.contains("1100"),
-            "{}",
-            spikes[0].body
+            app.entries()
+                .iter()
+                .all(|entry| entry.kind != EntryKind::Notice),
+            "{:?}",
+            app.entries()
         );
     }
 
@@ -17054,7 +17061,15 @@ mod tests {
             }
             app.settle_spikes();
         }
-        assert_eq!(spikes(&app).len(), 1, "{:?}", spikes(&app));
+        let turns: Vec<u64> = spikes(&app).iter().map(|spike| spike.turn).collect();
+        assert_eq!(
+            turns,
+            [3],
+            "the third turn of the conversation the clear began"
+        );
+
+        app.apply(&Event::Cleared);
+        assert!(spikes(&app).is_empty(), "a turn of the conversation before");
     }
 
     #[test]
@@ -18840,9 +18855,8 @@ mod tests {
         assert_eq!(counted, [(3, Some(Duration::from_secs(30))), (1, None)]);
     }
 
-    /// What the shell says of its own while a reply streams — files a turn
-    /// changed outside the edit tools, a turn that spent far more — is not
-    /// the reply's end: read back without it, the reply is one entry, and so
+    /// What the shell says of its own while a reply streams — that most of
+    /// the budget is spent, say — is not the reply's end: read back without it, the reply is one entry, and so
     /// it is live.
     #[test]
     fn a_note_the_shell_adds_while_a_reply_streams_leaves_the_reply_whole() {
@@ -18851,15 +18865,18 @@ mod tests {
         app.apply(&Event::AssistantDelta {
             text: "Hel".to_owned(),
         });
-        app.say_outside(
-            1,
-            &[Outside::Changed(WorkingFile {
-                path: "src/lib.rs".to_owned(),
-                added: Some(1),
-                removed: Some(0),
-                new: false,
-            })],
-        );
+        app.say(Entry {
+            queued: false,
+            attention: Attention::Notable,
+            kind: EntryKind::Notice,
+            head: "budget".to_owned(),
+            meta: String::new(),
+            body: "Most of the budget is spent.".to_owned(),
+            streaming: false,
+            at: None,
+            calls: Vec::new(),
+            agent: None,
+        });
         app.apply(&Event::AssistantDelta {
             text: "lo".to_owned(),
         });
