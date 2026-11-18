@@ -361,8 +361,10 @@ fn no_content_puts_a_control_or_a_direction_mark_on_the_terminal() {
             head: None,
             began: None,
             commits: vec![niobe_tui::app::Commit {
+                id: format!("ab{p}"),
                 hash: format!("ab{p}"),
                 subject: format!("feat: commit {p} made"),
+                at: None,
             }],
         });
         app.apply(&Event::UserMessage { text: "hi".into() });
@@ -600,6 +602,45 @@ fn overview_page(p: &str) -> App {
     app
 }
 
+/// A commit opened from the Changes pane and read whole: its message is the
+/// repository's, whoever wrote it.
+fn commit_dialog(p: &str) -> App {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let id = "ab".repeat(20);
+    let mut app = App::new(niobe_tui::app::Repo {
+        name: "niobe".into(),
+        branch: Some("main".into()),
+        read: true,
+        commits: vec![niobe_tui::app::Commit {
+            id: id.clone(),
+            hash: "ababab".into(),
+            subject: format!("feat: {p}"),
+            at: None,
+        }],
+        ..niobe_tui::app::Repo::default()
+    });
+    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+    common::screen(&mut app, 200, 60);
+    app.on_key(key(KeyCode::Tab));
+    for _ in 0..4 {
+        if app.section_cursor(niobe_tui::app::Pane::Changes)
+            == Some(niobe_tui::app::Section::Commit(id.clone()))
+        {
+            break;
+        }
+        app.on_key(key(KeyCode::Down));
+        common::screen(&mut app, 200, 60);
+    }
+    app.on_key(key(KeyCode::Enter));
+    let asked = app.take_commit_request().unwrap_or_default();
+    app.set_commit(niobe_tui::app::ShownCommit {
+        id: asked,
+        text: Ok(format!("commit {id}\nAuthor: {p}\n\n    shipped {p}\n")),
+    });
+    app
+}
+
 fn refused_answer(p: &str) -> App {
     let mut app = with(vec![
         Event::ToolCallStart {
@@ -708,6 +749,7 @@ const SITES: &[Site] = &[
     ("proposed-command-open", command_open, "echo"),
     ("call-detail", call_detail, "output"),
     ("overview", overview_page, "built"),
+    ("commit-detail", commit_dialog, "shipped"),
     ("activity-at-work", at_work, "& tail "),
 ];
 

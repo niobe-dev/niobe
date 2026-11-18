@@ -6708,8 +6708,8 @@ fn changes_rows(app: &App, width: usize, theme: &Theme) -> PaneRows {
     match &repo.branch {
         Some(branch) => {
             rows.extend([branch_row(branch, repo, width, theme)]);
-            commit_rows(app, repo, width, theme, &mut rows);
             working_tree_rows(app, repo, width, theme, &mut rows);
+            commit_rows(app, repo, width, theme, &mut rows);
         }
         None => rows.extend([Line::from(Span::styled(
             text::truncate(NOT_A_REPOSITORY, width),
@@ -6719,9 +6719,10 @@ fn changes_rows(app: &App, width: usize, theme: &Theme) -> PaneRows {
     rows
 }
 
-/// The commits made on the branch since the shell opened, the oldest first:
-/// a row each of its short hash and its subject, cut to fit. A session that
-/// has made none has no section, rather than one saying so.
+/// The commits made on the branch since the shell opened, the newest first:
+/// a row each of its short hash, when it was committed and its subject, cut
+/// to fit, each a stop for the section cursor that Enter opens whole. A
+/// session that has made none has no section, rather than one saying so.
 ///
 /// The subject is drawn without the conventional prefix — `feat(tui): ` —
 /// which says what kind of change it was rather than what changed, and takes
@@ -6751,19 +6752,48 @@ fn commit_rows(
     if folded {
         return;
     }
-    rows.extend(repo.commits.iter().map(|commit| {
-        let hash = text::truncate(&commit.hash, width.saturating_sub(ROW_INDENT.len()));
-        let room = width.saturating_sub(ROW_INDENT.len() + text::width(&hash) + 1);
-        Line::from(vec![
-            Span::raw(ROW_INDENT),
-            Span::styled(hash, Style::new().fg(theme.warn)),
-            Span::raw(" "),
-            Span::styled(
-                text::truncate(unprefixed(&commit.subject), room),
-                Style::new().fg(theme.fg),
-            ),
-        ])
-    }));
+    for commit in &repo.commits {
+        rows.header(
+            Section::Commit(commit.id.clone()),
+            commit_row(app, commit, width, theme),
+        );
+    }
+}
+
+/// `1f3706d 14:05 record no session…`: one commit's row, its time a clock
+/// time today and a weekday's on another day, as [`clock::past`] says it.
+fn commit_row(
+    app: &App,
+    commit: &crate::app::Commit,
+    width: usize,
+    theme: &Theme,
+) -> Line<'static> {
+    let hash = text::truncate(&commit.hash, width.saturating_sub(ROW_INDENT.len()));
+    let when = commit_time(app, commit).map(|when| format!(" {when}"));
+    let when = text::truncate(
+        when.as_deref().unwrap_or_default(),
+        width.saturating_sub(ROW_INDENT.len() + text::width(&hash)),
+    );
+    let room = width.saturating_sub(ROW_INDENT.len() + text::width(&hash) + text::width(&when) + 1);
+    Line::from(vec![
+        Span::raw(ROW_INDENT),
+        Span::styled(hash, Style::new().fg(theme.warn)),
+        Span::styled(when, Style::new().fg(theme.dim)),
+        Span::raw(" "),
+        Span::styled(
+            text::truncate(unprefixed(&commit.subject), room),
+            Style::new().fg(theme.fg),
+        ),
+    ])
+}
+
+/// When `commit` was committed, as its row says it: `None` where the
+/// repository or the clock cannot say. A committer's clock a little ahead of
+/// this machine's still names the time it gave, rather than nothing.
+fn commit_time(app: &App, commit: &crate::app::Commit) -> Option<String> {
+    let now = app.stamp()?;
+    let at = app.moment(commit.at?)?;
+    clock::past(now, at).or_else(|| clock::upcoming(now, at))
 }
 
 /// `subject` without the conventional-commit prefix it opens with — a type,

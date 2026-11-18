@@ -18,7 +18,7 @@
 
 use std::time::Instant;
 
-use crate::app::Repo;
+use crate::app::{Repo, ShownCommit};
 
 /// Where the shell gets the state of the repository it is running in.
 pub trait Watch {
@@ -43,6 +43,21 @@ pub trait Watch {
     /// that failed is the answer it would otherwise never get: the next read
     /// that works may come only after something else has changed the tree.
     fn failed(&mut self) -> Option<Instant> {
+        None
+    }
+
+    /// Asks for the commit named `id` read whole — who made it and when, its
+    /// whole message, the files it changed and the change — for the dialog
+    /// the operator opened it in. Returns at once; the commit arrives through
+    /// [`Watch::shown`]. A watch that reads no repository answers nothing,
+    /// and has listed no commit to be opened.
+    fn show(&mut self, id: &str) {
+        let _ = id;
+    }
+
+    /// A commit asked for with [`Watch::show`] that has been read since the
+    /// last call. Never blocks.
+    fn shown(&mut self) -> Option<ShownCommit> {
         None
     }
 }

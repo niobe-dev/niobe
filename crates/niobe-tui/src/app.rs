@@ -88,7 +88,7 @@ pub struct Repo {
     /// turn ended says what the turn left behind.
     pub began: Option<Instant>,
     /// The commits on the checked-out branch made since the shell opened,
-    /// the oldest first, as the repository names them; empty where none
+    /// the newest first, as the repository names them; empty where none
     /// were, or nobody has read it.
     pub commits: Vec<Commit>,
 }
@@ -96,10 +96,28 @@ pub struct Repo {
 /// A commit made since the shell opened, as the Changes pane lists it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Commit {
+    /// Its whole name, which is what it is asked for by when the operator
+    /// opens it: a short one can come to name two commits.
+    pub id: String,
     /// Its hash, as short as the repository abbreviates it.
     pub hash: String,
     /// The first line of its message.
     pub subject: String,
+    /// When it was committed, in seconds since the Unix epoch, by its
+    /// committer's clock; `None` where the repository did not say.
+    pub at: Option<u64>,
+}
+
+/// One commit read whole, as [`crate::watch::Watch::shown`] answers an open
+/// one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShownCommit {
+    /// The commit's whole name, as it was asked for.
+    pub id: String,
+    /// Who made it and when, its whole message, the files it changed and the
+    /// change itself, as lines to be read as written; or why it could not be
+    /// read.
+    pub text: Result<String, String>,
 }
 
 /// One file the working tree has changed, measured from the repository.
@@ -178,6 +196,9 @@ pub enum Section {
     Directory(String),
     /// The commits made since the shell opened.
     Commits,
+    /// One of those commits, by its whole name: it folds nothing, and Enter
+    /// on it opens it whole.
+    Commit(String),
     /// The sub-agents running now.
     SubAgents,
     /// The shell commands running now.
@@ -190,7 +211,10 @@ impl Section {
     /// The pane this section is drawn in.
     pub fn pane(&self) -> Pane {
         match self {
-            Section::WorkingTree | Section::Directory(_) | Section::Commits => Pane::Changes,
+            Section::WorkingTree
+            | Section::Directory(_)
+            | Section::Commits
+            | Section::Commit(_) => Pane::Changes,
             Section::SubAgents | Section::Shells | Section::Tools => Pane::Activity,
         }
     }
@@ -1403,6 +1427,10 @@ pub struct Activity {
     pub compacting: bool,
 }
 
+/// What a commit's dialog says while the repository is still being asked for
+/// it.
+const COMMIT_READING: &str = "reading the commit…";
+
 /// What the working line says while the backend compacts the conversation.
 const COMPACTING: &str = "compacting context";
 
@@ -1778,6 +1806,13 @@ pub struct App {
     /// Whether the project overview has been opened since the binary was
     /// last asked to write it.
     overview_wanted: bool,
+    /// The commit opened in the Changes pane since the loop last asked, by
+    /// its whole name, which the loop asks the repository for.
+    commit_wanted: Option<String>,
+    /// The commit whose dialog was opened last, by its whole name, and the
+    /// title that dialog is drawn under: what tells a commit read for it from
+    /// one read for a dialog closed since.
+    commit_open: Option<(String, String)>,
     /// The MCP view, while it is open.
     mcp: Option<crate::mcp::View>,
     /// One tool call read whole, while it is open.
@@ -2451,6 +2486,8 @@ impl App {
             memory: None,
             memory_wanted: false,
             overview_wanted: false,
+            commit_wanted: None,
+            commit_open: None,
             mcp: None,
             detail: None,
             detail_call: None,
@@ -7766,7 +7803,8 @@ impl App {
         true
     }
 
-    /// Folds the section under `pane`'s cursor, or opens it again.
+    /// Folds the section under `pane`'s cursor, or opens it again; opens the
+    /// commit under it whole.
     ///
     /// Unlike [`App::fold`], which puts the pane back at its top, this keeps
     /// the header in view: the operator is looking at it, and nothing above
@@ -7778,9 +7816,61 @@ impl App {
         };
         scroller.cursor = Some(section.clone());
         scroller.scroll = scroller.scroll.min(row);
+        if let Section::Commit(id) = section {
+            self.open_commit(id);
+            return;
+        }
         if !self.folded.remove(&section) {
             self.folded.insert(section);
         }
+    }
+
+    /// Opens the commit named `id` on a line saying it is being read, and
+    /// asks for it whole: read each time it opens, since nothing of a commit
+    /// is kept once its dialog closes.
+    fn open_commit(&mut self, id: String) {
+        let hash = self
+            .repo
+            .commits
+            .iter()
+            .find(|commit| commit.id == id)
+            .map_or(id.as_str(), |commit| commit.hash.as_str());
+        let title = format!("Commit {hash}");
+        self.detail_call = None;
+        self.detail = Some(crate::detail::Detail::verbatim(&title, "", COMMIT_READING));
+        self.commit_wanted = Some(id.clone());
+        self.commit_open = Some((id, title));
+    }
+
+    /// The commit opened since this was last asked, by its whole name.
+    pub fn take_commit_request(&mut self) -> Option<String> {
+        self.commit_wanted.take()
+    }
+
+    /// A commit read whole, for the dialog it was opened in. One that lands
+    /// after the dialog was closed, or once something else was opened in its
+    /// place, is dropped.
+    pub fn set_commit(&mut self, shown: ShownCommit) {
+        let Some((id, title)) = &self.commit_open else {
+            return;
+        };
+        let open = self
+            .detail
+            .as_ref()
+            .is_some_and(|open| open.title() == title);
+        if *id != shown.id || !open {
+            return;
+        }
+        let title = title.clone();
+        let text = match shown.text {
+            Ok(text) => text,
+            Err(why) => format!("git could not read this commit: {why}"),
+        };
+        self.detail = Some(crate::detail::Detail::verbatim(
+            &title,
+            &text,
+            "git said nothing of this commit",
+        ));
     }
 
     /// Replaces what the shell knows about the repository with a fresh read.

@@ -13,7 +13,7 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::time::{Duration, Instant, SystemTime};
 
 use niobe_store::Store;
-use niobe_tui::app::{Commit, Repo, WorkingFile};
+use niobe_tui::app::{Commit, Repo, ShownCommit, WorkingFile};
 use niobe_tui::watch::Watch;
 
 /// The directory in a repository that holds Niobe's own files.
@@ -654,6 +654,12 @@ pub struct Watcher {
     /// Asks for a read now. Dropping it is also how the thread is told the
     /// session is over: its wait ends disconnected and it returns.
     nudge: Sender<()>,
+    /// The repository's root, which a commit is read in.
+    root: PathBuf,
+    /// Where a commit read for its dialog is sent, and where the loop takes
+    /// it from.
+    shown: Sender<ShownCommit>,
+    read_shown: Receiver<ShownCommit>,
 }
 
 impl Watch for Watcher {
@@ -683,6 +689,21 @@ impl Watch for Watcher {
         // and a pane one cadence behind is not worth a line in the transcript.
         let _ = self.nudge.send(());
     }
+
+    fn show(&mut self, id: &str) {
+        // A thread of its own rather than the reading thread's: a commit is
+        // opened to be read now, not after the working tree's next count.
+        let (root, id, shown) = (self.root.clone(), id.to_owned(), self.shown.clone());
+        std::thread::spawn(move || {
+            let text = show_commit(&root, &id);
+            // A shell that has closed has no dialog to put it in.
+            let _ = shown.send(ShownCommit { id, text });
+        });
+    }
+
+    fn shown(&mut self) -> Option<ShownCommit> {
+        self.read_shown.try_recv().ok()
+    }
 }
 
 /// Starts reading the repository `cwd` is in, until the returned [`Watcher`]
@@ -701,12 +722,17 @@ pub fn watch(root: &Path) -> Watcher {
     let name = describe(&root).name;
     let opened = SystemTime::now();
 
-    std::thread::spawn(move || keep_reading(&root, (&name, opened), &reads, &nudged));
+    let reading = root.clone();
+    std::thread::spawn(move || keep_reading(&reading, (&name, opened), &reads, &nudged));
+    let (shown, read_shown) = channel();
 
     Watcher {
         reads: from_reads,
         failed: None,
         nudge,
+        root,
+        shown,
+        read_shown,
     }
 }
 
@@ -903,7 +929,7 @@ fn read(
 /// listed, and the pane is not the place to read a history that long.
 const COMMITS_LISTED: usize = 200;
 
-/// The commits on `HEAD` its committer made at `opened` or after, the oldest
+/// The commits on `HEAD` its committer made at `opened` or after, the newest
 /// first: what was committed while the shell was open, whoever ran the
 /// commit. A commit rebased or amended in that time is listed by the hash it
 /// has now, which is the one the branch holds.
@@ -926,10 +952,9 @@ fn commits_since(root: &Path, opened: SystemTime) -> Result<Vec<Commit>, String>
             "-z",
             "--no-show-signature",
             "--no-mailmap",
-            "--format=%h%x1f%s",
+            "--format=%H%x1f%h%x1f%ct%x1f%s",
             &format!("--since=@{since}"),
             &format!("--max-count={COMMITS_LISTED}"),
-            "--reverse",
             "HEAD",
             "--",
         ],
@@ -937,16 +962,115 @@ fn commits_since(root: &Path, opened: SystemTime) -> Result<Vec<Commit>, String>
     Ok(listed_commits(&printed))
 }
 
-/// The commits `git log -z --format=%h%x1f%s` printed, in its order.
+/// The commits `git log -z --format=%H%x1f%h%x1f%ct%x1f%s` printed, in its
+/// order. The subject is the last field, so a separator in it stays in it.
 fn listed_commits(printed: &str) -> Vec<Commit> {
     printed
         .split('\0')
-        .filter_map(|record| record.split_once('\u{1f}'))
-        .map(|(hash, subject)| Commit {
-            hash: hash.to_owned(),
-            subject: subject.to_owned(),
+        .filter_map(|record| {
+            let mut fields = record.splitn(4, '\u{1f}');
+            let (id, hash, at, subject) = (
+                fields.next()?,
+                fields.next()?,
+                fields.next()?,
+                fields.next()?,
+            );
+            Some(Commit {
+                id: id.to_owned(),
+                hash: hash.to_owned(),
+                subject: subject.to_owned(),
+                at: at.parse().ok(),
+            })
         })
         .collect()
+}
+
+/// The most of one commit read for its dialog. A message, a list of files or
+/// a change can be any length, and a commit is read whole into memory to be
+/// paged.
+const SHOWN_BYTES: usize = 4 * 1024 * 1024;
+
+/// The most of what a git that failed said about it that is kept.
+const SHOWN_ERROR_BYTES: u64 = 64 * 1024;
+
+/// The commit named `id` in the repository at `root`, read whole for its
+/// dialog: who made it and when, by whose clock and on whose behalf, its
+/// whole message, the files it changed with how many lines, and the change
+/// itself, as `git show --format=fuller --stat --summary --patch` prints it.
+/// Past [`SHOWN_BYTES`] the rest is left out, and the text says so.
+///
+/// `id` is refused unless it is a commit's whole name, so that nothing the
+/// shell hands over reaches git as an option or a revision range. Run as the
+/// working tree's reads are, so nothing the repository configures runs: no
+/// signature check, no converter and no external diff.
+pub(crate) fn show_commit(root: &Path, id: &str) -> Result<String, String> {
+    use std::io::Read as _;
+
+    if id.is_empty() || !id.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(format!("{id:?} is not the name of a commit"));
+    }
+    let args = [
+        "-c",
+        "log.showSignature=false",
+        "show",
+        "--no-color",
+        "--no-show-signature",
+        "--no-mailmap",
+        "--no-textconv",
+        "--no-ext-diff",
+        "--format=fuller",
+        "--date=format-local:%a %Y-%m-%d %H:%M",
+        "--stat=100",
+        "--summary",
+        "--patch",
+        id,
+        "--",
+    ];
+    let mut child = guarded(root)?
+        .args(args)
+        .spawn()
+        .map_err(|e| format!("cannot run git: {e}"))?;
+    // Read on a thread of its own, so a git that fills the pipe it reports
+    // errors on is not left waiting for a reader that is reading the other.
+    let stderr = child.stderr.take().map(|stderr| {
+        std::thread::spawn(move || {
+            let mut said = Vec::new();
+            let _ = stderr.take(SHOWN_ERROR_BYTES).read_to_end(&mut said);
+            said
+        })
+    });
+    let mut printed = Vec::new();
+    if let Some(stdout) = child.stdout.take() {
+        let bound = u64::try_from(SHOWN_BYTES)
+            .unwrap_or(u64::MAX)
+            .saturating_add(1);
+        stdout
+            .take(bound)
+            .read_to_end(&mut printed)
+            .map_err(|e| format!("cannot read git: {e}"))?;
+    }
+    let cut = printed.len() > SHOWN_BYTES;
+    if cut {
+        // What is left is not read, and a git writing it would wait on the
+        // pipe for ever.
+        let _ = child.kill();
+    }
+    let status = child.wait().map_err(|e| format!("cannot run git: {e}"))?;
+    let said = stderr
+        .and_then(|reader| reader.join().ok())
+        .unwrap_or_default();
+    if !cut && !status.success() {
+        return Err(failed(&args, &said));
+    }
+    printed.truncate(SHOWN_BYTES);
+    let mut text = String::from_utf8_lossy(&printed).into_owned();
+    if cut {
+        text.push_str(&format!(
+            "\n… the rest is left out: past {} MiB of it\n",
+            SHOWN_BYTES / (1024 * 1024)
+        ));
+    }
+    Ok(text)
 }
 
 /// What the working tree did to each file git tracks, against the tree
@@ -1776,8 +1900,9 @@ mod tests {
         assert!(output.status.success(), "{output:?}");
     }
 
-    /// A read lists the commits made since the shell opened, the oldest
-    /// first, by short hash and subject, and none made before; and the
+    /// A read lists the commits made since the shell opened, the newest
+    /// first, by whole name, short hash, time and subject, and none made
+    /// before; and the
     /// signature check a repository's config asks of `git log`, which runs
     /// the program it names, is never run by it.
     #[test]
@@ -1826,9 +1951,13 @@ mod tests {
             .iter()
             .map(|commit| commit.subject.as_str())
             .collect();
-        assert_eq!(subjects, ["feat(tui): one", "two\u{1f}and a separator"]);
+        assert_eq!(subjects, ["two\u{1f}and a separator", "feat(tui): one"]);
+        let times: Vec<Option<u64>> = read.commits.iter().map(|commit| commit.at).collect();
+        assert_eq!(times, [Some(opened + 60), Some(opened)]);
         assert!(
             read.commits.iter().all(|commit| commit.hash.len() >= 7
+                && commit.id.len() == 40
+                && commit.id.starts_with(&commit.hash)
                 && commit.hash.chars().all(|c| c.is_ascii_hexdigit())),
             "{:?}",
             read.commits
@@ -1838,6 +1967,66 @@ mod tests {
         let later = SystemTime::UNIX_EPOCH + Duration::from_secs(opened + 3_600);
         let none = super::read(&work, ("work", later), &mut Counts::default()).expect("it reads");
         assert!(none.commits.is_empty(), "{:?}", none.commits);
+    }
+
+    /// A commit opened from the pane is read whole — its author, its time,
+    /// every line of its message and the files it changed — with nothing the
+    /// repository configures run to read it, and nothing but a commit's whole
+    /// name taken as what to read.
+    #[test]
+    fn a_commit_is_read_whole_and_nothing_its_repository_names_is_run() {
+        let dir = repository();
+        let work = dir.path().join("work");
+        let marker = dir.path().join("diff-ran");
+        let differ = dir.path().join("differ.sh");
+        std::fs::write(
+            &differ,
+            format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+        )
+        .expect("the script is written");
+        std::fs::set_permissions(&differ, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .expect("the script is made runnable");
+        let differ = differ.display().to_string();
+        run(&work, &["config", "diff.external", &differ]);
+        run(&work, &["config", "diff.shown.textconv", &differ]);
+        std::fs::write(work.join(".gitattributes"), "*.txt diff=shown\n")
+            .expect("the attributes are written");
+        run(&work, &["add", ".gitattributes"]);
+        commit_at(
+            &work,
+            "feat: say more\n\nThe body, which the pane leaves out.\nOn two lines.",
+            4_000_000_000,
+            false,
+        );
+        let id = run(&work, &["rev-parse", "HEAD"]);
+
+        let text = show_commit(&work, id.trim()).expect("the commit reads");
+        for words in [
+            id.trim(),
+            "Author:     A Test <test@example.invalid>",
+            "feat: say more",
+            "    The body, which the pane leaves out.",
+            "    On two lines.",
+            "kept.txt",
+            ".gitattributes",
+            "2 files changed",
+            "diff --git a/kept.txt b/kept.txt",
+            "+feat: say more",
+        ] {
+            assert!(text.contains(words), "{words:?} in:\n{text}");
+        }
+        assert!(!marker.exists(), "the repository's diff program ran");
+
+        for not_a_commit in ["", "--all", "HEAD", "HEAD~1", "abc..def", "-p"] {
+            assert!(
+                show_commit(&work, not_a_commit).is_err(),
+                "{not_a_commit:?} is read"
+            );
+        }
+        assert!(
+            show_commit(&work, &"0".repeat(40)).is_err(),
+            "no such commit"
+        );
     }
 
     /// A repository with one commit and an origin it has been pushed to, so
@@ -1883,8 +2072,9 @@ mod tests {
 
     /// Runs `git` to set a test's repository up, with no configuration but
     /// the repository's own: a developer's `commit.gpgsign`, hooks or
-    /// defaults would otherwise decide whether a commit here works.
-    fn run(at: &Path, args: &[&str]) {
+    /// defaults would otherwise decide whether a commit here works. Returns
+    /// what it printed.
+    fn run(at: &Path, args: &[&str]) -> String {
         let output = std::process::Command::new("git")
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -1898,6 +2088,7 @@ mod tests {
             "git {args:?} failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
+        String::from_utf8_lossy(&output.stdout).into_owned()
     }
 
     #[test]

@@ -4466,13 +4466,19 @@ fn a_session_outside_a_repository_draws_no_branch_and_no_working_tree() {
 }
 
 /// The commits made since the shell opened are listed in the Changes pane,
-/// under the branch, the oldest first, each by its short hash and its subject
-/// without the conventional prefix, which says the kind of change rather
-/// than the change; a session that has made none has no section for them.
+/// under the working tree, in the order the repository gave them — the
+/// newest first — each by its short hash, when it was committed and its
+/// subject without the conventional prefix, which says the kind of change
+/// rather than the change: a clock time today, a weekday's on another day. A
+/// session that has made none has no section for them.
 #[test]
 fn the_commits_made_since_the_shell_opened_are_listed_in_the_changes_pane() {
     use niobe_tui::app::Commit;
+    use niobe_tui::clock::Clock;
+    use std::time::{Duration, Instant, UNIX_EPOCH};
 
+    // Day 20,000 after the epoch, 13:41 UTC; the day before was a Thursday.
+    let now: u64 = 20_000 * 86_400 + 13 * 3_600 + 41 * 60;
     let repo = |commits: Vec<Commit>| Repo {
         name: "niobe".to_owned(),
         branch: Some("main".to_owned()),
@@ -4483,39 +4489,52 @@ fn the_commits_made_since_the_shell_opened_are_listed_in_the_changes_pane() {
     let none = screen(&mut App::new(repo(Vec::new())), 120, 30);
     assert!(!none.contains("Commits"), "{none}");
 
+    let clock = Clock::fixed(0).expect("UTC is an offset");
     let mut app = App::new(repo(vec![
         Commit {
+            id: format!("abfdd03{}", "0".repeat(33)),
             hash: "abfdd03".to_owned(),
             subject: "feat(tui): draw modern's cyborg in shaded pixels".to_owned(),
+            at: Some(now - 36 * 60),
         },
         Commit {
+            id: format!("f18f976{}", "0".repeat(33)),
             hash: "f18f976".to_owned(),
             subject: "skyline starts on a building".to_owned(),
+            at: Some(now - 15 * 3_600 - 31 * 60),
         },
-    ]));
+    ]))
+    .with_clock(clock.clone());
+    app.tick(
+        Instant::now(),
+        Some(clock.at(UNIX_EPOCH + Duration::from_secs(now))),
+    );
     let frame = screen(&mut app, 200, 60);
     let lines: Vec<&str> = frame.lines().collect();
     let header = lines
         .iter()
         .position(|line| line.contains("▾ Commits  2 this session"))
         .unwrap_or_else(|| panic!("no section for the commits:\n{frame}"));
+    let tree = lines
+        .iter()
+        .position(|line| line.contains("▾ Working tree"))
+        .unwrap_or_else(|| panic!("no working tree:\n{frame}"));
     assert!(
-        lines[header - 1].contains("⎇ main"),
-        "under the branch:\n{frame}"
+        tree < header,
+        "the working tree is above the commits:\n{frame}"
     );
     assert!(
-        lines[header + 1].contains("  abfdd03 draw modern's cyborg in shaded pixels "),
+        lines[header + 1].contains("  abfdd03 13:05 draw modern's cyborg in shaded …"),
         "{frame}"
     );
     assert!(
-        lines[header + 2].contains("  f18f976 skyline starts on a building "),
+        lines[header + 2].contains("  f18f976 Thu 22:10 skyline starts on a building │"),
         "{frame}"
     );
-    assert!(lines[header + 3].contains("▾ Working tree"), "{frame}");
     // Narrower, a subject is cut to the pane, and says so.
     let narrow = screen(&mut app, 120, 30);
     assert!(
-        narrow.contains("  abfdd03 draw modern's cyborg in s… │"),
+        narrow.contains("  abfdd03 13:05 draw modern's cybor… │"),
         "{narrow}"
     );
     assert_snapshot("changes-commits-120x30", &narrow);
@@ -4524,6 +4543,72 @@ fn the_commits_made_since_the_shell_opened_are_listed_in_the_changes_pane() {
     let folded = screen(&mut app, 120, 30);
     assert!(folded.contains("▸ Commits  2 this session"), "{folded}");
     assert!(!folded.contains("abfdd03"), "{folded}");
+}
+
+/// The section cursor walks onto each commit the Changes pane lists, and
+/// Enter on one opens it whole in a dialog: saying it is being read until
+/// the repository answers, then what it answered, and an answer for a
+/// dialog closed since dropped.
+#[test]
+fn enter_on_a_commit_opens_it_whole_in_a_dialog() {
+    use niobe_tui::app::{Commit, ShownCommit};
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let id = format!("abfdd03{}", "0".repeat(33));
+    let mut app = App::new(Repo {
+        name: "niobe".to_owned(),
+        branch: Some("main".to_owned()),
+        read: true,
+        commits: vec![Commit {
+            id: id.clone(),
+            hash: "abfdd03".to_owned(),
+            subject: "feat(tui): draw modern's cyborg".to_owned(),
+            at: None,
+        }],
+        ..Repo::default()
+    });
+    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+    screen(&mut app, 120, 30);
+    app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert_eq!(app.focus(), niobe_tui::app::Focus::Pane(Pane::Changes));
+    while app.section_cursor(Pane::Changes) != Some(Section::Commit(id.clone())) {
+        let was = app.section_cursor(Pane::Changes);
+        app.on_key(key(KeyCode::Down));
+        screen(&mut app, 120, 30);
+        assert_ne!(
+            app.section_cursor(Pane::Changes),
+            was,
+            "the cursor never reaches it"
+        );
+    }
+    app.on_key(key(KeyCode::Enter));
+    assert_eq!(app.take_commit_request().as_deref(), Some(id.as_str()));
+    assert_eq!(app.take_commit_request(), None, "asked once");
+    let reading = screen(&mut app, 120, 30);
+    assert!(reading.contains("Commit abfdd03"), "{reading}");
+    assert!(reading.contains("reading the commit…"), "{reading}");
+    assert!(
+        !app.folded(Section::Commits),
+        "Enter on a commit folds nothing"
+    );
+
+    app.set_commit(ShownCommit {
+        id: id.clone(),
+        text: Ok("commit abfdd03\nAuthor:     A Test\n\n    feat(tui): draw modern's cyborg\n\n    The body, whole.\n".to_owned()),
+    });
+    let shown = screen(&mut app, 120, 30);
+    assert!(shown.contains("The body, whole."), "{shown}");
+
+    app.on_key(key(KeyCode::Esc));
+    app.set_commit(ShownCommit {
+        id,
+        text: Ok("late".to_owned()),
+    });
+    let closed = screen(&mut app, 120, 30);
+    assert!(
+        !closed.contains("Commit abfdd03"),
+        "a closed dialog stays closed:\n{closed}"
+    );
 }
 
 /// The wheel goes to whatever the pointer is over. Two panes scroll, and a

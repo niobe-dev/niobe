@@ -424,6 +424,7 @@ fn event_loop<B: Backend<Error = io::Error>>(
             if let Some(began) = watch.failed() {
                 app.tree_read_failed(began);
             }
+            fold_commit(app, watch);
             // Before the draw, so that a prompt a standing rule already answers is
             // never on screen for the frame it takes to answer it.
             app.settle_rules();
@@ -621,6 +622,17 @@ fn fold_history(app: &mut App, journal: &dyn Journal, history: &mut dyn History)
     }
     if let Some(past) = history.drain() {
         app.set_past(past);
+    }
+}
+
+/// Passes on the commit the operator opened, and hands its dialog the commit
+/// once read, as [`fold_overview`] does the overview's page.
+fn fold_commit(app: &mut App, watch: &mut dyn Watch) {
+    if let Some(id) = app.take_commit_request() {
+        watch.show(&id);
+    }
+    if let Some(shown) = watch.shown() {
+        app.set_commit(shown);
     }
 }
 

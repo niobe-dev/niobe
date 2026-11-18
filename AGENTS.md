@@ -156,9 +156,11 @@ reviewers that encode both, for an agent working in this tree.
   composer and sent once it has, so they are the new conversation's — `ui.rs`
   draws it, leaving the routine entries out where `n` is pressed in a side pane, each run of them
   a row that counts them, beside the session a stack a third of the body wide, between 34 and
-  52 columns, of the Usage pane and the Changes pane — the branch, the commits made since the
-  shell opened, oldest first by short hash and subject without its conventional prefix, and the
-  working tree — and at the foot of the transcript, under
+  52 columns, of the Usage pane and the Changes pane — the branch, the working tree, and the
+  commits made since the shell opened, newest first by short hash, the time they were committed
+  — a weekday beside it on another day — and subject without its conventional prefix, each a
+  stop for the section cursor that Enter opens whole in a dialog — and at the foot of the
+  transcript, under
   the working line or `still running` once no turn is, a branch for each thing at work: the shell
   commands running — the agent's calls the session waits on, the operator's `!` commands and the
   backend's background ones — each with how long it has run and, where the same command ran to
@@ -170,7 +172,7 @@ reviewers that encode both, for an agent working in this tree.
   operator's events to and `rules.rs` the one it hands their standing answers to, `preferences.rs`
   the one it hands the theme, model and effort they pick to, kept for the next session, `bridge.rs`
   the one it sends turns to and takes events from, `watch.rs` the one it asks what the
-  repository looks like now, and `prices.rs` the one it asks to value the tokens no reported
+  repository looks like now, and for a commit read whole, and `prices.rs` the one it asks to value the tokens no reported
   cost covers yet, which it shows marked as an estimate, `terminal.rs`
   enters and restores the terminal — and hands it back for a stop and takes it again after — the mouse it takes for the wheel, clicks and drags, the bracketing it
   asks pastes to arrive in, and the keyboard
@@ -468,9 +470,12 @@ reviewers that encode both, for an agent working in this tree.
   file — and
   the `git` reads of the working tree made on a thread of its own as the shell's `Watch`,
   each dated by when it began and, where the shell asked for it, sent though nothing changed,
-  and each listing the commits on `HEAD` committed since the shell opened, read by committer
-  date with `git log`, whose signature check, which runs the program the config names, is
-  turned off;
+  and each listing the commits on `HEAD` committed since the shell opened, newest first, read
+  by committer date with `git log`, whose signature check, which runs the program the config
+  names, is turned off; and a commit the operator opens read whole with `git show` on a thread
+  of its own — who made it, its message, its files and its change, with no converter or
+  external diff the config names run, nothing taken but a commit's whole name, and no more
+  than four mebibytes of it;
   `preferences.rs` keeps the shell's picks in the user's `choices.toml`, under the session's
   profile, and reads them back so that a new shell opens on the theme last picked — over the
   config's, under `--theme` — and starts its backend with the model and effort last picked under
