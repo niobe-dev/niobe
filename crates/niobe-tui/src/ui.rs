@@ -6719,7 +6719,7 @@ fn changes_rows(app: &App, width: usize, theme: &Theme) -> PaneRows {
     rows
 }
 
-/// The commits made on the branch since the shell opened, the newest first:
+/// The commits made on the branch since the session began, the newest first:
 /// a row each of its short hash, when it was committed and its subject, cut
 /// to fit, each a stop for the section cursor that Enter opens whole. A
 /// session that has made none has no section, rather than one saying so.

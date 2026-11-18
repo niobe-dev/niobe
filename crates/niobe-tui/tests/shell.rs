@@ -4465,7 +4465,7 @@ fn a_session_outside_a_repository_draws_no_branch_and_no_working_tree() {
     assert!(frame.contains("not a git repository"), "{frame}");
 }
 
-/// The commits made since the shell opened are listed in the Changes pane,
+/// The commits made since the session began are listed in the Changes pane,
 /// under the working tree, in the order the repository gave them — the
 /// newest first — each by its short hash, when it was committed and its
 /// subject without the conventional prefix, which says the kind of change

@@ -525,7 +525,7 @@ fn shell(profile: Option<&str>, asked: &Asked, opening: Opening) -> Result<Optio
     let mut rules = ConfigRules::at(&root).withheld(loaded.untrusted.is_some());
     // Started with the shell and stopped with it: the thread behind it reads
     // the repository while the session runs, and a piped run never gets here.
-    let mut watching = repo::watch(&root);
+    let mut watching = repo::watch(&root, SystemTime::now());
     let mut started = Started::beside(&root, backend);
     let ended = niobe_tui::run(
         app,
@@ -843,7 +843,7 @@ fn resume(
     let mut journal = StoreJournal::open(recorder);
     journal.keep_taking_up(&mut app);
     let mut rules = ConfigRules::at(&root).withheld(loaded.untrusted.is_some());
-    let mut watching = repo::watch(&root);
+    let mut watching = repo::watch(&root, began(stored.iter().map(|stored| stored.at)));
     let mut started = Started::beside(&root, backend);
     let ended = niobe_tui::run(
         app,
@@ -874,6 +874,14 @@ fn resume(
     };
     say_unsaved(&journal.finish());
     Ok(next)
+}
+
+/// When a session began, from the times its events are dated by: the
+/// earliest of them, since an event is dated by when it happened, which need
+/// not follow the order it was recorded in; now, for a session with none.
+/// What the Changes pane lists the session's commits from.
+fn began(times: impl IntoIterator<Item = SystemTime>) -> SystemTime {
+    times.into_iter().min().unwrap_or_else(SystemTime::now)
 }
 
 /// Says how many of a session's last events the store refused after the
@@ -1090,7 +1098,7 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<Option<
     let mut journal = StoreJournal::open(recorder);
     journal.keep_taking_up(&mut app);
     let mut rules = ConfigRules::at(&root).withheld(loaded.untrusted.is_some());
-    let mut watching = repo::watch(&root);
+    let mut watching = repo::watch(&root, began(times.iter().flatten().copied()));
     let mut started = Started::beside(&root, backend);
     let ended = niobe_tui::run(
         app,
@@ -2642,6 +2650,18 @@ fn fkey_rows() -> String {
 
 #[cfg(test)]
 mod tests {
+    /// A session began at the earliest time its events are dated by, which
+    /// need not be its first event's, and one with none begins now.
+    #[test]
+    fn a_session_began_at_the_earliest_time_its_events_are_dated_by() {
+        use std::time::{Duration, SystemTime, UNIX_EPOCH};
+        let at = |seconds| UNIX_EPOCH + Duration::from_secs(seconds);
+        assert_eq!(super::began([at(300), at(100), at(200)]), at(100));
+        let before = SystemTime::now();
+        let none = super::began([]);
+        assert!(none >= before && none <= SystemTime::now(), "{none:?}");
+    }
+
     #[test]
     fn a_session_resumed_under_another_profile_says_both() {
         let said =

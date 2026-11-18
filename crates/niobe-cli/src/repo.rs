@@ -713,17 +713,17 @@ impl Watch for Watcher {
 /// in — and everything else from the repository that encloses it, so a session
 /// started in a subdirectory reports the whole tree it is part of.
 ///
-/// The commits each read lists are those made since this was called, which
-/// is when the shell opened.
-pub fn watch(root: &Path) -> Watcher {
+/// The commits each read lists are those made since `began`: when the
+/// session the shell shows began, which for one resumed is long before the
+/// shell opened on it.
+pub fn watch(root: &Path, began: SystemTime) -> Watcher {
     let (reads, from_reads) = channel();
     let (nudge, nudged) = channel();
     let root = root.to_path_buf();
     let name = describe(&root).name;
-    let opened = SystemTime::now();
 
     let reading = root.clone();
-    std::thread::spawn(move || keep_reading(&reading, (&name, opened), &reads, &nudged));
+    std::thread::spawn(move || keep_reading(&reading, (&name, began), &reads, &nudged));
     let (shown, read_shown) = channel();
 
     Watcher {
@@ -930,7 +930,7 @@ fn read(
 const COMMITS_LISTED: usize = 200;
 
 /// The commits on `HEAD` its committer made at `opened` or after, the newest
-/// first: what was committed while the shell was open, whoever ran the
+/// first: what was committed while the session ran, whoever ran the
 /// commit. A commit rebased or amended in that time is listed by the hash it
 /// has now, which is the one the branch holds.
 ///
@@ -1981,7 +1981,7 @@ mod tests {
         assert!(output.status.success(), "{output:?}");
     }
 
-    /// A read lists the commits made since the shell opened, the newest
+    /// A read lists the commits made since the session began, the newest
     /// first, by whole name, short hash, time and subject, and none made
     /// before; and the
     /// signature check a repository's config asks of `git log`, which runs
@@ -2662,7 +2662,7 @@ mod tests {
         let work = dir.path().join("work");
         std::fs::write(work.join("kept.txt"), "a\nb\nc\nd\n").expect("the file is written");
 
-        let mut watching = watch(&work);
+        let mut watching = watch(&work, SystemTime::now());
         // Reading the repository starts `git` more than once; with three
         // copies of this binary running at once the slowest read measured came
         // back in 7.25 s, and one that never comes waits the same either way.
@@ -2673,11 +2673,37 @@ mod tests {
         assert_eq!(read.working.len(), 1);
     }
 
+    /// A watch started for a session that began earlier — one resumed —
+    /// lists the commits made since that session began, not only those made
+    /// since this shell opened on it.
+    #[test]
+    fn a_watch_lists_the_commits_made_since_the_session_it_watches_for_began() {
+        let dir = repository();
+        let work = dir.path().join("work");
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("the clock is past the epoch")
+            .as_secs();
+        commit_at(&work, "before the session", now - 7_200, false);
+        commit_at(&work, "while it ran", now - 1_800, false);
+        let began = SystemTime::UNIX_EPOCH + Duration::from_secs(now - 3_600);
+
+        let mut watching = watch(&work, began);
+        let read = within(&mut watching, Duration::from_secs(60)).expect("a read comes back");
+
+        let subjects: Vec<&str> = read
+            .commits
+            .iter()
+            .map(|commit| commit.subject.as_str())
+            .collect();
+        assert_eq!(subjects, ["while it ran"]);
+    }
+
     #[test]
     fn a_read_asked_for_comes_back_dated_after_the_asking_though_nothing_changed() {
         let dir = repository();
         let work = dir.path().join("work");
-        let mut watching = watch(&work);
+        let mut watching = watch(&work, SystemTime::now());
         let first = within(&mut watching, Duration::from_secs(60)).expect("a read comes back");
 
         let asked = Instant::now();
@@ -2693,7 +2719,7 @@ mod tests {
     fn a_watch_on_a_directory_that_is_not_a_repository_hands_over_nothing() {
         let dir = tempfile::tempdir().expect("a temporary directory can be created");
 
-        let mut watching = watch(dir.path());
+        let mut watching = watch(dir.path(), SystemTime::now());
 
         assert_eq!(
             within(&mut watching, Duration::from_secs(1)),
@@ -2705,7 +2731,7 @@ mod tests {
     #[test]
     fn a_read_asked_for_that_fails_is_reported_dated_after_the_asking() {
         let dir = tempfile::tempdir().expect("a temporary directory can be created");
-        let mut watching = watch(dir.path());
+        let mut watching = watch(dir.path(), SystemTime::now());
 
         let asked = Instant::now();
         watching.changed();
@@ -2783,7 +2809,7 @@ mod tests {
     /// of a real repository is going on behind them.
     #[test]
     fn asking_what_the_repository_looks_like_never_waits_for_the_answer() {
-        let mut watching = watch(Path::new(env!("CARGO_MANIFEST_DIR")));
+        let mut watching = watch(Path::new(env!("CARGO_MANIFEST_DIR")), SystemTime::now());
 
         let began = Instant::now();
         for _ in 0..TICKS {

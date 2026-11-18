@@ -157,7 +157,8 @@ reviewers that encode both, for an agent working in this tree.
   draws it, leaving the routine entries out where `n` is pressed in a side pane, each run of them
   a row that counts them, beside the session a stack a third of the body wide, between 34 and
   52 columns, of the Usage pane and the Changes pane — the branch, the working tree, and the
-  commits made since the shell opened, newest first by short hash, the time they were committed
+  commits made since the session began — for one resumed, its first event — newest first by
+  short hash, the time they were committed
   — a weekday beside it on another day — and subject without its conventional prefix, each a
   stop for the section cursor that Enter opens whole in a dialog — and at the foot of the
   transcript, under
@@ -470,7 +471,7 @@ reviewers that encode both, for an agent working in this tree.
   file — and
   the `git` reads of the working tree made on a thread of its own as the shell's `Watch`,
   each dated by when it began and, where the shell asked for it, sent though nothing changed,
-  and each listing the commits on `HEAD` committed since the shell opened, newest first, read
+  and each listing the commits on `HEAD` committed since the session began, newest first, read
   by committer date with `git log`, whose signature check, which runs the program the config
   names, is turned off; and a commit the operator opens read with `git show` on a thread of
   its own — who made it, its whole message, and each file it changed with the lines it gained

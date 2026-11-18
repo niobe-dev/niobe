@@ -146,7 +146,7 @@ impl Action {
 pub enum SidePane {
     /// The plan's windows, the tokens and the context.
     Usage,
-    /// The branch, the commits made since the shell opened and the working
+    /// The branch, the commits made since the session began and the working
     /// tree.
     Changes,
 }

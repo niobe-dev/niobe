@@ -1726,6 +1726,93 @@ fn a_session_whose_terminal_went_away_is_still_there_to_resume() {
     assert!(!listed.contains("etags please"), "{listed}");
 }
 
+/// A session resumed lists, in the Changes pane, the commits made since the
+/// session began, not only those made since the shell opened on it: a
+/// commit made between the session's first event and its resume is one of
+/// its own.
+#[test]
+fn a_resumed_session_lists_the_commits_made_since_it_began() {
+    let repo = tempfile::tempdir().expect("a temporary directory can be created");
+    let git = |args: &[&str], at: Option<u64>| {
+        let mut command = Command::new("git");
+        command
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .args([
+                "-c",
+                "user.name=A Test",
+                "-c",
+                "user.email=test@example.invalid",
+            ])
+            .args(["-c", "commit.gpgsign=false"])
+            .args(args)
+            .current_dir(repo.path())
+            .stdin(Stdio::null());
+        if let Some(at) = at {
+            command
+                .env("GIT_COMMITTER_DATE", format!("@{at} +0000"))
+                .env("GIT_AUTHOR_DATE", format!("@{at} +0000"));
+        }
+        let output = command.output().expect("git runs");
+        assert!(output.status.success(), "git {args:?}: {output:?}");
+    };
+    git(&["init", "--initial-branch=main", "."], None);
+    git(&["commit", "--allow-empty", "-m", "first"], None);
+
+    let (terminal, slave) = Terminal::open();
+    let mut shell = shell_on(&slave, repo.path());
+    terminal.shows(OPENING_FRAME);
+    terminal.typed(b"etags please\r");
+    recorded(repo.path(), 1);
+    terminal.typed(CTRL_Q);
+    ended(&mut shell);
+    drop(slave);
+
+    let db = repo.path().join(".niobe").join("sessions.db");
+    let session: SessionId = "1".parse().expect("1 is a session id");
+    let began = Store::open(&db)
+        .and_then(|store| store.events(session))
+        .expect("the session was recorded")
+        .iter()
+        .map(|stored| stored.at)
+        .min()
+        .expect("the session holds an event");
+    let began = began
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("the clock is past the epoch")
+        .as_secs();
+    // Committed in the second the session began, and resumed seconds after:
+    // a list from when the shell opened would leave it out.
+    git(
+        &["commit", "--allow-empty", "-m", "feat: zebra crossing"],
+        Some(began),
+    );
+    while std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("the clock is past the epoch")
+        .as_secs()
+        < began + 2
+    {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let (terminal, slave) = Terminal::open();
+    // Wide enough that the Changes pane is drawn beside the session.
+    rustix::termios::tcsetwinsize(&slave, WIDE).expect("the pty can be resized");
+    let mut resumed = Reaped(
+        shell_command(&slave, repo.path())
+            .args(["--resume", "1"])
+            .spawn()
+            .expect("the niobe binary runs"),
+    );
+    terminal.shows(OPENING_FRAME);
+    // Its subject's words: the terminal is written in runs, and a run of
+    // spaces between two words is skipped over rather than written.
+    terminal.shows("zebra");
+    terminal.typed(CTRL_Q);
+    ended(&mut resumed);
+}
+
 #[test]
 fn a_shell_whose_terminal_went_away_ends_the_session_rather_than_failing() {
     let repo = repo();

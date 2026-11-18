@@ -87,13 +87,13 @@ pub struct Repo {
     /// shell compares a turn's end with: only a read that began after the
     /// turn ended says what the turn left behind.
     pub began: Option<Instant>,
-    /// The commits on the checked-out branch made since the shell opened,
+    /// The commits on the checked-out branch made since the session began,
     /// the newest first, as the repository names them; empty where none
     /// were, or nobody has read it.
     pub commits: Vec<Commit>,
 }
 
-/// A commit made since the shell opened, as the Changes pane lists it.
+/// A commit made since the session began, as the Changes pane lists it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Commit {
     /// Its whole name, which is what it is asked for by when the operator
@@ -194,7 +194,7 @@ pub enum Section {
     /// root with its trailing slash: it folds the files and directories
     /// under it away.
     Directory(String),
-    /// The commits made since the shell opened.
+    /// The commits made since the session began.
     Commits,
     /// One of those commits, by its whole name: it folds nothing, and Enter
     /// on it opens it whole.
