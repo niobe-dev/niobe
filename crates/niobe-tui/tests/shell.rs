@@ -74,6 +74,55 @@ pub fn session_waiting_on_a_prompt() -> App {
     app
 }
 
+/// A question about a skill says which skill, what it is — the first line
+/// of the backend's description of it, not the rest, which is written for
+/// the agent — and what it is handed; it shows none of the arguments again
+/// by key, and offers to always allow that skill, the rule the CLI itself
+/// suggests, or every skill, each said as such.
+#[test]
+fn a_question_about_a_skill_says_which_skill_and_what_it_is_for() {
+    use niobe_core::{Action, Proposal};
+
+    let mut app = running_session();
+    app.apply(&Event::PermissionRequest {
+        id: "toolu_skill".into(),
+        tool: "Skill".to_owned(),
+        input: r#"{"args":"price of haiku","skill":"claude-api"}"#.to_owned(),
+        target: Some("claude-api".to_owned()),
+        proposal: Some(Proposal::new(
+            Action::Skill {
+                name: "claude-api".to_owned(),
+                asked: "price of haiku".to_owned(),
+                about: Some(
+                    "Reference for the Claude API / Anthropic SDK.\nTRIGGER — read FIRST."
+                        .to_owned(),
+                ),
+            },
+            ["skill", "args"],
+        )),
+        reason: None,
+        agent: None,
+    });
+    let frame = screen(&mut app, 120, 40);
+    for words in [
+        "to use skill claude-api",
+        "Reference for the Claude API / Anthropic SDK.",
+        "for: price of haiku",
+        "Always allow skill claude-api",
+        "Always allow every skill",
+    ] {
+        assert!(frame.contains(words), "{words:?} in:\n{frame}");
+    }
+    for words in ["to run Skill", "TRIGGER", "args:", "skill:", "this target"] {
+        assert!(!frame.contains(words), "{words:?} in:\n{frame}");
+    }
+    let ask = app.asking().expect("the question waits");
+    assert_eq!(
+        ask.target_rule().map(|rule| rule.to_string()).as_deref(),
+        Some("Skill(claude-api)")
+    );
+}
+
 fn empty_session() -> App {
     App::new(Repo {
         name: "niobe".to_owned(),

@@ -57,7 +57,7 @@ reviewers that encode both, for an agent working in this tree.
   share or another action's own, so the config that writes them and the shell that draws them agree;
   `proposal.rs` is what a call
   waiting on the operator would do — replace text in a file, write a file whole, run a command,
-  let a plan go ahead, put questions to the operator — as the backend read it out of the call's
+  let a plan go ahead, put questions to the operator, use a skill — as the backend read it out of the call's
   arguments, and which arguments that reading covers, and the answers the operator gave
   questions, which no standing rule ever gives, since leave alone reaches the agent as questions
   nobody answered; `test_run.rs` recognises a shell
@@ -260,7 +260,9 @@ reviewers that encode both, for an agent working in this tree.
   diff is, a file written as the lines it will hold and whether what it held is lost, a command
   once, a plan whole as its markdown — or as written, where that markdown would draw
   some of its words as nothing or the plan holds a control or text that draws as nothing — with no standing answer offered and its refusal named
-  "keep planning" — and the arguments that reading does not cover by key; the questions a call
+  "keep planning", a skill as `to use skill <name>` with the first line the CLI describes it
+  with and what it is handed, its standing answers that skill and every skill — and the
+  arguments that reading does not cover by key; the questions a call
   puts to the operator are drawn in the question's frame instead of the tool, one at a time, each
   with its answers and what each means, ticked with Space where several may be chosen, Tab
   writing an answer of the operator's own, and go back with the leave to go ahead, `tags.rs` names each sub-agent by one short word of the kind of agent
@@ -328,7 +330,9 @@ reviewers that encode both, for an agent working in this tree.
   own mark of a call it did not run for want of permission, beside the result live and as the
   transcript's `permissionDecision`, as refused, whoever refused it — and reads an `Edit`,
   `Write`, `Bash` or `ExitPlanMode` permission prompt's arguments as what the call would do, and
-  an `AskUserQuestion` prompt's as the questions it puts to the operator, and the MCP
+  an `AskUserQuestion` prompt's as the questions it puts to the operator, and a `Skill`
+  prompt's as the skill it would use, beside the `description` the CLI gives it, with the
+  skill's name as its target, as the CLI's own suggested rule `Skill(<name>)` names it, and the MCP
   servers every `init` lists, each with the tools of the session's that are its own, and the
   CLI's answer to `mcp_status` — why a server failed, its scope, its transport and command or
   address (never its arguments, environment or headers) — which it keeps for every later

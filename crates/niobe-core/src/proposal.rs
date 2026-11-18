@@ -56,7 +56,8 @@ impl Proposal {
             Action::Replace { .. }
             | Action::Write { .. }
             | Action::Command { .. }
-            | Action::Plan { .. } => false,
+            | Action::Plan { .. }
+            | Action::Skill { .. } => false,
         }
     }
 }
@@ -105,6 +106,20 @@ pub enum Action {
     Questions {
         /// The questions, in the order they are asked.
         questions: Vec<Question>,
+    },
+    /// Use the skill called `name`: load the instructions, and whatever else
+    /// the skill bundles, that the backend keeps under that name, and hand it
+    /// `asked` to work on.
+    Skill {
+        /// The skill, as the backend names it.
+        name: String,
+        /// What the skill is handed to work on, as the agent wrote it; empty
+        /// where it handed nothing.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        asked: String,
+        /// What the skill is, in the backend's words, where it said.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        about: Option<String>,
     },
 }
 

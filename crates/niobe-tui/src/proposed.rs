@@ -5,7 +5,7 @@
 //! edit as the lines it removes and adds, a file written as the lines it
 //! will hold, a command once, a plan whole as the markdown it was written in
 //! — or as written, where that markdown would draw some of its words as
-//! nothing.
+//! nothing — and a skill as what it is and what it is handed.
 //!
 //! The backend reads these out of the call's arguments (see
 //! [`niobe_core::proposal`]); this draws them, and lays out by key whatever
@@ -100,7 +100,10 @@ impl Proposed {
                     .map(|l| DiffLine::Added(l.to_owned()))
                     .collect(),
             ),
-            Action::Command { .. } | Action::Plan { .. } | Action::Questions { .. } => None,
+            Action::Command { .. }
+            | Action::Plan { .. }
+            | Action::Questions { .. }
+            | Action::Skill { .. } => None,
         };
         Self {
             proposal,
@@ -197,6 +200,21 @@ impl Proposed {
                 capped: false,
             });
         }
+        if let Action::Skill { asked, about, .. } = self.proposal.action() {
+            self.skill_rows(
+                (asked, about.as_deref()),
+                width,
+                theme,
+                &mut rows,
+                &mut markers,
+            );
+            self.others_under(input, width, theme, &mut rows, &mut markers);
+            return Some(Call {
+                rows,
+                markers,
+                capped: false,
+            });
+        }
         let (subject, said) = match (self.proposal.action(), &self.lines) {
             (Action::Replace { path, every, .. }, Some(_)) => (
                 path,
@@ -212,7 +230,9 @@ impl Proposed {
                 _,
             ) => (path, Some(written(content, *existed))),
             (Action::Command { command }, _) => (command, None),
-            (Action::Plan { .. } | Action::Questions { .. }, _) => return None,
+            (Action::Plan { .. } | Action::Questions { .. } | Action::Skill { .. }, _) => {
+                return None;
+            }
         };
         let (subject_rows, beyond) = self.subject_rows(subject, width);
         rows.extend(
@@ -272,6 +292,72 @@ impl Proposed {
         )
     }
 
+    /// What a skill the call would use is, in the first line the backend
+    /// described it with — the rest of a skill's description is written for
+    /// the agent, when to reach for it — then `for:` and what it is handed,
+    /// laid out no further than a command is.
+    fn skill_rows(
+        &self,
+        (asked, about): (&str, Option<&str>),
+        width: usize,
+        theme: &Theme,
+        rows: &mut Vec<Line<'static>>,
+        markers: &mut Vec<(usize, usize, usize)>,
+    ) {
+        let dim = Style::new().fg(theme.dim);
+        if let Some(about) =
+            about.and_then(|about| about.lines().find(|line| !line.trim().is_empty()))
+        {
+            let (shown, more) = match about.char_indices().nth(SKILL_ABOUT_CHARS) {
+                Some((at, _)) => (&about[..at], true),
+                None => (about, false),
+            };
+            let about = match more {
+                true => format!("{}…", shown.trim_end()),
+                false => shown.trim().to_owned(),
+            };
+            rows.extend(
+                text::wrap_words_exact(&about, width)
+                    .into_iter()
+                    .map(|row| Line::from(row).style(dim)),
+            );
+        }
+        if asked.trim().is_empty() {
+            return;
+        }
+        if !rows.is_empty() {
+            rows.push(Line::from(""));
+        }
+        let (subject_rows, beyond) = self.subject_rows(&format!("{SKILL_FOR}{asked}"), width);
+        for (at, row) in subject_rows.into_iter().enumerate() {
+            let plain = Style::new().fg(theme.fg);
+            rows.push(match (at, row.strip_prefix(SKILL_FOR)) {
+                (0, Some(rest)) => Line::from(vec![
+                    ratatui::text::Span::styled(SKILL_FOR, dim),
+                    ratatui::text::Span::styled(rest.to_owned(), plain),
+                ]),
+                _ => Line::from(row).style(plain),
+            });
+        }
+        if beyond > 0 {
+            let cut = text::wrap(&subject_cut(beyond), width);
+            markers.push((rows.len(), cut.len(), beyond));
+            rows.extend(cut.into_iter().map(|row| Line::from(row).style(dim)));
+        }
+    }
+
+    /// The skill the call would use, where that is what it does.
+    pub fn skill(&self) -> Option<&str> {
+        match self.proposal.action() {
+            Action::Skill { name, .. } => Some(name),
+            Action::Replace { .. }
+            | Action::Write { .. }
+            | Action::Command { .. }
+            | Action::Plan { .. }
+            | Action::Questions { .. } => None,
+        }
+    }
+
     /// Whether what is asked is a plan going ahead, which no standing answer
     /// may approve: each plan is read before it is carried out.
     pub fn is_plan(&self) -> bool {
@@ -286,7 +372,8 @@ impl Proposed {
             Action::Replace { .. }
             | Action::Write { .. }
             | Action::Command { .. }
-            | Action::Plan { .. } => None,
+            | Action::Plan { .. }
+            | Action::Skill { .. } => None,
         }
     }
 
@@ -315,6 +402,13 @@ impl Proposed {
         }
     }
 }
+
+/// What a skill is handed to work on is said after this.
+const SKILL_FOR: &str = "for: ";
+
+/// The most characters of what a skill is drawn: the first line of its
+/// description, which a skill's author can make as long as they like.
+const SKILL_ABOUT_CHARS: usize = 400;
 
 /// What a plan the backend asked about with no text of its own shows instead.
 const NO_PLAN: &str = "No plan came with this question.";

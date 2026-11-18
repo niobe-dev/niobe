@@ -2877,6 +2877,7 @@ impl Translator {
             }),
             "WebFetch" => field("url").map(str::to_owned),
             "WebSearch" | "ToolSearch" => field("query").map(str::to_owned),
+            "Skill" => field("skill").map(str::to_owned),
             _ if AGENT_TOOLS.contains(&name) => field("description").map(str::to_owned),
             _ => scalars_of(input),
         }
@@ -3166,7 +3167,7 @@ impl Translator {
         let proposal = body
             .input
             .as_ref()
-            .and_then(|input| self.proposal_of(&tool, input));
+            .and_then(|input| self.proposal_of(&tool, input, body.description));
         let reason = asking_reason(body.decision_reason, body.blocked_path);
         let target = body
             .input
@@ -3184,11 +3185,18 @@ impl Translator {
     }
 
     /// What a call to the CLI's tool `tool` would do, read from its `input`,
-    /// for the tools whose arguments are known here: `Edit`, `Write`, `Bash`
-    /// and `ExitPlanMode`. `None` for any other tool, and for arguments not of the shape
-    /// the tool takes, which the question then shows as they are — but for
-    /// `ExitPlanMode`, which is a plan however its arguments are shaped.
-    fn proposal_of(&self, tool: &str, input: &serde_json::Value) -> Option<Proposal> {
+    /// for the tools whose arguments are known here: `Edit`, `Write`, `Bash`,
+    /// `ExitPlanMode`, `AskUserQuestion` and `Skill`, the last with what the
+    /// CLI's `described` the skill as. `None` for any other tool, and for
+    /// arguments not of the shape the tool takes, which the question then
+    /// shows as they are — but for `ExitPlanMode`, which is a plan however
+    /// its arguments are shaped.
+    fn proposal_of(
+        &self,
+        tool: &str,
+        input: &serde_json::Value,
+        described: Option<String>,
+    ) -> Option<Proposal> {
         let text = |key: &str| input.get(key)?.as_str().map(str::to_owned);
         match tool {
             "Edit" => {
@@ -3237,6 +3245,18 @@ impl Translator {
                 ),
             }),
             "AskUserQuestion" => questions_of(input),
+            "Skill" => {
+                let asked = match input.get("args") {
+                    None | Some(serde_json::Value::Null) => String::new(),
+                    Some(args) => args.as_str()?.to_owned(),
+                };
+                let action = Action::Skill {
+                    name: text("skill")?,
+                    asked,
+                    about: described.filter(|about| !about.trim().is_empty()),
+                };
+                Some(Proposal::new(action, ["skill", "args"]))
+            }
             _ => None,
         }
     }
@@ -4848,6 +4868,14 @@ fn target_of(input: &serde_json::Value) -> Option<String> {
 /// and a `path` beside an `owner` and a `repo` is a file in that repository.
 /// Its target is named only where it is the call's one argument.
 fn rule_target(tool: &str, input: &serde_json::Value) -> Option<String> {
+    // What a skill may do is the skill's: what it is handed to work on is
+    // text it reads, and the CLI's own rule for one names the skill alone.
+    if tool == "Skill" {
+        return input
+            .get("skill")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+    }
     let unread = !CLI_TARGETED_TOOLS.contains(&tool)
         && input.as_object().is_some_and(|fields| fields.len() != 1);
     match reaches_further(input) || unread {
@@ -8127,6 +8155,54 @@ mod tests {
         assert!(proposal.covers("command"));
         assert!(!proposal.covers("description"));
         assert!(!proposal.covers("dangerouslyDisableSandbox"));
+    }
+
+    /// A skill the agent asks to use is read as that skill, what it is and
+    /// what it is handed, as Claude Code 2.1.327 asks it; its name is what a
+    /// standing answer is written about, as the CLI's own suggested rule is
+    /// `Skill(<name>)`, and what the call's row names.
+    #[test]
+    fn a_skill_asked_for_is_proposed_as_that_skill_and_targeted_by_its_name() {
+        let line = r#"{"type":"control_request","request_id":"c1","request":{"subtype":"can_use_tool","tool_name":"Skill","display_name":"Skill","input":{"skill":"claude-api","args":"price of haiku"},"description":"Reference for the Claude API / Anthropic SDK — model ids, pricing.\nTRIGGER — read FIRST.","permission_suggestions":[{"type":"addRules","rules":[{"toolName":"Skill","ruleContent":"claude-api"}],"behavior":"allow","destination":"localSettings"}],"tool_use_id":"toolu_1"}}"#;
+        let events = translator().line(line);
+        let [
+            Event::PermissionRequest {
+                target, proposal, ..
+            },
+        ] = events.as_slice()
+        else {
+            panic!("one prompt: {events:?}");
+        };
+        assert_eq!(target.as_deref(), Some("claude-api"));
+        let proposal = proposal.as_ref().expect("a skill is read");
+        assert_eq!(
+            proposal.action(),
+            &Action::Skill {
+                name: "claude-api".to_owned(),
+                asked: "price of haiku".to_owned(),
+                about: Some(
+                    "Reference for the Claude API / Anthropic SDK — model ids, pricing.\n\
+                     TRIGGER — read FIRST."
+                        .to_owned()
+                ),
+            }
+        );
+        assert!(proposal.covers("skill") && proposal.covers("args"));
+
+        // One with no arguments for it and no description is still a skill.
+        let bare = proposal_asked(
+            r#"{"type":"control_request","request_id":"c2","request":{"subtype":"can_use_tool","tool_name":"Skill","input":{"skill":"review"},"tool_use_id":"toolu_2"}}"#,
+            &mut translator(),
+        )
+        .expect("a skill is read");
+        assert_eq!(
+            bare.action(),
+            &Action::Skill {
+                name: "review".to_owned(),
+                asked: String::new(),
+                about: None,
+            }
+        );
     }
 
     #[test]

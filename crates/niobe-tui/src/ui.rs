@@ -4137,9 +4137,14 @@ fn question_body(app: &App, ask: &Ask, inner: usize, theme: &Theme) -> QuestionB
             0 => tool_label(tool),
             more => format!("{}… ({more} more characters)", tool_label(tool)),
         };
-        let mut head = match app.question_on_screen() {
-            Some((question, step)) => put_question(question, step, ask, inner, theme),
-            None => question_head(&label, inner, plain),
+        let skill = ask
+            .proposed
+            .as_ref()
+            .and_then(crate::proposed::Proposed::skill);
+        let mut head = match (app.question_on_screen(), skill) {
+            (Some((question, step)), _) => put_question(question, step, ask, inner, theme),
+            (None, Some(skill)) => question_head(USE_SKILL, &skill_label(skill), inner, plain),
+            (None, None) => question_head(TO_RUN, &label, inner, plain),
         };
         head.extend(question_reason(ask, inner, theme));
         let words: Vec<(Answer, String, String)> = app
@@ -4464,21 +4469,42 @@ fn capped(said: &str, most: usize) -> (&str, usize) {
     }
 }
 
-/// `to run <tool>` wrapped to `inner` columns, the tool's name in bold on
-/// every row it takes.
-fn question_head(label: &str, inner: usize, plain: Style) -> Vec<Line<'static>> {
-    const TO_RUN: &str = "to run ";
-    text::wrap_exact(&format!("{TO_RUN}{label}"), inner)
+/// What a question asks leave for, said before the tool it would run.
+const TO_RUN: &str = "to run ";
+
+/// What a question about a skill asks leave for, said before the skill: the
+/// skill is what the operator is deciding on, and `Skill` is only the tool
+/// the backend uses one with.
+const USE_SKILL: &str = "to use skill ";
+
+/// `to run <tool>`, or `to use skill <name>`, wrapped to `inner` columns, the
+/// name in bold on every row it takes.
+fn question_head(
+    lead: &'static str,
+    label: &str,
+    inner: usize,
+    plain: Style,
+) -> Vec<Line<'static>> {
+    text::wrap_exact(&format!("{lead}{label}"), inner)
         .into_iter()
         .enumerate()
-        .map(|(at, row)| match (at, row.strip_prefix(TO_RUN)) {
+        .map(|(at, row)| match (at, row.strip_prefix(lead)) {
             (0, Some(name)) => Line::from(vec![
-                Span::styled(TO_RUN, plain),
+                Span::styled(lead, plain),
                 Span::styled(name.to_owned(), plain.bold()),
             ]),
             _ => Line::from(Span::styled(row, plain.bold())),
         })
         .collect()
+}
+
+/// A skill's name as a question says it: no longer than a tool's name is
+/// drawn, and saying how much more there is where it is longer.
+fn skill_label(skill: &str) -> String {
+    match capped(skill, TOOL_NAME_CHARS) {
+        (name, 0) => name.to_owned(),
+        (name, more) => format!("{name}… ({more} more characters)"),
+    }
 }
 
 /// `┌ ? claude asks ──── blocks turn 3 ┐`: who is asking at the left, in the
@@ -4606,11 +4632,21 @@ fn option_words(answer: Answer, ask: &Ask, spelled: bool) -> (String, String) {
 }
 
 /// What an answer to any call but a plan is called, and what choosing it does.
+/// A call that uses a skill names the skill, which is what its standing
+/// answer about the target allows, and says what the one about the tool
+/// allows: every skill.
 fn answer_words(answer: Answer, ask: &Ask, spelled: bool) -> (String, String) {
+    let skill = ask
+        .proposed
+        .as_ref()
+        .and_then(crate::proposed::Proposed::skill);
     match answer {
         Answer::Once => ("Allow once".to_owned(), "this call only".to_owned()),
         Answer::AlwaysTool => (
-            format!("Always allow {}", tool_label(&ask.tool)),
+            match skill {
+                Some(_) => "Always allow every skill".to_owned(),
+                None => format!("Always allow {}", tool_label(&ask.tool)),
+            },
             ask.tool_rule()
                 .map(|rule| match spelled || tool_label(&ask.tool) == ask.tool {
                     true => format!("niobe saves {rule}"),
@@ -4619,7 +4655,10 @@ fn answer_words(answer: Answer, ask: &Ask, spelled: bool) -> (String, String) {
                 .unwrap_or_default(),
         ),
         Answer::AlwaysTarget => (
-            "Always allow this target".to_owned(),
+            match skill {
+                Some(skill) => format!("Always allow skill {}", skill_label(skill)),
+                None => "Always allow this target".to_owned(),
+            },
             ask.target_rule()
                 .map(|rule| format!("niobe saves {rule}"))
                 .unwrap_or_default(),

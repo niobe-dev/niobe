@@ -1007,6 +1007,9 @@ pub(crate) struct ControlBody {
     pub(crate) decision_reason: Option<String>,
     /// The file a path-guarded call was stopped at, where the CLI named one.
     pub(crate) blocked_path: Option<String>,
+    /// What the call's subject is, where the CLI says: for a skill, the
+    /// skill's own description. Recorded on Claude Code 2.1.327.
+    pub(crate) description: Option<String>,
 }
 
 /// A `control_response`: the CLI answering a request Niobe made.
