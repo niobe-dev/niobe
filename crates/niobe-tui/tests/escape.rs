@@ -639,9 +639,28 @@ fn commit_dialog(p: &str) -> App {
     }
     app.on_key(key(KeyCode::Enter));
     let asked = app.take_commit_request().unwrap_or_default();
+    let person = niobe_tui::app::Person {
+        name: p.to_owned(),
+        email: p.to_owned(),
+    };
     app.set_commit(niobe_tui::app::ShownCommit {
         id: asked,
-        text: Ok(format!("commit {id}\nAuthor: {p}\n\n    shipped {p}\n")),
+        read: Ok(niobe_tui::app::CommitRead {
+            merged: vec![p.to_owned(), p.to_owned()],
+            author: person.clone(),
+            authored: p.to_owned(),
+            committer: person,
+            committed: p.to_owned(),
+            message: format!("{p}: shipped {p}\n\n{p}"),
+            files: vec![niobe_tui::app::WorkingFile {
+                path: p.to_owned(),
+                added: Some(1),
+                removed: None,
+                new: false,
+            }],
+            message_cut: None,
+            files_cut: None,
+        }),
     });
     app
 }

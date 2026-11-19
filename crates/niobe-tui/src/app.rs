@@ -115,9 +115,44 @@ pub struct ShownCommit {
     /// The commit's whole name, as it was asked for.
     pub id: String,
     /// Who made it and when, its whole message and the files it changed with
-    /// the lines each gained and lost, as lines to be read as written; or why
-    /// it could not be read.
-    pub text: Result<String, String>,
+    /// the lines each gained and lost; or why it could not be read.
+    pub read: Result<CommitRead, String>,
+}
+
+/// What a commit's dialog shows of it, each part as the repository gave it,
+/// for the shell to lay out and colour.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CommitRead {
+    /// The commits a merge joined, by their short names; empty for a commit
+    /// that is not a merge.
+    pub merged: Vec<String>,
+    /// Who wrote it.
+    pub author: Person,
+    /// When it was written, worded by the repository in the machine's zone.
+    pub authored: String,
+    /// Who committed it.
+    pub committer: Person,
+    /// When it was committed, worded as [`CommitRead::authored`] is.
+    pub committed: String,
+    /// Its whole message, as written.
+    pub message: String,
+    /// The files it changed, each with the lines it gained and lost: a
+    /// merge's against its first parent, the branch it was merged into.
+    pub files: Vec<WorkingFile>,
+    /// The bytes kept of who made it and its message, where the read was
+    /// cut short there and the rest left out; `None` where it was read whole.
+    pub message_cut: Option<usize>,
+    /// The bytes kept of its list of files, on the same terms.
+    pub files_cut: Option<usize>,
+}
+
+/// Someone a commit names: its author or its committer.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Person {
+    /// Their name, as the commit records it.
+    pub name: String,
+    /// Their address, as the commit records it.
+    pub email: String,
 }
 
 /// One file the working tree has changed, measured from the repository.
@@ -7857,15 +7892,8 @@ impl App {
             return;
         }
         let title = title.clone();
-        let text = match shown.text {
-            Ok(text) => text,
-            Err(why) => format!("git could not read this commit: {why}"),
-        };
-        self.detail = Some(crate::detail::Detail::verbatim(
-            &title,
-            &text,
-            "git said nothing of this commit",
-        ));
+        let lines = crate::commit::lines(&shown.id, &shown.read);
+        self.detail = Some(crate::detail::Detail::styled(&title, lines));
     }
 
     /// Replaces what the shell knows about the repository with a fresh read.
@@ -21946,7 +21974,12 @@ mod tests {
                 .expect("the call is open")
                 .visible(80, 10)
                 .first()
-                .map(|(line, _)| line.clone())
+                .map(|pieces| {
+                    pieces
+                        .iter()
+                        .map(|(said, _)| said.as_str())
+                        .collect::<String>()
+                })
         };
         let before = top(&app);
 

@@ -24,7 +24,7 @@ use niobe_core::event::ToolOutcome;
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
-use ratatui::text::Line;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use crate::app::App;
@@ -78,6 +78,12 @@ enum Row {
     Heading(String),
     /// A piece of the text, at most [`CHUNK`] bytes and no line break.
     Text(Range<usize>),
+    /// A piece of the text laid out in tones, at most [`CHUNK`] bytes and
+    /// no line break: each tone with where in the piece it ends, the last at
+    /// its end. The text is held as it is drawn — its controls shown and its
+    /// tabs expanded — so wrapping it moves no byte and each tone ends where
+    /// it says.
+    Styled(Range<usize>, Vec<(usize, Tone)>),
     /// Said in place of text there is none of.
     Note(&'static str),
     /// Between the two parts.
@@ -213,6 +219,26 @@ impl Detail {
         }
     }
 
+    /// A page of `lines` under `title`, each a line laid out in pieces of
+    /// the tones they are drawn in, read as written: a line too long for the
+    /// view breaks at the last cell that fits.
+    pub(crate) fn styled(title: &str, lines: Vec<Vec<(String, Tone)>>) -> Self {
+        let mut text = String::new();
+        let mut rows = Vec::new();
+        for line in lines {
+            push_styled(&mut text, &mut rows, line);
+        }
+        Self {
+            title: title.to_owned(),
+            text,
+            rows,
+            top: (0, 0),
+            drawn: None,
+            words: false,
+            other: None,
+        }
+    }
+
     /// What the dialog is drawn under.
     pub(crate) fn title(&self) -> &str {
         &self.title
@@ -269,7 +295,7 @@ impl Detail {
     /// The lines of row `at` at `width`.
     fn lines_of(&self, at: usize, width: usize) -> Vec<String> {
         match self.rows.get(at) {
-            Some(Row::Text(range)) => {
+            Some(Row::Text(range) | Row::Styled(range, _)) => {
                 let line = self.text.get(range.clone()).unwrap_or("");
                 let lines = match self.words {
                     true => text::wrap(line, width),
@@ -289,7 +315,7 @@ impl Detail {
     /// How many lines row `at` takes at `width`.
     fn height_of(&self, at: usize, width: usize) -> usize {
         match self.rows.get(at) {
-            Some(Row::Text(_)) => self.lines_of(at, width).len(),
+            Some(Row::Text(_) | Row::Styled(..)) => self.lines_of(at, width).len(),
             _ => 1,
         }
     }
@@ -346,36 +372,129 @@ impl Detail {
         (0, 0)
     }
 
-    /// The lines on screen, `room` of them at `width` at most, each with
-    /// whether it is a heading or a note rather than the text.
-    pub(crate) fn visible(&self, width: usize, room: usize) -> Vec<(String, Kind)> {
+    /// The lines on screen, `room` of them at `width` at most, each in the
+    /// pieces of the tones it is drawn in.
+    pub(crate) fn visible(&self, width: usize, room: usize) -> Vec<Vec<(String, Tone)>> {
         let (first, skip) = self.top;
         let mut shown = Vec::new();
         for at in first..self.rows.len() {
-            let kind = match self.rows.get(at) {
-                Some(Row::Heading(_)) => Kind::Heading,
-                Some(Row::Note(_)) => Kind::Note,
-                Some(Row::Text(_) | Row::Blank) | None => Kind::Text,
-            };
-            let lines = self.lines_of(at, width);
+            let lines = self.toned_lines_of(at, width);
             let skipped = if at == first { skip } else { 0 };
             for line in lines.into_iter().skip(skipped) {
                 if shown.len() == room {
                     return shown;
                 }
-                shown.push((line, kind));
+                shown.push(line);
             }
         }
         shown
     }
+
+    /// The lines of row `at` at `width`, each in the pieces of its tones.
+    fn toned_lines_of(&self, at: usize, width: usize) -> Vec<Vec<(String, Tone)>> {
+        let lines = self.lines_of(at, width);
+        let whole = |tone: Tone| -> Vec<Vec<(String, Tone)>> {
+            lines
+                .iter()
+                .map(|line| vec![(line.clone(), tone)])
+                .collect()
+        };
+        match self.rows.get(at) {
+            Some(Row::Heading(_)) => whole(Tone::Strong),
+            Some(Row::Note(_)) => whole(Tone::Dim),
+            Some(Row::Text(_) | Row::Blank) | None => whole(Tone::Plain),
+            Some(Row::Styled(_, tones)) => toned(lines, tones),
+        }
+    }
 }
 
-/// How a line of the view is drawn.
+/// What a piece of a line in the view is, which decides how it is drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Kind {
-    Heading,
-    Note,
-    Text,
+pub(crate) enum Tone {
+    /// The text itself.
+    Plain,
+    /// What says less than the text beside it: a label, an address, a note.
+    Dim,
+    /// What the rest is under: a heading, a commit's subject.
+    Strong,
+    /// What the eye is pointed to: a time, a commit's kind.
+    Hint,
+    /// A commit's name, as the Changes pane draws it.
+    Hash,
+    /// Lines added, in a diff's colours.
+    Added,
+    /// Lines removed, in a diff's colours.
+    Removed,
+    /// What went wrong.
+    Failed,
+}
+
+/// `lines`, the lines one styled row wraps into, cut into the pieces its
+/// `tones` say. Each line is a slice of the row as it is held, one after
+/// the other, so where a line starts in the row is the lengths before it.
+fn toned(lines: Vec<String>, tones: &[(usize, Tone)]) -> Vec<Vec<(String, Tone)>> {
+    let mut start = 0;
+    lines
+        .into_iter()
+        .map(|line| {
+            let end = start + line.len();
+            let mut pieces = Vec::new();
+            let mut from = start;
+            for &(until, tone) in tones {
+                let until = until.min(end);
+                if until > from {
+                    let piece = line.get(from - start..until - start).unwrap_or_default();
+                    pieces.push((piece.to_owned(), tone));
+                    from = until;
+                }
+            }
+            start = end;
+            if pieces.is_empty() {
+                pieces.push((line, Tone::Plain));
+            }
+            pieces
+        })
+        .collect()
+}
+
+/// Appends a line laid out in `pieces` to `text` as rows of at most
+/// [`CHUNK`] bytes, each with the tones of the pieces it holds. Each piece
+/// is held as it is drawn — its controls shown, a line break among them,
+/// and its tabs expanded from where the line has reached — so that wrapping
+/// it, which would do both, moves none of the tones' ends.
+fn push_styled(text: &mut String, rows: &mut Vec<Row>, pieces: Vec<(String, Tone)>) {
+    let mut line = String::new();
+    let mut ends = Vec::with_capacity(pieces.len());
+    for (said, tone) in pieces {
+        let shown = text::controls_shown_in_rows(&said).replace('\n', "␤");
+        let reached = line.len();
+        line.push_str(&shown);
+        if shown.contains('\t') {
+            line = text::expand_tabs(&line);
+        }
+        if line.len() > reached {
+            ends.push((line.len(), tone));
+        }
+    }
+    let base = text.len();
+    text.push_str(&line);
+    let mut at = 0;
+    loop {
+        let mut cut = (at + CHUNK).min(line.len());
+        while !line.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        let tones = ends
+            .iter()
+            .filter(|(end, _)| *end > at)
+            .map(|&(end, tone)| (end.min(cut) - at, tone))
+            .collect();
+        rows.push(Row::Styled(base + at..base + cut, tones));
+        at = cut;
+        if at >= line.len() {
+            break;
+        }
+    }
 }
 
 /// Appends `said` to `text` as rows, or a note saying there is none of it.
@@ -437,18 +556,15 @@ pub(crate) fn draw(frame: &mut Frame, body: Rect, app: &mut App, theme: &Theme) 
     // the text.
     let room = usize::from(body.height).saturating_sub(5).max(1);
     let text_width = usize::from(width).saturating_sub(crate::ui::DIALOG_INSET);
-    let plain = Style::new().fg(theme.dialog_fg);
     let mut lines = vec![Line::from("")];
-    lines.extend(
-        detail
-            .visible(text_width, room)
-            .into_iter()
-            .map(|(line, kind)| match kind {
-                Kind::Heading => Line::styled(line, plain.bold()),
-                Kind::Note => Line::styled(line, Style::new().fg(theme.dialog_dim)),
-                Kind::Text => Line::styled(line, plain),
-            }),
-    );
+    lines.extend(detail.visible(text_width, room).into_iter().map(|pieces| {
+        Line::from(
+            pieces
+                .into_iter()
+                .map(|(said, tone)| Span::styled(said, drawn_as(tone, theme)))
+                .collect::<Vec<_>>(),
+        )
+    }));
     let title = text::truncate(&text::controls_shown(&detail.title), text_width);
     let footer = match detail.turns() {
         true => " ↑↓ PgUp PgDn Home End scroll · w trimmed/whole · Esc close ",
@@ -461,6 +577,29 @@ pub(crate) fn draw(frame: &mut Frame, body: Rect, app: &mut App, theme: &Theme) 
         crate::app::Overlay::Detail,
         inner,
     )));
+}
+
+/// How a piece in `tone` is drawn on a dialog in `theme`.
+///
+/// The text in the dialog's own colours. What is pointed out in a colour of
+/// its own is drawn on the background that colour was chosen for, as a
+/// badge: in the sixteen names a dialog is grey or green, and the accent or
+/// a diff's green drawn straight on it vanishes. Lines added and removed are
+/// on a diff's wash, as the transcript draws them; a time, a commit's kind,
+/// its name and a failure on the panes' background, as the Changes pane
+/// draws a commit's name.
+fn drawn_as(tone: Tone, theme: &Theme) -> Style {
+    let plain = Style::new().fg(theme.dialog_fg);
+    let badge = |colour| Style::new().fg(colour).bg(theme.pane_bg);
+    match tone {
+        Tone::Plain => plain,
+        Tone::Dim => Style::new().fg(theme.dialog_dim),
+        Tone::Strong => plain.bold(),
+        Tone::Hint => badge(theme.hot),
+        Tone::Hash | Tone::Failed => badge(theme.warn),
+        Tone::Added => Style::new().fg(theme.add).bg(theme.add_bg),
+        Tone::Removed => Style::new().fg(theme.del).bg(theme.del_bg),
+    }
 }
 
 impl Detail {
@@ -495,8 +634,104 @@ mod tests {
         detail
             .visible(width, room)
             .into_iter()
-            .map(|(line, _)| line)
+            .map(|pieces| pieces.into_iter().map(|(said, _)| said).collect())
             .collect()
+    }
+
+    fn pieces(said: &[(&str, Tone)]) -> Vec<(String, Tone)> {
+        said.iter()
+            .map(|(said, tone)| ((*said).to_owned(), *tone))
+            .collect()
+    }
+
+    /// A line laid out in pieces of several tones keeps each piece's tone
+    /// wherever the view breaks it, a piece cut at the edge carrying its
+    /// tone on into the next line.
+    #[test]
+    fn a_line_in_pieces_keeps_each_pieces_tone_where_it_wraps() {
+        let detail = Detail::styled(
+            "Commit abc",
+            vec![pieces(&[
+                ("+12", Tone::Added),
+                (" ", Tone::Plain),
+                ("−3", Tone::Removed),
+                ("  src/long/path.rs", Tone::Plain),
+            ])],
+        );
+
+        assert_eq!(
+            detail.visible(8, 10),
+            [
+                pieces(&[
+                    ("+12", Tone::Added),
+                    (" ", Tone::Plain),
+                    ("−3", Tone::Removed),
+                    ("  ", Tone::Plain),
+                ]),
+                pieces(&[("src/long", Tone::Plain)]),
+                pieces(&[("/path.rs", Tone::Plain)]),
+            ]
+        );
+    }
+
+    /// A piece holding a control character shows it by its glyph and a tab
+    /// as the spaces to the next stop, as the rest of the view does, and the
+    /// pieces after it keep their tones where they are drawn.
+    #[test]
+    fn a_control_in_a_piece_is_shown_and_moves_no_tone() {
+        let detail = Detail::styled(
+            "Commit abc",
+            vec![pieces(&[
+                ("a\tb\u{1b}[31m\n", Tone::Plain),
+                ("+1", Tone::Added),
+            ])],
+        );
+
+        assert_eq!(
+            detail.visible(40, 10),
+            [pieces(&[("a   b␛[31m␤", Tone::Plain), ("+1", Tone::Added)])]
+        );
+    }
+
+    /// A line longer than one row of the view holds is cut into rows, every
+    /// row after the first in the tone of the piece it was cut from, and a
+    /// piece after the cut in its own tone where it is.
+    #[test]
+    fn a_piece_longer_than_a_row_holds_keeps_its_tone_in_every_row() {
+        let long = "x".repeat(CHUNK * 2 + 5);
+        let detail = Detail::styled(
+            "Commit abc",
+            vec![pieces(&[
+                ("    ", Tone::Plain),
+                (&long, Tone::Strong),
+                ("+1", Tone::Added),
+            ])],
+        );
+
+        let lines = detail.visible(usize::MAX / 2, 10);
+
+        assert_eq!(lines.len(), 3, "a row a chunk");
+        assert_eq!(lines[0][0], ("    ".to_owned(), Tone::Plain));
+        let strong: String = lines
+            .iter()
+            .flatten()
+            .filter(|(_, tone)| *tone == Tone::Strong)
+            .map(|(said, _)| said.as_str())
+            .collect();
+        assert_eq!(strong, long);
+        assert_eq!(
+            lines.last().and_then(|line| line.last()),
+            Some(&("+1".to_owned(), Tone::Added)),
+            "the piece after the cut is where it is"
+        );
+        assert!(
+            lines
+                .iter()
+                .skip(1)
+                .flatten()
+                .all(|(said, tone)| *tone == Tone::Strong || said == "+1"),
+            "{lines:?}"
+        );
     }
 
     #[test]

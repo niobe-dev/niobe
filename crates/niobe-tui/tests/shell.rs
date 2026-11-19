@@ -4679,11 +4679,12 @@ fn the_commits_made_since_the_shell_opened_are_listed_in_the_changes_pane() {
 
 /// The section cursor walks onto each commit the Changes pane lists, and
 /// Enter on one opens it whole in a dialog: saying it is being read until
-/// the repository answers, then what it answered, and an answer for a
-/// dialog closed since dropped.
+/// the repository answers, then what it answered, the lines its files gained
+/// and lost in a diff's colours, and an answer for a dialog closed since
+/// dropped.
 #[test]
 fn enter_on_a_commit_opens_it_whole_in_a_dialog() {
-    use niobe_tui::app::{Commit, ShownCommit};
+    use niobe_tui::app::{Commit, CommitRead, Person, ShownCommit, WorkingFile};
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     let id = format!("abfdd03{}", "0".repeat(33));
@@ -4726,15 +4727,44 @@ fn enter_on_a_commit_opens_it_whole_in_a_dialog() {
 
     app.set_commit(ShownCommit {
         id: id.clone(),
-        text: Ok("commit abfdd03\nAuthor:     A Test\n\n    feat(tui): draw modern's cyborg\n\n    The body, whole.\n".to_owned()),
+        read: Ok(CommitRead {
+            author: Person {
+                name: "A Test".to_owned(),
+                email: "test@example.invalid".to_owned(),
+            },
+            message: "feat(tui): draw modern's cyborg\n\nThe body, whole.\n".to_owned(),
+            files: vec![WorkingFile {
+                path: "crates/niobe-tui/src/scene.rs".to_owned(),
+                added: Some(16),
+                removed: Some(2),
+                new: false,
+            }],
+            ..CommitRead::default()
+        }),
     });
     let shown = screen(&mut app, 120, 30);
-    assert!(shown.contains("The body, whole."), "{shown}");
+    for said in [
+        "Author:     A Test <test@example.invalid>",
+        "    feat(tui): draw modern's cyborg",
+        "    The body, whole.",
+        "1 file changed  +16 −2",
+        "  +16 −2  crates/niobe-tui/src/scene.rs",
+    ] {
+        assert!(shown.contains(said), "{said:?} in:\n{shown}");
+    }
+    let theme = *app.theme();
+    let gained = style_at(&mut app, 120, 30, "+16 −2  crates").expect("the row is drawn");
+    assert_eq!(
+        (gained.fg, gained.bg),
+        (Some(theme.add), Some(theme.add_bg))
+    );
+    let lost = style_at(&mut app, 120, 30, "−2  crates").expect("the row is drawn");
+    assert_eq!((lost.fg, lost.bg), (Some(theme.del), Some(theme.del_bg)));
 
     app.on_key(key(KeyCode::Esc));
     app.set_commit(ShownCommit {
         id,
-        text: Ok("late".to_owned()),
+        read: Err("late".to_owned()),
     });
     let closed = screen(&mut app, 120, 30);
     assert!(

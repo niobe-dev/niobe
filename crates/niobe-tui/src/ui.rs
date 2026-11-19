@@ -6861,7 +6861,7 @@ fn commit_time(app: &App, commit: &crate::app::Commit) -> Option<String> {
 /// `subject` without the conventional-commit prefix it opens with — a type,
 /// a scope in parentheses, a `!` and the colon and space after them — or
 /// whole where it opens with none.
-fn unprefixed(subject: &str) -> &str {
+pub(crate) fn unprefixed(subject: &str) -> &str {
     let Some((prefix, rest)) = subject.split_once(": ") else {
         return subject;
     };

@@ -24,7 +24,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use crate::app::App;
-use crate::detail::{Detail, Kind};
+use crate::detail::{Detail, Tone};
 use crate::text;
 use crate::theme::Theme;
 
@@ -450,12 +450,23 @@ fn sized(file: &MemoryFile) -> String {
 /// A file's text, read-only: the lines of its page on screen, `room` of them
 /// at `width` at most.
 fn reading(page: &Detail, (width, room): (usize, usize), theme: &Theme) -> Vec<Line<'static>> {
-    let plain = Style::new().fg(theme.dialog_fg);
     page.visible(width, room)
         .into_iter()
-        .map(|(line, kind)| match kind {
-            Kind::Note => Line::styled(line, Style::new().fg(theme.dialog_dim)),
-            Kind::Heading | Kind::Text => Line::styled(line, plain),
+        .map(|pieces| {
+            let pieces = pieces.into_iter().map(|(said, tone)| {
+                let colour = match tone {
+                    Tone::Dim => theme.dialog_dim,
+                    Tone::Plain
+                    | Tone::Strong
+                    | Tone::Hint
+                    | Tone::Hash
+                    | Tone::Added
+                    | Tone::Removed
+                    | Tone::Failed => theme.dialog_fg,
+                };
+                Span::styled(said, Style::new().fg(colour))
+            });
+            Line::from(pieces.collect::<Vec<_>>())
         })
         .collect()
 }

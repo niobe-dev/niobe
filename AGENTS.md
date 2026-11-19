@@ -314,7 +314,13 @@ reviewers that encode both, for an agent working in this tree.
   Niobe's hook trimmed that output, the whole of it behind `w` — opened from
   the list of the conversation's calls that `d` in a side pane or View › Tool calls… shows, or by a click on the
   call's row, a run's own row or a run folded to it opening that list on its first; it
-  wraps only the rows on screen, so a megabyte of output pages as fast as a screenful. `s` in a side
+  wraps only the rows on screen, so a megabyte of output pages as fast as a screenful; a row of it
+  can be laid out in pieces of tones — plain, dim, strong, a hint, a commit's name, lines added or
+  removed, a failure — each drawn in a colour the theme is checked to read on a dialog, the counts
+  in a diff's own colours on its wash. `commit.rs` lays a commit opened from the Changes pane out
+  in those tones, as `git show --format=fuller` lays it out: its name, who made it and when, the
+  kind of change its subject opens with before the subject, its message, and the lines each file
+  gained and lost, a count of none dim. `s` in a side
   pane or View › Just one agent… narrows the transcript to one sub-agent's own entries — what the
   bridge read under that agent's id, and nothing of the session's — and its title says whose,
   until the key again shows everything. `overview.rs` is the trait the loop asks for the project
@@ -484,7 +490,8 @@ reviewers that encode both, for an agent working in this tree.
   by committer date with `git log`, whose signature check, which runs the program the config
   names, is turned off; and a commit the operator opens read with `git show` on a thread of
   its own — who made it, its whole message, and each file it changed with the lines it gained
-  and lost, against a merge's first parent, but not the change itself — with no converter or
+  and lost, against a merge's first parent, but not the change itself — each field read apart
+  and handed to the shell as such, never as text for it to read back, with no converter or
   external diff the config names run, nothing taken but a commit's whole name, and no more
   than four mebibytes of either;
   `preferences.rs` keeps the shell's picks in the user's `choices.toml`, under the session's

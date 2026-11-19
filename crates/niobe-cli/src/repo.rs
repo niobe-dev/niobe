@@ -13,7 +13,7 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::time::{Duration, Instant, SystemTime};
 
 use niobe_store::Store;
-use niobe_tui::app::{Commit, Repo, ShownCommit, WorkingFile};
+use niobe_tui::app::{Commit, CommitRead, Person, Repo, ShownCommit, WorkingFile};
 use niobe_tui::watch::Watch;
 
 /// The directory in a repository that holds Niobe's own files.
@@ -695,9 +695,9 @@ impl Watch for Watcher {
         // opened to be read now, not after the working tree's next count.
         let (root, id, shown) = (self.root.clone(), id.to_owned(), self.shown.clone());
         std::thread::spawn(move || {
-            let text = show_commit(&root, &id);
+            let read = show_commit(&root, &id);
             // A shell that has closed has no dialog to put it in.
-            let _ = shown.send(ShownCommit { id, text });
+            let _ = shown.send(ShownCommit { id, read });
         });
     }
 
@@ -993,19 +993,25 @@ const SHOWN_BYTES: usize = 4 * 1024 * 1024;
 /// The most of what a git that failed said about it that is kept.
 const SHOWN_ERROR_BYTES: u64 = 64 * 1024;
 
+/// Who made a commit and when, and its message, as `git show` is asked for
+/// them: its parents' short names, the author's name, address and date, the
+/// committer's, and the message, a NUL after each. The message is last, so a
+/// NUL in it stays in it. `%an` and `%ae` rather than `%aN` and `%aE`, so no
+/// mailmap the repository holds renames anyone.
+const ABOUT: &str = "--format=%p%x00%an%x00%ae%x00%ad%x00%cn%x00%ce%x00%cd%x00%B";
+
 /// The commit named `id` in the repository at `root`, read whole for its
-/// dialog: who made it and when, by whose clock and on whose behalf, and its
-/// whole message, as `git show --format=fuller` prints them; then the files
-/// it changed, a row each of the lines it added and removed, with the files
-/// and lines summed above them. A merge is counted against its first parent,
-/// the branch it was merged into. Past [`SHOWN_BYTES`] of either half the
-/// rest is left out, and the text says so.
+/// dialog: who wrote it and when, who committed it and when, and its whole
+/// message; then the files it changed, each with the lines it added and
+/// removed. A merge is counted against its first parent, the branch it was
+/// merged into. Past [`SHOWN_BYTES`] of either half the rest is left out,
+/// and the read says so.
 ///
 /// `id` is refused unless it is a commit's whole name, so that nothing the
 /// shell hands over reaches git as an option or a revision range. Run as the
 /// working tree's reads are, so nothing the repository configures runs: no
 /// signature check, no converter and no external diff.
-pub(crate) fn show_commit(root: &Path, id: &str) -> Result<String, String> {
+pub(crate) fn show_commit(root: &Path, id: &str) -> Result<CommitRead, String> {
     if id.is_empty() || !id.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(format!("{id:?} is not the name of a commit"));
     }
@@ -1025,25 +1031,43 @@ pub(crate) fn show_commit(root: &Path, id: &str) -> Result<String, String> {
         args.extend([id, "--"]);
         bounded_git(root, &args)
     };
-    let (about, about_cut) = shown(
-        "--format=fuller",
+    let (printed, about_cut) = shown(
+        ABOUT,
         &["--date=format-local:%a %Y-%m-%d %H:%M", "--no-patch"],
     )?;
     let (numstat, files_cut) = shown("--format=", &["--numstat", "-z", "-m", "--first-parent"])?;
+    Ok(CommitRead {
+        files: working_tree(whole_records(&numstat, files_cut)),
+        message_cut: about_cut.then_some(SHOWN_BYTES),
+        files_cut: files_cut.then_some(SHOWN_BYTES),
+        ..about(&printed)
+    })
+}
 
-    let mut text = about.trim_end().to_owned();
-    if about_cut {
-        text.push_str(&left_out());
+/// Who made a commit and when, and its message, from what `git show` printed
+/// as [`ABOUT`] asks. A field a read cut off before is empty. Only a merge's
+/// parents are kept, since a commit with one names no other it joined.
+fn about(printed: &str) -> CommitRead {
+    let mut fields = printed.splitn(8, '\0');
+    let mut next = || fields.next().unwrap_or_default().to_owned();
+    let parents: Vec<String> = next().split_whitespace().map(str::to_owned).collect();
+    let (name, email, authored) = (next(), next(), next());
+    let author = Person { name, email };
+    let (name, email, committed) = (next(), next(), next());
+    let committer = Person { name, email };
+    CommitRead {
+        merged: if parents.len() > 1 {
+            parents
+        } else {
+            Vec::new()
+        },
+        author,
+        authored,
+        committer,
+        committed,
+        message: next(),
+        ..CommitRead::default()
     }
-    text.push_str("\n\n");
-    text.push_str(&file_list(&working_tree(whole_records(
-        &numstat, files_cut,
-    ))));
-    if files_cut {
-        text.push_str(&left_out());
-    }
-    text.push('\n');
-    Ok(text)
 }
 
 /// The records of `git show --numstat -z` that were read whole: where the
@@ -1056,50 +1080,6 @@ fn whole_records(numstat: &str, cut: bool) -> &str {
         true => numstat.rfind('\0').map_or("", |end| &numstat[..=end]),
         false => numstat,
     }
-}
-
-/// What a commit's dialog says where it left the rest of a read out.
-fn left_out() -> String {
-    format!(
-        "\n… the rest is left out: past {} MiB of it",
-        SHOWN_BYTES / (1024 * 1024)
-    )
-}
-
-/// `2 files changed  +31 −9`, then a row each of the lines a file gained and
-/// lost and its path, the counts lined up. A binary file, which git counts no
-/// lines in, has an em dash for each: no lines counted is not none.
-fn file_list(files: &[WorkingFile]) -> String {
-    let count = |n: Option<u64>| n.map_or_else(|| "—".to_owned(), |n| n.to_string());
-    let sum = |n: fn(&WorkingFile) -> Option<u64>| {
-        files.iter().filter_map(n).fold(0u64, u64::saturating_add)
-    };
-    let mut list = format!(
-        "{} {} changed  +{} −{}",
-        files.len(),
-        if files.len() == 1 { "file" } else { "files" },
-        sum(|file| file.added),
-        sum(|file| file.removed),
-    );
-    let rows: Vec<(String, String, &str)> = files
-        .iter()
-        .map(|file| {
-            (
-                format!("+{}", count(file.added)),
-                format!("−{}", count(file.removed)),
-                file.path.as_str(),
-            )
-        })
-        .collect();
-    let widest = |cells: &mut dyn Iterator<Item = &String>| {
-        cells.map(|cell| cell.chars().count()).max().unwrap_or(0)
-    };
-    let added = widest(&mut rows.iter().map(|row| &row.0));
-    let removed = widest(&mut rows.iter().map(|row| &row.1));
-    for (plus, minus, path) in &rows {
-        list.push_str(&format!("\n  {plus:>added$} {minus:>removed$}  {path}"));
-    }
-    list
 }
 
 /// What `git` with `args` printed in `root`, run as [`guarded`] runs it, and
@@ -2082,24 +2062,38 @@ mod tests {
         );
         let id = run(&work, &["rev-parse", "HEAD"]);
 
-        let text = show_commit(&work, id.trim()).expect("the commit reads");
-        for words in [
-            id.trim(),
-            "Author:     A Test <test@example.invalid>",
-            // 4,000,000,000 seconds is a Tuesday in 2096, in any language.
-            "AuthorDate: Tue 2096-",
-            "feat: say more",
-            "    The body, which the pane leaves out.",
-            "    On two lines.",
-            // Three lines replaced by the message's four, and one added.
-            "\n\n2 files changed  +5 −3\n  +1 −0  .gitattributes\n  +4 −3  kept.txt\n",
-        ] {
-            assert!(text.contains(words), "{words:?} in:\n{text}");
-        }
-        assert!(!text.contains("diff --git"), "no change is shown:\n{text}");
+        let read = show_commit(&work, id.trim()).expect("the commit reads");
+        let person = Person {
+            name: "A Test".to_owned(),
+            email: "test@example.invalid".to_owned(),
+        };
+        assert_eq!(read.author, person);
+        assert_eq!(read.committer, person);
+        // 4,000,000,000 seconds is a Tuesday in 2096, in any language.
+        assert!(read.authored.starts_with("Tue 2096-"), "{read:?}");
+        assert!(read.committed.starts_with("Tue 2096-"), "{read:?}");
+        assert_eq!(
+            read.message.trim_end(),
+            "feat: say more\n\nThe body, which the pane leaves out.\nOn two lines."
+        );
+        assert!(read.merged.is_empty(), "not a merge: {read:?}");
+        // Three lines replaced by the message's four, and one added.
+        let files: Vec<_> = read
+            .files
+            .iter()
+            .map(|file| (file.path.as_str(), file.added, file.removed))
+            .collect();
+        assert_eq!(
+            files,
+            [
+                (".gitattributes", Some(1), Some(0)),
+                ("kept.txt", Some(4), Some(3))
+            ]
+        );
+        assert_eq!((read.message_cut, read.files_cut), (None, None));
         assert!(
-            !text.contains("+feat: say more"),
-            "no change is shown:\n{text}"
+            !read.message.contains("diff --git"),
+            "no change is shown: {read:?}"
         );
         assert!(!marker.exists(), "the repository's diff program ran");
 
@@ -2115,27 +2109,76 @@ mod tests {
         );
     }
 
-    /// A commit's files are listed a row each, the counts lined up and
-    /// summed above them; a binary file, which git counts no lines in, reads
-    /// as an em dash rather than a zero, and adds nothing to the sums.
+    /// A merge names the commits it joined, by their short names, and its
+    /// files are counted against the branch it was merged into.
     #[test]
-    fn a_commits_files_are_listed_with_the_lines_each_gained_and_lost() {
-        let files = working_tree(
+    fn a_merge_names_the_commits_it_joined() {
+        let dir = repository();
+        let work = dir.path().join("work");
+        let first = run(&work, &["rev-parse", "--short", "HEAD"]);
+        run(&work, &["checkout", "-q", "-b", "side"]);
+        std::fs::write(work.join("side.txt"), "s\n").expect("the file is written");
+        run(&work, &["add", "side.txt"]);
+        commit_at(&work, "side", 4_000_000_000, false);
+        let side = run(&work, &["rev-parse", "--short", "HEAD"]);
+        run(&work, &["checkout", "-q", "main"]);
+        run(&work, &["merge", "--no-ff", "-q", "-m", "join", "side"]);
+        let id = run(&work, &["rev-parse", "HEAD"]);
+
+        let read = show_commit(&work, id.trim()).expect("the merge reads");
+
+        assert_eq!(read.merged, [first.trim(), side.trim()]);
+        let paths: Vec<_> = read.files.iter().map(|file| file.path.as_str()).collect();
+        // What the side branch changed: `commit_at` writes its message into
+        // `kept.txt` beside the file added.
+        assert_eq!(paths, ["kept.txt", "side.txt"]);
+    }
+
+    /// Who made a commit and its message are read field by field, the
+    /// message whole whatever it holds; a read cut off before the last field
+    /// leaves what it did not reach empty rather than misplaced.
+    #[test]
+    fn a_commits_fields_are_read_in_their_places() {
+        let read = about(
+            "a1 b2\0Ann\0ann@x\0Mon 2026-01-05 09:00\0Bob\0bob@y\0Tue 2026-01-06 10:00\0subject\0with a nul\n",
+        );
+        assert_eq!(read.merged, ["a1", "b2"]);
+        assert_eq!(read.author.name, "Ann");
+        assert_eq!(read.committer.email, "bob@y");
+        assert_eq!(read.committed, "Tue 2026-01-06 10:00");
+        assert_eq!(read.message, "subject\0with a nul\n");
+
+        let one_parent = about("a1\0Ann\0ann@x\0d\0Bob\0bob@y\0d\0m");
+        assert!(one_parent.merged.is_empty());
+
+        let cut = about("a1\0Ann\0ann@");
+        assert_eq!(cut.author.email, "ann@");
+        assert_eq!(
+            (cut.committer.name.as_str(), cut.message.as_str()),
+            ("", "")
+        );
+    }
+
+    /// A commit's files are read a record each: a binary file, which git
+    /// counts no lines in, has no counts rather than zeros, and a rename
+    /// reads as where it went from and to.
+    #[test]
+    fn a_commits_files_are_read_with_the_lines_each_gained_and_lost() {
+        let files: Vec<_> = working_tree(
             "120\t3\tsrc/long.rs\0-\t-\tlogo.png\0\
              0\t0\t\0old.rs\0new.rs\0",
-        );
+        )
+        .into_iter()
+        .map(|file| (file.path, file.added, file.removed))
+        .collect();
         assert_eq!(
-            file_list(&files),
-            concat!(
-                "3 files changed  +120 −3\n",
-                "  +120 −3  src/long.rs\n",
-                "    +— −—  logo.png\n",
-                "    +0 −0  old.rs => new.rs",
-            )
+            files,
+            [
+                ("src/long.rs".to_owned(), Some(120), Some(3)),
+                ("logo.png".to_owned(), None, None),
+                ("old.rs => new.rs".to_owned(), Some(0), Some(0)),
+            ]
         );
-        let one = working_tree("1\t0\tREADME.md\0");
-        assert_eq!(file_list(&one), "1 file changed  +1 −0\n  +1 −0  README.md");
-        assert_eq!(file_list(&[]), "0 files changed  +0 −0");
     }
 
     /// A list of files read only in part keeps the records it read whole

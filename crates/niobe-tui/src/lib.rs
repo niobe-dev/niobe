@@ -31,6 +31,7 @@ mod browse;
 mod bubble;
 mod calls;
 pub mod clock;
+mod commit;
 mod compaction;
 pub mod desktop;
 pub mod detail;
