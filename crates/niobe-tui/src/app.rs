@@ -2027,10 +2027,6 @@ pub struct App {
     /// text: the one its last frame before the first key was drawn at.
     /// `None` while it plays.
     scene_held: Option<std::time::Duration>,
-    /// Whether the transcript's first entry is the row a cleared
-    /// conversation opens with, which the idle scene is drawn behind until
-    /// something else happens.
-    cleared: bool,
     /// The wall clock the same tick read, which is what every event folded in
     /// now is stamped with. `None` until the loop has ticked, which is also
     /// what a fold with no clock behind it — a JSON Lines log — leaves behind:
@@ -2610,7 +2606,6 @@ impl App {
             now: None,
             scene_seed: 0,
             scene_held: None,
-            cleared: false,
             at: None,
             unsaved: None,
             asides: BTreeSet::new(),
@@ -2972,7 +2967,6 @@ impl App {
             .collect();
         self.cleared_prompts.extend(sent);
         self.entries.clear();
-        self.cleared = false;
         // Each names a turn, and the next conversation counts its turns from
         // the first again.
         self.spike = None;
@@ -3727,27 +3721,11 @@ impl App {
             Event::Looked => {}
 
             // A conversation started over is a new session: what the shell
-            // drew of the one before it goes, and the first row of this one
-            // says where that went.
+            // drew of the one before it goes, and it opens as a new session
+            // does, on the greeting alone.
             Event::Cleared => {
                 self.start_over();
-                self.cleared = true;
                 self.sent_since = self.sent.len();
-                self.push(Entry {
-                    queued: false,
-                    attention: Attention::Routine,
-                    kind: EntryKind::Notice,
-                    head: "cleared".to_owned(),
-                    meta: String::new(),
-                    body: "The conversation starts over here, as a new session: nothing above \
-                       this line is in front of the model, and what came before is a session \
-                       of its own, with its own cost. Session › Resume opens it again."
-                        .to_owned(),
-                    streaming: false,
-                    at: self.at,
-                    calls: Vec::new(),
-                    agent: None,
-                });
             }
 
             Event::PermissionRequest {
@@ -7422,10 +7400,9 @@ impl App {
     /// there. The loop draws it at its own frame while it plays, which
     /// [`App::scene_frame`] says.
     ///
-    /// A cleared conversation is a new session, and opens as one does; the
-    /// row saying what was cleared is drawn over the scene's foot.
+    /// A cleared conversation is a new session, and opens as one does.
     pub fn showing_scene(&self) -> bool {
-        self.entries.len() == usize::from(self.cleared) && self.asks.is_empty()
+        self.entries.is_empty() && self.asks.is_empty()
     }
 
     /// The moment the idle scene is drawn at: the wall clock the last tick
@@ -13687,8 +13664,10 @@ mod tests {
         }
     }
 
+    /// A cleared conversation is a new session, and its transcript opens as
+    /// a new session's does: empty, with no row saying what was cleared.
     #[test]
-    fn a_cleared_conversation_starts_the_transcript_over_at_a_line_that_says_so() {
+    fn a_cleared_conversation_starts_the_transcript_over_empty() {
         let mut app = app();
         for event in [
             Event::UserMessage {
@@ -13711,12 +13690,8 @@ mod tests {
 
         app.apply(&Event::Cleared);
 
-        let [only] = app.entries() else {
-            panic!("the transcript holds only the clear: {:?}", app.entries());
-        };
-        assert_eq!(only.kind, EntryKind::Notice);
-        assert_eq!(only.head, "cleared");
-        assert!(only.body.contains("new session"), "{}", only.body);
+        assert!(app.entries().is_empty(), "{:?}", app.entries());
+        assert!(app.showing_scene());
         assert_eq!(app.session().errors(), 0);
         assert!(app.session().turns().is_empty());
     }
@@ -18194,13 +18169,13 @@ mod tests {
     }
 
     #[test]
-    fn what_the_shell_says_went_wrong_needs_the_operator_and_a_cleared_session_is_notable() {
+    fn what_the_shell_says_went_wrong_needs_the_operator_and_a_clear_leaves_nothing_to_read() {
         let mut app = sent(app().attached(), "go");
         app.not_sent("the pipe closed");
         assert_eq!(attention(&app).last(), Some(&Attention::NeedsYou));
 
         app.apply(&Event::Cleared);
-        assert_eq!(attention(&app), [Attention::Notable]);
+        assert_eq!(attention(&app), []);
     }
 
     #[test]
@@ -24937,8 +24912,8 @@ mod tests {
     }
 
     /// A conversation cleared is a new session, and it opens as one does: on
-    /// the idle scene, with the row that says what was cleared kept. The
-    /// first thing that happens after it takes the scene away again.
+    /// the idle scene, its transcript empty. The first thing that happens
+    /// after it takes the scene away again.
     #[test]
     fn the_idle_scene_comes_back_when_the_conversation_is_cleared() {
         let mut app = app().attached();
@@ -24951,7 +24926,7 @@ mod tests {
 
         app.apply(&Event::Cleared);
         assert!(app.showing_scene(), "cleared, the session starts over");
-        assert_eq!(app.entries().len(), 1, "the cleared row is kept");
+        assert!(app.entries().is_empty(), "nothing says what was cleared");
 
         app.apply(&Event::UserMessage {
             text: "format it".to_owned(),

@@ -1,15 +1,15 @@
  Niobe  Session  Context  Model  View  Help                            opus-5  claude · default  ○ not attached  13:41
  ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ > where was I? ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓ ┌─────────────── Usage ────────────────┐
- ┃ · cleared                                                                 ┃ │ 5h         15% ▓░░░░░░░ resets 16:40 │
- ┃   The conversation starts over here, as a new session: nothing above this ┃ │ ──────────────────────────────────── │
- ┃   line is in front of the model, and what came before is a session of its ┃ │ sonnet-5  100% ▓▓▓▓▓▓▓▓▓▓▓▓   600    │
- ┃   own, with its own cost. Session › Resume opens it again.                ┃ │ cache hit   0% ░░░░░░░░░░░░     0    │
- ┃                                                                           ┃ └──────────────────────────────────────┘
- ┃                                                           ▄▄▄▄▄▄▄▄▄▄▄▄▄▄  ┃ ┌────────────── Changes ───────────────┐
- ┃                                                            where was I?   ┃ │ ⎇ main ↑3                            █
- ┃                                                           ▀▀▀▀▀▀▀▀▀▀▀▀▀▀  ┃ │ ▾ Working tree  +≥977 −≥259          █
+ ┃                                                           ▄▄▄▄▄▄▄▄▄▄▄▄▄▄  ┃ │ 5h         15% ▓░░░░░░░ resets 16:40 │
+ ┃                                                            where was I?   ┃ │ ──────────────────────────────────── │
+ ┃                                                           ▀▀▀▀▀▀▀▀▀▀▀▀▀▀  ┃ │ sonnet-5  100% ▓▓▓▓▓▓▓▓▓▓▓▓   600    │
+ ┃                                                                           ┃ │ cache hit   0% ░░░░░░░░░░░░     0    │
+ ┃ ◆ A new conversation.                                                     ┃ └──────────────────────────────────────┘
+ ┃                                                                           ┃ ┌────────────── Changes ───────────────┐
+ ┃                                                                           ┃ │ ⎇ main ↑3                            █
+ ┃                                                                           ┃ │ ▾ Working tree  +≥977 −≥259          █
  ┃                                                                           ┃ │   ▾ catalog/                         █
- ┃ ◆ A new conversation.                                                     ┃ │     ▾ cache/                         █
+ ┃                                                                           ┃ │     ▾ cache/                         █
  ┃                                                                           ┃ │       lru.ts                 +31  −9 █
  ┃                                                                           ┃ │       index.ts               +12  −0 █
  ┃                                                                           ┃ │     fetch.ts                +149 −12 █

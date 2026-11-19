@@ -1445,12 +1445,11 @@ fn a_new_session_greets_the_operator_over_the_scene_in_every_theme() {
     assert!(!screen(&mut app, 120, 30).contains("Welcome to Niobe"));
 }
 
-/// A conversation started over greets the operator as a new one does, and
-/// says where the one before it went inside the greeting's card, under the
-/// greeting: nothing is written over the scene's foot, where its words would
-/// run across the buildings.
+/// A conversation started over is a new session and greets the operator as
+/// a new one does: the greeting alone over the scene, with no row saying
+/// what was cleared.
 #[test]
-fn a_cleared_session_greets_the_operator_and_keeps_the_scene_foot_clear() {
+fn a_cleared_session_greets_the_operator_as_a_new_one_does() {
     let mut app = empty_session().attached();
     app.apply(&Event::UserMessage {
         text: "hello".to_owned(),
@@ -1463,28 +1462,9 @@ fn a_cleared_session_greets_the_operator_and_keeps_the_scene_foot_clear() {
         inside.starts_with("  Welcome to Niobe, the coding agent that"),
         "{frame}"
     );
-    let greeting = rows
-        .iter()
-        .position(|row| row.contains("Start by entering"));
-    let cleared = rows.iter().position(|row| row.contains("· cleared"));
-    let resume = rows
-        .iter()
-        .position(|row| row.contains("Resume opens it again"));
-    let (Some(greeting), Some(cleared), Some(resume)) = (greeting, cleared, resume) else {
-        panic!("the greeting and the cleared notice are both drawn:\n{frame}");
-    };
-    assert!(
-        greeting < cleared,
-        "the notice is under the greeting:\n{frame}"
-    );
-    let composer = rows
-        .iter()
-        .position(|row| row.contains("Ask for a change"))
-        .expect("an attached session draws its composer");
-    assert!(
-        resume + 4 < composer,
-        "nothing of the notice is written over the scene's foot:\n{frame}"
-    );
+    assert!(frame.contains("Start by entering"), "{frame}");
+    assert!(!frame.contains("cleared"), "{frame}");
+    assert!(!frame.contains("starts over here"), "{frame}");
 }
 
 /// A session with a backend attached and nothing asked yet: the Usage and
