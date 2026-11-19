@@ -152,12 +152,75 @@ mod tests {
         }
     }
 
-    fn terminal() -> (Terminal<Quiet<CrosstermBackend<Sent>>>, Sent) {
+    /// The screen the tests draw on.
+    const SCREEN: Rect = Rect::new(0, 0, 20, 4);
+
+    /// Crossterm's backend writing into `Sent`, its screen [`SCREEN`]:
+    /// crossterm asks the process's terminal for its size, which a CI runner
+    /// does not have, and ratatui asks for the size whenever it clears a
+    /// fixed viewport, as a resize does.
+    struct Screen(CrosstermBackend<Sent>);
+
+    impl Backend for Screen {
+        type Error = std::io::Error;
+
+        fn draw<'a, I>(&mut self, content: I) -> std::io::Result<()>
+        where
+            I: Iterator<Item = (u16, u16, &'a Cell)>,
+        {
+            self.0.draw(content)
+        }
+
+        fn append_lines(&mut self, n: u16) -> std::io::Result<()> {
+            self.0.append_lines(n)
+        }
+
+        fn hide_cursor(&mut self) -> std::io::Result<()> {
+            self.0.hide_cursor()
+        }
+
+        fn show_cursor(&mut self) -> std::io::Result<()> {
+            self.0.show_cursor()
+        }
+
+        fn get_cursor_position(&mut self) -> std::io::Result<Position> {
+            self.0.get_cursor_position()
+        }
+
+        fn set_cursor_position<P: Into<Position>>(&mut self, at: P) -> std::io::Result<()> {
+            self.0.set_cursor_position(at)
+        }
+
+        fn clear(&mut self) -> std::io::Result<()> {
+            self.0.clear()
+        }
+
+        fn clear_region(&mut self, clear_type: ClearType) -> std::io::Result<()> {
+            self.0.clear_region(clear_type)
+        }
+
+        fn size(&self) -> std::io::Result<Size> {
+            Ok(SCREEN.as_size())
+        }
+
+        fn window_size(&mut self) -> std::io::Result<WindowSize> {
+            Ok(WindowSize {
+                columns_rows: SCREEN.as_size(),
+                pixels: Size::default(),
+            })
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Backend::flush(&mut self.0)
+        }
+    }
+
+    fn terminal() -> (Terminal<Quiet<Screen>>, Sent) {
         let sent = Sent::default();
         let terminal = Terminal::with_options(
-            Quiet::new(CrosstermBackend::new(sent.clone())),
+            Quiet::new(Screen(CrosstermBackend::new(sent.clone()))),
             TerminalOptions {
-                viewport: Viewport::Fixed(Rect::new(0, 0, 20, 4)),
+                viewport: Viewport::Fixed(SCREEN),
             },
         )
         .expect("a terminal over a buffer opens");
@@ -165,11 +228,7 @@ mod tests {
     }
 
     /// Draws `said` at the top left, with the cursor at `cursor` or none.
-    fn draw(
-        terminal: &mut Terminal<Quiet<CrosstermBackend<Sent>>>,
-        said: &str,
-        cursor: Option<(u16, u16)>,
-    ) {
+    fn draw(terminal: &mut Terminal<Quiet<Screen>>, said: &str, cursor: Option<(u16, u16)>) {
         terminal
             .draw(|frame| {
                 frame.render_widget(ratatui::widgets::Paragraph::new(said), frame.area());
@@ -256,7 +315,7 @@ mod tests {
         // The screen the next frame is drawn on is blank, as ratatui's
         // resize makes it.
         terminal
-            .resize(Rect::new(0, 0, 20, 4))
+            .resize(SCREEN)
             .expect("a resize of a buffer succeeds");
         sent.take();
 
