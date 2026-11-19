@@ -174,7 +174,10 @@ reviewers that encode both, for an agent working in this tree.
   the one it hands the theme, model and effort they pick to, kept for the next session, `bridge.rs`
   the one it sends turns to and takes events from, `watch.rs` the one it asks what the
   repository looks like now, and for a commit read whole, and `prices.rs` the one it asks to value the tokens no reported
-  cost covers yet, which it shows marked as an estimate, `terminal.rs`
+  cost covers yet, which it shows marked as an estimate, `quiet.rs` is the backend the shell draws
+  through, which sends the terminal nothing for a frame that changed nothing — no colours reset, no
+  cursor shown or placed again where it already is — since a terminal repaints for those bytes as
+  for any, and forgets what it knew of the cursor whenever the screen is cleared, `terminal.rs`
   enters and restores the terminal — and hands it back for a stop and takes it again after — the mouse it takes for the wheel, clicks and drags, the bracketing it
   asks pastes to arrive in, and the keyboard
   enhancement it pushes where the terminal says it can tell Shift+Enter from Enter — or the

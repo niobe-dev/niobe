@@ -58,6 +58,7 @@ pub mod overview;
 pub mod preferences;
 pub mod prices;
 pub mod proposed;
+mod quiet;
 pub mod rules;
 pub mod run;
 mod scene;

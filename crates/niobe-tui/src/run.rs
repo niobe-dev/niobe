@@ -245,7 +245,12 @@ fn open(app: App, around: Around<'_>) -> io::Result<(Ended, App)> {
     // No `Terminal::clear` here: the alternate screen starts blank and the
     // first draw covers it. `clear` also asks the terminal where its cursor is
     // and waits for the reply, which never comes when stdin is a pipe.
-    let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
+    // Quietened, so a frame that changed nothing sends the terminal nothing:
+    // most frames change no cell, and a terminal repaints for the cursor
+    // shown and placed again as for anything else.
+    let mut terminal = Terminal::new(crate::quiet::Quiet::new(
+        CrosstermBackend::new(io::stdout()),
+    ))?;
     // What the session started — the CLI and the `!` commands, each in a
     // process group of its own — is not stopped with it: a turn goes on while
     // the operator is at their shell, and is on screen when they come back.
