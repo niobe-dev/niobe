@@ -8828,3 +8828,78 @@ fn what_the_agent_says_of_its_work_stands_between_the_calls_it_splits() {
     assert!(style.add_modifier.contains(Modifier::ITALIC), "{style:?}");
     assert_eq!(style.fg, Some(empty_session().theme().dim), "{style:?}");
 }
+
+/// The moment `seconds` after the epoch, as the loop hands the clock in.
+fn moment(seconds: u64) -> niobe_tui::clock::Stamp {
+    niobe_tui::clock::Stamp::new(
+        std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds),
+        None,
+    )
+}
+
+/// A frame in which nothing the transcript is drawn from changed reuses its
+/// lines, but a test run still going says how long it has run, so it is laid
+/// out again as the clock moves though nothing else did.
+#[test]
+fn a_test_run_still_going_counts_its_seconds_though_nothing_else_changed() {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = running_session();
+    app.apply_at(
+        &Event::ToolCallStart {
+            id: "t1".into(),
+            name: "Bash".to_owned(),
+            input: r#"{"command":"cargo test"}"#.to_owned(),
+            summary: Some("cargo test".to_owned()),
+            agent: None,
+        },
+        moment(100),
+    );
+    app.on_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
+
+    app.tick(std::time::Instant::now(), Some(moment(118)));
+    let first = screen(&mut app, 120, 30);
+    app.tick(std::time::Instant::now(), Some(moment(119)));
+    let second = screen(&mut app, 120, 30);
+
+    assert!(first.contains("testing · 18s"), "{first}");
+    assert!(second.contains("testing · 19s"), "{second}");
+}
+
+/// An entry changed where it stands — a call that ends — is drawn as it is
+/// now, though the transcript holds as many entries as it did.
+#[test]
+fn an_entry_changed_where_it_stands_is_drawn_as_it_is_now() {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = running_session();
+    app.apply(&Event::ToolCallStart {
+        id: "r1".into(),
+        name: "Read".to_owned(),
+        input: r#"{"file_path":"src/lib.rs"}"#.to_owned(),
+        summary: Some("src/lib.rs".to_owned()),
+        agent: None,
+    });
+    app.on_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
+    let running = screen(&mut app, 120, 30);
+    let entries = app.entries().len();
+
+    app.apply(&Event::ToolCallEnd {
+        id: "r1".into(),
+        name: "Read".to_owned(),
+        input: r#"{"file_path":"src/lib.rs"}"#.to_owned(),
+        output: "denied".to_owned(),
+        bytes: 6,
+        outcome: niobe_core::event::ToolOutcome::Denied,
+        summary: Some("src/lib.rs".to_owned()),
+        exit_code: None,
+        error: None,
+        command: None,
+        untrimmed: None,
+    });
+    let ended = screen(&mut app, 120, 30);
+
+    assert_eq!(app.entries().len(), entries, "the same entry, changed");
+    assert_ne!(running, ended);
+    assert!(ended.contains("denied"), "{ended}");
+}

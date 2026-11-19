@@ -916,6 +916,62 @@ impl EntryKind {
     }
 }
 
+/// The transcript's entries, in order, with a revision that moves on
+/// whenever one is added or may have been changed, or they are cleared.
+///
+/// The draw lays the transcript out again only where something it is drawn
+/// from changed, and walking thousands of entries every frame to find out
+/// took longer than drawing them; the revision says it in one comparison.
+/// The list is changed only through these methods, so no change can leave
+/// the revision where it was: reading it is a slice.
+#[derive(Debug, Default)]
+pub(crate) struct Entries {
+    list: Vec<Entry>,
+    revision: u64,
+}
+
+impl Entries {
+    /// Which state of the list this is: equal only to a revision read when
+    /// the list was as it is now.
+    pub(crate) fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// Adds `entry` at the end.
+    fn push(&mut self, entry: Entry) {
+        self.moved_on();
+        self.list.push(entry);
+    }
+
+    /// The entry at `at`, to change; the revision moves on whether or not
+    /// it is changed.
+    fn get_mut(&mut self, at: usize) -> Option<&mut Entry> {
+        self.moved_on();
+        self.list.get_mut(at)
+    }
+
+    /// Takes every entry out.
+    fn clear(&mut self) {
+        self.moved_on();
+        self.list.clear();
+    }
+
+    /// Wrapping rather than saturating: a revision is told apart from the
+    /// last one read, never counted, and one held at its ceiling would say
+    /// nothing changed.
+    fn moved_on(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
+    }
+}
+
+impl std::ops::Deref for Entries {
+    type Target = [Entry];
+
+    fn deref(&self) -> &[Entry] {
+        &self.list
+    }
+}
+
 /// One block in the transcript: a message, a tool call or a notice.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Entry {
@@ -1582,7 +1638,7 @@ pub struct App {
     /// The keys the F-key bar's actions were given instead of their own.
     keymap: niobe_core::Keymap,
     session: SessionState,
-    entries: Vec<Entry>,
+    entries: Entries,
     /// Where each running call is drawn: its entry, and its place among the
     /// entry's calls.
     tool_entries: BTreeMap<ToolCallId, (usize, usize)>,
@@ -2428,7 +2484,7 @@ impl App {
             depth: Depth::default(),
             keymap: niobe_core::Keymap::default(),
             session: SessionState::new(),
-            entries: Vec::new(),
+            entries: Entries::default(),
             tool_entries: BTreeMap::new(),
             cut_entries: BTreeMap::new(),
             agent_entries: BTreeMap::new(),
@@ -8031,7 +8087,7 @@ impl App {
     /// draw to reuse.
     pub(crate) fn entries_to_draw(
         &mut self,
-    ) -> (&[Entry], &[SlashCommand], &mut crate::ui::DrawnEntries) {
+    ) -> (&Entries, &[SlashCommand], &mut crate::ui::DrawnEntries) {
         (&self.entries, self.session.commands(), &mut self.drawn)
     }
 

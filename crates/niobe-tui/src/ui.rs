@@ -2452,6 +2452,47 @@ pub struct DrawnEntries {
     /// The switches the lines were last laid out under, the columns worked
     /// out among them: what says which call a row of a run belongs to.
     detail: Detail,
+    /// What the lines were last laid out from, which a frame that finds the
+    /// same leaves them as they are; `None` before the first time.
+    laid: Option<Laid>,
+    /// Whether a test run still going was among what was laid out last,
+    /// whose line says how long it has run: such lines follow the clock,
+    /// so a frame at another moment lays them out again.
+    timed: bool,
+}
+
+/// Everything the transcript's lines are laid out from, as one value two
+/// frames compare: the entries by their revision, the rest as they are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Laid {
+    revision: u64,
+    width: usize,
+    /// The switches the frame asked for, its moment among them.
+    detail: Detail,
+    /// The sub-agents' headings and the one agent narrowed to, as one number.
+    arranged: u64,
+    theme: Theme,
+    /// The commands a prompt is drawn naming, as one number.
+    named: u64,
+}
+
+impl Laid {
+    /// Whether lines laid out from `self` stand for a frame laid out from
+    /// `now`: the same in all, but the moment, which matters only where a
+    /// test run still going was drawn.
+    fn holds_for(self, now: Laid, timed: bool) -> bool {
+        let moment = |laid: Laid| Laid {
+            detail: Detail {
+                now: None,
+                ..laid.detail
+            },
+            ..laid
+        };
+        match timed {
+            true => self == now,
+            false => moment(self) == moment(now),
+        }
+    }
 }
 
 /// How a copy reads a drawn line.
@@ -2563,13 +2604,37 @@ impl DrawnEntries {
     /// one agent's: see [`Arrangement`].
     fn update(
         &mut self,
-        entries: &[Entry],
+        entries: &crate::app::Entries,
         commands: &[SlashCommand],
         width: usize,
         detail: Detail,
         arranged: Arrangement<'_>,
         theme: &Theme,
     ) {
+        let laid = Laid {
+            revision: entries.revision(),
+            width,
+            detail,
+            arranged: arrangement_key(arranged),
+            theme: *theme,
+            named: commands_key(commands),
+        };
+        // Walking every entry to find each one's lines still current cost
+        // more than drawing a screenful of them, every frame.
+        if self
+            .laid
+            .is_some_and(|last| last.holds_for(laid, self.timed))
+        {
+            return;
+        }
+        self.laid = Some(laid);
+        self.timed = entries.iter().any(|entry| {
+            entry
+                .calls
+                .iter()
+                .any(|call| call.testing && call.running())
+        });
+        let entries: &[Entry] = entries;
         let headings = arranged.headings.filter(|_| arranged.only.is_none());
         let order = order(
             entries,
@@ -3492,6 +3557,15 @@ fn drawn_from(entry: &Entry, width: usize, detail: Detail, theme: &Theme, named:
     if matches!(entry.kind, EntryKind::User) {
         named.hash(&mut hasher);
     }
+    hasher.finish()
+}
+
+/// How the rows are arranged, as one number: the sub-agents' headings they
+/// are grouped under and the one agent they are narrowed to.
+fn arrangement_key(arranged: Arrangement<'_>) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    (arranged.headings, arranged.only).hash(&mut hasher);
     hasher.finish()
 }
 

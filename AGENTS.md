@@ -146,6 +146,9 @@ reviewers that encode both, for an agent working in this tree.
   taking it; `jsonl.rs` reads a JSON Lines event log, each line dated where it carries an
   `at` in the milliseconds the store dates an event by.
 - **`crates/niobe-tui/`** — the terminal UI (ratatui). `app.rs` is the state the shell draws from,
+  its transcript's entries among it, changed only through what moves their revision on, so a frame
+  that finds the revision, the width, the switches and the theme where they were lays no entry out
+  again — but a test run still going, whose line follows the clock — and
   including which pane has the keyboard — the one the scroll keys, the wheel and a section cursor
   go to — where the last frame drew the dialog that is open and its list's rows, so a click on a
   row moves the cursor there, a click on the cursor's row chooses it as Enter does and a click
@@ -815,7 +818,8 @@ Where tests live:
     `UPDATE_SNAPSHOTS=1 cargo test -p niobe-tui --test shell` and **read the diff** of the
     snapshot files before accepting it. The session both draw is in `tests/common/mod.rs`.
   - `niobe-tui/tests/frame_budget.rs` times a 200×60 resize, a resize of a reply quoted thousands
-    deep, a resize of a paragraph of thousands of links, a resize of linked images nested thousands deep, and the steady redraw of a long session of markdown replies, and the scene an empty session pane shows in every theme, against a 16 ms budget, and a long line typed or pasted into
+    deep, a resize of a paragraph of thousands of links, a resize of linked images nested thousands deep, and the steady redraw of a long session of markdown replies, and the scene an empty session pane shows in every theme, against a 16 ms budget, and a
+    frame of a 2,000-turn session in which nothing changed against 2 ms, and a long line typed or pasted into
     the composer: a paste as long as the composer holds against 50 ms, a key typed into it
     against 16 ms, and keys read together against a linear ratio — and a
     100,000-line file written from scratch, applied and drawn against 50 ms, and the question for a

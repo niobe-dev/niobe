@@ -491,6 +491,72 @@ fn a_long_session_of_edits_summed_up_redraws_inside_a_frame_budget() {
     );
 }
 
+/// Turns in [`a_very_long_session_redraws_unchanged_in_a_fraction_of_a_frame`]:
+/// a day's work, each turn a prompt, calls and a reply, thousands of entries.
+const LONG_DAY_TURNS: usize = 2_000;
+
+/// The budget of a frame in which nothing the transcript is drawn from
+/// changed: an eighth of a frame, whatever the session holds. The loop draws
+/// ten such frames a second while idle, and a key typed waits behind one.
+const UNCHANGED_BUDGET: Duration = Duration::from_millis(2);
+
+/// The redraw every tick makes in a very long session when nothing in it
+/// changed. Walking every entry to find that out took longer than drawing
+/// the screenful: 8 to 9 ms a frame in a recorded session of 15,000 events,
+/// every frame, and every key typed waited behind it.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "a frame is timed in an optimised build")]
+fn a_very_long_session_redraws_unchanged_in_a_fraction_of_a_frame() {
+    let _alone = ALONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut app = running_session();
+    for turn in 0..LONG_DAY_TURNS {
+        app.apply(&Event::UserMessage {
+            text: format!("Look at module {turn} and fix what fails."),
+        });
+        for (n, command) in ["rg -n fails src", "cargo test -p niobe-tui"]
+            .iter()
+            .enumerate()
+        {
+            let id = format!("call-{turn}-{n}");
+            app.apply(&Event::ToolCallStart {
+                id: id.as_str().into(),
+                name: "Bash".to_owned(),
+                input: format!("{{\"command\":\"{command}\"}}"),
+                summary: Some((*command).to_owned()),
+                agent: None,
+            });
+            app.apply(&Event::ToolCallEnd {
+                id: id.as_str().into(),
+                name: "Bash".to_owned(),
+                input: format!("{{\"command\":\"{command}\"}}"),
+                output: "ok".to_owned(),
+                bytes: 2,
+                outcome: niobe_core::event::ToolOutcome::Ok,
+                summary: Some((*command).to_owned()),
+                exit_code: None,
+                error: None,
+                command: Some((*command).to_owned()),
+                untrimmed: None,
+            });
+        }
+        app.apply(&Event::AssistantMessage {
+            text: format!("Fixed module {turn}: the test passes now."),
+            agent: None,
+        });
+    }
+    let _ = screen(&mut app, 200, 60);
+
+    let median = median_frame(&mut app, &[(200, 60)]);
+
+    assert!(
+        median <= UNCHANGED_BUDGET,
+        "the median unchanged frame of {LONG_DAY_TURNS} turns at 200x60 took {median:?}, over \
+         the {UNCHANGED_BUDGET:?} budget"
+    );
+}
+
 /// A running session with [`LONG_SESSION_DIFFS`] edits in it, each drawn
 /// under its call as the lines it changed where every call is drawn.
 fn session_of_diffs() -> App {
