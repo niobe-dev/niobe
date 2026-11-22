@@ -44,6 +44,11 @@ const QUIT_GRACE: Duration = Duration::from_millis(500);
 /// after this is not recorded as the command's.
 const LINGER: Duration = Duration::from_millis(100);
 
+/// How long the lookout waits between two looks at the groups: as often as
+/// the shell's loop looks for what has ended while idle, so that a group is
+/// let go of about as soon as it empties.
+const LOOK: Duration = Duration::from_millis(100);
+
 /// The operator's commands, run in the directory the session runs in.
 #[derive(Debug)]
 pub struct Commands {
@@ -65,10 +70,86 @@ pub struct Commands {
     /// The process groups the backend has led, while the reaper is told of
     /// them. They are the bridge's to stop; they are kept here only so that
     /// the reaper is told when each is seen empty, as a command's is.
-    backend: Vec<u32>,
+    backend: Arc<Mutex<Vec<u32>>>,
     /// Where word of each group the backend leads comes from: the one it
-    /// started in, and one for each time it is started again.
+    /// started in, and one for each time it is started again. Handed to the
+    /// lookout once it starts.
     backend_groups: Option<Receiver<u32>>,
+    /// Whether anyone is left in the group a leader leads: [`occupied`], but
+    /// for a test.
+    occupied: fn(u32) -> bool,
+    /// What looks at the groups for having emptied, from the first drain on.
+    lookout: Option<Lookout>,
+}
+
+/// The thread that looks at the groups for having emptied, so that the
+/// shell's loop never asks.
+///
+/// Asking the kernel whether a group has anyone left in it is a `kill` with
+/// no signal, and on macOS that waited up to half a second while something
+/// else on the machine walked its processes. The loop drains the commands on
+/// every pass, between one frame and the next, so every key typed in that
+/// time waited with it.
+#[derive(Debug)]
+struct Lookout {
+    /// Dropped to end the thread, which it does at once unless it is in the
+    /// middle of a look.
+    ending: Sender<()>,
+    thread: std::thread::JoinHandle<()>,
+}
+
+impl Lookout {
+    /// Looks at `watched` now and every [`LOOK`] after, until stopped.
+    fn start(watched: Watched) -> Self {
+        let (ending, ended) = channel::<()>();
+        let thread = std::thread::spawn(move || {
+            let mut watched = watched;
+            loop {
+                watched.look();
+                match ended.recv_timeout(LOOK) {
+                    Err(RecvTimeoutError::Timeout) => {}
+                    Ok(()) | Err(RecvTimeoutError::Disconnected) => return,
+                }
+            }
+        });
+        Self { ending, thread }
+    }
+
+    /// Ends the thread and waits for it: it holds the reaper, which is to be
+    /// let go of with the commands.
+    fn stop(self) {
+        drop(self.ending);
+        let _ = self.thread.join();
+    }
+}
+
+/// What the lookout looks at: the commands' groups and the backend's, with
+/// the reaper each one seen empty is let go of by.
+struct Watched {
+    groups: Arc<Mutex<Vec<Group>>>,
+    backend: Arc<Mutex<Vec<u32>>>,
+    backend_groups: Option<Receiver<u32>>,
+    reaper: Option<Reaper>,
+    occupied: fn(u32) -> bool,
+}
+
+impl Watched {
+    /// Lets go of every group that has emptied since the last look, the
+    /// backend's among them, so that neither the quit nor the reaper is left
+    /// holding the number of a group that is gone: once empty, it can be
+    /// given to anyone's.
+    fn look(&mut self) {
+        if let Ok(mut groups) = self.groups.lock() {
+            let_go_of_the_empty(&mut groups, self.reaper.as_ref(), self.occupied);
+        }
+        let Ok(mut backend) = self.backend.lock() else {
+            return;
+        };
+        if let Some(started) = &self.backend_groups {
+            watch_the_backends_new_groups(started, self.reaper.as_ref(), &mut backend);
+        }
+        let_go_of_the_backend_once_empty(&mut backend, self.reaper.as_ref(), self.occupied);
+    }
 }
 
 /// The process group one command's `sh` leads.
@@ -92,8 +173,10 @@ impl Commands {
             groups: Arc::new(Mutex::new(Vec::new())),
             reaper: None,
             grace: QUIT_GRACE,
-            backend: Vec::new(),
+            backend: Arc::new(Mutex::new(Vec::new())),
             backend_groups: None,
+            occupied,
+            lookout: None,
         }
     }
 
@@ -104,49 +187,72 @@ impl Commands {
         self
     }
 
-    /// Tells the reaper of each group the backend has started since the last
-    /// look.
-    fn watch_the_backends_new_groups(&mut self) {
-        let (Some(reaper), Some(groups)) = (&self.reaper, &self.backend_groups) else {
-            return;
-        };
-        for group in groups.try_iter() {
-            reaper.watch(group);
-            self.backend.push(group);
-        }
-    }
-
-    /// Tells the reaper each of the backend's groups has ended once nobody is
-    /// left in it. Until then its number cannot be given to anyone else, so
-    /// whatever the backend started is still the session's to stop.
-    fn let_go_of_the_backend_once_empty(&mut self) {
-        let reaper = self.reaper.as_ref();
-        self.backend.retain(|&group| {
-            let kept = occupied(group);
-            if !kept && let Some(reaper) = reaper {
-                reaper.forget(group);
-            }
-            kept
-        });
-    }
-
     /// Tells the reaper of each process group the backend leads, as `groups`
     /// names them, and, once each is seen with nobody left in it, that it has
-    /// ended.
+    /// ended. The group it leads already is told of at once, so that a
+    /// session killed before its first look still has it ended.
     pub fn reaping_the_backend(mut self, groups: Receiver<u32>) -> Self {
         if self.reaper.is_some() {
+            if let Ok(mut backend) = self.backend.lock() {
+                watch_the_backends_new_groups(&groups, self.reaper.as_ref(), &mut backend);
+            }
             self.backend_groups = Some(groups);
-            self.watch_the_backends_new_groups();
         }
         self
     }
+
+    /// Starts the lookout, the first time it is asked for: by then the
+    /// reaper and the backend's groups have been given, and nothing has run.
+    fn look_out(&mut self) {
+        if self.lookout.is_some() {
+            return;
+        }
+        self.lookout = Some(Lookout::start(Watched {
+            groups: Arc::clone(&self.groups),
+            backend: Arc::clone(&self.backend),
+            backend_groups: self.backend_groups.take(),
+            reaper: self.reaper.clone(),
+            occupied: self.occupied,
+        }));
+    }
+}
+
+/// Tells `reaper` of each group the backend has started since the last look,
+/// and adds it to `backend`.
+fn watch_the_backends_new_groups(
+    started: &Receiver<u32>,
+    reaper: Option<&Reaper>,
+    backend: &mut Vec<u32>,
+) {
+    let Some(reaper) = reaper else {
+        return;
+    };
+    for group in started.try_iter() {
+        reaper.watch(group);
+        backend.push(group);
+    }
+}
+
+/// Tells `reaper` each of the backend's groups has ended once nobody is left
+/// in it. Until then its number cannot be given to anyone else, so whatever
+/// the backend started is still the session's to stop.
+fn let_go_of_the_backend_once_empty(
+    backend: &mut Vec<u32>,
+    reaper: Option<&Reaper>,
+    occupied: fn(u32) -> bool,
+) {
+    backend.retain(|&group| {
+        let kept = occupied(group);
+        if !kept && let Some(reaper) = reaper {
+            reaper.forget(group);
+        }
+        kept
+    });
 }
 
 impl Shell for Commands {
     fn run(&mut self, id: &ToolCallId, command: &str) -> Result<(), ShellError> {
-        if let Ok(mut groups) = self.groups.lock() {
-            let_go_of_the_empty(&mut groups, self.reaper.as_ref());
-        }
+        self.look_out();
         let mut child = spawn(&self.cwd, command)?;
         let leader = child.id();
         let printed = child.stdout.take();
@@ -165,6 +271,7 @@ impl Shell for Commands {
         let ends = self.ends.clone();
         let groups = Arc::clone(&self.groups);
         let reaper = self.reaper.clone();
+        let occupied = self.occupied;
         std::thread::spawn(move || {
             let ran = wait(id, &mut child, printed);
             if let Ok(mut groups) = groups.lock() {
@@ -174,7 +281,7 @@ impl Shell for Commands {
                 if let Some(reaper) = &reaper {
                     reaper.shell_ended(leader);
                 }
-                let_go_of_the_empty(&mut groups, reaper.as_ref());
+                let_go_of_the_empty(&mut groups, reaper.as_ref(), occupied);
             }
             // The shell has gone: the session ended while this ran, and there
             // is nobody left to tell.
@@ -198,6 +305,7 @@ impl Shell for Commands {
         stop(leader);
         let groups = Arc::clone(&self.groups);
         let reaper = self.reaper.clone();
+        let occupied = self.occupied;
         let id = id.clone();
         std::thread::spawn(move || {
             std::thread::sleep(GRACE);
@@ -205,7 +313,7 @@ impl Shell for Commands {
             // is taken off the list once it is seen empty, so a group killed
             // here cannot be one a new process has taken the number of.
             if let Ok(mut groups) = groups.lock() {
-                let_go_of_the_empty(&mut groups, reaper.as_ref());
+                let_go_of_the_empty(&mut groups, reaper.as_ref(), occupied);
                 if groups
                     .iter()
                     .any(|group| group.id == id && group.leader == leader)
@@ -216,16 +324,10 @@ impl Shell for Commands {
         });
     }
 
-    /// Also lets go of every group that has emptied since the last look, the
-    /// backend's among them, so
-    /// that neither the quit nor the reaper is left holding the number of a
-    /// group that is gone: once empty, it can be given to anyone's.
+    /// The groups that have emptied are let go of by the lookout, which the
+    /// first drain starts, and never here: see [`Lookout`].
     fn drain(&mut self) -> Vec<Ran> {
-        if let Ok(mut groups) = self.groups.lock() {
-            let_go_of_the_empty(&mut groups, self.reaper.as_ref());
-        }
-        self.watch_the_backends_new_groups();
-        self.let_go_of_the_backend_once_empty();
+        self.look_out();
         self.ended.try_iter().collect()
     }
 }
@@ -247,8 +349,13 @@ impl Drop for Commands {
     /// the machine, and a command that daemonises itself has asked to
     /// outlive what started it.
     fn drop(&mut self) {
+        // First: the lookout holds the reaper, which is let go of with the
+        // commands, and the looks made here are the last.
+        if let Some(lookout) = self.lookout.take() {
+            lookout.stop();
+        }
         if let Ok(mut groups) = self.groups.lock() {
-            let_go_of_the_empty(&mut groups, self.reaper.as_ref());
+            let_go_of_the_empty(&mut groups, self.reaper.as_ref(), self.occupied);
             for group in groups.iter() {
                 if !group.ended {
                     end_the_shell(group.leader);
@@ -264,7 +371,7 @@ impl Drop for Commands {
         // that emptied while this waited is let go of rather than killed, so a
         // group killed here is still the command's own.
         if let Ok(mut groups) = self.groups.lock() {
-            let_go_of_the_empty(&mut groups, self.reaper.as_ref());
+            let_go_of_the_empty(&mut groups, self.reaper.as_ref(), self.occupied);
             for group in groups.iter() {
                 kill(group.leader);
             }
@@ -273,11 +380,15 @@ impl Drop for Commands {
 }
 
 /// Takes off `groups` each group whose `sh` has ended with nothing it
-/// started still running, and tells `reaper` so.
+/// started still running, as `occupied` says, and tells `reaper` so.
 ///
 /// A group's number is not given to a new process while anyone is in it, so
 /// until it is seen empty it can only be signalled as the command's own.
-fn let_go_of_the_empty(groups: &mut Vec<Group>, reaper: Option<&Reaper>) {
+fn let_go_of_the_empty(
+    groups: &mut Vec<Group>,
+    reaper: Option<&Reaper>,
+    occupied: fn(u32) -> bool,
+) {
     groups.retain(|group| {
         let kept = !group.ended || occupied(group.leader);
         if !kept && let Some(reaper) = reaper {
@@ -532,6 +643,13 @@ mod tests {
             self.grace = grace;
             self
         }
+
+        /// The same commands, asking `occupied` whether a group has anyone
+        /// left in it.
+        fn occupied_by(mut self, occupied: fn(u32) -> bool) -> Self {
+            self.occupied = occupied;
+            self
+        }
     }
 
     /// Runs `command` in `cwd` and waits for it to end.
@@ -755,12 +873,32 @@ mod tests {
             .reaping_the_backend(groups);
 
         commands.drain();
-        assert_eq!(commands.backend, [backend.id()]);
+        assert_eq!(
+            backend_groups(&mut commands, &[backend.id()]),
+            [backend.id()]
+        );
 
         backend.kill().expect("sleep is killed");
         backend.wait().expect("sleep is reaped");
-        commands.drain();
-        assert!(commands.backend.is_empty());
+        assert!(backend_groups(&mut commands, &[]).is_empty());
+    }
+
+    /// The backend's groups the commands hold, once they are `wanted` or the
+    /// lookout has had [`PATIENCE`] to get there.
+    fn backend_groups(commands: &mut Commands, wanted: &[u32]) -> Vec<u32> {
+        let until = Instant::now() + PATIENCE;
+        loop {
+            commands.drain();
+            let held = commands
+                .backend
+                .lock()
+                .expect("nothing else holds the list")
+                .clone();
+            if held == wanted || Instant::now() >= until {
+                return held;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     /// A backend started again in the same session leads a group of its own,
@@ -784,13 +922,46 @@ mod tests {
 
         let mut again = backend();
         started.send(again.id()).expect("the receiver is held");
-        commands.drain();
-        assert_eq!(commands.backend, [again.id()]);
+        assert_eq!(backend_groups(&mut commands, &[again.id()]), [again.id()]);
 
         again.kill().expect("sleep is killed");
         again.wait().expect("sleep is reaped");
-        commands.drain();
-        assert!(commands.backend.is_empty());
+        assert!(backend_groups(&mut commands, &[]).is_empty());
+    }
+
+    /// The shell's loop drains the commands on every pass, between one frame
+    /// and the next, and asking the kernel whether a group has anyone left in
+    /// it waited up to half a second on a Mac whose process table something
+    /// else was walking: every key typed in that time waited with it.
+    #[test]
+    fn a_drain_does_not_wait_on_asking_whether_a_group_has_emptied() {
+        fn slowly(_leader: u32) -> bool {
+            std::thread::sleep(Duration::from_millis(500));
+            true
+        }
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let mut backend = Command::new("sleep");
+        std::os::unix::process::CommandExt::process_group(backend.arg("30"), 0);
+        let mut backend = backend.spawn().expect("sleep starts");
+        let (started, groups) = channel();
+        started.send(backend.id()).expect("the receiver is held");
+        let mut commands = Commands::at(dir.path())
+            .reaped_by(Reaper::start().expect("sh starts"))
+            .reaping_the_backend(groups)
+            .occupied_by(slowly);
+
+        let began = Instant::now();
+        for _ in 0..3 {
+            commands.drain();
+        }
+        let took = began.elapsed();
+
+        backend.kill().expect("sleep is killed");
+        backend.wait().expect("sleep is reaped");
+        assert!(
+            took < Duration::from_millis(250),
+            "three drains waited {took:?} on the group's look"
+        );
     }
 
     #[test]
@@ -808,15 +979,15 @@ mod tests {
     }
 
     /// A group can empty after its `sh` has ended, when what the command left
-    /// running exits on its own. It is let go of at the next look rather than
-    /// kept for the quit to signal, by which time its number could be
-    /// someone else's.
+    /// running exits on its own. It is let go of at the lookout's next look
+    /// rather than kept for the quit to signal, by which time its number
+    /// could be someone else's.
     ///
     /// What the command left running is ended by the test, once the shell
-    /// has, and waited out, so the one drain made after is the first to see
-    /// the group empty however long the machine took to get there.
+    /// has, and waited out, so a look made after is the first to see the
+    /// group empty however long the machine took to get there.
     #[test]
-    fn a_group_that_empties_after_its_shell_ended_is_let_go_of_at_the_next_drain() {
+    fn a_group_that_empties_after_its_shell_ended_is_let_go_of_at_the_next_look() {
         let dir = tempfile::tempdir().expect("a temporary directory can be created");
         let marker = dir.path().join("left-running");
         let mut commands = Commands::at(dir.path());
@@ -842,7 +1013,10 @@ mod tests {
         rustix::process::kill_process(pid, rustix::process::Signal::KILL)
             .expect("what the command left running can be killed");
         gone(child, "what the command left running outlived its kill");
-        commands.drain();
+        let until = Instant::now() + PATIENCE;
+        while Instant::now() < until && !commands.groups.lock().is_ok_and(|g| g.is_empty()) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
 
         let groups = commands.groups.lock().expect("nothing else holds the list");
         assert!(
