@@ -247,10 +247,12 @@ fn open(app: App, around: Around<'_>) -> io::Result<(Ended, App)> {
     // and waits for the reply, which never comes when stdin is a pipe.
     // Quietened, so a frame that changed nothing sends the terminal nothing:
     // most frames change no cell, and a terminal repaints for the cursor
-    // shown and placed again as for anything else.
-    let mut terminal = Terminal::new(crate::quiet::Quiet::new(
-        CrosstermBackend::new(io::stdout()),
-    ))?;
+    // shown and placed again as for anything else. Measured off standard
+    // output, so that no frame waits on an open of the terminal.
+    let mut terminal = Terminal::new(
+        crate::quiet::Quiet::new(CrosstermBackend::new(io::stdout()))
+            .measured_by(crate::quiet::stdout_size),
+    )?;
     // What the session started — the CLI and the `!` commands, each in a
     // process group of its own — is not stopped with it: a turn goes on while
     // the operator is at their shell, and is on screen when they come back.

@@ -180,7 +180,7 @@ reviewers that encode both, for an agent working in this tree.
   cost covers yet, which it shows marked as an estimate, `quiet.rs` is the backend the shell draws
   through, which sends the terminal nothing for a frame that changed nothing — no colours reset, no
   cursor shown or placed again where it already is — since a terminal repaints for those bytes as
-  for any, and forgets what it knew of the cursor whenever the screen is cleared, `terminal.rs`
+  for any, and forgets what it knew of the cursor whenever the screen is cleared, and reads the terminal's size off standard output, since crossterm opens `/dev/tty` for it at every draw and an endpoint-security agent can hold that open for a second, `terminal.rs`
   enters and restores the terminal — and hands it back for a stop and takes it again after — the mouse it takes for the wheel, clicks and drags, the bracketing it
   asks pastes to arrive in, and the keyboard
   enhancement it pushes where the terminal says it can tell Shift+Enter from Enter — or the

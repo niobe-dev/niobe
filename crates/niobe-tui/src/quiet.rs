@@ -10,6 +10,14 @@
 //! a core on a screen that did nothing but that ten times a second, against
 //! 5% for a still one. So this remembers what the terminal was last told of
 //! its cursor and passes on only what would change it.
+//!
+//! Ratatui also asks the size at every draw, and crossterm's backend answers
+//! by opening `/dev/tty` each time. An endpoint-security agent that vets every
+//! open — Microsoft Defender on macOS does — held that open for over a second
+//! on a machine it was busy on, and the keys typed meanwhile waited with the
+//! frame. So the size is read off the descriptor the shell already draws on,
+//! which opens nothing, and the terminal's backend is asked only where that
+//! says nothing.
 
 use ratatui::backend::{Backend, ClearType, WindowSize};
 use ratatui::buffer::Cell;
@@ -25,6 +33,9 @@ pub(crate) struct Quiet<B> {
     /// Where the cursor was last put; `None` where the shell no longer
     /// knows, as after cells are written, which moves it.
     at: Option<Position>,
+    /// Reads the terminal's size without the terminal's backend; `None`
+    /// where it cannot, and the backend is asked.
+    measure: fn() -> Option<Size>,
 }
 
 impl<B> Quiet<B> {
@@ -34,7 +45,13 @@ impl<B> Quiet<B> {
             inner,
             shown: None,
             at: None,
+            measure: || None,
         }
+    }
+
+    /// The same backend, reading the terminal's size with `measure` first.
+    pub(crate) fn measured_by(self, measure: fn() -> Option<Size>) -> Self {
+        Self { measure, ..self }
     }
 
     /// Forgets what the terminal shows of its cursor, so that the next frame
@@ -109,7 +126,10 @@ impl<B: Backend> Backend for Quiet<B> {
     }
 
     fn size(&self) -> Result<Size, Self::Error> {
-        self.inner.size()
+        match (self.measure)() {
+            Some(size) => Ok(size),
+            None => self.inner.size(),
+        }
     }
 
     fn window_size(&mut self) -> Result<WindowSize, Self::Error> {
@@ -119,6 +139,29 @@ impl<B: Backend> Backend for Quiet<B> {
     fn flush(&mut self) -> Result<(), Self::Error> {
         self.inner.flush()
     }
+}
+
+/// The size of the terminal on standard output, which the shell draws on.
+#[cfg(unix)]
+pub(crate) fn stdout_size() -> Option<Size> {
+    use std::os::fd::AsFd;
+    terminal_size(std::io::stdout().as_fd())
+}
+
+/// Nothing: off Unix the terminal's backend is asked, as it always was.
+#[cfg(not(unix))]
+pub(crate) fn stdout_size() -> Option<Size> {
+    None
+}
+
+/// The size of the terminal `tty` is, as its window size says: an `ioctl`
+/// on a descriptor already open, which no agent vets as it vets an open.
+/// `None` where it is no terminal, or says it has no size, as a terminal
+/// that has not been told one does.
+#[cfg(unix)]
+fn terminal_size(tty: std::os::fd::BorrowedFd<'_>) -> Option<Size> {
+    let size = rustix::termios::tcgetwinsize(tty).ok()?;
+    (size.ws_col > 0 && size.ws_row > 0).then(|| Size::new(size.ws_col, size.ws_row))
 }
 
 #[cfg(test)]
@@ -154,6 +197,63 @@ mod tests {
 
     /// The screen the tests draw on.
     const SCREEN: Rect = Rect::new(0, 0, 20, 4);
+
+    /// The size the shell reads for itself is the terminal's, and the
+    /// terminal's own backend is not asked: crossterm opens `/dev/tty` for
+    /// it, and an endpoint-security agent that vets every open held that for
+    /// over a second on a Mac it was busy on, while keys typed waited.
+    #[test]
+    fn a_size_read_for_the_shell_is_the_one_the_terminal_is_not_asked_for() {
+        let quiet = Quiet::new(Screen(CrosstermBackend::new(Sent::default())))
+            .measured_by(|| Some(Size::new(33, 7)));
+
+        assert_eq!(quiet.size().expect("a size is read"), Size::new(33, 7));
+    }
+
+    /// Where the shell cannot read the size for itself — standard output is
+    /// no terminal — the terminal's own backend is asked, as before.
+    #[test]
+    fn a_size_the_shell_cannot_read_is_asked_of_the_terminal() {
+        let quiet = Quiet::new(Screen(CrosstermBackend::new(Sent::default()))).measured_by(|| None);
+
+        assert_eq!(quiet.size().expect("a size is read"), SCREEN.as_size());
+    }
+
+    /// A terminal's size is read off the descriptor the shell holds, as its
+    /// window size says; one that says no size at all says nothing.
+    #[cfg(unix)]
+    #[test]
+    fn a_terminals_size_is_read_off_its_descriptor() {
+        use std::os::fd::AsFd;
+        use std::os::unix::ffi::OsStrExt;
+        let master =
+            rustix::pty::openpt(rustix::pty::OpenptFlags::RDWR | rustix::pty::OpenptFlags::NOCTTY)
+                .expect("a pty can be opened");
+        rustix::pty::grantpt(&master).expect("the slave can be granted");
+        rustix::pty::unlockpt(&master).expect("the slave can be unlocked");
+        let name = rustix::pty::ptsname(&master, Vec::new()).expect("the slave has a name");
+        let slave = std::fs::File::options()
+            .read(true)
+            .write(true)
+            .open(std::ffi::OsStr::from_bytes(name.as_bytes()))
+            .expect("the slave can be opened");
+        let sized = |columns, rows| {
+            rustix::termios::tcsetwinsize(
+                slave.as_fd(),
+                rustix::termios::Winsize {
+                    ws_row: rows,
+                    ws_col: columns,
+                    ws_xpixel: 0,
+                    ws_ypixel: 0,
+                },
+            )
+            .expect("a pty's size can be set");
+            terminal_size(slave.as_fd())
+        };
+
+        assert_eq!(sized(132, 43), Some(Size::new(132, 43)));
+        assert_eq!(sized(0, 0), None);
+    }
 
     /// Crossterm's backend writing into `Sent`, its screen [`SCREEN`]:
     /// crossterm asks the process's terminal for its size, which a CI runner
