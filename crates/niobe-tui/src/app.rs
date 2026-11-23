@@ -1987,8 +1987,9 @@ pub struct App {
     /// The working tree a running turn began on, held until a read after
     /// the turn's end can be compared with it. `None` between turns.
     tree_watch: Option<TreeWatch>,
-    /// The files the running turn's edit calls changed, by the path each
-    /// call named.
+    /// The files the running turn changed that something said it changed:
+    /// its edit calls, by the path each named, and the file the shell wrote
+    /// a standing answer to for the operator.
     turn_edits: BTreeSet<String>,
     /// How many of the session's ended turns have been judged for a spike,
     /// from the first time the event loop asked. `None` until then: the turns
@@ -5323,6 +5324,13 @@ impl App {
         {
             self.tree_watch = None;
         }
+    }
+
+    /// Takes word that the shell wrote the operator's standing answer to the
+    /// file the working tree lists at `path`: the operator's change, which
+    /// the running turn is not said to have made.
+    pub fn kept_rule_in(&mut self, path: &str) {
+        self.turn_edits.insert(path.to_owned());
     }
 
     /// Keeps what `turn` changed outside the edit tools, for the Changes

@@ -24,6 +24,9 @@ pub struct ConfigRules {
     /// inside.
     root: PathBuf,
     path: PathBuf,
+    /// `path` as the working tree lists it, which the shell holds against
+    /// the tree so that the operator's rule is not a turn's change.
+    listed: String,
     /// Where this machine records the config files it has trusted, so that a
     /// file Niobe itself edits does not lose the operator's decision about it.
     trust: Option<PathBuf>,
@@ -44,6 +47,7 @@ impl ConfigRules {
         Self {
             root: root.to_path_buf(),
             path: crate::repo::config_path(root),
+            listed: crate::repo::config_listed(),
             trust: crate::config::trust_path(),
             withheld: false,
             text_trusted_when_withheld: false,
@@ -144,6 +148,10 @@ impl Rules for ConfigRules {
         niobe_config::remember_then(&self.path, rule, |remembered| self.keep_trust(remembered))
             .map_err(|error| error.to_string())?
     }
+
+    fn kept_in(&self) -> Option<&str> {
+        Some(&self.listed)
+    }
 }
 
 #[cfg(test)]
@@ -170,6 +178,7 @@ mod tests {
             ConfigRules {
                 root: self.dir.path().to_path_buf(),
                 path: crate::repo::config_path(self.dir.path()),
+                listed: crate::repo::config_listed(),
                 trust: Some(self.record.clone()),
                 withheld: false,
                 text_trusted_when_withheld: false,
@@ -199,6 +208,7 @@ mod tests {
         let mut rules = ConfigRules {
             root: dir.path().to_path_buf(),
             path: crate::repo::config_path(dir.path()),
+            listed: crate::repo::config_listed(),
             trust: Some(dir.path().join("trusted.list")),
             withheld: false,
             text_trusted_when_withheld: false,
@@ -231,6 +241,34 @@ mod tests {
             repo.is_trusted(),
             "the operator's own answer would be withheld from the next session"
         );
+    }
+
+    /// The shell holds this name against the working tree it reads, so it is
+    /// checked against what `git` itself lists once the rule is written.
+    #[test]
+    fn the_file_a_rule_is_kept_in_is_named_as_git_lists_it() {
+        let repo = Repo::with_config("[permissions]\nallow = []\n");
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(repo.dir.path())
+                .output()
+                .expect("git runs")
+        };
+        assert!(git(&["init", "-q"]).status.success());
+        let mut rules = repo.rules();
+
+        rules
+            .remember(&Rule::tool("Read"))
+            .expect("the rule is written");
+
+        let listed = git(&["status", "--porcelain", "--untracked-files=all"]);
+        let listed = String::from_utf8_lossy(&listed.stdout);
+        let config = listed
+            .lines()
+            .find(|line| line.contains("config.toml"))
+            .and_then(|line| line.get(3..));
+        assert_eq!(rules.kept_in(), config, "{listed}");
     }
 
     #[test]
@@ -410,6 +448,7 @@ mod tests {
         let mut rules = ConfigRules {
             root: repo.dir.path().to_path_buf(),
             path: path.clone(),
+            listed: crate::repo::config_listed(),
             trust: Some(record.clone()),
             withheld: false,
             text_trusted_when_withheld: false,
@@ -489,6 +528,7 @@ mod tests {
         let created = ConfigRules {
             root: dir.path().to_path_buf(),
             path: crate::repo::config_path(dir.path()),
+            listed: crate::repo::config_listed(),
             trust: Some(dir.path().join("trusted.list")),
             withheld: false,
             text_trusted_when_withheld: false,

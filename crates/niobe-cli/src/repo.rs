@@ -63,6 +63,12 @@ pub fn config_path(root: &Path) -> PathBuf {
     root.join(DIR).join(niobe_config::FILE_NAME)
 }
 
+/// [`config_path`] as the repository's working tree lists it: from the
+/// root, its parts joined by `/` on every platform, as `git status` names it.
+pub fn config_listed() -> String {
+    format!("{DIR}/{}", niobe_config::FILE_NAME)
+}
+
 /// Where a session under `trim = true` keeps the whole outputs it trimmed,
 /// and the settings it starts the `claude` CLI with.
 pub fn trim_dir(root: &Path) -> PathBuf {

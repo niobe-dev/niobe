@@ -33,6 +33,16 @@ pub trait Rules {
     /// Keeps one rule, and says how far it reaches. Called once, when the
     /// operator makes it.
     fn remember(&mut self, rule: &Rule) -> Result<Reach, RulesError>;
+
+    /// The file a kept rule is written to, by the path the repository's
+    /// working tree lists it under, where it is in the repository.
+    ///
+    /// The shell wrote it for the operator, so a turn running at the time is
+    /// not said to have changed it. Nothing, by default: rules kept nowhere
+    /// change no file.
+    fn kept_in(&self) -> Option<&str> {
+        None
+    }
 }
 
 /// Rules that are kept nowhere: a recorded log being looked at rather than
