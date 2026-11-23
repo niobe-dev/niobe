@@ -3037,6 +3037,7 @@ impl DrawnEntries {
         &'a self,
         start: usize,
         cut: impl Fn(usize) -> bool + 'a,
+        theme: &'a Theme,
     ) -> impl Iterator<Item = Option<crate::select::CopiedLine>> + 'a {
         use crate::select::CopiedLine;
 
@@ -3055,8 +3056,8 @@ impl DrawnEntries {
             .enumerate()
             .skip(start)
             .map(move |(number, (read, line))| match read {
-                Copied::AsShown => Some(crate::select::shown(line).into()),
-                Copied::Marked => Some(unmarked(crate::select::shown(line)).into()),
+                Copied::AsShown => Some(copied_row(line, false, theme)),
+                Copied::Marked => Some(copied_row(line, true, theme)),
                 Copied::InBubble if crate::bubble::is_end(line) => None,
                 Copied::InBubble if cut(number) => Some(CopiedLine::behind(
                     crate::select::shown(line),
@@ -5056,6 +5057,41 @@ fn entry_lines(
 
 /// `line`, the first of a reply, with the glyph in its gutter read as the
 /// blank cells it stands in.
+/// A transcript row as a copy reads it: as the terminal shows it, the
+/// reply's glyph read as a blank where the row is `marked` with it, and a
+/// code block's gutter read as blanks — the drawing is not the code — with a
+/// row the pane cut from the line above said to go on with it.
+fn copied_row(line: &Line<'_>, marked: bool, theme: &Theme) -> crate::select::CopiedLine {
+    use crate::select::{CopiedLine, shown_spans};
+
+    let read = |shown: String| match marked {
+        true => unmarked(shown),
+        false => shown,
+    };
+    let skip = usize::from(marked);
+    let gutter = line
+        .spans
+        .get(skip..)
+        .and_then(|spans| crate::markdown::code_gutter(spans, theme))
+        .map(|(at, cut)| (at + skip, cut));
+    let Some((at, cut)) = gutter else {
+        return read(crate::select::shown(line)).into();
+    };
+    let (before, rest) = line.spans.split_at(at);
+    let Some((mark, after)) = rest.split_first() else {
+        return read(crate::select::shown(line)).into();
+    };
+    let mut row = read(shown_spans(before));
+    let blanks = text::width(&mark.content);
+    let own = text::width(&row) + blanks;
+    row.extend(std::iter::repeat_n(' ', blanks));
+    crate::select::push_shown(&mut row, after);
+    match cut {
+        true => CopiedLine::going_on(row, own),
+        false => row.into(),
+    }
+}
+
 fn unmarked(line: String) -> String {
     let mark = format!("{} ", EntryKind::Agent.glyph());
     match line.strip_prefix(&mark) {

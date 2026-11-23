@@ -200,7 +200,8 @@ reviewers that encode both, for an agent working in this tree.
   palette — one table entry per theme in the sixteen ANSI names, which is what a terminal gets
   unless `COLORTERM` says it draws 24-bit colour; then the designed themes draw their own values,
   and `classic`, which is the sixteen, still honours the user's scheme — `text.rs` wraps, truncates, pads to a column by cells and expands tabs, `find.rs` finds a query in the transcript as it is drawn and marks
-  where, `select.rs` is a drag's selection of the transcript as drawn, the text it copies and
+  where, `select.rs` is a drag's selection of the transcript as drawn, the text it copies — a
+  code block's line the pane cut into rows copied as the one line, without its gutter — and
   the link under a click, `desktop.rs` the trait the loop hands what to copy, what to open and what to edit to,
   `trust.rs` the question a session opens on where the repository's config sets what only a
   trusted file may — `run::ask_trust` asks it on a loop of its own, before any backend is
@@ -235,7 +236,8 @@ reviewers that encode both, for an agent working in this tree.
   turn, so it opens while one runs, and names the CLI and files that add, remove, turn off or
   sign in to one — `markdown.rs` draws the assistant's replies
   from their markdown and wraps the styled text itself, so the transcript's line count stays
-  exact, `hunks.rs` draws a file change under the call that made it as the lines that changed,
+  exact — a code block's line too wide for the pane cut into rows, each after the first behind
+  `┆` rather than the block's `│`, so the operator sees it is one line — `hunks.rs` draws a file change under the call that made it as the lines that changed,
   cut at twenty rows until Ctrl+T opens every cut diff in place,
   `summary.rs` sums up the session's calls between two things it said as one dim line of what
   they did — `Read 3 files, edited 1 file +6 −2, ran 2 shell commands, 41 tests passed` — and

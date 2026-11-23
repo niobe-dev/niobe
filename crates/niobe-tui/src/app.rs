@@ -6366,15 +6366,15 @@ impl App {
             self.hint = Some("There is no transcript to export yet".to_owned());
             return;
         }
-        let mut copied = self.drawn.copied_lines_from(0, |_| false);
-        let text: Vec<String> = (0..lines)
-            .filter_map(|_| {
-                copied
-                    .next()
-                    .flatten()
-                    .map(crate::select::CopiedLine::into_text)
-            })
-            .collect();
+        let mut text = Vec::new();
+        for copied in self
+            .drawn
+            .copied_lines_from(0, |_| false, &self.theme)
+            .take(lines)
+            .flatten()
+        {
+            copied.onto(&mut text);
+        }
         self.handoffs
             .push(crate::desktop::Handoff::Copy(text.join("\n")));
     }
@@ -9195,17 +9195,24 @@ impl App {
     fn selected_text(&self, selection: crate::select::Selection) -> String {
         let covered = selection.lines();
         let (first, last) = (*covered.start(), *covered.end());
-        let mut lines: Vec<Option<crate::select::CopiedLine>> = self
-            .drawn
-            .copied_lines_from(first, |line| line == first || line == last)
-            .take(covered.count())
-            .collect();
-        // Each line is asked for once, in order, so it is handed over rather
-        // than copied.
+        let mut lines = self.drawn.copied_lines_from(
+            first,
+            move |line| line == first || line == last,
+            &self.theme,
+        );
+        // Each line is asked for once, in order, so each is read as the walk
+        // reaches it and handed over, rather than all gathered first.
+        let mut next = first;
         selection.text(|line| {
-            lines
-                .get_mut(line.checked_sub(first)?)
-                .and_then(Option::take)
+            while next < line {
+                lines.next();
+                next += 1;
+            }
+            if next > line {
+                return None;
+            }
+            next += 1;
+            lines.next().flatten()
         })
     }
 
@@ -23563,7 +23570,7 @@ mod tests {
         let each: Vec<String> = (0..lines)
             .filter_map(|line| {
                 app.drawn
-                    .copied_lines_from(line, |_| false)
+                    .copied_lines_from(line, |_| false, &app.theme)
                     .next()
                     .flatten()
                     .map(crate::select::CopiedLine::into_text)
@@ -23629,8 +23636,12 @@ mod tests {
             let drawn = &app.drawn;
             let ends = *selection.lines().start()..=*selection.lines().end();
             let cut = move |line: usize| line == *ends.start() || line == *ends.end();
-            let each =
-                selection.text(|line| drawn.copied_lines_from(line, cut.clone()).next().flatten());
+            let each = selection.text(|line| {
+                drawn
+                    .copied_lines_from(line, cut.clone(), &app.theme)
+                    .next()
+                    .flatten()
+            });
             assert!(!each.is_empty(), "{selection:?} covers something");
 
             assert_eq!(app.selected_text(selection), each, "{selection:?}");

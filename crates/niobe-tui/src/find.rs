@@ -316,7 +316,8 @@ impl Text {
 
 /// How many characters `line` starts with that are blank or the marks of a
 /// block it carries on from `above` — a quote's bar or a code block's gutter
-/// drawn in the same column of both — up to the last such mark: what a
+/// drawn in the same column of both, or a code row cut for room under its
+/// block — up to the last such mark: what a
 /// comparison reads as the space between the words either side of the
 /// break, as it reads an indent.
 fn carried_lead(above: &Line<'_>, line: &Line<'_>) -> usize {
@@ -327,7 +328,7 @@ fn carried_lead(above: &Line<'_>, line: &Line<'_>) -> usize {
         let above = over.next();
         if c.is_whitespace() {
             lead += 1;
-        } else if above == Some(c) && crate::markdown::is_carried_mark(c) {
+        } else if above.is_some_and(|above| crate::markdown::carries_on(above, c)) {
             lead += 1;
             carried = lead;
         } else {
@@ -559,6 +560,12 @@ mod tests {
             found_in("zebra quokka", &["▎ ▎ │ a zebra", "▎ ▎ │ quokka"]),
             vec![vec![(10, 8, 5), (11, 6, 6)]]
         );
+        assert_eq!(
+            found_in("zebra quokka", &["  │ a zebra", "  ┆ quokka", "  ┆ more"]),
+            vec![vec![(10, 6, 5), (11, 4, 6)]],
+            "a code row cut for room goes on behind its own mark"
+        );
+        assert!(found_in("zebra quokka", &["  ┆ a zebra", "  │ quokka"]).is_empty());
         assert!(found_in("zebra quokka", &["a zebra", "▎ quokka"]).is_empty());
         assert!(found_in("zebra quokka", &["• a zebra", "• quokka"]).is_empty());
         assert_eq!(

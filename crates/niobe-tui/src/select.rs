@@ -93,37 +93,53 @@ impl Selection {
     /// share is taken off them all: the transcript draws a gutter before every
     /// line of a message, and copied text is wanted without it. A first line
     /// that starts part way along has no indent of its own to share.
+    ///
+    /// A line that goes on with the one above — a code block's line the
+    /// pane cut for room — is joined to it as the one line it was, with no
+    /// break between and the blanks either side of the cut kept, since they
+    /// are the line's own.
     pub(crate) fn text<L: Into<CopiedLine>>(
         &self,
         mut line_at: impl FnMut(usize) -> Option<L>,
     ) -> String {
-        let (start, _) = self.ends();
-        let pieces: Vec<String> = self
+        let (start, end) = self.ends();
+        let mut lines = self
             .lines()
-            .filter_map(|line| {
-                let copied = line_at(line)?.into();
-                let (from, to) = self.columns_on(line)?;
-                Some(copied.covered(from, to))
-            })
-            .collect();
-        let shares_indent =
-            |(at, piece): &(usize, &String)| !piece.is_empty() && (*at > 0 || start.column == 0);
+            .filter_map(|line| Some((line, line_at(line)?.into())))
+            .peekable();
+        let mut pieces: Vec<(String, bool)> =
+            Vec::with_capacity(end.line.saturating_sub(start.line).saturating_add(1));
+        while let Some((line, copied)) = lines.next() {
+            let copied: CopiedLine = copied;
+            let Some((from, to)) = self.columns_on(line) else {
+                continue;
+            };
+            let kept_to_its_end = lines.peek().is_some_and(|(_, next)| next.goes_on());
+            let goes_on = copied.goes_on() && !pieces.is_empty();
+            let piece = copied.covered(from, to, kept_to_its_end);
+            match (goes_on, pieces.last_mut()) {
+                (true, Some((above, _))) => above.push_str(&piece),
+                _ => pieces.push((piece, line > start.line || start.column == 0)),
+            }
+        }
+        let shares_indent = |(piece, whole): &(String, bool)| !piece.is_empty() && *whole;
         let indent = pieces
             .iter()
-            .enumerate()
-            .filter(shares_indent)
-            .map(|(_, piece)| piece.len() - piece.trim_start_matches(' ').len())
+            .filter(|piece| shares_indent(piece))
+            .map(|(piece, _)| piece.len() - piece.trim_start_matches(' ').len())
             .min()
             .unwrap_or(0);
-        pieces
-            .iter()
-            .enumerate()
-            .map(|(at, piece)| match shares_indent(&(at, piece)) {
-                true => piece.get(indent..).unwrap_or_default(),
-                false => piece.as_str(),
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
+        let mut text = String::with_capacity(pieces.iter().map(|(piece, _)| piece.len() + 1).sum());
+        for (at, piece) in pieces.iter().enumerate() {
+            if at > 0 {
+                text.push('\n');
+            }
+            text.push_str(match shares_indent(piece) {
+                true => piece.0.get(indent..).unwrap_or_default(),
+                false => piece.0.as_str(),
+            });
+        }
+        text
     }
 }
 
@@ -139,9 +155,20 @@ impl Selection {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CopiedLine {
     text: String,
-    /// The cells before the words that are drawing, and the blanks a copy
-    /// reads them as; `None` where every cell is read as drawn.
-    drawing: Option<(usize, usize)>,
+    read: Reading,
+}
+
+/// How a copy reads a [`CopiedLine`]'s cells.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reading {
+    /// Every cell as drawn.
+    AsDrawn,
+    /// The first `drawn` cells are drawing before the words, read as `read`
+    /// blanks.
+    Behind { drawn: usize, read: usize },
+    /// The line goes on with the one above it, its own text starting at
+    /// cell `from`, past the mark that says so.
+    GoesOn { from: usize },
 }
 
 impl CopiedLine {
@@ -150,30 +177,62 @@ impl CopiedLine {
     pub(crate) fn behind(text: String, drawn: usize, read: usize) -> Self {
         Self {
             text,
-            drawing: Some((drawn, read)),
+            read: Reading::Behind { drawn, read },
         }
+    }
+
+    /// `text`, as drawn, going on from cell `from` with the line above it,
+    /// as a code block's line the pane cut for room does: the cells before
+    /// are the cut's mark and the indent of the block.
+    pub(crate) fn going_on(text: String, from: usize) -> Self {
+        Self {
+            text,
+            read: Reading::GoesOn { from },
+        }
+    }
+
+    /// Whether the line goes on with the one above it.
+    fn goes_on(&self) -> bool {
+        matches!(self.read, Reading::GoesOn { .. })
     }
 
     /// The whole line, as a copy of all of it reads: as drawn, or its
     /// drawing read as the gutter.
     pub(crate) fn into_text(self) -> String {
-        match self.drawing {
-            None => self.text,
-            Some(_) => self.covered(0, usize::MAX),
+        match self.read {
+            Reading::AsDrawn => self.text,
+            Reading::Behind { .. } | Reading::GoesOn { .. } => self.covered(0, usize::MAX, false),
+        }
+    }
+
+    /// Adds the whole line to `lines`, a copy of whole lines in order: as a
+    /// line of its own, or where it goes on with the one above, onto the end
+    /// of that one as the one line it was.
+    pub(crate) fn onto(self, lines: &mut Vec<String>) {
+        match (self.read, lines.last_mut()) {
+            (Reading::GoesOn { from }, Some(above)) => {
+                above.push_str(&covered(self.text, from, usize::MAX, false));
+            }
+            _ => lines.push(self.into_text()),
         }
     }
 
     /// What the cells from `from` up to `to` read as, without trailing
-    /// blanks: the drawing before the words read as the part of the gutter
-    /// those cells reach back into, and nothing where they hold no words.
-    fn covered(self, from: usize, to: usize) -> String {
-        let Some((drawn, read)) = self.drawing.filter(|(drawn, _)| from < *drawn) else {
-            return covered(self.text, from, to);
-        };
-        let words = covered(self.text, drawn, to);
-        match words.is_empty() {
-            true => words,
-            false => format!("{}{words}", " ".repeat(read.saturating_sub(from))),
+    /// blanks unless `to_its_end` keeps them for a line the next goes on
+    /// from: the drawing before the words read as the part of the gutter
+    /// those cells reach back into, and nothing where they hold no words;
+    /// a line going on from the one above as its own text, past its mark.
+    fn covered(self, from: usize, to: usize, to_its_end: bool) -> String {
+        match self.read {
+            Reading::GoesOn { from: own } => covered(self.text, from.max(own), to, to_its_end),
+            Reading::Behind { drawn, read } if from < drawn => {
+                let words = covered(self.text, drawn, to, to_its_end);
+                match words.is_empty() {
+                    true => words,
+                    false => format!("{}{words}", " ".repeat(read.saturating_sub(from))),
+                }
+            }
+            Reading::AsDrawn | Reading::Behind { .. } => covered(self.text, from, to, to_its_end),
         }
     }
 }
@@ -183,7 +242,7 @@ impl From<String> for CopiedLine {
     fn from(text: String) -> Self {
         Self {
             text,
-            drawing: None,
+            read: Reading::AsDrawn,
         }
     }
 }
@@ -215,12 +274,25 @@ pub(crate) fn shown(line: &Line<'_>) -> String {
 
 /// [`shown`] of a run of a line's spans.
 pub(crate) fn shown_spans(spans: &[ratatui::text::Span<'_>]) -> String {
-    let drawn = |c: char| !c.is_control() && !crate::ui::is_direction_mark(c);
     let mut shown = String::new();
+    push_shown(&mut shown, spans);
+    shown
+}
+
+/// [`shown_spans`] of `spans`, written onto the end of `shown`.
+pub(crate) fn push_shown(shown: &mut String, spans: &[ratatui::text::Span<'_>]) {
+    let drawn = |c: char| !c.is_control() && !crate::ui::is_direction_mark(c);
+    // Direction marks and tags are never ASCII, so text that is all ASCII,
+    // as most of a transcript is, holds nothing to drop but its controls,
+    // which a byte says.
+    let keeps_all = |content: &str| match content.is_ascii() {
+        true => !content.bytes().any(|byte| byte.is_ascii_control()),
+        false => content.chars().all(|c| drawn(c) && !text::is_tag(c)),
+    };
     for span in spans {
         // Most spans hold nothing to drop, and are copied whole rather than
         // a character at a time.
-        if span.content.chars().all(|c| drawn(c) && !text::is_tag(c)) {
+        if keeps_all(&span.content) {
             shown.push_str(&span.content);
             continue;
         }
@@ -234,19 +306,23 @@ pub(crate) fn shown_spans(spans: &[ratatui::text::Span<'_>]) -> String {
             );
         }
     }
-    shown
 }
 
-/// [`cells`] of `drawn` without its trailing blanks, kept in `drawn`'s own
-/// buffer where it is the whole line, as every line but a selection's first
-/// and last is: a long selection is otherwise each line copied a second time.
-fn covered(mut drawn: String, from: usize, to: usize) -> String {
+/// [`cells`] of `drawn` without its trailing blanks — but where `to_its_end`
+/// keeps them — kept in `drawn`'s own buffer where it is the whole line, as
+/// every line but a selection's first and last is: a long selection is
+/// otherwise each line copied a second time.
+fn covered(mut drawn: String, from: usize, to: usize, to_its_end: bool) -> String {
+    let trim = |kept: &str| match to_its_end {
+        true => kept.len(),
+        false => kept.trim_end().len(),
+    };
     let kept = cells(&drawn, from, to);
     let whole = matches!(kept, std::borrow::Cow::Borrowed(kept) if kept.len() == drawn.len());
     if !whole {
-        return kept.trim_end().to_owned();
+        return kept.get(..trim(&kept)).unwrap_or_default().to_owned();
     }
-    drawn.truncate(drawn.trim_end().len());
+    drawn.truncate(trim(&drawn));
     drawn
 }
 
@@ -499,14 +575,29 @@ fn lead(drawn: &str) -> usize {
 
 /// Whether `below`, the lead of a line, is what a line carrying on the text
 /// of the one whose lead is `above` would start with: in each cell, a blank
-/// or what `above` has in that cell. A quote's bar, a code block's gutter and
+/// or what `above` has in that cell, or a code row's gutter cut for room under
+/// its block's. A quote's bar, a code block's gutter and
 /// a table's column rules are drawn on every line of the block, and a
 /// bullet's or a number's line goes on under spaces; anything else there is
 /// a word of the line's own, which a cut word is not carried on behind.
 fn carries_on(above: &str, below: &str) -> bool {
     let above: Vec<(usize, &str)> = placed(above).collect();
-    placed(below)
-        .all(|(at, grapheme)| grapheme.trim().is_empty() || above.contains(&(at, grapheme)))
+    let mark = |grapheme: &str| {
+        let mut chars = grapheme.chars();
+        chars.next().filter(|_| chars.next().is_none())
+    };
+    let under = |at: usize, grapheme: &str| {
+        above.iter().any(|&(over, drawn)| {
+            over == at
+                && (drawn == grapheme
+                    || mark(drawn)
+                        .zip(mark(grapheme))
+                        .is_some_and(|(drawn, grapheme)| {
+                            crate::markdown::carries_on(drawn, grapheme)
+                        }))
+        })
+    };
+    placed(below).all(|(at, grapheme)| grapheme.trim().is_empty() || under(at, grapheme))
 }
 
 /// Each grapheme of `drawn` beside the column it is drawn from.
@@ -596,7 +687,8 @@ mod tests {
     #[test]
     fn a_rows_drawing_reads_as_the_part_of_the_gutter_a_cut_reaches_back_into() {
         let row = |from, to| {
-            CopiedLine::behind(format!("{}words 漢字  ", " ".repeat(10)), 10, 2).covered(from, to)
+            CopiedLine::behind(format!("{}words 漢字  ", " ".repeat(10)), 10, 2)
+                .covered(from, to, false)
         };
         assert_eq!(row(0, usize::MAX), "  words 漢字");
         assert_eq!(row(1, usize::MAX), " words 漢字");
@@ -620,6 +712,50 @@ mod tests {
             selection.text(drawn(&lines)),
             "fn main() {\n    run();\n}\n"
         );
+    }
+
+    /// Rows the pane cut a code line into, read as the copy reads them: the
+    /// gutter as blanks, and every row after the first going on from where
+    /// its mark ends.
+    fn cut_rows() -> Vec<CopiedLine> {
+        vec![
+            CopiedLine::from("    one tw".to_owned()),
+            CopiedLine::going_on("    o thr".to_owned(), 4),
+            CopiedLine::going_on("    ee ".to_owned(), 4),
+            CopiedLine::from("    next".to_owned()),
+        ]
+    }
+
+    #[test]
+    fn rows_a_line_was_cut_into_for_room_copy_as_that_line() {
+        let rows = cut_rows();
+        let line_at = |line: usize| rows.get(line).cloned();
+
+        assert_eq!(
+            Selection::new(at(0, 0), at(3, 40)).text(line_at),
+            "one two three\nnext"
+        );
+        assert_eq!(
+            Selection::new(at(0, 8), at(2, 5)).text(line_at),
+            "two three",
+            "from part way along the first row, to part way along the last"
+        );
+        assert_eq!(
+            Selection::new(at(1, 6), at(2, 40)).text(line_at),
+            "three",
+            "a selection that starts on a row going on has nothing to join it to"
+        );
+        assert_eq!(
+            Selection::new(at(1, 0), at(1, 40)).text(line_at),
+            "o thr",
+            "the mark before a row's own text is not copied"
+        );
+
+        let mut whole = Vec::new();
+        for row in cut_rows() {
+            row.onto(&mut whole);
+        }
+        assert_eq!(whole, ["    one two three", "    next"]);
     }
 
     #[test]

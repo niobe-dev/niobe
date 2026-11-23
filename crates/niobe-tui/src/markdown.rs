@@ -134,6 +134,12 @@ impl Gathered {
 /// The gutter a code block's lines sit behind.
 const CODE_GUTTER: &str = "│ ";
 
+/// The gutter of a code block's row that goes on with the line above it,
+/// cut there only because the pane had no more room: so the operator sees a
+/// command drawn over three rows is one line, and a copy joins the rows back
+/// into it.
+const CODE_CUT: &str = "┆ ";
+
 /// Before a fenced code block's label, on its first row.
 const LABEL_MARK: &str = "╭ ";
 
@@ -148,9 +154,49 @@ const QUOTE_BAR: &str = "▎ ";
 /// bullet is: a line that has one where the line above has it goes on with
 /// the block's text, however the pane wrapped it.
 pub(crate) fn is_carried_mark(c: char) -> bool {
-    [QUOTE_BAR, CODE_GUTTER]
+    [QUOTE_BAR, CODE_GUTTER, CODE_CUT]
         .iter()
         .any(|mark| mark.starts_with(c))
+}
+
+/// Whether a row whose mark in a column is `below` goes on with the block of
+/// the row above, whose mark in that column is `above`: the same mark, or a
+/// code row cut for room under any row of its block.
+pub(crate) fn carries_on(above: char, below: char) -> bool {
+    let code = |c: char| CODE_GUTTER.starts_with(c) || CODE_CUT.starts_with(c);
+    (above == below && is_carried_mark(below)) || (CODE_CUT.starts_with(below) && code(above))
+}
+
+/// Where a row of a code block drawn among `spans` in `theme` has its
+/// gutter: the index of the span that draws it, and whether the row goes on
+/// with the line above, cut for room. `None` for any other row.
+///
+/// A code row is drawn as the marks of the blocks around it, then the
+/// gutter, then one span of code, so the gutter is the span before the
+/// last: drawn as nothing but the gutter, in the style the gutter is drawn
+/// in, with only blanks and blocks' marks before it. Words of a reply that
+/// happen to read `│ ` are drawn in the style of words. Asked of every row a
+/// copy reads, so the one span is looked at first, and the rest only for a
+/// row it could be.
+pub(crate) fn code_gutter(spans: &[Span<'_>], theme: &Theme) -> Option<(usize, bool)> {
+    let at = spans.len().checked_sub(2)?;
+    let gutter = spans.get(at)?;
+    let cut = match gutter.content.as_ref() {
+        CODE_GUTTER => false,
+        CODE_CUT => true,
+        _ => return None,
+    };
+    let behind_marks = spans.get(..at)?.iter().all(|span| {
+        span.content
+            .chars()
+            .all(|c| c.is_whitespace() || is_carried_mark(c))
+    });
+    (behind_marks && gutter.style == gutter_style(theme)).then_some((at, cut))
+}
+
+/// The style a code block's gutter is drawn in.
+fn gutter_style(theme: &Theme) -> Style {
+    Style::new().fg(theme.dim)
 }
 
 /// Between two table columns.
@@ -716,11 +762,11 @@ impl<'t> Renderer<'t> {
 
     /// A code block's lines behind the gutter, as written: code is not
     /// rewrapped, because where its lines break is part of what it says. A line
-    /// wider than the pane is cut into pieces that each keep the gutter. Tabs
-    /// are expanded, since a cell cannot draw one.
+    /// wider than the pane is cut into pieces, each after the first behind
+    /// [`CODE_CUT`]. Tabs are expanded, since a cell cannot draw one.
     fn code_lines(&mut self, code: &str) {
         let room = self.room().saturating_sub(text::width(CODE_GUTTER)).max(1);
-        let gutter = Style::new().fg(self.theme.dim);
+        let gutter = gutter_style(self.theme);
         let style = Style::new().fg(self.theme.code);
         for line in code.trim_end_matches('\n').split('\n') {
             if line.is_empty() {
@@ -731,9 +777,10 @@ impl<'t> Renderer<'t> {
             } else {
                 let expanded = text::expand_tabs(line);
                 let pieces = text::split_to_width(&expanded, room);
-                for piece in pieces {
+                for (at, piece) in pieces.into_iter().enumerate() {
+                    let mark = if at == 0 { CODE_GUTTER } else { CODE_CUT };
                     self.emit(vec![
-                        Span::styled(CODE_GUTTER, gutter),
+                        Span::styled(mark, gutter),
                         Span::styled(piece.to_owned(), style),
                     ]);
                 }
@@ -1311,7 +1358,29 @@ mod tests {
     fn a_code_block_keeps_its_lines_behind_a_gutter_and_cuts_only_what_overflows() {
         let lines = drawn("```rust\nfn main() {\n    run();\n}\n```", 14);
         assert_eq!(lines, ["╭ rust", "│ fn main() {", "│     run();", "│ }"]);
-        assert_eq!(drawn("```\nabcdefghij\n```", 8), ["│ abcdef", "│ ghij"]);
+        assert_eq!(
+            drawn("```\nabcdefghij\nk\n```", 8),
+            ["│ abcdef", "┆ ghij", "│ k"],
+            "a row cut for room says it goes on with the line above"
+        );
+    }
+
+    #[test]
+    fn a_code_rows_gutter_is_found_and_words_that_read_like_one_are_not() {
+        let theme = crate::theme::Theme::default();
+        let gutters = |source: &str| -> Vec<Option<(usize, bool)>> {
+            render(source, 8, &theme)
+                .iter()
+                .map(|line| code_gutter(&line.spans, &theme))
+                .collect()
+        };
+        assert_eq!(
+            gutters("```\nabcdefghij\n```"),
+            [Some((0, false)), Some((0, true))]
+        );
+        assert_eq!(gutters("> ```\n> ab\n> ```"), [Some((1, false))]);
+        assert_eq!(gutters("│ `x`"), [None], "words that read `│ ` are words");
+        assert_eq!(gutters("┆ **x**"), [None]);
     }
 
     #[test]

@@ -120,6 +120,63 @@ fn a_drag_across_lines_copies_them_without_the_gutter_they_are_drawn_in() {
     );
 }
 
+/// A command the agent suggests in a code block is copied as the line it
+/// wrote: the gutter the block is drawn behind is drawing, and the rows the
+/// pane cut the line into for room are one line, so a copy pasted into a
+/// shell runs the command rather than its pieces — even where a cut falls
+/// on a space.
+#[test]
+fn a_long_command_in_a_code_block_copies_as_one_line_without_its_gutter() {
+    let command = format!(
+        "! printf 'begin;\\nupdate sources set url = {}' | ssh -i ~/.ssh/deploy dokku@example.org \
+         postgres:connect db",
+        "x".repeat(150)
+    );
+    let mut app = replied(&format!(
+        "Run it:\n\n```\n{command}\nls  -la\n```\n\nThen say so."
+    ));
+    let frame = screen(&mut app, WIDTH, HEIGHT);
+    let from = cell_of(&frame, "! printf");
+    let (_, last) = cell_of(&frame, "ls  -la");
+
+    drag(&mut app, (from.0 - 4, from.1), (WIDTH - 10, last));
+
+    assert_eq!(
+        app.take_handoffs(),
+        vec![Handoff::Copy(format!("{command}\nls  -la"))],
+        "{frame}"
+    );
+}
+
+#[test]
+fn a_code_line_cut_on_a_space_keeps_the_space_when_copied() {
+    // How many cells a code row holds, read off a line far too long for one.
+    let mut measuring = replied(&format!("```\n{}\n```", "a".repeat(400)));
+    let frame = screen(&mut measuring, WIDTH, HEIGHT);
+    let room = frame
+        .lines()
+        .flat_map(|line| line.split(|c| c != 'a').map(str::len))
+        .max()
+        .expect("the frame has rows");
+    // A space at the end of the first row, or a run of them across the cut,
+    // and the rest of the line on the next row.
+    for spaces in 1..4 {
+        let line = format!("{}{}tail", "a".repeat(room - 1), " ".repeat(spaces));
+        let mut app = replied(&format!("```\n{line}\n```"));
+        let frame = screen(&mut app, WIDTH, HEIGHT);
+        let from = cell_of(&frame, "aaaa");
+        let (_, last) = cell_of(&frame, "tail");
+
+        drag(&mut app, from, (WIDTH - 10, last));
+
+        assert_eq!(
+            app.take_handoffs(),
+            vec![Handoff::Copy(line.clone())],
+            "{spaces} spaces:\n{frame}"
+        );
+    }
+}
+
 #[test]
 fn what_a_drag_selected_stays_marked_until_a_key_is_pressed() {
     let mut app = replied("The config lives in niobe.toml beside the manifest.");
