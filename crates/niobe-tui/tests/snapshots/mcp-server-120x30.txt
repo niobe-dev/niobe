@@ -1,29 +1,29 @@
  Niobe  Session  Context  Model  View  Help                            opus-5  claude · default  ○ not attached  13:41
  ┏━━ > add etag support to the catalog fetcher so we stop re-downloading… ━━━┓ ┌─────────────── Usage ────────────────┐
- ┃   test file.                                                              ┃ │ 5h         62% ▓▓░░ resets 16:40     │
- ┃                                                                           ┃ │ 7d         18% ▓░░░ resets Tue 15:00 │
- ┃   Read 3 files, used Notion 2 times                                       ┃ │ ──────────────────────────────────── │
- ┃                                                                           ┃ │ opus-5    100% ▓▓▓▓▓▓▓▓▓▓▓▓   49k    │
- ┃ ✗ Notion·update… {}                                                failed █ │ cache hit  86% ▓▓▓▓▓▓▓▓▓▓░░   40k    │
- ┃   └ 404 object_not_found — the page is not shared with the integration    █ │ ──────────────────────────────────── │
- ┃                                                                           █ │ context    13% ▓░░░░░░░░░ 25k / 200k │
- ┃ ◆ Caching the etag beside the body so a 304 can be answered from the LRU. █ └──────────────────────────────────────┘
- ┃                                                                           █ ┌────────────── Changes ───────────────┐
- ┃   Edite┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ MCP servers · remote docs ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓        █
- ┃        ┃                                                                                                  ┃        █
- ┃ ◆ Rewri┃  status       failed                                                                             ┃        █
- ┃        ┃  why          ECONNREFUSED: Unable to connect. Is the computer able to access the url?           ┃        █
- ┃ ◆ The n┃  scope        local                                                                              ┃+31  −9 █
- ┃        ┃  reached by   http · http://127.0.0.1:9/mcp                                                      ┃+12  −0 █
- ┃ ✗ Bash ┃  calls itself —                                                                                  ┃149 −12 █
- ┃   └ 1 f┃  tools        none                                                                               ┃+88 −41 │
- ┃        ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ ↑↓ scroll · Esc back ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛        │
- ┃ ◆ Etags cached in the LRU; 304s short-circuit. One test still red — the   █ │     ▾ adr/                           │
- ┃   304 path asserts a body that is no longer sent.                         █ │       0004-etags.md          +34  −1 │
- ┃                                                                           █ │     ▾ diagrams/                      │
- ┃ still running                                                             ┃ │       cache.png                —   — │
- ┃   └ ◆ test Cover tests/fetch.test.ts                        sonnet 1m 42s ┃ │     caching.md               +64 −22 │
- ┃       └ Reading tests/stream.rs                                           ┃ │   ▾ server/                          │
+ ┃ ◆ Reading catalog/fetch.ts and its callers first. Two call sites, one     ┃ │ 5h         62% ▓▓░░ resets 16:40     │
+ ┃   test file.                                                              ┃ │ 7d         18% ▓░░░ resets Tue 15:00 │
+ ┃                                                                           ┃ │ ──────────────────────────────────── │
+ ┃   Read 3 files, used Notion 2 times                                       █ │ opus-5    100% ▓▓▓▓▓▓▓▓▓▓▓▓   49k    │
+ ┃                                                                           █ │ cache hit  86% ▓▓▓▓▓▓▓▓▓▓░░   40k    │
+ ┃ ✗ Notion·update… {}                                                failed █ │ ──────────────────────────────────── │
+ ┃   └ 404 object_not_found — the page is not shared with the integration    █ │ context    13% ▓░░░░░░░░░ 25k / 200k │
+ ┃                                                                           █ └──────────────────────────────────────┘
+ ┃ ◆ Caching the etag beside the body so a 304 can be answered from the LRU. █ ┌────────────── Changes ───────────────┐
+ ┃        ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ MCP servers · remote docs ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓        █
+ ┃   Edite┃                                                                                                  ┃        █
+ ┃        ┃  status       failed                                                                             ┃        █
+ ┃ ◆ Rewri┃  why          ECONNREFUSED: Unable to connect. Is the computer able to access the url?           ┃        █
+ ┃        ┃  scope        local                                                                              ┃+31  −9 █
+ ┃ ◆ The n┃  reached by   http · http://127.0.0.1:9/mcp                                                      ┃+12  −0 █
+ ┃        ┃  calls itself —                                                                                  ┃149 −12 █
+ ┃ ✗ Bash ┃  tools        none                                                                               ┃+88 −41 │
+ ┃   └ 1 f┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ ↑↓ scroll · Esc back ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛        │
+ ┃                                                                           █ │     ▾ adr/                           │
+ ┃ ◆ Etags cached in the LRU; 304s short-circuit. One test still red — the   █ │       0004-etags.md          +34  −1 │
+ ┃   304 path asserts a body that is no longer sent.                         █ │     ▾ diagrams/                      │
+ ┃                                                                           █ │       cache.png                —   — │
+ ┃ still running                                                             ┃ │     caching.md               +64 −22 │
+ ┃   └ [•_•] test Cover tests/fetch… ▸ Reading tests/stream.rs sonnet 1m 42s ┃ │   ▾ server/                          │
  ┃ ───────────────────────────────────────────────────────────────────────── ┃ │     ▾ handlers/                      │
  ┃  ask  >  Ask for a change · @ file · Ctrl+F find           Ctrl+J newline ┃ │       manifest.ts            +97  −4 │
  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ └──────────────────────────────────────┘

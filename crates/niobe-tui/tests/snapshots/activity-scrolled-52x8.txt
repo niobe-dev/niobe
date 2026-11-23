@@ -1,5 +1,5 @@
 ┌──────────────────── Activity ────────────────────┐
-│   └ Reading tests/stream.rs                      │
+│ [•_•] test Cover tests… ▸ Reading tests/… 1m 42s █
 │ ▾ Tools  8 calls ✗ 2 · 0 denied · 21.6 kB out    █
 │   Exploring code   3 ▓▓▓▓▓▓▓▓▓▓▓▓                █
 │   Notion           3 ▓▓▓▓▓▓▓▓▓▓▓▓ ✗ 1            █

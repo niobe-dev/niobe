@@ -51,9 +51,9 @@
  │                                                                                                                                               │ ┃                                                  ┃
  │                                                                                                                                               │ ┃                                                  ┃
  │                                                                                                                                               │ ┃                                                  ┃
+ │                                                                                                                                               │ ┃                                                  ┃
  │ still running                                                                                                                                 │ ┃                                                  ┃
- │   └ ◆ test Cover tests/fetch.test.ts                                                                                            sonnet 1m 42s │ ┃                                                  ┃
- │       └ Reading tests/stream.rs                                                                                                               │ ┃                                                  ┃
+ │   └ [•_•] test Cover tests/fetch.test.ts                                                              ▸ Reading tests/stream.rs sonnet 1m 42s │ ┃                                                  ┃
  │ ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── │ ┃                                                  ┃
  │  ask  >  Ask for a change · @ file · Ctrl+F find            Shift+Tab cycles · ↑↓ Enter folds · a groups by agent · n notable only · Esc back │ ┃                                                  ┃
  └───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘ ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛

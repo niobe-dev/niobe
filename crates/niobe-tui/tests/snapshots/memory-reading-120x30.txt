@@ -1,29 +1,29 @@
  Niobe  Session  Context  Model  View  Help                            opus-5  claude · default  ○ not attached  13:41
  ┏━━ > add etag support to the catalog fetcher so we stop re-downloading… ━━━┓ ┌─────────────── Usage ────────────────┐
- ┃   test file.                                                              ┃ │ 5h         62% ▓▓░░ resets 16:40     │
- ┃                                                                           ┃ │ 7d         18% ▓░░░ resets Tue 15:00 │
- ┃   Read 3 files, used Notion 2 times                                       ┃ │ ──────────────────────────────────── │
- ┃                                                                           ┃ │ opus-5    100% ▓▓▓▓▓▓▓▓▓▓▓▓   49k    │
- ┃ ✗ Notion·update… {}                                                failed █ │ cache hit  86% ▓▓▓▓▓▓▓▓▓▓░░   40k    │
- ┃   └ 404 object_not_found — the page is not shared with the integration    █ │ ──────────────────────────────────── │
- ┃                                                                           █ │ context    13% ▓░░░░░░░░░ 25k / 200k │
- ┃ ◆ Caching the etag beside the body so a 304 can be answered from the LRU. █ └──────────────────────────────────────┘
- ┃        ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ Memory · AGENTS.md ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓────────┐
- ┃   Edite┃  # AI Agent Guidelines                                                                           ┃        █
- ┃        ┃                                                                                                  ┃        █
- ┃ ◆ Rewri┃  When working on this project, adopt the persona of a                                            ┃        █
- ┃        ┃  Principal Rust Engineer.                                                                        ┃        █
- ┃ ◆ The n┃                                                                                                  ┃+31  −9 █
- ┃        ┃  ## 0. The project                                                                               ┃+12  −0 █
- ┃ ✗ Bash ┃                                                                                                  ┃149 −12 █
- ┃   └ 1 f┃  Niobe is a terminal coding agent.                                                               ┃+88 −41 │
- ┃        ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━ ↑↓ PgUp PgDn scroll · e edit · Esc back ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛        │
- ┃ ◆ Etags cached in the LRU; 304s short-circuit. One test still red — the   █ │     ▾ adr/                           │
- ┃   304 path asserts a body that is no longer sent.                         █ │       0004-etags.md          +34  −1 │
- ┃                                                                           █ │     ▾ diagrams/                      │
- ┃ still running                                                             ┃ │       cache.png                —   — │
- ┃   └ ◆ test Cover tests/fetch.test.ts                        sonnet 1m 42s ┃ │     caching.md               +64 −22 │
- ┃       └ Reading tests/stream.rs                                           ┃ │   ▾ server/                          │
+ ┃ ◆ Reading catalog/fetch.ts and its callers first. Two call sites, one     ┃ │ 5h         62% ▓▓░░ resets 16:40     │
+ ┃   test file.                                                              ┃ │ 7d         18% ▓░░░ resets Tue 15:00 │
+ ┃                                                                           ┃ │ ──────────────────────────────────── │
+ ┃   Read 3 files, used Notion 2 times                                       █ │ opus-5    100% ▓▓▓▓▓▓▓▓▓▓▓▓   49k    │
+ ┃                                                                           █ │ cache hit  86% ▓▓▓▓▓▓▓▓▓▓░░   40k    │
+ ┃ ✗ Notion·update… {}                                                failed █ │ ──────────────────────────────────── │
+ ┃   └ 404 object_not_found — the page is not shared with the integration    █ │ context    13% ▓░░░░░░░░░ 25k / 200k │
+ ┃                                                                           █ └──────────────────────────────────────┘
+ ┃ ◆ Cachi┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ Memory · AGENTS.md ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓────────┐
+ ┃        ┃  # AI Agent Guidelines                                                                           ┃        █
+ ┃   Edite┃                                                                                                  ┃        █
+ ┃        ┃  When working on this project, adopt the persona of a                                            ┃        █
+ ┃ ◆ Rewri┃  Principal Rust Engineer.                                                                        ┃        █
+ ┃        ┃                                                                                                  ┃+31  −9 █
+ ┃ ◆ The n┃  ## 0. The project                                                                               ┃+12  −0 █
+ ┃        ┃                                                                                                  ┃149 −12 █
+ ┃ ✗ Bash ┃  Niobe is a terminal coding agent.                                                               ┃+88 −41 │
+ ┃   └ 1 f┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━ ↑↓ PgUp PgDn scroll · e edit · Esc back ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛        │
+ ┃                                                                           █ │     ▾ adr/                           │
+ ┃ ◆ Etags cached in the LRU; 304s short-circuit. One test still red — the   █ │       0004-etags.md          +34  −1 │
+ ┃   304 path asserts a body that is no longer sent.                         █ │     ▾ diagrams/                      │
+ ┃                                                                           █ │       cache.png                —   — │
+ ┃ still running                                                             ┃ │     caching.md               +64 −22 │
+ ┃   └ [•_•] test Cover tests/fetch… ▸ Reading tests/stream.rs sonnet 1m 42s ┃ │   ▾ server/                          │
  ┃ ───────────────────────────────────────────────────────────────────────── ┃ │     ▾ handlers/                      │
  ┃  ask  >  Ask for a change · @ file · Ctrl+F find           Ctrl+J newline ┃ │       manifest.ts            +97  −4 │
  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛ └──────────────────────────────────────┘

@@ -4786,7 +4786,7 @@ fn a_session_that_ended_draws_nothing_as_still_running() {
         agent: None,
     });
     let before = screen(&mut app, 200, 60);
-    assert!(before.contains("◆ test "), "{before}");
+    assert!(before.contains("[•_•] test "), "{before}");
     assert!(before.contains("$ cargo build"), "{before}");
 
     app.apply(&Event::Error {
@@ -4821,7 +4821,7 @@ fn only_a_running_agent_is_listed_and_a_finished_one_is_counted() {
     let mut app = running_session();
     let frame = screen(&mut app, 200, 60);
 
-    assert!(frame.contains("◆ test "), "running:\n{frame}");
+    assert!(frame.contains("[•_•] test "), "running:\n{frame}");
     for finished in [REVIEW_TASK, DOCS_TASK] {
         assert!(
             !frame.lines().any(|line| line.contains(finished)),
@@ -4887,44 +4887,40 @@ fn a_sub_agents_model_is_drawn_beside_what_it_was_spawned_to_do() {
             .to_owned()
     };
 
-    assert!(row("◆ test ").contains(" sonnet "), "{frame}");
-    assert!(row(PLAN_TASK).contains("◆ plan"), "{frame}");
+    assert!(row("[•_•] test ").contains(" sonnet "), "{frame}");
+    assert!(row(PLAN_TASK).contains("[•_•] plan"), "{frame}");
     for model in ["sonnet", "haiku", "opus"] {
         assert!(!row(PLAN_TASK).contains(model), "{frame}");
     }
 }
 
-/// Under an agent is what it is doing now, and under an agent that reported
-/// nothing there is nothing — not an empty `└`.
+/// An agent's own row says what it is doing now, and an agent that reported
+/// nothing says nothing there — no row of its own under it, and no empty
+/// `└`.
 #[test]
-fn under_each_agent_is_the_last_thing_it_was_seen_doing() {
+fn each_agents_row_says_the_last_thing_it_was_seen_doing() {
     let frame = screen(&mut session_with_a_silent_agent(), 200, 60);
     let lines: Vec<&str> = frame.lines().collect();
-    let under = |label: &str| {
-        let at = lines
+    let at = |label: &str| {
+        lines
             .iter()
             .position(|line| line.contains(label))
-            .expect("the agent has a row");
-        lines[at + 1].to_owned()
+            .expect("the agent has a row")
     };
 
     assert!(
-        under("◆ test ").contains("└ Reading tests/stream.rs"),
+        lines[at("[•_•] test ")].contains("▸ Reading tests/stream.rs"),
         "{frame}"
     );
-    // The agent drawn last hangs from the last branch, and nothing hangs
-    // from it, since its backend said nothing of what it is doing.
+    // The agent drawn last hangs from the last branch, and says nothing of
+    // what it is doing, since its backend said nothing.
+    let plan = in_session(lines[at(PLAN_TASK)]);
+    assert!(plan.contains("└ [•_•] plan"), "{frame}");
+    assert!(!plan.contains('▸'), "{frame}");
     assert!(
-        in_session(
-            lines
-                .iter()
-                .find(|line| line.contains(PLAN_TASK))
-                .expect("the agent has a row")
-        )
-        .contains("└ ◆ plan"),
+        !in_session(lines[at(PLAN_TASK) + 1]).contains('└'),
         "{frame}"
     );
-    assert!(!under(PLAN_TASK).contains('└'), "{frame}");
 }
 
 /// A session reaches for one MCP server a dozen ways, and a row each says

@@ -1,23 +1,23 @@
  Niobe  Session  Context  Model  View  Help           opus-5  claude · default
 ┏━━━━ > add etag support to the catalog fetcher so we stop re-downloading… ━━━━┓
+┃   └ 404 object_not_found — the page is not shared with the integration       ┃
 ┃                                                                              ┃
-┃ ◆ Caching the etag beside the body so a 304 can be answered from the LRU.    ┃
-┃   ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ Model ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓   ┃
+┃ ◆ ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ Model ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓   ┃
 ┃   ┃                                                                      ┃   ┃
 ┃   ┃  › Default (recommended)  default            Sonnet 5.5 · Efficien…  ┃   ┃
-┃ ◆ ┃    Opus 5.5               opus               For complex work and …  ┃   ┃
-┃   ┃    Fable 5.1              fable              For your toughest cha…  ┃   █
-┃ ◆ ┃    Sonnet 5.5             sonnet             Most efficient for si…  ┃   █
-┃   ┃    Haiku 4.5              haiku              Fastest for quick ans…  ┃   █
-┃ ✗ ┃    Sonnet 5               claude-sonnet-5    Efficient for routine…  ┃4s █
-┃   ┃    Opus 5                 claude-opus-5      Best for everyday, co…  ┃   █
+┃   ┃    Opus 5.5               opus               For complex work and …  ┃   ┃
+┃ ◆ ┃    Fable 5.1              fable              For your toughest cha…  ┃   █
+┃   ┃    Sonnet 5.5             sonnet             Most efficient for si…  ┃   █
+┃ ◆ ┃    Haiku 4.5              haiku              Fastest for quick ans…  ┃   █
+┃   ┃    Sonnet 5               claude-sonnet-5    Efficient for routine…  ┃   █
+┃ ✗ ┃    Opus 5                 claude-opus-5      Best for everyday, co…  ┃4s █
 ┃   ┃    Fable 5                claude-fable-5     Most capable for your…  ┃   █
-┃ ◆ ┃    Opus 4.8               claude-opus-4-8    Best for everyday, co…  ┃4  █
-┃   ┃    Opus 4.7               claude-opus-4-7    Best for everyday, co…  ┃   █
+┃   ┃    Opus 4.8               claude-opus-4-8    Best for everyday, co…  ┃   █
+┃ ◆ ┃    Opus 4.7               claude-opus-4-7    Best for everyday, co…  ┃4  █
 ┃   ┃    Opus 4.6               claude-opus-4-6    Best for everyday, co…  ┃   █
-┃ st┃    Sonnet 4.6             claude-sonnet-4-6  Efficient for routine…  ┃   ┃
-┃   ┃                                                                      ┃2s ┃
-┃   ┃  ↑↓ choose · Enter switch · Esc keep this one                        ┃   ┃
+┃   ┃    Sonnet 4.6             claude-sonnet-4-6  Efficient for routine…  ┃   █
+┃ st┃                                                                      ┃   ┃
+┃   ┃  ↑↓ choose · Enter switch · Esc keep this one                        ┃2s ┃
 ┃ ──┗━━━━━━━━━━━━━━━━━━━━━ applied from the next turn ━━━━━━━━━━━━━━━━━━━━━┛── ┃
 ┃  ask  >  Ask for a change · @ file · Ctrl+F find              Ctrl+J newline ┃
 ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛

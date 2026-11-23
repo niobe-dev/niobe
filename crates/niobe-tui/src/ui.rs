@@ -34,7 +34,9 @@ use ratatui::widgets::{
 };
 
 use niobe_core::attention::Attention;
-use niobe_core::event::{Billing, Context, Overage, SlashCommand, UsageWindow, UsageWindows};
+use niobe_core::event::{
+    AgentId, Billing, Context, Overage, SlashCommand, UsageWindow, UsageWindows,
+};
 use niobe_core::goal::Goal;
 use niobe_core::session::{SessionState, ToolTotals, Totals, WorkTotals};
 
@@ -3729,7 +3731,10 @@ fn working_line(activity: &Activity, width: usize, theme: &Theme) -> Line<'stati
 /// a head — the working line while a turn runs, `still running` otherwise —
 /// and under it each shell command running — the agent's, the backend's
 /// background ones and the operator's own — and each sub-agent running, a
-/// group of rows apiece. `None` where nothing is at work.
+/// row apiece. `None` where nothing is at work.
+///
+/// A command a running sub-agent has open is left to that agent's row, which
+/// says what it runs: listed as well, it would be drawn twice.
 ///
 /// Drawn in the session pane rather than in a pane beside it, because the
 /// transcript is where the operator reads what the session is doing: a
@@ -3737,18 +3742,31 @@ fn working_line(activity: &Activity, width: usize, theme: &Theme) -> Line<'stati
 /// it, not in a corner the eye has to go looking in.
 fn live_rows(app: &App, width: usize, theme: &Theme) -> Option<Live> {
     let room = width.saturating_sub(text::width(LIVE_INDENT) + text::width(LIVE_BRANCH));
-    let mut items: Vec<Vec<Line<'static>>> = app
+    let running: Vec<&AgentId> = app
+        .agents()
+        .iter()
+        .filter(|agent| agent.is_running())
+        .map(|agent| &agent.id)
+        .collect();
+    let mut items: Vec<Line<'static>> = app
         .running_shells()
         .iter()
+        .filter(|shell| {
+            shell.background
+                || !shell
+                    .agent
+                    .as_ref()
+                    .is_some_and(|agent| running.contains(&agent))
+        })
         .map(|shell| {
             let ran = shell
                 .since
                 .zip(app.stamp())
                 .and_then(|(since, now)| now.since(since));
-            vec![live_shell_row(shell, ran, room, theme)]
+            live_shell_row(shell, ran, room, theme)
         })
         .collect();
-    items.extend(running_agent_groups(app, room, theme));
+    items.extend(running_agent_rows(app, room, theme));
     let head = match app.activity() {
         Some(activity) => working_line(&activity, width, theme),
         None if items.is_empty() => return None,
@@ -3761,14 +3779,14 @@ fn live_rows(app: &App, width: usize, theme: &Theme) -> Option<Live> {
 struct Live {
     /// The row the rest hang from.
     head: Line<'static>,
-    /// Each thing at work, its rows together.
-    items: Vec<Vec<Line<'static>>>,
+    /// Each thing at work, a row apiece.
+    items: Vec<Line<'static>>,
 }
 
 impl Live {
     /// How many rows it holds.
     fn rows(&self) -> usize {
-        1 + self.items.iter().map(Vec::len).sum::<usize>()
+        1 + self.items.len()
     }
 }
 
@@ -3784,11 +3802,6 @@ const LIVE_INDENT: &str = "  ";
 const LIVE_BRANCH: &str = "├ ";
 const LIVE_LAST: &str = "└ ";
 
-/// What stands before the rows of a thing at work after its first, beside
-/// the branch the things after it hang from, and where none does.
-const LIVE_STEM: &str = "│ ";
-const LIVE_NONE: &str = "  ";
-
 /// The rows the foot of a transcript `height` rows tall gives to `held` rows
 /// of what is at work: all of them, up to a third of it, so the words above
 /// keep most of the pane.
@@ -3797,24 +3810,17 @@ fn live_height(held: usize, height: u16) -> u16 {
     u16::try_from(held).unwrap_or(u16::MAX).min(most)
 }
 
-/// `live` in `rows`: its head, then the things at work that fit, whole and in
-/// order, each hung from a branch, and where some do not fit, a last branch
-/// counting how many more are at work — never a thing cut in half, whose
-/// agent would be drawn without its sub-line or a sub-line without its agent.
+/// `live` in `rows`: its head, then the things at work that fit, in order,
+/// each hung from a branch, and where some do not fit, a last branch counting
+/// how many more are at work.
 fn fit_live(live: Live, rows: usize, theme: &Theme) -> Vec<Line<'static>> {
     let total = live.items.len();
-    let fits = live.rows() <= rows;
-    let mut shown: Vec<Vec<Line<'static>>> = Vec::new();
-    let mut used = 1;
-    for item in live.items {
-        // A row is kept for the count of the rest wherever not all fit.
-        let reserve = usize::from(!fits);
-        if used + item.len() + reserve > rows {
-            break;
-        }
-        used += item.len();
-        shown.push(item);
-    }
+    // A row is kept for the count of the rest wherever not all fit.
+    let room = match live.rows() <= rows {
+        true => total,
+        false => rows.saturating_sub(2),
+    };
+    let shown: Vec<Line<'static>> = live.items.into_iter().take(room).collect();
     let more = total - shown.len();
     let branch = Style::new().fg(theme.dim);
     let hung = |branch_text: &'static str, line: Line<'static>| {
@@ -3824,15 +3830,9 @@ fn fit_live(live: Live, rows: usize, theme: &Theme) -> Vec<Line<'static>> {
     };
     let count = shown.len();
     let mut lines = vec![live.head];
-    for (at, item) in shown.into_iter().enumerate() {
+    for (at, line) in shown.into_iter().enumerate() {
         let last = at + 1 == count && more == 0;
-        let (first, rest) = match last {
-            true => (LIVE_LAST, LIVE_NONE),
-            false => (LIVE_BRANCH, LIVE_STEM),
-        };
-        for (row, line) in item.into_iter().enumerate() {
-            lines.push(hung(if row == 0 { first } else { rest }, line));
-        }
+        lines.push(hung(if last { LIVE_LAST } else { LIVE_BRANCH }, line));
     }
     if more > 0 && rows > 1 {
         lines.push(hung(
@@ -3854,6 +3854,10 @@ fn fit_live(live: Live, rows: usize, theme: &Theme) -> Vec<Line<'static>> {
 /// bar is the clock against the last run, said as `~` and named as such.
 /// Where the row is narrow the bar's words give way first, then the bar, and
 /// the time last: a row that loses its clock no longer says it is alive.
+///
+/// Its mark, bar and clock are in the theme's command colour, the one a `!`
+/// command is written in, so a shell reads apart from a sub-agent, whose
+/// row is in the agent's.
 fn live_shell_row(
     shell: &crate::app::RunningShell,
     ran: Option<std::time::Duration>,
@@ -3899,15 +3903,16 @@ fn live_shell_row(
     let room = width.saturating_sub(fixed + right);
     let command = text::truncate(&shell.command, room);
     let pad = room.saturating_sub(text::width(&command));
+    let accent = Style::new().fg(theme.command);
     let mut spans = vec![
-        Span::styled(mark, Style::new().fg(theme.hot).bold()),
+        Span::styled(mark, accent.bold()),
         Span::styled(command, Style::new().fg(theme.fg)),
         Span::raw(" ".repeat(pad + 1)),
         Span::styled(word, Style::new().fg(theme.tool)),
     ];
     if let (Some(share), true) = (share, bar > 0) {
         let (filled, track) = crate::meter::meter(share.min(1.0), SHELL_BAR);
-        spans.push(Span::styled(filled, Style::new().fg(theme.hot)));
+        spans.push(Span::styled(filled, accent));
         spans.push(Span::styled(track, Style::new().fg(theme.dim)));
         spans.push(Span::styled(
             said.unwrap_or_default(),
@@ -3915,7 +3920,7 @@ fn live_shell_row(
         ));
         spans.push(Span::raw(" "));
     }
-    spans.push(Span::styled(time, Style::new().fg(theme.hot)));
+    spans.push(Span::styled(time, accent));
     Line::from(spans)
 }
 
@@ -6470,25 +6475,24 @@ fn agent_figures(
     figures
 }
 
-/// A running sub-agent per row: the glyph, its tag — the word the
-/// transcript's rows name it by — what it was spawned to do, the model it
-/// answers with, and how long it has run on the right; then, on a row of its
-/// own, what it is doing.
+/// A running sub-agent per row: its face, its tag — the word the
+/// transcript's rows name it by — what it was spawned to do, a few words of
+/// what it is doing, the model it answers with, and how long it has run on
+/// the right.
 ///
 /// Only what is running is listed. An agent that finished, failed or was
 /// cancelled, or that the session ended under, leaves the list, and the
 /// header's counts are where it went: in a long session a list of every
 /// agent spawned buries the ones at work under the ones that stopped.
 ///
-/// The tag and the model each have a column as wide as the widest in the
-/// list, so the tasks start in one column and the times end in another. The
-/// model is drawn only where the agent's own messages named one, by its
-/// family where no other listed agent's model shares it.
+/// The tag, what it is doing and the model each have a column as wide as the
+/// widest in the list, so the tasks start in one column and the times end in
+/// another. The model is drawn only where the agent's own messages named one,
+/// by its family where no other listed agent's model shares it.
 ///
-/// The sub-line is the call the agent has open, as its row in the transcript
-/// names it, and otherwise the last thing its backend reported it doing. It
-/// is drawn only where there is one: an empty `└` on every agent that said
-/// nothing would be half the pane's rows saying nothing.
+/// What it is doing is the call the agent has open, said briefly
+/// ([`crate::doing`]), and otherwise the last thing its backend reported it
+/// doing; an agent that said nothing leaves its cell blank.
 fn agent_rows(
     app: &App,
     session: &SessionState,
@@ -6506,27 +6510,18 @@ fn agent_rows(
     if folded {
         return rows;
     }
-    rows.extend(running_agent_lines(app, width, theme));
+    rows.extend(running_agent_rows(app, width, theme));
     rows
 }
 
-/// A row for each sub-agent running now, and under it what it is doing
-/// where something said: see [`agent_rows`]. Nothing where none is running.
-pub(crate) fn running_agent_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
-    running_agent_groups(app, width, theme)
-        .into_iter()
-        .flatten()
-        .collect()
-}
-
-/// The rows of [`running_agent_lines`], each agent's row and its sub-line
-/// together, so that what lays them out can keep the two together.
+/// A row for each sub-agent running now: see [`agent_rows`]. Nothing where
+/// none is running.
 ///
 /// Each agent's status says how many calls it has made so far beside how
 /// long it has run: the backend reports no share of an agent's task done, and
 /// a count that keeps rising is what says it is getting on with it.
-fn running_agent_groups(app: &App, width: usize, theme: &Theme) -> Vec<Vec<Line<'static>>> {
-    let mut groups = Vec::new();
+fn running_agent_rows(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    let mut rows = Vec::new();
     // Tagged among every agent the session spawned, so that an agent keeps
     // the tag the transcript names it by when another one stops.
     let (running, tags): (Vec<&SubAgent>, Vec<String>) = app
@@ -6543,8 +6538,25 @@ fn running_agent_groups(app: &App, width: usize, theme: &Theme) -> Vec<Vec<Line<
         .map(|model| text::width(model))
         .max()
         .unwrap_or(0);
+    let doing: Vec<Option<String>> = running
+        .iter()
+        .map(|agent| app.agent_doing(&agent.id).or_else(|| agent.latest.clone()))
+        .collect();
+    let doing_column = doing
+        .iter()
+        .flatten()
+        .map(|said| text::width(said))
+        .max()
+        .unwrap_or(0)
+        .min(AGENT_DOING_MOST);
 
-    for ((agent, tag), model) in running.into_iter().zip(tags).zip(models) {
+    for (seat, (((agent, tag), model), doing)) in running
+        .into_iter()
+        .zip(tags)
+        .zip(models)
+        .zip(doing)
+        .enumerate()
+    {
         let status = match app.agent_calls(&agent.id) {
             0 => agent_status(agent, app.stamp()),
             1 => format!("1 call · {}", agent_status(agent, app.stamp())),
@@ -6555,28 +6567,74 @@ fn running_agent_groups(app: &App, width: usize, theme: &Theme) -> Vec<Vec<Line<
         // the room of another agent's task.
         let columns = AgentColumns {
             tag: tag_column,
+            doing: doing_column,
             model: model.as_ref().map_or(0, |_| model_column),
             status: text::width(&status),
             task: 0,
         };
-        let mut group = vec![agent_row(
-            &tag,
-            agent.task(),
-            (model, &status),
+        rows.push(agent_row(
+            AgentLine {
+                face: agent_face(app.stamp(), seat),
+                tag: &tag,
+                task: agent.task(),
+                doing: doing.as_deref(),
+                model,
+                status: &status,
+            },
             columns.fitted(width),
             theme,
-        )];
-
-        if let Some(doing) = app.agent_doing(&agent.id).or_else(|| agent.latest.clone()) {
-            let room = width.saturating_sub(AGENT_SUBLINE).max(1);
-            group.push(
-                Line::from(format!("  └ {}", text::truncate(&doing, room)))
-                    .style(Style::new().fg(theme.dim)),
-            );
-        }
-        groups.push(group);
+        ));
     }
-    groups
+    rows
+}
+
+/// A sub-agent's face, which opens its row: a robot's head, so an agent
+/// reads apart from a shell command's `$` at a glance. It blinks now and
+/// then by the clock the shell last read, each agent at its `seat` in the
+/// list a little after the one above, so a list of them does not blink as
+/// one. Without a clock — a log read back that kept no times — it does not.
+fn agent_face(now: Option<Stamp>, seat: usize) -> &'static str {
+    let Some(millis) = now.and_then(|now| {
+        now.at()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|since| since.as_millis())
+    }) else {
+        return AGENT_FACE;
+    };
+    let offset = u128::try_from(seat)
+        .unwrap_or(0)
+        .saturating_mul(BLINK_STAGGER_MS);
+    let phase = millis.saturating_add(offset) % BLINK_EVERY_MS;
+    match (BLINK_AT_MS..BLINK_AT_MS + BLINK_FOR_MS).contains(&phase) {
+        true => AGENT_BLINK,
+        false => AGENT_FACE,
+    }
+}
+
+/// A sub-agent's face with its eyes open, and shut.
+const AGENT_FACE: &str = "[•_•]";
+const AGENT_BLINK: &str = "[-_-]";
+
+/// How often a face blinks, when in that span its eyes shut, how long they
+/// stay shut — two frames of the loop's tenth of a second, so a blink is
+/// seen rather than flickered — and how far apart two agents' blinks fall.
+///
+/// The blink is off the whole second so that a picture of the screen taken
+/// at a round moment shows the first agent's eyes open.
+const BLINK_EVERY_MS: u128 = 4_000;
+const BLINK_AT_MS: u128 = 1_700;
+const BLINK_FOR_MS: u128 = 200;
+const BLINK_STAGGER_MS: u128 = 1_300;
+
+/// What one agent's row says, as [`agent_row`] lays it out.
+struct AgentLine<'a> {
+    face: &'static str,
+    tag: &'a str,
+    task: &'a str,
+    doing: Option<&'a str>,
+    model: Option<String>,
+    status: &'a str,
 }
 
 /// The columns an agent's row is drawn in. The task takes what the others
@@ -6584,63 +6642,101 @@ fn running_agent_groups(app: &App, width: usize, theme: &Theme) -> Vec<Vec<Line<
 #[derive(Debug, Clone, Copy)]
 struct AgentColumns {
     tag: usize,
+    doing: usize,
     model: usize,
     status: usize,
     task: usize,
 }
 
 impl AgentColumns {
-    /// The columns in a row `width` wide, with the model given up where it
-    /// would leave the task less than [`AGENT_LABEL_LEAST`]: a row that names
-    /// the model and not what the agent is for says nothing about which
-    /// agent it is.
+    /// The columns in a row `width` wide, each giving way where it would
+    /// leave the task less than [`AGENT_LABEL_LEAST`]: a row that names the
+    /// model and not what the agent is for says nothing about which agent it
+    /// is. The model gives way first, since what the agent is doing is worth
+    /// more than which model does it; then what it is doing narrows, to
+    /// [`AGENT_DOING_LEAST`], and past that gives way, the model drawn again
+    /// where it fits without it.
     fn fitted(self, width: usize) -> Self {
-        let task = |model: usize| {
+        let task = |model: usize, doing: usize| {
             width.saturating_sub(
-                AGENT_GLYPH + self.tag + AGENT_GAP + gapped(model) + AGENT_GAP + self.status,
+                AGENT_GLYPH
+                    + self.tag
+                    + AGENT_GAP
+                    + gapped(doing, text::width(AGENT_DOING_MARK) + AGENT_GAP)
+                    + gapped(model, 0)
+                    + AGENT_GAP
+                    + self.status,
             )
         };
-        match task(self.model) >= AGENT_LABEL_LEAST {
-            true => Self {
-                task: task(self.model),
-                ..self
+        let narrowed = || {
+            let opens = 2 * AGENT_GAP + text::width(AGENT_DOING_MARK);
+            task(0, 0)
+                .checked_sub(AGENT_LABEL_LEAST + opens)
+                .filter(|&room| room >= AGENT_DOING_LEAST.min(self.doing))
+                .map(|room| room.min(self.doing))
+        };
+        let (model, doing) = match (self.model, self.doing) {
+            (model, doing) if task(model, doing) >= AGENT_LABEL_LEAST => (model, doing),
+            (model, _) => match narrowed() {
+                Some(doing) => (0, doing),
+                None if task(model, 0) >= AGENT_LABEL_LEAST => (model, 0),
+                None => (0, 0),
             },
-            false => Self {
-                model: 0,
-                task: task(0),
-                ..self
-            },
+        };
+        Self {
+            model,
+            doing,
+            task: task(model, doing),
+            ..self
         }
     }
 }
 
-/// A column and the gap before it, or nothing for a column not drawn.
-fn gapped(column: usize) -> usize {
+/// A column, the gap before it and the `mark` it opens with, or nothing for
+/// a column not drawn.
+fn gapped(column: usize, mark: usize) -> usize {
     match column {
         0 => 0,
-        column => AGENT_GAP + column,
+        column => AGENT_GAP + mark + column,
     }
 }
 
 /// One agent's row, in `columns`.
-fn agent_row(
-    tag: &str,
-    task: &str,
-    (model, status): (Option<String>, &str),
-    columns: AgentColumns,
-    theme: &Theme,
-) -> Line<'static> {
+fn agent_row(line: AgentLine<'_>, columns: AgentColumns, theme: &Theme) -> Line<'static> {
+    let AgentLine {
+        face,
+        tag,
+        task,
+        doing,
+        model,
+        status,
+    } = line;
     let room = columns.task;
     let task = text::truncate(task, room);
     let pad = room.saturating_sub(text::width(&task));
     let colour = theme.agent;
     let mut row = vec![
-        Span::styled("◆ ", Style::new().fg(colour).bold()),
+        Span::styled(face, Style::new().fg(colour).bold()),
+        Span::raw(AGENT_SPACE),
         Span::styled(text::pad(tag, columns.tag), Style::new().fg(colour)),
         Span::raw(AGENT_SPACE),
         Span::styled(task, Style::new().fg(theme.fg)),
         Span::raw(" ".repeat(pad)),
     ];
+    if columns.doing > 0 {
+        let (mark, said) = match doing {
+            Some(doing) => (AGENT_DOING_MARK, text::truncate(doing, columns.doing)),
+            None => (" ", String::new()),
+        };
+        row.push(Span::styled(
+            format!(" {mark}{AGENT_SPACE}"),
+            Style::new().fg(colour),
+        ));
+        row.push(Span::styled(
+            text::pad(&said, columns.doing),
+            Style::new().fg(theme.dim),
+        ));
+    }
     if columns.model > 0 {
         let model = text::truncate(&model.unwrap_or_default(), columns.model);
         row.push(Span::styled(
@@ -6681,8 +6777,20 @@ fn agent_status(agent: &SubAgent, now: Option<Stamp>) -> String {
     }
 }
 
-/// The glyph a sub-agent row opens with, and the space after it.
-const AGENT_GLYPH: usize = 2;
+/// The face a sub-agent row opens with, and the space after it: both faces
+/// are as wide, so a blink moves nothing.
+const AGENT_GLYPH: usize = 6;
+
+/// What stands before what an agent is doing, setting it off from its task.
+const AGENT_DOING_MARK: &str = "▸";
+
+/// The most of what an agent is doing its row gives a column to: a glance,
+/// not the call, whose own row says it whole.
+const AGENT_DOING_MOST: usize = 32;
+
+/// The least of what an agent is doing its row narrows it to before giving
+/// it up: fewer cells than this say a verb and nothing it is done to.
+const AGENT_DOING_LEAST: usize = 10;
 
 /// What stands between one column of an agent's row and the next.
 const AGENT_SPACE: &str = " ";
@@ -6693,9 +6801,6 @@ const AGENT_GAP: usize = AGENT_SPACE.len();
 /// The least of an agent's task its model is drawn beside: fewer cells than
 /// this and the model is left off.
 const AGENT_LABEL_LEAST: usize = 12;
-
-/// The indent and the `└ ` an agent's sub-line opens with.
-const AGENT_SUBLINE: usize = 4;
 
 /// The Changes pane: the branch, and what the repository says the working
 /// tree holds that is not committed — whoever changed it.
@@ -10637,14 +10742,20 @@ mod tests {
         let theme = Theme::default();
         let columns = AgentColumns {
             tag: text::width("漢字漢字"),
+            doing: 0,
             model: 0,
             status: text::width("running"),
             task: 0,
         };
         let row = line_text(&agent_row(
-            "漢字漢字",
-            "書く",
-            (None, "running"),
+            AgentLine {
+                face: AGENT_FACE,
+                tag: "漢字漢字",
+                task: "書く",
+                doing: None,
+                model: None,
+                status: "running",
+            },
             columns.fitted(60),
             &theme,
         ));
@@ -11790,48 +11901,36 @@ mod tests {
         assert_eq!(option_words(Answer::No, &ask, false).0, "Keep planning");
     }
 
-    fn live_of(head: &str, items: &[&[&str]]) -> Live {
+    fn live_of(head: &str, items: &[&str]) -> Live {
         Live {
             head: Line::from(head.to_owned()),
             items: items
                 .iter()
-                .map(|rows| {
-                    rows.iter()
-                        .map(|row| Line::from((*row).to_owned()))
-                        .collect()
-                })
+                .map(|row| Line::from((*row).to_owned()))
                 .collect(),
         }
     }
 
     /// Every thing at work hangs from a branch under the head, the last from
-    /// the last branch, and the rows after a thing's first hang beside the
-    /// stem the things after it hang from.
+    /// the last branch.
     #[test]
     fn what_is_at_work_hangs_from_branches_under_its_head() {
         let theme = crate::theme::MODERN;
-        let live = live_of("head", &[&["$ make"], &["◆ test", "└ Reading"], &["& dev"]]);
+        let live = live_of("head", &["$ make", "[•_•] test", "& dev"]);
         let rows: Vec<String> = fit_live(live, 10, &theme).iter().map(line_text).collect();
-        assert_eq!(
-            rows,
-            [
-                "head",
-                "  ├ $ make",
-                "  ├ ◆ test",
-                "  │ └ Reading",
-                "  └ & dev"
-            ]
-        );
+        assert_eq!(rows, ["head", "  ├ $ make", "  ├ [•_•] test", "  └ & dev"]);
     }
 
-    /// Short of rows, what is at work is cut between things, never inside
-    /// one, and the last row counts what it left out; one row is the head.
+    /// Short of rows, the last row counts what was left out; one row is the
+    /// head.
     #[test]
     fn what_is_at_work_is_cut_between_things_and_counts_the_rest() {
         let theme = crate::theme::MODERN;
-        let live = || live_of("head", &[&["$ make"], &["◆ test", "└ Reading"], &["& dev"]]);
-        let rows: Vec<String> = fit_live(live(), 4, &theme).iter().map(line_text).collect();
+        let live = || live_of("head", &["$ make", "[•_•] test", "& dev"]);
+        let rows: Vec<String> = fit_live(live(), 3, &theme).iter().map(line_text).collect();
         assert_eq!(rows, ["head", "  ├ $ make", "  └ +2 more at work"]);
+        let rows: Vec<String> = fit_live(live(), 4, &theme).iter().map(line_text).collect();
+        assert_eq!(rows, ["head", "  ├ $ make", "  ├ [•_•] test", "  └ & dev"]);
         let rows: Vec<String> = fit_live(live(), 1, &theme).iter().map(line_text).collect();
         assert_eq!(rows, ["head"]);
         assert_eq!(live_height(5, 30), 5);
@@ -11845,7 +11944,171 @@ mod tests {
             since: None,
             last_run: last_run.map(std::time::Duration::from_secs),
             background: false,
+            agent: None,
         }
+    }
+
+    /// A shell row's mark and clock are drawn in the command colour and an
+    /// agent's face in the agent's, so the two read apart in every theme
+    /// that gives them different colours.
+    #[test]
+    fn a_shell_and_a_sub_agent_are_drawn_in_their_own_colours() {
+        let theme = crate::theme::NEO;
+        let ran = Some(std::time::Duration::from_secs(5));
+        let shell_row = live_shell_row(&shell("make", None), ran, 60, &theme);
+        let colour = |line: &Line<'_>, text: &str| {
+            line.spans
+                .iter()
+                .find(|span| span.content.contains(text))
+                .and_then(|span| span.style.fg)
+        };
+        assert_eq!(colour(&shell_row, "$"), Some(theme.command));
+        assert_eq!(colour(&shell_row, "5s"), Some(theme.command));
+
+        let agent = agent_row(
+            agent_line("test", "Cover the cache", Some("reading cache.rs")),
+            columns_for(None, "reading cache.rs").fitted(80),
+            &theme,
+        );
+        assert_eq!(colour(&agent, AGENT_FACE), Some(theme.agent));
+        assert_ne!(theme.command, theme.agent);
+    }
+
+    /// The face blinks by the clock, each agent at its own moment, and stays
+    /// open without one: a blink is as wide as the open face.
+    #[test]
+    fn an_agents_face_blinks_by_the_clock_and_never_in_step_with_the_next() {
+        let at = |millis: u64| {
+            Some(crate::clock::Stamp::new(
+                std::time::UNIX_EPOCH + std::time::Duration::from_millis(millis),
+                None,
+            ))
+        };
+        assert_eq!(agent_face(None, 0), AGENT_FACE);
+        assert_eq!(
+            agent_face(at(8_000), 0),
+            AGENT_FACE,
+            "open at a round moment"
+        );
+        assert_eq!(agent_face(at(9_700), 0), AGENT_BLINK);
+        assert_eq!(agent_face(at(9_850), 0), AGENT_BLINK);
+        assert_eq!(agent_face(at(9_950), 0), AGENT_FACE);
+        assert_eq!(
+            agent_face(at(9_700), 1),
+            AGENT_FACE,
+            "the next is staggered"
+        );
+        assert_eq!(agent_face(at(8_400), 1), AGENT_BLINK);
+        assert_eq!(text::width(AGENT_FACE), text::width(AGENT_BLINK));
+        assert_eq!(text::width(AGENT_FACE) + 1, AGENT_GLYPH);
+    }
+
+    fn agent_line<'a>(tag: &'a str, task: &'a str, doing: Option<&'a str>) -> AgentLine<'a> {
+        AgentLine {
+            face: AGENT_FACE,
+            tag,
+            task,
+            doing,
+            model: Some("haiku".to_owned()),
+            status: "27 calls · 5m 38s",
+        }
+    }
+
+    fn columns_for(tag: Option<&str>, doing: &str) -> AgentColumns {
+        AgentColumns {
+            tag: text::width(tag.unwrap_or("test")),
+            doing: text::width(doing),
+            model: text::width("haiku"),
+            status: text::width("27 calls · 5m 38s"),
+            task: 0,
+        }
+    }
+
+    /// An agent is one row: its face, tag and task, then what it is doing,
+    /// the model and its status, filling the row exactly.
+    #[test]
+    fn an_agents_row_says_what_it_is_doing_beside_its_task() {
+        let theme = crate::theme::MODERN;
+        let row = line_text(&agent_row(
+            agent_line("test", "Cover the cache", Some("running echo · grep")),
+            columns_for(None, "running echo · grep").fitted(100),
+            &theme,
+        ));
+        assert!(row.starts_with("[•_•] test Cover the cache "), "{row:?}");
+        assert!(
+            row.ends_with(" ▸ running echo · grep haiku 27 calls · 5m 38s"),
+            "{row:?}"
+        );
+        assert_eq!(text::width(&row), 100, "{row:?}");
+    }
+
+    /// Narrowed, the model gives way first, then what the agent is doing,
+    /// and the task is kept: it is what tells one agent from another.
+    #[test]
+    fn a_narrow_agents_row_gives_up_its_model_then_what_it_is_doing() {
+        let theme = crate::theme::MODERN;
+        let doing = "running echo · grep";
+        let row = |width| {
+            line_text(&agent_row(
+                agent_line("test", "Cover the cache", Some(doing)),
+                columns_for(None, doing).fitted(width),
+                &theme,
+            ))
+        };
+        // Face, tag, what it is doing and the status take 51 cells, the
+        // model 6 more, and the task keeps 12 at least.
+        let whole = row(69);
+        assert!(
+            whole.contains(doing) && whole.contains("haiku"),
+            "{whole:?}"
+        );
+        let no_model = row(68);
+        assert!(
+            no_model.contains(doing) && !no_model.contains("haiku"),
+            "{no_model:?}"
+        );
+        assert_eq!(text::width(&no_model), 68, "{no_model:?}");
+        // Then what it is doing narrows, to ten cells, before it goes.
+        let narrowed = row(60);
+        assert!(narrowed.contains("▸ running echo · …"), "{narrowed:?}");
+        assert!(!narrowed.contains("haiku"), "{narrowed:?}");
+        assert_eq!(text::width(&narrowed), 60, "{narrowed:?}");
+        let narrowest = row(54);
+        assert!(narrowest.contains("▸ running e… "), "{narrowest:?}");
+        assert!(narrowest.contains("Cover the c…"), "{narrowest:?}");
+        // Past that it gives way, and the model is drawn again where it fits.
+        let modelled = row(53);
+        assert!(
+            !modelled.contains('▸') && modelled.contains("haiku"),
+            "{modelled:?}"
+        );
+        assert!(modelled.contains("Cover the cache"), "{modelled:?}");
+        assert_eq!(text::width(&modelled), 53, "{modelled:?}");
+        let bare = row(45);
+        assert!(!bare.contains('▸') && !bare.contains("haiku"), "{bare:?}");
+        assert_eq!(text::width(&bare), 45, "{bare:?}");
+    }
+
+    /// An agent that said nothing of what it is doing keeps the column blank,
+    /// so the models and times of the agents around it stay in line.
+    #[test]
+    fn an_agent_that_said_nothing_keeps_the_doing_column_blank() {
+        let theme = crate::theme::MODERN;
+        let columns = columns_for(None, "reading cache.rs").fitted(90);
+        let said = line_text(&agent_row(
+            agent_line("test", "Cover", Some("reading cache.rs")),
+            columns,
+            &theme,
+        ));
+        let silent = line_text(&agent_row(
+            agent_line("test", "Cover", None),
+            columns,
+            &theme,
+        ));
+        assert!(!silent.contains('▸'), "{silent:?}");
+        let model_at = |row: &str| row.find(" haiku").map(|at| text::width(&row[..at]));
+        assert_eq!(model_at(&said), model_at(&silent), "{said:?} {silent:?}");
+        assert_eq!(text::width(&silent), 90, "{silent:?}");
     }
 
     /// A running command's row says how long it has run at its right edge,

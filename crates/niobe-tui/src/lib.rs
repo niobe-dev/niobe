@@ -35,6 +35,7 @@ mod commit;
 mod compaction;
 pub mod desktop;
 pub mod detail;
+mod doing;
 mod find;
 mod goal;
 pub mod history;

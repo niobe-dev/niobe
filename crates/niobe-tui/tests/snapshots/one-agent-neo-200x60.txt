@@ -49,11 +49,11 @@
  ║                                                                                                                                               ║ │     verify.ts                             +9 −11 │
  ║                                                                                                                                               ║ │   CHANGELOG.md                            +0  −0 │
  ║                                                                                                                                               ║ │   …n => tests/fixtures/manifest.v2.json   +6  −3 │
+ ║                                                                                                                                               ║ │                                                  │
  ║ still running                                                                                                                                 ║ │                                                  │
- ║   ├ ◆ test  Cover tests/fetch.test.ts                                                                                           sonnet 1m 42s ║ │                                                  │
- ║   │   └ Reading tests/stream.rs                                                                                                               ║ │                                                  │
- ║   ├ ◆ deep1 Review fetch.py                                                                                                      2 calls · 0s ║ │                                                  │
- ║   └ ◆ deep2 Review cache.py                                                                                                       1 call · 0s ║ │                                                  │
+ ║   ├ [•_•] test  Cover tests/fetch.test.ts                                                             ▸ Reading tests/stream.rs sonnet 1m 42s ║ │                                                  │
+ ║   ├ [•_•] deep1 Review fetch.py                                                                                                  2 calls · 0s ║ │                                                  │
+ ║   └ [•_•] deep2 Review cache.py                                                                                                   1 call · 0s ║ │                                                  │
  ║ ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ║ │                                                  │
  ║  ask  >  Ask for a change · @ file · Ctrl+F find                                                Shift+Tab cycles · Ctrl+J newline · Tab panes ║ │                                                  │
  ╚═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝ └──────────────────────────────────────────────────┘

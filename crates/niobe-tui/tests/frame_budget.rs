@@ -1313,10 +1313,10 @@ fn a_huge_working_tree_redraws_inside_a_frame_budget() {
     );
 }
 
-/// A session busy enough that the foot of the transcript lists a branch for
-/// each of a dozen sub-agents at work, each with the calls it has made so
-/// far, counted again on every frame.
-const BUSY_AGENTS: usize = 12;
+/// A session busy enough that the foot of the transcript has more sub-agents
+/// at work than the third of a 60-row pane it may take holds, a row each,
+/// each with the calls it has made so far, counted again on every frame.
+const BUSY_AGENTS: usize = 24;
 
 /// The calls each busy agent has made.
 const BUSY_CALLS: usize = 40;

@@ -1050,6 +1050,10 @@ pub struct RunningShell {
     /// Whether the backend moved it to the background, so that no turn is
     /// waiting on it.
     pub background: bool,
+    /// The sub-agent whose call it is, where one made it: its row says what
+    /// the agent is doing, so the command need not be listed twice. `None`
+    /// for the session's own calls and the operator's commands.
+    pub agent: Option<AgentId>,
 }
 
 /// One tool call as the transcript shows it: what it does, how it ended and
@@ -4089,8 +4093,9 @@ impl App {
         }
     }
 
-    /// The call sub-agent `id` has open, as its row in the transcript names
-    /// it — `Bash cargo test` — or `None` where it has none running.
+    /// What sub-agent `id`'s open call is doing, in a few words —
+    /// `running cargo test`, `reading ui.rs` — or `None` where it has none
+    /// running.
     pub fn agent_doing(&self, id: &AgentId) -> Option<String> {
         self.agent_entries
             .iter()
@@ -4099,7 +4104,7 @@ impl App {
             .find_map(|(&at, _)| {
                 let entry = self.entries.get(at)?;
                 let call = entry.calls.iter().rev().find(|call| call.running())?;
-                Some(format!("{} {}", entry.head, call.what))
+                Some(crate::doing::brief(&entry.head, call))
             })
     }
 
@@ -7943,18 +7948,24 @@ impl App {
                 .tool_entries
                 .get(id)
                 .and_then(|(at, index)| self.entries.get(*at)?.calls.get(*index));
-            match call {
-                Some(call) if call.asked || !call.running() => None,
-                Some(call) => Some((*order, self.running_shell(&call.what, call.began(), false))),
-                None => Some((*order, self.running_shell(what, *began, false))),
-            }
+            let shell = match call {
+                Some(call) if call.asked || !call.running() => return None,
+                Some(call) => self.running_shell(&call.what, call.began(), false),
+                None => self.running_shell(what, *began, false),
+            };
+            Some((*order, self.made_by(id, shell)))
         });
         let background = self
             .session
             .background_commands()
             .iter()
-            .filter_map(|id| self.shell_calls.get(id))
-            .map(|(what, began, order)| (*order, self.running_shell(what, *began, true)));
+            .filter_map(|id| Some((id, self.shell_calls.get(id)?)))
+            .map(|(id, (what, began, order))| {
+                (
+                    *order,
+                    self.made_by(id, self.running_shell(what, *began, true)),
+                )
+            });
         let mut shells: Vec<(usize, RunningShell)> = in_flight.chain(background).collect();
         shells.sort_by_key(|(order, shell)| (shell.since.map(|since| since.at()), *order));
         shells.into_iter().map(|(_, shell)| shell).collect()
@@ -7972,7 +7983,18 @@ impl App {
                 .map(|(took, _)| *took)
                 .or_else(|| self.test_times.get(what).copied()),
             background,
+            agent: None,
         }
+    }
+
+    /// `shell` named by the sub-agent whose call `id` is, where one made it.
+    fn made_by(&self, id: &ToolCallId, shell: RunningShell) -> RunningShell {
+        let agent = self
+            .tool_entries
+            .get(id)
+            .and_then(|(at, _)| self.agent_entries.get(at))
+            .cloned();
+        RunningShell { agent, ..shell }
     }
 
     /// What a sub-agent was spawned to do.
@@ -25128,6 +25150,46 @@ mod tests {
         app.apply(&end("b2", "Bash"));
         app.apply(&Event::BackgroundCommandEnded { id: "b1".into() });
         assert_eq!(running(&app), [("tail -f log/dev.log".to_owned(), false)]);
+    }
+
+    /// A shell call a sub-agent made names that agent, so the foot of the
+    /// transcript can leave it to the agent's own row; the session's own
+    /// call names none.
+    #[test]
+    fn a_shell_a_sub_agent_runs_names_the_agent() {
+        let mut app = app().attached();
+        app.apply(&Event::AgentSpawn {
+            id: "a1".into(),
+            parent: None,
+            kind: None,
+            label: "look around".to_owned(),
+        });
+        app.apply(&Event::ToolCallStart {
+            id: "s1".into(),
+            name: "Bash".to_owned(),
+            input: "{}".to_owned(),
+            summary: Some("grep -rn mcp src".to_owned()),
+            agent: Some("a1".into()),
+        });
+        app.apply(&start("s2", "Bash", "{}", Some("cargo test")));
+
+        let shells: Vec<(String, Option<AgentId>)> = app
+            .running_shells()
+            .into_iter()
+            .map(|shell| (shell.command, shell.agent))
+            .collect();
+        assert_eq!(
+            shells,
+            [
+                ("grep -rn mcp src".to_owned(), Some(AgentId::new("a1"))),
+                ("cargo test".to_owned(), None),
+            ]
+        );
+        assert_eq!(
+            app.agent_doing(&AgentId::new("a1")).as_deref(),
+            Some("running grep"),
+            "what the agent is doing is said briefly"
+        );
     }
 
     /// A command running again is measured against how long it took the

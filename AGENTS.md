@@ -169,10 +169,13 @@ reviewers that encode both, for an agent working in this tree.
   transcript, under
   the working line or `still running` once no turn is, a branch for each thing at work: the shell
   commands running — the agent's calls the session waits on, the operator's `!` commands and the
-  backend's background ones — each with how long it has run and, where the same command ran to
+  backend's background ones, but not a call a running sub-agent has open — each opening with `$`
+  or `&` in the command colour, with how long it has run and, where the same command ran to
   the end earlier, a bar of this run against that one marked as an estimate, a test run saying
-  so, and the sub-agents running, each with its calls so far, how long it has run and what it is
-  doing; while a question waits only the working line is drawn there. The Activity pane — those,
+  so, and the sub-agents running, a row each opening with a robot's face, `[•_•]`, that blinks by
+  the clock, with its calls so far, how long it has run and, after `▸`, what it is doing in the
+  few words `doing.rs` makes of its open call — `running grep · sed`, `reading ui.rs`; while a
+  question waits only the working line is drawn there. The Activity pane — those,
   and the tool calls counted by kind of work, or by the tools' own names where `t` is pressed in
   it — is drawn by no view of the shell, and `ui::draw_activity` draws it alone, `run.rs` is the event loop, `journal.rs` is the trait the loop hands the
   operator's events to and `rules.rs` the one it hands their standing answers to, `preferences.rs`
