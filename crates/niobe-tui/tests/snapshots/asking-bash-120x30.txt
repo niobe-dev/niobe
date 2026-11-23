@@ -1,24 +1,24 @@
  Niobe  Session  Context  Model  View  Help                            opus-5  claude · default  ○ not attached  13:41
  ┏━━ > add etag support to the catalog fetcher so we stop re-downloading… ━━━┓ ┌─────────────── Usage ────────────────┐
  ┃                                                                           ┃ │ 5h         62% ▓▓░░ resets 16:40     │
- ┃ ✗ Bash           npm test                                   exit 1 · 0.4s ┃ │ 7d         18% ▓░░░ resets Tue 15:00 │
- ┃   └ 1 failing: fetch returns the cached body on a 304                     ┃ │ ──────────────────────────────────── │
- ┃                                                                           ┃ │ opus-5    100% ▓▓▓▓▓▓▓▓▓▓▓▓   49k    │
- ┃ ◆ Etags cached in the LRU; 304s short-circuit. One test still red — the   ┃ │ cache hit  86% ▓▓▓▓▓▓▓▓▓▓░░   40k    │
- ┃   304 path asserts a body that is no longer sent.                         ┃ │ ──────────────────────────────────── │
- ┃                                                                           ┃ │ context    13% ▓░░░░░░░░░ 25k / 200k │
- ┃   ┌─ ? claude asks ────────────────────────────────────── blocks turn 1 ┐ ┃ └──────────────────────────────────────┘
- ┃   │ to run Bash                                                         │ ┃ ┌────────────── Changes ───────────────┐
- ┃   │ cargo test -p catalog                                               │ ┃ │ ⎇ main ↑3                            █
- ┃   │                                                                     │ ┃ │ ▾ Working tree  +≥977 −≥259          █
- ┃   │ description: Run the catalog tests                                  │ █ │   ▾ catalog/                         █
+ ┃ ◆ The notebook that demonstrates the fetcher needs the new call shape.    ┃ │ 7d         18% ▓░░░ resets Tue 15:00 │
+ ┃                                                                           ┃ │ ──────────────────────────────────── │
+ ┃ ✗ Bash           npm test                                   exit 1 · 0.4s ┃ │ opus-5    100% ▓▓▓▓▓▓▓▓▓▓▓▓   49k    │
+ ┃   └ 1 failing: fetch returns the cached body on a 304                     ┃ │ cache hit  86% ▓▓▓▓▓▓▓▓▓▓░░   40k    │
+ ┃                                                                           ┃ │ ──────────────────────────────────── │
+ ┃ ◆ Etags cached in the LRU; 304s short-circuit. One test still red — the   ┃ │ context    13% ▓░░░░░░░░░ 25k / 200k │
+ ┃   304 path asserts a body that is no longer sent.                         ┃ └──────────────────────────────────────┘
+ ┃                                                                           ┃ ┌────────────── Changes ───────────────┐
+ ┃   ┌─ ? claude asks ────────────────────────────────────── blocks turn 1 ┐ ┃ │ ⎇ main ↑3                            █
+ ┃   │ to run Bash                                                         │ █ │ ▾ Working tree  +≥977 −≥259          █
+ ┃   │ cargo test -p catalog                                               │ █ │   ▾ catalog/                         █
  ┃   │                                                                     │ █ │     ▾ cache/                         █
- ┃   │ ▶ 1. Allow once                                      this call only │ █ │       lru.ts                 +31  −9 █
- ┃   │   2. Always allow Bash                             niobe saves Bash │ █ │       index.ts               +12  −0 █
- ┃   │   3. Always allow this target  niobe saves Bash(cargo test -p cata… │ █ │     fetch.ts                +149 −12 █
- ┃   │   4. Deny                                     the call does not run │ █ │     etag.ts                  +88 −41 │
- ┃   │                                                                     │ █ │   ▾ docs/                            │
- ┃   │ 3. niobe saves Bash(cargo test -p catalog)                          │ █ │     ▾ adr/                           │
+ ┃   │ description: Run the catalog tests                                  │ █ │       lru.ts                 +31  −9 █
+ ┃   │                                                                     │ █ │       index.ts               +12  −0 █
+ ┃   │ ▶ 1. Allow once                                      this call only │ █ │     fetch.ts                +149 −12 █
+ ┃   │   2. Always allow Bash                             niobe saves Bash │ █ │     etag.ts                  +88 −41 │
+ ┃   │   3. Always allow this target  niobe saves Bash(cargo test -p cata… │ █ │   ▾ docs/                            │
+ ┃   │   4. Deny                                     the call does not run │ █ │     ▾ adr/                           │
  ┃   │                                                                     │ █ │       0004-etags.md          +34  −1 │
  ┃   │ ↑↓ move · 1-4 jump · Enter confirm · Tab type your own              │ █ │     ▾ diagrams/                      │
  ┃   │ Esc decide later                                                    │ █ │       cache.png                —   — │

@@ -1,24 +1,24 @@
  Niobe  Session  Context  Model  View  Help        opus-5  claude · default  ○ not attached  13:41
  ┏━━━ > add etag support to the catalog fetcher so we stop… ━━━┓ ┌──────────── Usage ─────────────┐
- ┃   still red — the 304 path asserts a body that is no longer ┃ │ 5h       62%  resets 16:40     │
- ┃   sent.                                                     ┃ │ 7d       18%  resets Tue 15:00 │
+ ┃ ✗ Bash           npm test                     exit 1 · 0.4s ┃ │ 5h       62%  resets 16:40     │
+ ┃   └ 1 failing: fetch returns the cached body on a 304       ┃ │ 7d       18%  resets Tue 15:00 │
  ┃                                                             ┃ │ ────────────────────────────── │
- ┃   ┌─ ? claude asks ──────────────────────── blocks turn 1 ┐ ┃ │ opus-5  100% ▓▓▓▓▓▓▓▓▓▓▓   49k │
- ┃   │ to run Bash                                           │ ┃ │ cache …  86% ▓▓▓▓▓▓▓▓▓░░   40k │
- ┃   │ asked because: Newline followed by # inside a quoted  │ ┃ │ ────────────────────────────── │
- ┃   │ argument can hide arguments from path validation      │ ┃ │ context  13% ▓░░░░░ 25k / 200k │
- ┃   │ grep -rn "cache" . ; python3 -c '                     │ ┃ └────────────────────────────────┘
- ┃   │ # x                                                   │ ┃ ┌─────────── Changes ────────────┐
- ┃   │ print(1)'                                             │ ┃ │ ⎇ main ↑3                      █
- ┃   │                                                       │ ┃ │ ▾ Working tree  +≥977 −≥259    █
- ┃   │ ▶ 1. Allow once                        this call only │ ┃ │   ▾ catalog/                   █
- ┃   │   2. Always allow Bash               niobe saves Bash │ █ │     ▾ cache/                   █
- ┃   │   3. Always allow this target  niobe saves Bash(grep… │ █ │       lru.ts           +31  −9 █
- ┃   │   4. Deny                       the call does not run │ █ │       index.ts         +12  −0 █
- ┃   │                                                       │ █ │     fetch.ts          +149 −12 █
- ┃   │ 3. niobe saves Bash(grep -rn "cache" . ; python3 -c ' │ █ │     etag.ts            +88 −41 │
- ┃   │ # x                                                   │ █ │   ▾ docs/                      │
- ┃   │ print(1)')                                            │ █ │     ▾ adr/                     │
+ ┃ ◆ Etags cached in the LRU; 304s short-circuit. One test     ┃ │ opus-5  100% ▓▓▓▓▓▓▓▓▓▓▓   49k │
+ ┃   still red — the 304 path asserts a body that is no longer ┃ │ cache …  86% ▓▓▓▓▓▓▓▓▓░░   40k │
+ ┃   sent.                                                     ┃ │ ────────────────────────────── │
+ ┃                                                             ┃ │ context  13% ▓░░░░░ 25k / 200k │
+ ┃   ┌─ ? claude asks ──────────────────────── blocks turn 1 ┐ ┃ └────────────────────────────────┘
+ ┃   │ to run Bash                                           │ ┃ ┌─────────── Changes ────────────┐
+ ┃   │ asked because: Newline followed by # inside a quoted  │ ┃ │ ⎇ main ↑3                      █
+ ┃   │ argument can hide arguments from path validation      │ ┃ │ ▾ Working tree  +≥977 −≥259    █
+ ┃   │ grep -rn "cache" . ; python3 -c '                     │ █ │   ▾ catalog/                   █
+ ┃   │ # x                                                   │ █ │     ▾ cache/                   █
+ ┃   │ print(1)'                                             │ █ │       lru.ts           +31  −9 █
+ ┃   │                                                       │ █ │       index.ts         +12  −0 █
+ ┃   │ ▶ 1. Allow once                        this call only │ █ │     fetch.ts          +149 −12 █
+ ┃   │   2. Always allow Bash               niobe saves Bash │ █ │     etag.ts            +88 −41 │
+ ┃   │   3. Always allow this target  niobe saves Bash(grep… │ █ │   ▾ docs/                      │
+ ┃   │   4. Deny                       the call does not run │ █ │     ▾ adr/                     │
  ┃   │                                                       │ █ │       0004-etags.md    +34  −1 │
  ┃   │ ↑↓ move · 1-4 jump · Enter confirm                    │ █ │     ▾ diagrams/                │
  ┃   │ Tab type your own · Esc decide later                  │ █ │       cache.png          —   — │

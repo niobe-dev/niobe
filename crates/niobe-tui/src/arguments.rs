@@ -1,19 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) Viacheslav Shynkarenko
 
-//! A tool's arguments laid out by key, for a permission question about a call
-//! the backend named no target in.
+//! A tool's arguments, an argument to a row, for a permission question about
+//! a call the backend named no target in, or for the arguments what the
+//! backend read out of a call says nothing of.
 //!
-//! Such a question has nothing to show but the arguments, and as the backend
-//! sends them they are one JSON string: a page body's line breaks arrive as
-//! `\n`, its quotes as `\"`, and a few hundred characters of it wrap mid-word
-//! into rows nobody reads before answering. Here each key gets a row, a string
-//! is drawn as the lines it holds, a nested object is indented under its key
-//! and a list says how many items it has with the items under it.
+//! As the backend sends them the arguments are one JSON string, and a page
+//! body of a few hundred characters wraps into rows nobody reads before
+//! answering. Here each argument is one row, `key: value`, cut at the frame
+//! as Claude Code's question cuts a tool's arguments: a string's first line,
+//! and a list or an object as the start of the JSON it is sent as.
 //!
 //! What is approved is still the JSON, so this is never the only form: Ctrl+T
-//! draws the arguments as they are sent, character for character, and this
-//! layout says so wherever it leaves anything out.
+//! draws the arguments as they are sent, character for character, and a row
+//! that leaves anything out ends in `…`.
 //!
 //! Only JSON's own shapes are read. No tool's or server's argument names are,
 //! beyond the convention that a key ending in `id` names something rather
@@ -26,17 +26,9 @@ use serde_json::{Map, Value};
 use crate::text;
 use crate::theme::Theme;
 
-/// The most rows the layout takes before it is cut, with a row under them
-/// saying how many more there are and how to read them all.
-const ROWS: usize = 12;
-
-/// The most rows one string's own lines take before the rest of it is
-/// counted rather than drawn, so a page body does not push the keys after it
-/// out of the question.
-const STRING_ROWS: usize = 3;
-
-/// How far a nested key is indented under the key it belongs to.
-const INDENT: usize = 2;
+/// The most arguments drawn before the rest are counted, with a row under
+/// them saying how many more there are and how to read them all.
+const ROWS: usize = 6;
 
 /// `input`'s arguments but for the fields `shown` says are drawn elsewhere,
 /// or `None` where it is not a JSON object.
@@ -54,70 +46,46 @@ pub(crate) fn fields_without(
     Some(fields)
 }
 
-/// `fields` laid out by key, `width` cells wide, cut at [`ROWS`] with rows
-/// saying how many more there are: with how many lines those rows stand for,
-/// which are not drawn, and how many rows they take, at the end of the rows.
+/// `fields` an argument to a row, `width` cells wide, cut at [`ROWS`] with a
+/// row saying how many more there are: with how many arguments that row
+/// stands for, which are not drawn, and how many rows it takes, at the end
+/// of the rows.
 pub(crate) fn rows(
     fields: &Map<String, Value>,
     width: usize,
     theme: &Theme,
 ) -> (Vec<Line<'static>>, usize, usize) {
-    let mut laid = Laid::default();
-    object(fields, 0, width, theme, &mut laid);
-    let Laid {
-        mut rows,
-        cut,
-        unlaid,
-    } = laid;
-    // A string cut at its own rows leaves lines out as surely as the layout
-    // cut at its rows does, and is counted with what is left out: a caller
-    // marks the call as cut where anything is, though no row of its own says
-    // how many lines a string held back but the string's.
-    if rows.len() <= ROWS + 1 && unlaid == 0 {
-        return (rows, cut, 0);
+    let mut keys: Vec<(&String, &Value)> = fields.iter().collect();
+    keys.sort_by_key(|(key, value)| Rank::of(key, value));
+    // One argument over is drawn rather than counted: the row saying so
+    // would take its place.
+    let shown = match keys.len() > ROWS + 1 {
+        true => ROWS,
+        false => keys.len(),
+    };
+    let mut rows: Vec<Line<'static>> = keys
+        .iter()
+        .take(shown)
+        .map(|(key, value)| row(key, value, width, theme))
+        .collect();
+    let over = keys.len() - shown;
+    if over == 0 {
+        return (rows, 0, 0);
     }
-    let over = rows.len().saturating_sub(ROWS).saturating_add(unlaid);
-    rows.truncate(ROWS);
-    let said = format!("… {over} more lines · Ctrl+T shows the arguments as sent");
-    let marker: Vec<Line<'static>> = text::wrap(&said, width.max(1))
+    let marker: Vec<Line<'static>> = text::wrap(&crate::proposed::more_lines(over), width.max(1))
         .into_iter()
         .map(|line| Line::from(Span::styled(line, Style::new().fg(theme.hot))))
         .collect();
     let marker_rows = marker.len();
     rows.extend(marker);
-    (rows, over.saturating_add(cut), marker_rows)
-}
-
-/// The rows laid out so far, and how many lines of the strings among them
-/// were cut at [`STRING_ROWS`] and counted rather than drawn.
-#[derive(Default)]
-pub(crate) struct Laid {
-    rows: Vec<Line<'static>>,
-    cut: usize,
-    /// How many rows a value past what the layout could show would have
-    /// taken, which were never laid out.
-    unlaid: usize,
-}
-
-impl std::ops::Deref for Laid {
-    type Target = Vec<Line<'static>>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.rows
-    }
-}
-
-impl std::ops::DerefMut for Laid {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.rows
-    }
+    (rows, over, marker_rows)
 }
 
 /// Where a key is drawn among its siblings, and whether it recedes.
 ///
 /// Text says the most about a call, so it comes first; then figures; then
-/// the shapes, whose rows run longest. What only names something — an id —
-/// and a flag come last and dim: they decide little an operator reads for.
+/// the shapes. What only names something — an id — and a flag come last and
+/// dim: they decide little an operator reads for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Rank {
     Text,
@@ -147,239 +115,117 @@ fn names_something(key: &str) -> bool {
             .any(|end| key.ends_with(end))
 }
 
-/// An object's keys, by [`Rank`] and then by name.
-///
-/// By name rather than in the order the backend sent them, because the JSON
-/// is read into serde_json's map, which keeps its keys sorted; the order as
-/// sent is what Ctrl+T shows.
-fn object(
-    fields: &Map<String, Value>,
-    indent: usize,
-    width: usize,
-    theme: &Theme,
-    rows: &mut Laid,
-) {
-    let mut keys: Vec<(&String, &Value)> = fields.iter().collect();
-    keys.sort_by_key(|(key, value)| Rank::of(key, value));
-    for (key, value) in keys {
-        field(key, value, indent, width, theme, rows);
-    }
-}
-
-/// One key and what it holds.
-fn field(key: &str, value: &Value, indent: usize, width: usize, theme: &Theme, rows: &mut Laid) {
-    let dim = Rank::of(key, value) == Rank::Detail;
-    match value {
-        // Quoted as JSON, since nothing else would show it: a bare `key:` is
-        // an object's header with its keys under it.
-        Value::String(said) if said.trim().is_empty() => {
-            pair(key, &value.to_string(), indent, width, dim, theme, rows);
-        }
-        Value::String(said) if said.contains('\n') => {
-            pair(key, "", indent, width, dim, theme, rows);
-            string(said, indent + INDENT, width, theme, rows);
-        }
-        Value::String(said) => pair(key, said, indent, width, dim, theme, rows),
-        Value::Object(fields) if fields.is_empty() => {
-            pair(key, "nothing", indent, width, true, theme, rows);
-        }
-        Value::Object(fields) => {
-            pair(key, "", indent, width, dim, theme, rows);
-            object(fields, indent + INDENT, width, theme, rows);
-        }
-        Value::Array(items) => {
-            let count = match items.len() {
-                1 => "1 item".to_owned(),
-                n => format!("{n} items"),
-            };
-            pair(key, &count, indent, width, dim, theme, rows);
-            list(items, indent + INDENT, width, theme, rows);
-        }
-        Value::Number(_) | Value::Bool(_) | Value::Null => {
-            pair(key, &value.to_string(), indent, width, dim, theme, rows);
-        }
-    }
-}
-
-/// A list's items under its key: an object's keys where the list holds one
-/// item, each item numbered where it holds more, and a plain value after a
-/// dash.
-fn list(items: &[Value], indent: usize, width: usize, theme: &Theme, rows: &mut Laid) {
-    let numbered = items.len() > 1;
-    for (at, item) in items.iter().enumerate() {
-        match item {
-            Value::Object(fields) if numbered => {
-                pair(
-                    &format!("#{}", at + 1),
-                    "",
-                    indent,
-                    width,
-                    true,
-                    theme,
-                    rows,
-                );
-                object(fields, indent + INDENT, width, theme, rows);
-            }
-            Value::Object(fields) => object(fields, indent, width, theme, rows),
-            Value::Array(inner) => {
-                pair(
-                    "-",
-                    &format!("{} items", inner.len()),
-                    indent,
-                    width,
-                    true,
-                    theme,
-                    rows,
-                );
-                list(inner, indent + INDENT, width, theme, rows);
-            }
-            Value::String(said) if said.contains('\n') => {
-                string(said, indent, width, theme, rows);
-            }
-            Value::String(said) => line(
-                &format!("- {}", text::controls_shown_in_rows(said)),
-                indent,
-                width,
-                theme,
-                rows,
-            ),
-            Value::Number(_) | Value::Bool(_) | Value::Null => {
-                line(&format!("- {item}"), indent, width, theme, rows);
-            }
-        }
-    }
-}
-
-/// `key: value`, wrapped under itself, with the key dim and the value in the
-/// body colour — or dim too, where the key is a [`Rank::Detail`].
-#[allow(clippy::too_many_arguments)] // Each is one part of the row; a struct would only name them again.
-fn pair(
-    key: &str,
-    value: &str,
-    indent: usize,
-    width: usize,
-    dim: bool,
-    theme: &Theme,
-    rows: &mut Laid,
-) {
+/// One argument as `key: value` on one row `width` cells wide, ending in `…`
+/// where anything of it is not drawn, with the key dim and the value in the
+/// body colour — or dim too, where the key is a [`Rank::Detail`] or the value
+/// says there is nothing.
+fn row(key: &str, value: &Value, width: usize, theme: &Theme) -> Line<'static> {
     let head = format!("{}:", text::controls_shown(key));
-    let lead = " ".repeat(indent);
-    let room = width.saturating_sub(indent).max(1);
-    let (value, beyond) = within_layout(value, room);
-    rows.unlaid = rows.unlaid.saturating_add(beyond);
-    let said = match value.is_empty() {
-        true => head.clone(),
-        false => format!("{head} {}", text::controls_shown_in_rows(value)),
-    };
+    let (said, dim) = summary(value, width);
+    let dim = dim || Rank::of(key, value) == Rank::Detail;
+    let whole = text::truncate(&format!("{head} {said}"), width);
     let value_style = match dim {
         true => Style::new().fg(theme.dim),
         false => Style::new().fg(theme.fg),
     };
-    for (at, wrapped) in text::wrap_keeping_spaces(&said, room)
-        .into_iter()
-        .enumerate()
-    {
-        let spans = match (at, wrapped.strip_prefix(&head)) {
-            (0, Some(rest)) => vec![
-                Span::raw(lead.clone()),
-                Span::styled(head.clone(), Style::new().fg(theme.dim)),
-                Span::styled(rest.to_owned(), value_style),
-            ],
-            _ => vec![Span::raw(lead.clone()), Span::styled(wrapped, value_style)],
-        };
-        rows.push(Line::from(spans));
+    match whole.strip_prefix(&head) {
+        Some(rest) => Line::from(vec![
+            Span::styled(head.clone(), Style::new().fg(theme.dim)),
+            Span::styled(rest.to_owned(), value_style),
+        ]),
+        None => Line::from(Span::styled(whole, Style::new().fg(theme.dim))),
     }
 }
 
-/// A string's own lines, each wrapped, at most [`STRING_ROWS`] rows of them
-/// and then how many rows are left.
-fn string(said: &str, indent: usize, width: usize, theme: &Theme, rows: &mut Laid) {
-    let room = width.saturating_sub(indent).max(1);
-    let said = said.trim_end();
-    // No more of the string is wrapped than its rows could show, and the
-    // rows the rest would take are counted from its lines: a value of
-    // megabytes was wrapped whole to keep three rows of it.
-    let (laid, rest) = match said
-        .char_indices()
-        .nth(room.saturating_mul(STRING_ROWS + 2))
-    {
-        Some((at, _)) => said.split_at(at),
-        None => (said, ""),
+/// What a row says of `value`, read no further than a row `width` cells wide
+/// could show — a value can be megabytes, and the row is laid out again with
+/// every question — and whether it says there is nothing.
+fn summary(value: &Value, width: usize) -> (String, bool) {
+    // Past this many bytes a row is full whatever the characters are: none
+    // takes fewer than one cell per four bytes.
+    let most = width.saturating_mul(4).saturating_add(4);
+    match value {
+        // Quoted as JSON, since nothing else would show it.
+        Value::String(said) if said.trim().is_empty() => (value.to_string(), false),
+        Value::String(said) => {
+            let said = said.trim();
+            let (first, more) = match said.split_once('\n') {
+                Some((first, _)) => (first.trim_end(), true),
+                None => (said, false),
+            };
+            let first = match first.char_indices().nth(most) {
+                Some((at, _)) => &first[..at],
+                None => first,
+            };
+            let first = text::controls_shown_in_rows(first);
+            match more {
+                true => (format!("{first} …"), false),
+                false => (first.into_owned(), false),
+            }
+        }
+        Value::Object(fields) if fields.is_empty() => ("nothing".to_owned(), true),
+        Value::Array(_) | Value::Object(_) => (
+            text::controls_shown_in_rows(&json_prefix(value, most)).into_owned(),
+            false,
+        ),
+        Value::Number(_) | Value::Bool(_) | Value::Null => (value.to_string(), false),
+    }
+}
+
+/// The first `most` bytes or fewer of `value` as compact JSON, ending on a
+/// whole character: written no further, since a list can hold a whole file.
+fn json_prefix(value: &Value, most: usize) -> String {
+    let mut written = Bounded {
+        bytes: Vec::new(),
+        most,
     };
-    let mut wrapped = text::wrap_keeping_spaces(&text::controls_shown_in_rows(laid), room);
-    let beyond = rows_of(rest, room);
-    let total = wrapped.len().saturating_add(beyond);
-    let lead = " ".repeat(indent);
-    let shown = match total > STRING_ROWS + 1 {
-        true => STRING_ROWS,
-        false => total,
-    };
-    wrapped.truncate(shown);
-    for part in wrapped.iter().take(shown) {
-        rows.push(Line::from(vec![
-            Span::raw(lead.clone()),
-            Span::styled(part.clone(), Style::new().fg(theme.fg)),
-        ]));
-    }
-    let hidden = total - shown;
-    if hidden > 0 {
-        rows.cut = rows.cut.saturating_add(hidden);
-        rows.push(Line::from(vec![
-            Span::raw(lead),
-            Span::styled(
-                format!("… {hidden} more lines"),
-                Style::new().fg(theme.dim).italic(),
-            ),
-        ]));
+    // Running out of room is the writer's error, and it is how the JSON is
+    // cut: what was written up to it is the prefix.
+    let _ = serde_json::to_writer(&mut written, value);
+    match String::from_utf8(written.bytes) {
+        Ok(said) => said,
+        Err(cut) => {
+            let valid = cut.utf8_error().valid_up_to();
+            let mut bytes = cut.into_bytes();
+            bytes.truncate(valid);
+            String::from_utf8(bytes).unwrap_or_default()
+        }
     }
 }
 
-/// As much of `said` as the layout could show at `room` columns, and about
-/// how many rows the rest would have taken: the layout keeps [`ROWS`] rows,
-/// and a value of megabytes was wrapped whole to keep them.
-fn within_layout(said: &str, room: usize) -> (&str, usize) {
-    match said.char_indices().nth(room.saturating_mul(ROWS + 2)) {
-        Some((at, _)) => (&said[..at], rows_of(&said[at..], room)),
-        None => (said, 0),
-    }
+/// A writer that keeps its first `most` bytes and refuses the rest.
+struct Bounded {
+    bytes: Vec<u8>,
+    most: usize,
 }
 
-/// About how many rows `rest` of a string wraps to at `room` columns,
-/// counted by its lines and their characters rather than laid out.
-fn rows_of(rest: &str, room: usize) -> usize {
-    if rest.is_empty() {
-        return 0;
+impl std::io::Write for Bounded {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let room = self.most.saturating_sub(self.bytes.len());
+        if room == 0 {
+            return Err(std::io::Error::other("the row is full"));
+        }
+        let taken = room.min(buf.len());
+        self.bytes.extend_from_slice(&buf[..taken]);
+        Ok(taken)
     }
-    rest.split('\n')
-        .map(|line| line.chars().count().div_ceil(room).max(1))
-        .fold(0, usize::saturating_add)
-}
 
-/// One plain row, wrapped under itself.
-fn line(said: &str, indent: usize, width: usize, theme: &Theme, rows: &mut Laid) {
-    let room = width.saturating_sub(indent).max(1);
-    let (said, beyond) = within_layout(said, room);
-    rows.unlaid = rows.unlaid.saturating_add(beyond);
-    let lead = " ".repeat(indent);
-    for wrapped in text::wrap_keeping_spaces(said, room) {
-        rows.push(Line::from(vec![
-            Span::raw(lead.clone()),
-            Span::styled(wrapped, Style::new().fg(theme.fg)),
-        ]));
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::theme::CYBER;
 
-    /// `input`'s arguments, one key to a row, `width` cells wide; `None`
+    /// `input`'s arguments, an argument to a row, `width` cells wide; `None`
     /// where it is not a JSON object.
     fn lines(input: &str, width: usize, theme: &Theme) -> Option<Vec<Line<'static>>> {
         let fields = fields_without(input, |_, _| false)?;
         Some(rows(&fields, width, theme).0)
     }
-    use crate::theme::CYBER;
 
     fn drawn(input: &str, width: usize) -> Vec<String> {
         lines(input, width, &CYBER)
@@ -412,8 +258,7 @@ mod tests {
             [
                 "query: etag",
                 "size: 10",
-                "filter:",
-                "  q: x",
+                r#"filter: {"q":"x"}"#,
                 "allow_async: true",
                 "page_id: abc",
             ]
@@ -447,8 +292,7 @@ mod tests {
         );
     }
 
-    /// An empty object says it holds nothing, dim, rather than a key with
-    /// nothing after it.
+    /// An empty object says it holds nothing, dim, rather than `{}`.
     #[test]
     fn an_empty_object_says_it_holds_nothing() {
         let rows = lines(r#"{"filter":{}}"#, 40, &CYBER).expect("the input is an object");
@@ -470,11 +314,9 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_or_blank_string_is_drawn_quoted_and_not_as_a_header() {
+    fn an_empty_or_blank_string_is_drawn_quoted() {
         assert_eq!(drawn(r#"{"a":""}"#, 40), [r#"a: """#]);
         assert_eq!(drawn(r#"{"a":"\n"}"#, 40), [r#"a: "\n""#]);
-        assert_eq!(drawn(r#"{"a":{}}"#, 40), ["a: nothing"]);
-        assert_eq!(drawn(r#"{"a":{"b":1}}"#, 40), ["a:", "  b: 1"]);
     }
 
     #[test]
@@ -482,70 +324,60 @@ mod tests {
         assert_eq!(drawn(r#"{"a\nb":"x"}"#, 40), ["a\u{2424}b: x"]);
     }
 
+    /// A string of several lines is its first, marked as having more.
     #[test]
-    fn a_string_is_drawn_as_its_lines_and_a_long_one_says_how_many_are_left() {
-        let rows = drawn(r#"{"body":"one\ntwo\nthree\nfour\nfive"}"#, 40);
-        assert_eq!(
-            rows,
-            ["body:", "  one", "  two", "  three", "  … 2 more lines"]
-        );
-        // One row over is drawn rather than said, as the saying takes a row.
-        let rows = drawn(r#"{"body":"one\ntwo\nthree\nfour"}"#, 40);
-        assert_eq!(rows, ["body:", "  one", "  two", "  three", "  four"]);
+    fn a_string_of_several_lines_is_drawn_as_its_first_and_says_there_is_more() {
+        assert_eq!(drawn(r#"{"body":"one\ntwo\nthree"}"#, 40), ["body: one …"]);
     }
 
+    /// A list or an object is the start of the JSON it is sent as, cut at the
+    /// row's edge.
     #[test]
-    fn a_list_says_how_many_items_it_holds_and_numbers_them_where_there_are_more() {
+    fn a_list_or_an_object_is_the_json_it_is_sent_as_cut_at_the_row() {
+        assert_eq!(drawn(r#"{"tags":["x","y"]}"#, 40), [r#"tags: ["x","y"]"#]);
         assert_eq!(
-            drawn(r#"{"pages":[{"title":"a"}]}"#, 40),
-            ["pages: 1 item", "  title: a"]
-        );
-        assert_eq!(
-            drawn(
-                r#"{"pages":[{"title":"a"},{"title":"b"}],"tags":["x"]}"#,
-                40
-            ),
-            [
-                "pages: 2 items",
-                "  #1:",
-                "    title: a",
-                "  #2:",
-                "    title: b",
-                "tags: 1 item",
-                "  - x",
-            ]
+            drawn(r#"{"pages":[{"title":"a long title for a page"}]}"#, 24),
+            [r#"pages: [{"title":"a lon…"#]
         );
     }
 
+    /// Every row is one row, however long the value: a page body as long as a
+    /// file is cut at the row's edge rather than wrapped.
     #[test]
-    fn a_layout_taller_than_its_rows_is_cut_with_a_row_saying_what_shows_the_rest() {
-        let fields: Vec<String> = (0..20).map(|at| format!(r#""k{at:02}":"v""#)).collect();
-        let rows = drawn(&format!("{{{}}}", fields.join(",")), 80);
-        assert_eq!(rows.len(), ROWS + 1);
-        assert_eq!(
-            rows[ROWS],
-            "… 8 more lines · Ctrl+T shows the arguments as sent"
-        );
-        // One row over is drawn whole: the row saying so would take its place.
-        let fields: Vec<String> = (0..13).map(|at| format!(r#""k{at:02}":"v""#)).collect();
-        assert_eq!(drawn(&format!("{{{}}}", fields.join(",")), 80).len(), 13);
+    fn a_value_wider_than_the_row_is_cut_at_its_edge() {
+        let long = "word ".repeat(200_000);
+        for input in [
+            serde_json::json!({ "body": long }),
+            serde_json::json!({ "pages": [{ "content": long }] }),
+        ] {
+            let rows = drawn(&input.to_string(), 30);
+            assert_eq!(rows.len(), 1, "{rows:?}");
+            assert_eq!(text::width(&rows[0]), 30, "{rows:?}");
+            assert!(rows[0].ends_with('…'), "{rows:?}");
+        }
+    }
+
+    /// The JSON is cut on a whole character, never inside one.
+    #[test]
+    fn a_list_cut_inside_a_character_keeps_only_whole_ones() {
+        let said = json_prefix(&serde_json::json!(["ééééé"]), 6);
+        assert_eq!(said, "[\"éé");
     }
 
     #[test]
     fn a_dim_key_and_a_detail_are_drawn_dim_and_text_in_the_body_colour() {
         let rows = lines(r#"{"query":"etag","page_id":"abc"}"#, 40, &CYBER)
             .expect("the input is an object");
-        let colours = |row: &Line<'_>| -> Vec<_> {
-            row.spans.iter().skip(1).map(|span| span.style.fg).collect()
-        };
+        let colours =
+            |row: &Line<'_>| -> Vec<_> { row.spans.iter().map(|span| span.style.fg).collect() };
         assert_eq!(colours(&rows[0]), [Some(CYBER.dim), Some(CYBER.fg)]);
         assert_eq!(colours(&rows[1]), [Some(CYBER.dim), Some(CYBER.dim)]);
     }
 
-    /// One row more than the cut would leave is drawn, not summarised as one
-    /// more line: a marker row would take the room that line needed.
+    /// One argument more than the cut would leave is drawn, not counted: a
+    /// marker row would take the room that argument needed.
     #[test]
-    fn a_row_over_the_cut_is_drawn_and_two_over_are_counted() {
+    fn an_argument_over_the_cut_is_drawn_and_two_over_are_counted() {
         let object = |keys: usize| {
             let fields: Vec<String> = (0..keys).map(|i| format!("\"k{i:02}\":\"v\"")).collect();
             format!("{{{}}}", fields.join(","))
@@ -559,6 +391,10 @@ mod tests {
         );
 
         let two_over = drawn(&object(ROWS + 2), 60);
-        assert!(two_over[ROWS].contains("… 2 more lines"), "{two_over:?}");
+        assert_eq!(two_over.len(), ROWS + 1, "{two_over:?}");
+        assert_eq!(
+            two_over[ROWS],
+            "… 2 more lines · Ctrl+T shows the whole call"
+        );
     }
 }

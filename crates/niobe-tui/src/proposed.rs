@@ -51,10 +51,20 @@ pub(crate) struct Call {
     /// how many rows it takes and how many lines it stands for: a marker is
     /// not itself a line of the call.
     pub markers: Vec<(usize, usize, usize)>,
-    /// Whether this view leaves part of the call undrawn however it is
-    /// opened: what is laid out is bounded, so a call past the bound is never
-    /// on screen whole.
-    pub capped: bool,
+}
+
+/// The most rows a command, a target or what a skill is handed takes in a
+/// question until Ctrl+T shows the whole call: enough to say what would run,
+/// as Claude Code's question does, and short enough that its answers are
+/// what the eye lands on.
+pub(crate) const BRIEF_ROWS: usize = 3;
+
+/// The row that says `n` lines of a call are not drawn, and how to see them.
+pub(crate) fn more_lines(n: usize) -> String {
+    match n {
+        1 => "… 1 more line · Ctrl+T shows the whole call".to_owned(),
+        n => format!("… {n} more lines · Ctrl+T shows the whole call"),
+    }
 }
 
 impl Call {
@@ -63,7 +73,6 @@ impl Call {
         Self {
             rows,
             markers: Vec::new(),
-            capped: false,
         }
     }
 
@@ -179,11 +188,7 @@ impl Proposed {
                 (false, false) => rows.extend(markdown::render(plan, width, theme)),
             }
             self.others_under(input, width, theme, &mut rows, &mut markers);
-            return Some(Call {
-                rows,
-                markers,
-                capped: false,
-            });
+            return Some(Call { rows, markers });
         }
         // The questions themselves are drawn above the answers, one at a
         // time, by whatever asks them; what is left of the call is whatever
@@ -194,26 +199,18 @@ impl Proposed {
                 rows.remove(0);
                 markers.iter_mut().for_each(|marker| marker.0 -= 1);
             }
-            return Some(Call {
-                rows,
-                markers,
-                capped: false,
-            });
+            return Some(Call { rows, markers });
         }
         if let Action::Skill { asked, about, .. } = self.proposal.action() {
             self.skill_rows(
                 (asked, about.as_deref()),
-                width,
+                (width, open),
                 theme,
                 &mut rows,
                 &mut markers,
             );
             self.others_under(input, width, theme, &mut rows, &mut markers);
-            return Some(Call {
-                rows,
-                markers,
-                capped: false,
-            });
+            return Some(Call { rows, markers });
         }
         let (subject, said) = match (self.proposal.action(), &self.lines) {
             (Action::Replace { path, every, .. }, Some(_)) => (
@@ -234,17 +231,13 @@ impl Proposed {
                 return None;
             }
         };
-        let (subject_rows, beyond) = self.subject_rows(subject, width);
+        let (subject_rows, beyond) = self.subject_rows(subject, width, open);
         rows.extend(
             subject_rows
                 .into_iter()
                 .map(|row| Line::from(row).style(plain.bold())),
         );
-        if beyond > 0 {
-            let cut = text::wrap(&subject_cut(beyond), width);
-            markers.push((rows.len(), cut.len(), beyond));
-            rows.extend(cut.into_iter().map(|row| Line::from(row).style(dim)));
-        }
+        cut_under(beyond, (width, open), theme, &mut rows, &mut markers);
         rows.extend(
             said.iter()
                 .flat_map(|said| text::wrap(said, width))
@@ -259,21 +252,18 @@ impl Proposed {
             rows.extend(change);
         }
         self.others_under(input, width, theme, &mut rows, &mut markers);
-        Some(Call {
-            rows,
-            markers,
-            capped: false,
-        })
+        Some(Call { rows, markers })
     }
 
     /// The first rows of `subject` — a command, or a file's path — wrapped
     /// exactly, `width` cells wide, and how many rows past them it wraps to.
     ///
-    /// Laid out no further than a proposed change is with the diffs open: a
-    /// command can carry a whole file in a heredoc, and the question is drawn
-    /// again with every tick. The rows it wraps to in all are counted once
-    /// for each width, since counting them reads the whole of it.
-    fn subject_rows(&self, subject: &str, width: usize) -> (Vec<String>, usize) {
+    /// [`BRIEF_ROWS`] of them until the diffs are `open`, and then no further
+    /// than a proposed change is laid out: a command can carry a whole file
+    /// in a heredoc, and the question is drawn again with every tick. The
+    /// rows it wraps to in all are counted once for each width, since
+    /// counting them reads the whole of it.
+    fn subject_rows(&self, subject: &str, width: usize, open: bool) -> (Vec<String>, usize) {
         let all = match self.subject_count.get() {
             Some((counted_at, all)) if counted_at == width => all,
             _ => {
@@ -282,8 +272,12 @@ impl Proposed {
                 all
             }
         };
-        let laid = match all > hunks::OPEN_ROWS + 1 {
+        let most = match open {
             true => hunks::OPEN_ROWS,
+            false => BRIEF_ROWS,
+        };
+        let laid = match all > most + 1 {
+            true => most,
             false => all,
         };
         (
@@ -299,7 +293,7 @@ impl Proposed {
     fn skill_rows(
         &self,
         (asked, about): (&str, Option<&str>),
-        width: usize,
+        (width, open): (usize, bool),
         theme: &Theme,
         rows: &mut Vec<Line<'static>>,
         markers: &mut Vec<(usize, usize, usize)>,
@@ -328,7 +322,7 @@ impl Proposed {
         if !rows.is_empty() {
             rows.push(Line::from(""));
         }
-        let (subject_rows, beyond) = self.subject_rows(&format!("{SKILL_FOR}{asked}"), width);
+        let (subject_rows, beyond) = self.subject_rows(&format!("{SKILL_FOR}{asked}"), width, open);
         for (at, row) in subject_rows.into_iter().enumerate() {
             let plain = Style::new().fg(theme.fg);
             rows.push(match (at, row.strip_prefix(SKILL_FOR)) {
@@ -339,11 +333,7 @@ impl Proposed {
                 _ => Line::from(row).style(plain),
             });
         }
-        if beyond > 0 {
-            let cut = text::wrap(&subject_cut(beyond), width);
-            markers.push((rows.len(), cut.len(), beyond));
-            rows.extend(cut.into_iter().map(|row| Line::from(row).style(dim)));
-        }
+        cut_under(beyond, (width, open), theme, rows, markers);
     }
 
     /// The skill the call would use, where that is what it does.
@@ -418,9 +408,30 @@ const NO_PLAN: &str = "No plan came with this question.";
 const PLAN_AS_WRITTEN: &str =
     "Drawn as written: as markdown, some of this plan would not be shown.";
 
-/// The row under a command too long to lay out whole: how many of its rows
-/// are not drawn, which nothing on screen shows; the arguments as sent behind
-/// Ctrl+T are cut too.
+/// Under a subject laid out in part, the row that says how many of its rows
+/// are not drawn — `beyond` of them — marked as standing for them.
+fn cut_under(
+    beyond: usize,
+    (width, open): (usize, bool),
+    theme: &Theme,
+    rows: &mut Vec<Line<'static>>,
+    markers: &mut Vec<(usize, usize, usize)>,
+) {
+    if beyond == 0 {
+        return;
+    }
+    let (said, style) = match open {
+        true => (subject_cut(beyond), Style::new().fg(theme.dim)),
+        false => (more_lines(beyond), Style::new().fg(theme.hot)),
+    };
+    let cut = text::wrap(&said, width);
+    markers.push((rows.len(), cut.len(), beyond));
+    rows.extend(cut.into_iter().map(|row| Line::from(row).style(style)));
+}
+
+/// The row under a command too long to lay out whole even with the diffs
+/// open: how many of its rows are not drawn, which nothing on screen shows;
+/// the arguments as sent behind Ctrl+T are cut too.
 fn subject_cut(beyond: usize) -> String {
     let rows = match beyond {
         1 => "row",
@@ -706,9 +717,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_command_too_long_to_lay_out_whole_is_drawn_to_the_rows_a_change_is_and_counts_the_rest() {
-        let command = (0..hunks::OPEN_ROWS + 500)
+    fn long_command(lines: usize) -> (Proposal, String) {
+        let command = (0..lines)
             .map(|at| format!("echo {at}"))
             .collect::<Vec<_>>()
             .join("\n");
@@ -718,21 +728,61 @@ mod tests {
             },
             ["command"],
         );
-        let input = serde_json::json!({ "command": command }).to_string();
-        for open in [false, true] {
-            let call = Proposed::new(proposal.clone())
-                .call(&input, 80, open, &CLASSIC)
-                .expect("a command has a view");
-            assert_eq!(call.rows.len(), hunks::OPEN_ROWS + 1, "open: {open}");
-            let last: String = call.rows[hunks::OPEN_ROWS]
-                .spans
-                .iter()
-                .map(|span| span.content.as_ref())
-                .collect();
-            assert!(last.contains("500 more rows"), "{last}");
-            assert_eq!(call.hidden_after(0), hunks::OPEN_ROWS + 500, "open: {open}");
-            assert_eq!(call.hidden_after(hunks::OPEN_ROWS), 500, "open: {open}");
-        }
+        (
+            proposal,
+            serde_json::json!({ "command": command }).to_string(),
+        )
+    }
+
+    fn said(row: &Line<'_>) -> String {
+        row.spans.iter().map(|span| span.content.as_ref()).collect()
+    }
+
+    /// Until Ctrl+T, a command is its first rows and a row counting the rest,
+    /// as Claude Code's question shows one.
+    #[test]
+    fn a_long_command_is_drawn_in_its_first_rows_and_counts_the_rest() {
+        let (proposal, input) = long_command(BRIEF_ROWS + 10);
+        let call = Proposed::new(proposal)
+            .call(&input, 80, false, &CLASSIC)
+            .expect("a command has a view");
+        let rows: Vec<String> = call.rows.iter().map(said).collect();
+        assert_eq!(
+            rows,
+            [
+                "echo 0",
+                "echo 1",
+                "echo 2",
+                "… 10 more lines · Ctrl+T shows the whole call"
+            ]
+        );
+        assert_eq!(call.hidden_after(0), BRIEF_ROWS + 10);
+        assert_eq!(call.hidden_after(BRIEF_ROWS), 10);
+    }
+
+    /// One row over is drawn rather than counted: the count would take its
+    /// row.
+    #[test]
+    fn a_command_one_row_over_the_brief_is_drawn_whole() {
+        let (proposal, input) = long_command(BRIEF_ROWS + 1);
+        let call = Proposed::new(proposal)
+            .call(&input, 80, false, &CLASSIC)
+            .expect("a command has a view");
+        assert_eq!(call.rows.len(), BRIEF_ROWS + 1);
+        assert!(call.markers.is_empty());
+    }
+
+    #[test]
+    fn under_ctrl_t_a_command_too_long_to_lay_out_whole_is_drawn_to_the_rows_a_change_is() {
+        let (proposal, input) = long_command(hunks::OPEN_ROWS + 500);
+        let call = Proposed::new(proposal)
+            .call(&input, 80, true, &CLASSIC)
+            .expect("a command has a view");
+        assert_eq!(call.rows.len(), hunks::OPEN_ROWS + 1);
+        let last = said(&call.rows[hunks::OPEN_ROWS]);
+        assert!(last.contains("500 more rows"), "{last}");
+        assert_eq!(call.hidden_after(0), hunks::OPEN_ROWS + 500);
+        assert_eq!(call.hidden_after(hunks::OPEN_ROWS), 500);
     }
 
     #[test]

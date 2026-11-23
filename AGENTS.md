@@ -265,13 +265,17 @@ reviewers that encode both, for an agent working in this tree.
   that names the agent, rows with nothing under them on consecutive lines, a run of calls to one tool as one
   group, edits to the agent's own notes as one `updated memory` row whose
   lines Ctrl+T shows, and — where `a` is pressed in a side pane — each turn's sub-agent rows
-  grouped under a heading per agent — `arguments.rs` lays out a permission question's arguments one key to a row, with
-  the JSON as sent behind Ctrl+T — a question cut to fit its pane, or drawn with lines its layout
-  leaves out, allowed only once every row of the call, drawn whole, has been on screen clear of the
-  way back down — `proposed.rs` draws what a question's call would do where the
+  grouped under a heading per agent — `arguments.rs` lays out a permission question's arguments
+  one to a row, `key: value` cut at the frame — a string's first line, a list or an object the
+  start of its JSON — with the JSON as sent behind Ctrl+T; a question is brief, as Claude Code's
+  is, and what it leaves out — a command's or a target's rows past the first three, the rule a
+  standing answer keeps said whole — is behind Ctrl+T, which draws the rule above the answers so
+  the view, following the question's end, keeps them on screen; nothing left out keeps an answer
+  from being chosen, and only a pane shorter than the answers themselves does —
+  `proposed.rs` draws what a question's call would do where the
   backend read it — an edit as the lines it removes and adds, wrapped and cut where a transcript
   diff is, a file written as the lines it will hold and whether what it held is lost, a command
-  once, a plan whole as its markdown — or as written, where that markdown would draw
+  once, its first three rows until Ctrl+T, a plan whole as its markdown — or as written, where that markdown would draw
   some of its words as nothing or the plan holds a control or text that draws as nothing — with no standing answer offered and its refusal named
   "keep planning", a skill as `to use skill <name>` with the first line the CLI describes it
   with and what it is handed, its standing answers that skill and every skill — and the

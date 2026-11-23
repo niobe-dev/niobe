@@ -1601,198 +1601,152 @@ fn a_question_taller_than_the_pane_keeps_what_is_asked_and_its_answers_on_screen
     assert_snapshot("asking-long-120x40", &large);
 }
 
+/// Ctrl+T draws a long call whole, taller than the pane: the view follows
+/// the question's end, where its answers are, and Enter answers it there
+/// without the operator scrolling through every row first.
 #[test]
-fn enter_answers_nothing_while_the_top_of_the_question_is_not_drawn() {
+fn under_ctrl_t_a_question_taller_than_the_pane_is_still_answered() {
+    use niobe_tui::app::ASK_QUIET;
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use std::time::Instant;
 
-    let mut app = session_waiting_on_a_long_command();
-    app.on_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
+    let shown = Instant::now();
+    let mut app = session_waiting_on_a_long_command().attached();
+    app.tick(shown, None);
+    screen(&mut app, 80, 24);
+    app.on_key_read(
+        KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL),
+        alone(shown + ASK_QUIET * 2),
+    );
     let frame = screen(&mut app, 80, 24);
     assert!(
         !frame.contains("to run Bash"),
         "the whole call fits:\n{frame}"
     );
+    assert!(frame.contains("1. Allow once"), "{frame}");
 
-    app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    app.on_key_read(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        alone(shown + ASK_QUIET * 4),
+    );
 
     assert!(
-        !app.take_produced()
-            .iter()
-            .any(|event| matches!(event, Event::PermissionResponse { .. })),
-        "a call was answered with the question it asks off screen"
+        answered(&mut app),
+        "a question whose answers are on screen took no answer"
     );
-    assert!(app.asking().is_some());
 }
 
-/// A call cut to fit its pane is allowed only once every row of it has been
-/// on screen: Enter on "Allow once" would otherwise allow lines the operator
-/// was never shown. Ctrl+T draws it whole, but taller than the pane only its
-/// end is on screen, so cutting it again straight away has shown nothing of
-/// its middle; scrolled through, it has, and cut again it is answered as any
-/// other.
+/// What a question leaves out to stay short — the rest of a long command, a
+/// long argument, the end of a tool's name, a target of hundreds of thousands
+/// of characters — is behind Ctrl+T for whoever wants it, and never stands
+/// between the operator and an answer.
 #[test]
-fn a_call_cut_to_fit_is_not_allowed_until_every_row_of_it_has_been_on_screen() {
+fn a_call_shown_in_part_is_answered_without_being_read_whole() {
     use niobe_tui::app::ASK_QUIET;
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use std::time::Instant;
 
-    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
-    let ctrl = |code| KeyEvent::new(code, KeyModifiers::CONTROL);
-    let shown = Instant::now();
-    let mut beat = 0;
-    let mut next = || {
-        beat += 2;
-        alone(shown + ASK_QUIET * beat)
-    };
-    let mut app = session_waiting_on_a_long_command().attached();
-    app.tick(shown, None);
-    let frame = screen(&mut app, 80, 24);
-    assert!(frame.contains("more lines"), "{frame}");
-
-    app.on_key_read(key(KeyCode::Enter), next());
-    assert!(
-        !answered(&mut app),
-        "a call was allowed with lines of it unseen"
-    );
-    let frame = screen(&mut app, 80, 24);
-    assert!(
-        frame.contains("not all of the call has been on screen"),
-        "{frame}"
-    );
-
-    app.on_key_read(ctrl(KeyCode::Char('t')), next());
-    screen(&mut app, 80, 24);
-    app.on_key_read(ctrl(KeyCode::Char('t')), next());
-    screen(&mut app, 80, 24);
-    app.on_key_read(key(KeyCode::Enter), next());
-    assert!(
-        !answered(&mut app),
-        "a call was allowed with only the end of it drawn whole"
-    );
-
-    app.on_key_read(ctrl(KeyCode::Char('t')), next());
-    screen(&mut app, 80, 24);
-    for _ in 0..10 {
-        app.on_key_read(key(KeyCode::PageUp), next());
-        screen(&mut app, 80, 24);
-    }
-    app.on_key_read(ctrl(KeyCode::End), next());
-    screen(&mut app, 80, 24);
-    app.on_key_read(ctrl(KeyCode::Char('t')), next());
-    let frame = screen(&mut app, 80, 24);
-    assert!(frame.contains("more lines"), "{frame}");
-
-    app.on_key_read(key(KeyCode::Enter), next());
-    assert!(answered(&mut app), "a call read whole was not allowed");
-}
-
-/// A call whose arguments the layout cuts at their rows — "… N more lines"
-/// — fits its pane and still leaves lines out: it is allowed only once
-/// Ctrl+T has had every row of the arguments as sent on screen.
-#[test]
-fn a_call_whose_arguments_are_cut_at_their_rows_is_not_allowed_unread() {
-    use niobe_tui::app::ASK_QUIET;
-    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    use std::time::Instant;
-
-    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
-    let ctrl_t = KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL);
-    let mut app = running_session();
     let sql = format!("SELECT 1;{}\nDROP TABLE users;", "\n-- pad".repeat(20));
-    app.apply(&Event::PermissionRequest {
-        id: "toolu_query".into(),
-        tool: "mcp__db__query".to_owned(),
-        input: serde_json::json!({ "database": "analytics", "sql": sql }).to_string(),
-        proposal: None,
-        target: None,
-        reason: None,
-        agent: None,
-    });
-    let mut app = app.attached();
-    let shown = Instant::now();
-    app.tick(shown, None);
-    let frame = screen(&mut app, 100, 40);
-    assert!(frame.contains("more lines"), "{frame}");
-    assert!(!frame.contains("users;"), "{frame}");
-
-    app.on_key_read(key(KeyCode::Enter), alone(shown + ASK_QUIET * 2));
-    assert!(
-        !answered(&mut app),
-        "a call was allowed with lines of it unseen"
-    );
-
-    app.on_key_read(ctrl_t, alone(shown + ASK_QUIET * 4));
-    let frame = screen(&mut app, 100, 40);
-    assert!(frame.contains("users;"), "{frame}");
-    app.on_key_read(ctrl_t, alone(shown + ASK_QUIET * 6));
-    screen(&mut app, 100, 40);
-    app.on_key_read(key(KeyCode::Enter), alone(shown + ASK_QUIET * 8));
-    assert!(answered(&mut app), "a call read whole was not allowed");
-}
-
-/// A call larger than the question draws even under Ctrl+T — a tool named in
-/// thousands of characters, a target of hundreds of thousands — can never be
-/// read whole, so it is not allowed however it is read; it can be refused.
-#[test]
-fn a_call_too_large_to_draw_whole_can_only_be_refused() {
-    use niobe_tui::app::ASK_QUIET;
-    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    use std::time::Instant;
-
-    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
-    let held = |code, modifiers| KeyEvent::new(code, modifiers);
     let long_tool = format!("mcp__{}", "x".repeat(2_000));
     let huge_target = "y".repeat(400_000);
-    for (tool, target) in [
-        (long_tool.as_str(), "a"),
-        ("mcp__fs__read", huge_target.as_str()),
-    ] {
+    let asked = |tool: &str, input: serde_json::Value, target: Option<&str>| {
         let mut app = running_session();
         app.apply(&Event::PermissionRequest {
-            id: "toolu_large".into(),
+            id: "toolu_long".into(),
             tool: tool.to_owned(),
-            input: serde_json::json!({ "path": target }).to_string(),
+            input: input.to_string(),
             proposal: None,
-            target: Some(target.to_owned()),
+            target: target.map(str::to_owned),
             reason: None,
             agent: None,
         });
+        app
+    };
+    let sessions = [
+        ("a long command", session_waiting_on_a_long_command()),
+        (
+            "a long argument",
+            asked("mcp__db__query", serde_json::json!({ "sql": sql }), None),
+        ),
+        (
+            "a long tool name",
+            asked(&long_tool, serde_json::json!({ "path": "a" }), Some("a")),
+        ),
+        (
+            "a huge target",
+            asked(
+                "mcp__fs__read",
+                serde_json::json!({ "path": huge_target }),
+                Some(&huge_target),
+            ),
+        ),
+    ];
+    for (what, app) in sessions {
         let mut app = app.attached();
         let shown = Instant::now();
-        let mut beat = 0;
-        let mut next = || {
-            beat += 2;
-            alone(shown + ASK_QUIET * beat)
-        };
         app.tick(shown, None);
         screen(&mut app, 80, 24);
 
-        app.on_key_read(held(KeyCode::Char('t'), KeyModifiers::CONTROL), next());
-        screen(&mut app, 80, 24);
-        app.on_key_read(held(KeyCode::Home, KeyModifiers::CONTROL), next());
-        screen(&mut app, 80, 24);
-        for _ in 0..2_400 {
-            app.on_key_read(key(KeyCode::PageDown), next());
-            screen(&mut app, 80, 24);
-            if app.follows_tail() {
-                break;
-            }
-        }
-        app.on_key_read(held(KeyCode::Char('t'), KeyModifiers::CONTROL), next());
-        screen(&mut app, 80, 24);
-        app.on_key_read(key(KeyCode::Enter), next());
-        assert!(
-            !answered(&mut app),
-            "{tool:.20}: a call never drawn whole was allowed"
+        app.on_key_read(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            alone(shown + ASK_QUIET * 2),
         );
-
-        app.on_key_read(key(KeyCode::Char('4')), next());
-        app.on_key_read(key(KeyCode::Enter), next());
-        assert!(
-            answered(&mut app),
-            "{tool:.20}: a call too large to read could not be refused"
-        );
+        assert!(answered(&mut app), "{what}: Enter did not allow the call");
     }
+}
+
+/// A long command is asked about in its first rows, with a row saying how
+/// much more there is and that Ctrl+T shows it, and the standing answer that
+/// would keep it is not said again whole under the answers; Ctrl+T shows the
+/// whole of both.
+#[test]
+fn a_long_command_is_asked_about_in_a_few_rows_and_ctrl_t_shows_it_whole() {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = session_waiting_on_a_long_command();
+    let frame = screen(&mut app, 120, 40);
+    let call: Vec<String> = call_rows(&frame)
+        .iter()
+        .map(|row| row.trim_end().to_owned())
+        .collect();
+    assert_eq!(
+        call,
+        [
+            "set -e",
+            "cd /tmp",
+            "echo step 1 && \\",
+            "… 59 more lines · Ctrl+T shows the whole call",
+        ],
+        "{frame}"
+    );
+    assert!(
+        !question_rows(&frame)
+            .iter()
+            .any(|row| row.starts_with("3. niobe saves")),
+        "the rule is said again whole without being asked for:\n{frame}"
+    );
+
+    app.on_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
+    let open = screen(&mut app, 120, 40);
+    let rows = question_rows(&open);
+    let end = rows
+        .iter()
+        .position(|row| row == "rm -rf ~/important)")
+        .unwrap_or_else(|| panic!("Ctrl+T does not show the rule whole:\n{open}"));
+    assert!(
+        rows[end..]
+            .iter()
+            .any(|row| row.starts_with("▶ 1. Allow once")),
+        "the answers are not under the rule, at the end the view follows:\n{open}"
+    );
+    app.scroll_to_head();
+    let top = screen(&mut app, 120, 60);
+    assert!(
+        question_rows(&top)
+            .iter()
+            .any(|row| row == "echo step 2 && \\"),
+        "Ctrl+T does not show the whole command:\n{top}"
+    );
 }
 
 /// A backend names a call by an id it chooses, and may give a later call
@@ -2324,7 +2278,7 @@ fn the_selected_answer_is_a_solid_bar_as_well_as_a_mark() {
 }
 
 #[test]
-fn a_standing_answer_too_long_for_its_column_is_repeated_whole() {
+fn a_standing_answer_too_long_for_its_column_is_said_whole_under_ctrl_t() {
     let mut app = running_session();
     let command = "grep -rn description --include=Cargo.toml . | grep -v target";
     app.apply(&Event::PermissionRequest {
@@ -2338,12 +2292,21 @@ fn a_standing_answer_too_long_for_its_column_is_repeated_whole() {
     });
     let frame = screen(&mut app, 120, 30);
     let rows = question_rows(&frame);
+    assert!(
+        !rows.iter().any(|row| row.starts_with("3. niobe saves")),
+        "the rule is said again whole without being asked for:\n{frame}"
+    );
 
     assert!(
         rows.iter()
             .any(|row| row.starts_with("2. Always allow Notion·search")),
         "the tool's option does not name it the way the timeline does:\n{frame}"
     );
+    app.on_key(ratatui::crossterm::event::KeyEvent::new(
+        ratatui::crossterm::event::KeyCode::Char('t'),
+        ratatui::crossterm::event::KeyModifiers::CONTROL,
+    ));
+    let frame = screen(&mut app, 120, 30);
     let rule: String = question_cells(&frame)
         .into_iter()
         .skip_while(|row| !row.starts_with("3. niobe saves"))
@@ -2460,13 +2423,19 @@ fn session_asked_to_create_a_page() -> App {
     app
 }
 
-/// The rows of a question between what it asks and its answers: the call.
+/// The rows of a question between what it asks and its answers, or the rule
+/// an answer keeps said whole above them: the call.
 fn call_rows(frame: &str) -> Vec<String> {
+    let said_whole = |row: &str| {
+        row.split_once(". ").is_some_and(|(number, rest)| {
+            number.parse::<usize>().is_ok() && rest.starts_with("niobe saves")
+        })
+    };
     question_cells(frame)
         .into_iter()
         .skip_while(|row| !row.starts_with("to run "))
         .skip(1)
-        .take_while(|row| !row.contains("1. Allow once"))
+        .take_while(|row| !row.contains("1. Allow once") && !said_whole(row))
         .collect::<Vec<_>>()
         .into_iter()
         .rev()
@@ -2477,57 +2446,34 @@ fn call_rows(frame: &str) -> Vec<String> {
         .collect()
 }
 
+/// A tool the backend named no target for is asked about as Claude Code asks
+/// about one: each argument on a row of its own, `key: value`, the value
+/// cut at the frame — the JSON a list or an object is sent as, a string's
+/// first line — and Ctrl+T shows the arguments as they are sent.
 #[test]
-fn a_tool_with_no_target_is_asked_about_by_its_arguments_laid_out_by_key() {
-    let frame = screen(&mut session_asked_to_create_a_page(), 100, 60);
-    let rows = question_rows(&frame);
-    let call = call_rows(&frame);
-
-    for raw in ["{", "\\\"", "\\n", "\""] {
-        assert!(
-            !call.iter().any(|row| row.contains(raw)),
-            "`{raw}` is drawn: the arguments are shown as their JSON:\n{frame}"
-        );
-    }
-    assert!(
-        rows.iter().any(|row| row == "to run Notion·create-pages"),
-        "{frame}"
-    );
-    let indent = |text: &str| {
-        call.iter()
-            .find(|row| row.trim_start().starts_with(text))
-            .map(|row| row.len() - row.trim_start().len())
-            .unwrap_or_else(|| panic!("`{text}` is not drawn:\n{frame}"))
-    };
-    assert_eq!(indent("pages: 1 item"), 0, "{frame}");
-    // The page's body as the lines it is, under its key.
-    assert!(indent("content:") > indent("pages: 1 item"), "{frame}");
-    assert!(indent("**Severity:** High") > indent("content:"), "{frame}");
-    assert!(indent("## Report") > indent("content:"), "{frame}");
-    // And its properties under the page, one to a row.
-    assert!(indent("properties:") > indent("pages: 1 item"), "{frame}");
-    assert!(
-        indent("Status: Not started") > indent("properties:"),
-        "{frame}"
-    );
-    assert!(
-        indent("Name: Etag support") > indent("properties:"),
-        "{frame}"
-    );
-}
-
-#[test]
-fn a_tool_with_no_target_is_asked_about_in_a_few_rows_and_ctrl_t_shows_what_is_sent() {
+fn a_tool_with_no_target_is_asked_about_one_row_to_an_argument_and_ctrl_t_shows_what_is_sent() {
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     let mut app = session_asked_to_create_a_page();
     let frame = screen(&mut app, 100, 60);
-    let call = call_rows(&frame);
-    assert!(call.len() <= 14, "{} rows:\n{frame}", call.len());
+    let rows = question_rows(&frame);
     assert!(
-        call.last()
-            .is_some_and(|row| row.contains("more lines") && row.contains("Ctrl+T")),
-        "nothing says the arguments were cut, or how to read them whole:\n{frame}"
+        rows.iter().any(|row| row == "to run Notion·create-pages"),
+        "{frame}"
+    );
+    let call: Vec<String> = call_rows(&frame)
+        .iter()
+        .map(|row| row.trim_end().to_owned())
+        .collect();
+    assert_eq!(call.len(), 2, "{frame}");
+    assert!(
+        call[0].starts_with(r#"pages: [{"content":"**Severity:** High\n## Report"#)
+            && call[0].ends_with('…'),
+        "{frame}"
+    );
+    assert!(
+        call[1].starts_with(r#"parent: {"data_source_id":"615238cb-"#),
+        "{frame}"
     );
 
     app.on_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
@@ -2723,16 +2669,27 @@ fn the_question_draws_a_command_with_every_space_and_tab_it_has() {
     app.on_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
     let sent = screen(&mut app, 120, 40);
     let sent_rows = question_cells(&sent);
-    let from = |first: &str, count: usize| -> Vec<String> {
+    let from = |rows: &[String], first: &str, count: usize| -> Vec<String> {
         rows.iter()
             .map(|row| row.trim_end().to_owned())
             .skip_while(|row| row != first)
             .take(count)
             .collect()
     };
-    // The command once, and the arguments as they are sent only on Ctrl+T.
+    // The command's first rows, and the arguments as they are sent only on
+    // Ctrl+T.
     assert!(
         !rows.iter().any(|row| row.starts_with(r#"{"command""#)),
+        "{frame}"
+    );
+    assert_eq!(
+        from(&rows, "python3 -c '", 4),
+        [
+            "python3 -c '",
+            "class H:",
+            "    def log(self, a): pass",
+            "… 2 more lines · Ctrl+T shows the whole call",
+        ],
         "{frame}"
     );
     let arguments: String = sent_rows
@@ -2743,7 +2700,7 @@ fn the_question_draws_a_command_with_every_space_and_tab_it_has() {
         .collect();
 
     assert_eq!(
-        from("python3 -c '", 5),
+        from(&sent_rows, "python3 -c '", 5),
         [
             "python3 -c '",
             "class H:",
@@ -2751,7 +2708,7 @@ fn the_question_draws_a_command_with_every_space_and_tab_it_has() {
             "    print(\"a    b\")",
             "' # three   spaces",
         ],
-        "{frame}"
+        "{sent}"
     );
     assert_eq!(
         arguments.trim_end(),
@@ -2759,7 +2716,7 @@ fn the_question_draws_a_command_with_every_space_and_tab_it_has() {
         "the arguments are not drawn as they arrived:\n{sent}"
     );
     assert_eq!(
-        from("3. niobe saves Bash(python3 -c '", 5),
+        from(&sent_rows, "3. niobe saves Bash(python3 -c '", 5),
         [
             "3. niobe saves Bash(python3 -c '",
             "class H:",
@@ -2767,13 +2724,13 @@ fn the_question_draws_a_command_with_every_space_and_tab_it_has() {
             "    print(\"a    b\")",
             "' # three   spaces)",
         ],
-        "the rule the operator would save is not drawn as it is kept:\n{frame}"
+        "the rule the operator would save is not drawn as it is kept:\n{sent}"
     );
     assert_snapshot("asking-spaced-120x40", &frame);
 }
 
 #[test]
-fn a_short_standing_answer_with_a_tab_in_it_is_repeated_as_it_is_kept() {
+fn under_ctrl_t_a_short_standing_answer_with_a_tab_in_it_is_repeated_as_it_is_kept() {
     let mut app = running_session();
     app.apply(&Event::PermissionRequest {
         id: "toolu_tab".into(),
@@ -2784,6 +2741,10 @@ fn a_short_standing_answer_with_a_tab_in_it_is_repeated_as_it_is_kept() {
         reason: None,
         agent: None,
     });
+    app.on_key(ratatui::crossterm::event::KeyEvent::new(
+        ratatui::crossterm::event::KeyCode::Char('t'),
+        ratatui::crossterm::event::KeyModifiers::CONTROL,
+    ));
     let frame = screen(&mut app, 120, 30);
     let rows = question_cells(&frame);
 

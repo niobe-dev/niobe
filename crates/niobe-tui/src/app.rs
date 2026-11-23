@@ -1585,15 +1585,10 @@ pub struct App {
     /// Where the way back down to the newest line was drawn last frame, while
     /// the transcript is scrolled back.
     jump: Option<ratatui::layout::Rect>,
-    /// Whether the last frame drew the top row of the question waiting, which
-    /// says who asks and what is asked. `true` until a frame says otherwise.
-    question_top_drawn: bool,
-    /// Whether the last frame left lines of the waiting call out to fit the
-    /// pane.
-    question_cut: bool,
-    /// Which rows of the waiting call, drawn whole, frames have had on
-    /// screen: a question cut to fit is allowed only once every one has.
-    question_seen: Option<SeenRows>,
+    /// Whether the last frame drew every answer of the question waiting,
+    /// which is what a key at it chooses among. `true` until a frame says
+    /// otherwise.
+    question_answers_drawn: bool,
     /// How many questions have been asked this session, which numbers the
     /// next.
     asked: u64,
@@ -2322,26 +2317,10 @@ pub(crate) type QuestionParts = (
     Vec<ratatui::text::Line<'static>>,
 );
 
-/// Which rows of a call, drawn whole `width` columns wide, have been on
-/// screen.
-#[derive(Debug, Clone)]
-struct SeenRows {
-    /// The question's [`Ask::serial`].
-    serial: u64,
-    width: usize,
-    rows: Vec<bool>,
-    /// How many of `rows` have not been.
-    unseen: usize,
-}
-
-/// What the shell says when a call cut to fit its pane was allowed before
-/// the whole of it had been on screen.
-const CUT_QUESTION_HINT: &str = "Not allowed: not all of the call has been on screen. Ctrl+T \
-     shows it whole; scroll through it, Ctrl+T again, then answer";
-
-/// What the bar says when a key reached a prompt whose top is off screen.
-const TOP_OFF_SCREEN_HINT: &str =
-    "Not taken as an answer: the top of the question is off screen. Ctrl+T cuts it to fit";
+/// What the bar says when a key reached a prompt whose answers are not all
+/// on screen: the pane is shorter than they are.
+const ANSWERS_OFF_SCREEN_HINT: &str =
+    "Not taken as an answer: not every answer is on screen. A taller window shows them";
 
 /// What the shell says when a key reached a prompt the window is too small
 /// to draw.
@@ -2467,9 +2446,7 @@ impl App {
             focus: Focus::Session,
             session_area: None,
             jump: None,
-            question_top_drawn: true,
-            question_cut: false,
-            question_seen: None,
+            question_answers_drawn: true,
             asked: 0,
             question_laid: std::cell::RefCell::new(None),
             too_small: false,
@@ -4689,7 +4666,6 @@ impl App {
             // quiet keyboard: a second Enter pressed with the first must not
             // answer a question nobody has read.
             self.ask_quiet_since = self.latest_instant();
-            self.question_seen = None;
             self.scroll_to_tail();
             return;
         }
@@ -4704,7 +4680,6 @@ impl App {
             message: None,
             answers,
         });
-        self.question_seen = None;
         self.scroll_to_tail();
     }
 
@@ -4870,9 +4845,6 @@ impl App {
             message: None,
             answers: Vec::new(),
         });
-        // What was seen of this call says nothing of a later one, whatever
-        // id the backend gives it.
-        self.question_seen = None;
         self.scroll_to_tail();
     }
 
@@ -7688,57 +7660,9 @@ impl App {
         self.jump = at;
     }
 
-    /// Whether the last frame drew the top row of the question waiting.
-    pub fn drew_question_top(&mut self, drawn: bool) {
-        self.question_top_drawn = drawn;
-    }
-
-    /// What the last frame drew of the waiting question, `width` columns
-    /// wide: whether it left lines of the call out to fit the pane, which of
-    /// its rows the call takes drawn whole, and which of its rows were on
-    /// screen.
-    ///
-    /// Only a frame that drew the call whole says which of its rows were
-    /// seen: one cut to fit numbers them otherwise. A call taller than the
-    /// pane is seen whole by scrolling through it, so what counts is every
-    /// row having been on screen in some frame, not one frame without a cut.
-    pub fn drew_question(
-        &mut self,
-        cut: bool,
-        width: usize,
-        call: std::ops::Range<usize>,
-        shown: std::ops::Range<usize>,
-    ) {
-        self.question_cut = cut;
-        let Some(ask) = self.asks.front() else {
-            self.question_seen = None;
-            return;
-        };
-        if cut {
-            return;
-        }
-        let rows = call.len();
-        let same = self.question_seen.as_ref().is_some_and(|seen| {
-            seen.serial == ask.serial && seen.width == width && seen.rows.len() == rows
-        });
-        if !same {
-            self.question_seen = Some(SeenRows {
-                serial: ask.serial,
-                width,
-                rows: vec![false; rows],
-                unseen: rows,
-            });
-        }
-        if let Some(seen) = self.question_seen.as_mut() {
-            let from = shown.start.max(call.start).saturating_sub(call.start);
-            let to = shown.end.min(call.end).saturating_sub(call.start);
-            for row in seen.rows.iter_mut().take(to).skip(from) {
-                if !*row {
-                    *row = true;
-                    seen.unseen = seen.unseen.saturating_sub(1);
-                }
-            }
-        }
+    /// Whether the last frame drew every answer of the question waiting.
+    pub fn drew_question_answers(&mut self, drawn: bool) {
+        self.question_answers_drawn = drawn;
     }
 
     /// Hands `with` the waiting question's head, call, answers and
@@ -7778,17 +7702,6 @@ impl App {
         let drawn = with(&kept);
         *laid = Some(kept);
         drawn
-    }
-
-    /// Whether allowing the waiting call would allow lines of it the operator
-    /// was never shown: the question is cut to fit, and not every row of the
-    /// call drawn whole has been on screen.
-    fn allowing_unseen(&self) -> bool {
-        let read = match (self.asks.front(), self.question_seen.as_ref()) {
-            (Some(ask), Some(seen)) => seen.serial == ask.serial && seen.unseen == 0,
-            _ => false,
-        };
-        self.question_cut && !read
     }
 
     /// Whether the last frame was too small to draw the shell, and with it
@@ -10081,11 +9994,13 @@ impl App {
             self.ask_quiet_since = self.latest_instant();
             return;
         }
-        // Drawn whole and taller than the pane, the question's top is above
-        // it while the view follows its end: Enter would confirm a call whose
-        // name, and whose first answer, are not on screen.
-        if !self.question_top_drawn {
-            self.hint = Some(TOP_OFF_SCREEN_HINT.to_owned());
+        // An answer chosen off screen is one nobody read. The view follows
+        // the question's end, where its answers are, so only a pane shorter
+        // than the answers themselves leaves one out; what is shown of the
+        // call above them is the operator's to read or not, and Ctrl+T shows
+        // the rest of it.
+        if !self.question_answers_drawn && self.ask_focus != AskFocus::Writing {
+            self.hint = Some(ANSWERS_OFF_SCREEN_HINT.to_owned());
             return;
         }
         // The answer field takes words, and words may arrive together —
@@ -10184,9 +10099,6 @@ impl App {
             return;
         };
         match code {
-            KeyCode::Enter if self.ask_selected() != Answer::No && self.allowing_unseen() => {
-                self.hint = Some(CUT_QUESTION_HINT.to_owned());
-            }
             KeyCode::Enter => self.answer(self.ask_selected()),
             KeyCode::Down => self.move_selection(true),
             KeyCode::Up => self.move_selection(false),

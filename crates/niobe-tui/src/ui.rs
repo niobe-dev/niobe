@@ -2254,7 +2254,7 @@ fn draw_transcript(
         .map(|ask| question_lines(app, ask, (width, height), theme))
         .unwrap_or_default();
     let framed = question.framed;
-    let (cut, call) = (question.cut, question.call.clone());
+    let answers = question.answers.clone();
     let question = question.lines;
 
     if app.showing_scene() {
@@ -2314,14 +2314,13 @@ fn draw_transcript(
     }
     app.drew_transcript(area, above);
     let room = height.saturating_sub(visible.len());
-    app.drew_question_top(question.is_empty() || (start..start + height).contains(&above));
     let shown = question_on_screen(
         (start, height),
         (above, question.len()),
         visible.len(),
         app.follows_tail(),
     );
-    app.drew_question(cut, width, call, shown);
+    app.drew_question_answers(shown.start <= answers.start && answers.end <= shown.end);
     visible.extend(
         question
             .into_iter()
@@ -4044,16 +4043,12 @@ fn question_on_screen(
 /// the gutter, with the question's labels on its top border, its numbered
 /// answers, and the keys that work in whatever state it is in.
 ///
-/// The whole of the arguments is shown, wrapped rather than truncated:
-/// approving a call whose arguments were cut off at the edge is approving
-/// something the operator did not read. Except where the whole question is
-/// taller than the `height` rows the transcript has: the transcript follows
-/// its end, so the top of the question — what is asked, and the first
-/// answer, which Enter confirms — would be above the pane. There the
-/// arguments are cut instead, with a row saying how many lines are not shown
-/// and that Ctrl+T shows them, which draws the question whole again; the app
-/// is told which rows of the call each frame had on screen, and allows a call
-/// cut to fit only once every one of them has been.
+/// The call is shown briefly, as Claude Code shows one: the first rows of a
+/// command or a target and an argument to a row, each saying where there is
+/// more, which Ctrl+T shows. A question still taller than the `height` rows
+/// the transcript has is cut further, from the end of the call, since the
+/// transcript follows the question's end and what is asked, and every answer,
+/// must stay on screen. Nothing left out keeps an answer from being chosen.
 fn question_lines(
     app: &App,
     ask: &Ask,
@@ -4069,23 +4064,17 @@ fn question_lines(
     // The frame's top and bottom rows and the blank row under it.
     let framing = 3;
     let fits = app.diffs_open() || body.len() + framing <= height;
-    // The call's rows, counted from the frame's top border.
-    let call = 1 + body.head.len()..1 + body.head.len() + body.call.rows.len();
-    // A call drawn with rows that stand for lines left out — an argument cut
-    // at its rows, a diff at twenty — is cut as surely as one cut to fit.
-    let elided = (!app.diffs_open() && !body.call.markers.is_empty())
-        || body.call.capped
-        || ask.tool.chars().nth(TOOL_NAME_CHARS).is_some();
-    let (body, cut) = match fits {
-        true => (body.whole(), elided),
-        false => {
-            let (lines, cut) = body.cut(height.saturating_sub(framing - 1), inner, theme);
-            (lines, cut || elided)
-        }
+    let body = match fits {
+        true => body,
+        false => body.cut(height.saturating_sub(framing - 1), inner, theme),
     };
+    // The answer rows, counted from the frame's top border, past the blank
+    // row that sets them off.
+    let first = 1 + body.head.len() + body.call.rows.len() + body.consequences.len() + 1;
+    let answers = first..first + body.answers.len().saturating_sub(1);
 
     let mut lines = vec![question_top(app, ask, outer, theme)];
-    lines.extend(body.into_iter().map(|line| {
+    lines.extend(body.whole().into_iter().map(|line| {
         // Measured as ratatui draws it: `Line::width` counts a control
         // character as a cell, which ratatui does not draw, so a row holding
         // one would be padded short and pull its border in.
@@ -4116,8 +4105,7 @@ fn question_lines(
     Question {
         lines,
         framed,
-        cut,
-        call,
+        answers,
     }
 }
 
@@ -4128,10 +4116,8 @@ struct Question {
     /// The frame's width and its rows from the top border to the bottom one,
     /// which is what casts the shadow; `None` when nothing is asked.
     framed: Option<(u16, usize)>,
-    /// Whether lines of the call were left out to fit the pane.
-    cut: bool,
-    /// Which of `lines` the call takes where it is drawn whole.
-    call: std::ops::Range<usize>,
+    /// Which of `lines` the numbered answers take.
+    answers: std::ops::Range<usize>,
 }
 
 /// What is inside a question's frame, in the parts a question too tall for
@@ -4143,10 +4129,12 @@ struct QuestionBody {
     /// What would run: what the call does where the backend read it, or its
     /// target, and the arguments under it.
     call: crate::proposed::Call,
+    /// Any consequence too long for its column, said whole, above the
+    /// answers: said under them, a rule naming a long command pushed them
+    /// off the pane the view follows the end of.
+    consequences: Vec<Line<'static>>,
     /// The numbered answers, after a blank row.
     answers: Vec<Line<'static>>,
-    /// Any consequence too long for its column, said whole.
-    consequences: Vec<Line<'static>>,
     /// The answer being written, and the keys.
     rest: Vec<Line<'static>>,
 }
@@ -4163,32 +4151,28 @@ impl QuestionBody {
     fn whole(self) -> Vec<Line<'static>> {
         let mut lines = self.head;
         lines.extend(self.call.rows);
-        lines.extend(self.answers);
         lines.extend(self.consequences);
+        lines.extend(self.answers);
         lines.extend(self.rest);
         lines
     }
 
-    /// The body in `rows` rows where it can be: the consequences said again
-    /// go first, as each is a copy of something above it, then the call's
-    /// last lines, down to its first, which is kept with what is asked and
-    /// every answer. Also says whether a line of the call was left out.
-    fn cut(mut self, rows: usize, inner: usize, theme: &Theme) -> (Vec<Line<'static>>, bool) {
+    /// The body in `rows` rows where it can be: the call's last lines go,
+    /// down to its first, which is kept with what is asked and every answer.
+    /// Only Ctrl+T says a consequence again whole, and Ctrl+T draws the
+    /// question uncut.
+    fn cut(mut self, rows: usize, inner: usize, theme: &Theme) -> Self {
         let fixed = self.head.len() + self.answers.len() + self.rest.len() + 1;
         let room = rows.saturating_sub(fixed);
-        let dropped_consequences = !std::mem::take(&mut self.consequences).is_empty();
         let kept = room.clamp(1, self.call.rows.len().max(1));
         // The lines of the call that are not drawn, which the operator reads
         // as how much more there is to see: not the blank rows between its
-        // parts, not a marker row, which is a count and not a line, and not
-        // the rule said again, which is a copy of the answer above it.
+        // parts, and not a marker row, which is a count and not a line.
         let hidden = self.call.hidden_after(kept);
         self.call.rows.truncate(kept);
-        let said = match (hidden, dropped_consequences) {
-            (0, false) => None,
-            (0, true) => Some("… the rule is cut above · Ctrl+T shows it whole".to_owned()),
-            (1, _) => Some("… 1 more line · Ctrl+T shows the whole call".to_owned()),
-            (n, _) => Some(format!("… {n} more lines · Ctrl+T shows the whole call")),
+        let said = match hidden {
+            0 => None,
+            n => Some(crate::proposed::more_lines(n)),
         };
         if let Some(said) = said {
             self.call.rows.extend(
@@ -4197,7 +4181,7 @@ impl QuestionBody {
                     .map(|line| Line::from(line).style(Style::new().fg(theme.hot))),
             );
         }
-        (self.whole(), hidden > 0)
+        self
     }
 }
 
@@ -4259,10 +4243,13 @@ fn question_body(app: &App, ask: &Ask, inner: usize, theme: &Theme) -> QuestionB
             })
             .collect();
         // A consequence cut off at the edge of its column is said again
-        // whole: a standing answer is a rule the operator keeps, and keeping
-        // one nobody could read to its end is agreeing to something unread.
+        // whole under Ctrl+T, for the operator who wants the exact rule a
+        // standing answer keeps; the row already says what kind of rule it
+        // is, and said again by default it was the whole command a second
+        // time.
         let mut consequences = Vec::new();
-        for (at, (answer, label, hint)) in words.iter().enumerate() {
+        let spelled = app.diffs_open();
+        for (at, (answer, label, hint)) in words.iter().enumerate().filter(|_| spelled) {
             // What an answer to a question means is drawn whole under it.
             if matches!(answer, Answer::Choose(_)) {
                 continue;
@@ -4368,11 +4355,10 @@ fn consequence_rows(said: &str, inner: usize, theme: &Theme) -> Vec<Line<'static
 
 /// What would run, `inner` columns wide: what the call does where the
 /// backend read that out of its arguments, and otherwise its target and its
-/// arguments by key. Ctrl+T draws the arguments as they are sent instead of
-/// by key, and under what the call does, since they are what is approved.
+/// arguments, an argument to a row. Ctrl+T draws the arguments as they are
+/// sent instead of by key, and under what the call does, since they are what
+/// is approved.
 fn question_call(app: &App, ask: &Ask, inner: usize, theme: &Theme) -> crate::proposed::Call {
-    use crate::proposed::Call;
-
     let open = app.diffs_open();
     let proposed = ask
         .proposed
@@ -4380,38 +4366,24 @@ fn question_call(app: &App, ask: &Ask, inner: usize, theme: &Theme) -> crate::pr
         .and_then(|proposed| proposed.call(&ask.input, inner, open, theme));
     if let Some(mut call) = proposed {
         if open {
-            let (sent, capped) = sent_rows(&ask.input, inner, theme);
             call.rows.push(Line::from(""));
-            call.rows.extend(sent);
-            call.capped |= capped;
+            call.rows.extend(sent_rows(&ask.input, inner, theme));
         }
         return call;
     }
     let Some(target) = &ask.target else {
-        let whole = |input: &str| {
-            let (rows, capped) = bold_rows(input, inner, theme);
-            Call {
-                capped,
-                ..Call::of(rows)
-            }
-        };
         return match open {
-            false => by_key(&ask.input, inner, theme).unwrap_or_else(|| whole(&ask.input)),
-            true => whole(&ask.input),
+            false => by_key(&ask.input, inner, theme)
+                .unwrap_or_else(|| bold_rows(&ask.input, inner, open, theme)),
+            true => bold_rows(&ask.input, inner, open, theme),
         };
     };
-    let (mut call, mut capped) = bold_rows(target, inner, theme);
-    let mut markers = Vec::new();
+    let mut call = bold_rows(target, inner, open, theme);
     let under = match open {
-        true => {
-            let (sent, cut) = sent_rows(&ask.input, inner, theme);
-            capped |= cut;
-            sent
-        }
+        true => sent_rows(&ask.input, inner, theme),
         false => {
             // The key that holds the target is the target, drawn above: said
-            // again by key it would be the same text under another name, and
-            // wrapped as words it was not the same text.
+            // again by key it would be the same text under another name.
             let fields = crate::arguments::fields_without(&ask.input, |_, value| {
                 value.as_str() == Some(target.as_str())
             });
@@ -4420,36 +4392,28 @@ fn question_call(app: &App, ask: &Ask, inner: usize, theme: &Theme) -> crate::pr
                     let (laid, hidden, marker_rows) = crate::arguments::rows(&fields, inner, theme);
                     if hidden > 0 {
                         // After the blank row that sets them off.
-                        markers.push((
-                            call.len() + 1 + laid.len() - marker_rows,
+                        call.markers.push((
+                            call.rows.len() + 1 + laid.len() - marker_rows,
                             marker_rows,
                             hidden,
                         ));
                     }
                     laid
                 }
-                None => {
-                    let (sent, cut) = sent_rows(&ask.input, inner, theme);
-                    capped |= cut;
-                    sent
-                }
+                None => Vec::new(),
             }
         }
     };
     if !under.is_empty() {
-        call.push(Line::from(""));
-        call.extend(under);
+        call.rows.push(Line::from(""));
+        call.rows.extend(under);
     }
-    Call {
-        rows: call,
-        markers,
-        capped,
-    }
+    call
 }
 
 /// A call's arguments by key, `inner` columns wide, with the rows that say
-/// how many lines the layout left out marked as such, or `None` where the
-/// input is not a JSON object with a field to draw.
+/// how many were left out marked as such, or `None` where the input is not a
+/// JSON object with a field to draw.
 fn by_key(input: &str, inner: usize, theme: &Theme) -> Option<crate::proposed::Call> {
     let fields = crate::arguments::fields_without(input, |_, _| false)?;
     let (rows, hidden, marker_rows) = crate::arguments::rows(&fields, inner, theme);
@@ -4460,11 +4424,7 @@ fn by_key(input: &str, inner: usize, theme: &Theme) -> Option<crate::proposed::C
         0 => Vec::new(),
         _ => vec![(rows.len().saturating_sub(marker_rows), marker_rows, hidden)],
     };
-    Some(crate::proposed::Call {
-        rows,
-        markers,
-        capped: false,
-    })
+    Some(crate::proposed::Call { rows, markers })
 }
 
 /// The most rows of the arguments as sent that are drawn behind Ctrl+T: they
@@ -4473,8 +4433,8 @@ const SENT_ROWS: usize = 2_000;
 
 /// The arguments as the backend sent them, `inner` columns wide, character for
 /// character, and — past [`SENT_ROWS`] rows of them — how many characters are
-/// not drawn, and whether any are not.
-fn sent_rows(input: &str, inner: usize, theme: &Theme) -> (Vec<Line<'static>>, bool) {
+/// not drawn.
+fn sent_rows(input: &str, inner: usize, theme: &Theme) -> Vec<Line<'static>> {
     let dim = Style::new().fg(theme.dim);
     let room = inner.max(1).saturating_mul(SENT_ROWS);
     let cut = input.char_indices().nth(room).map(|(at, _)| at);
@@ -4490,28 +4450,62 @@ fn sent_rows(input: &str, inner: usize, theme: &Theme) -> (Vec<Line<'static>>, b
                 .style(Style::new().fg(theme.hot)),
         );
     }
-    (rows, cut.is_some())
+    rows
 }
 
-/// `said` wrapped to `inner` columns exactly as written, in bold — past
-/// [`SENT_ROWS`] rows of it, how many characters are not drawn — and whether
-/// any are not.
-fn bold_rows(said: &str, inner: usize, theme: &Theme) -> (Vec<Line<'static>>, bool) {
+/// `said` wrapped to `inner` columns exactly as written, in bold: its first
+/// [`crate::proposed::BRIEF_ROWS`] rows and a row counting the rest until the
+/// diffs are `open`, and then — past [`SENT_ROWS`] rows of it — how many
+/// characters are not drawn.
+///
+/// No more of it is wrapped than [`SENT_ROWS`] rows could show, and the rest
+/// is counted by its characters: a target can be megabytes, and wrapped whole
+/// it was wrapped again with every question laid out.
+fn bold_rows(said: &str, inner: usize, open: bool, theme: &Theme) -> crate::proposed::Call {
+    use crate::proposed::{BRIEF_ROWS, Call, more_lines};
+
+    let bold = Style::new().fg(theme.fg).bold();
     let room = inner.max(1).saturating_mul(SENT_ROWS);
     let cut = said.char_indices().nth(room).map(|(at, _)| at);
     let shown = &said[..cut.unwrap_or(said.len())];
+    let rest = cut.map_or(0, |cut| said[cut..].chars().count());
+    if !open {
+        let rows = text::wrap_exact_rows(shown, inner).saturating_add(rest.div_ceil(inner.max(1)));
+        if rows <= BRIEF_ROWS + 1 {
+            return Call::of(
+                text::wrap_exact(shown, inner)
+                    .into_iter()
+                    .map(|wrapped| Line::from(wrapped).style(bold))
+                    .collect(),
+            );
+        }
+        let mut laid: Vec<Line<'static>> = text::wrap_exact_first(shown, inner, BRIEF_ROWS)
+            .into_iter()
+            .map(|wrapped| Line::from(wrapped).style(bold))
+            .collect();
+        let hidden = rows - laid.len();
+        let marker: Vec<Line<'static>> = text::wrap(&more_lines(hidden), inner)
+            .into_iter()
+            .map(|wrapped| Line::from(wrapped).style(Style::new().fg(theme.hot)))
+            .collect();
+        let markers = vec![(laid.len(), marker.len(), hidden)];
+        laid.extend(marker);
+        return Call {
+            rows: laid,
+            markers,
+        };
+    }
     let mut rows: Vec<Line<'static>> = text::wrap_exact(shown, inner)
         .into_iter()
-        .map(|wrapped| Line::from(wrapped).style(Style::new().fg(theme.fg).bold()))
+        .map(|wrapped| Line::from(wrapped).style(bold))
         .collect();
-    if let Some(cut) = cut {
-        let rest = said[cut..].chars().count();
+    if rest > 0 {
         rows.push(
             Line::from(format!("… {rest} more characters are not drawn"))
                 .style(Style::new().fg(theme.hot)),
         );
     }
-    (rows, cut.is_some())
+    Call::of(rows)
 }
 
 /// Why the backend asked, where it said, wrapped to `inner` columns under
@@ -4538,7 +4532,7 @@ fn question_reason(ask: &Ask, inner: usize, theme: &Theme) -> Vec<Line<'static>>
 const REASON_CHARS: usize = 4_096;
 
 /// The most characters of a tool's name drawn: no tool is named in more,
-/// and one that is cannot be read whole, so it is not allowed from here.
+/// and one that is says how many characters more it has.
 pub(crate) const TOOL_NAME_CHARS: usize = 256;
 
 /// `said` up to its first `most` characters, and how many characters follow.
