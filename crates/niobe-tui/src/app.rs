@@ -1804,6 +1804,12 @@ pub struct App {
     /// recorded as, so its end can repeat what it ran; oldest first, which is
     /// what decides the one [`crate::shell::STOP_KEY`] stops.
     running_commands: Vec<(ToolCallId, String)>,
+    /// Commands that ended and are yet to be handed to the agent, each as
+    /// typed beside how it ended, oldest first: see [`App::take_handed`].
+    handing: Vec<(String, crate::shell::Ran)>,
+    /// Whether what the operator's commands did is handed to the agent at
+    /// all, which the config's `hand_commands` decides.
+    hands_commands: bool,
     /// Commands the operator stopped that have not been handed out to be
     /// stopped.
     stops: Vec<ToolCallId>,
@@ -2535,6 +2541,8 @@ impl App {
             shell_mode: false,
             commands: Vec::new(),
             running_commands: Vec::new(),
+            handing: Vec::new(),
+            hands_commands: true,
             stops: Vec::new(),
             stopping: BTreeSet::new(),
             commands_started: 0,
@@ -2906,6 +2914,7 @@ impl App {
             }
             Event::SessionMeta(_)
             | Event::UserMessage { .. }
+            | Event::CommandsHanded { .. }
             | Event::PromptNotSent { .. }
             | Event::Titled { .. }
             | Event::AssistantDelta { .. }
@@ -3286,6 +3295,26 @@ impl App {
     fn fold_into_transcript(&mut self, event: &Event, ended: Option<(usize, usize, Option<Gate>)>) {
         match event {
             Event::UserMessage { text } => self.push_prompt(text),
+
+            // Under the commands it names, which are in the transcript with
+            // what they printed: what the agent was sent is said once, not
+            // drawn a second time.
+            Event::CommandsHanded { commands, text } => self.push(Entry {
+                queued: false,
+                attention: Attention::of(event),
+                kind: EntryKind::Notice,
+                head: String::new(),
+                meta: String::new(),
+                body: format!(
+                    "Sent the agent what {} did, {} bytes",
+                    commands_named(commands),
+                    text.len()
+                ),
+                streaming: false,
+                at: self.at,
+                calls: Vec::new(),
+                agent: None,
+            }),
 
             // Shown as it was typed, with what became of it under it, read
             // back as it was said live.
@@ -7176,6 +7205,14 @@ impl App {
         self
     }
 
+    /// The same shell, handing what the operator's `!` commands did to the
+    /// agent once they end where `handed`, and keeping it from the agent
+    /// otherwise: see [`App::take_handed`]. Handed unless told otherwise.
+    pub fn with_commands_handed(mut self, handed: bool) -> Self {
+        self.hands_commands = handed;
+        self
+    }
+
     /// Whether the backend was asked to state the decisions it makes.
     pub fn decisions_asked(&self) -> bool {
         self.decisions_asked
@@ -8109,7 +8146,10 @@ impl App {
     /// can do.
     pub(crate) fn fit_placeholder(&mut self, columns: usize) {
         let said = match self.shell_mode {
-            true => SHELL_PLACEHOLDER.to_owned(),
+            true => match self.hands_commands {
+                true => SHELL_PLACEHOLDER.to_owned(),
+                false => SHELL_KEPT_PLACEHOLDER.to_owned(),
+            },
             false => placeholder(
                 columns,
                 Offers {
@@ -8511,7 +8551,7 @@ impl App {
     /// ended, not how the command did, and an `exit 0` beside "stopped"
     /// would read as a command that succeeded.
     pub fn ran(&mut self, ran: crate::shell::Ran) {
-        self.command_ended(ran, false);
+        self.command_ended(ran, CommandEnding::Ran);
     }
 
     /// Records the end of a command the session ending stopped: as
@@ -8528,13 +8568,18 @@ impl App {
                 exit_code: None,
                 error: Some("stopped: the session ended before the command did".to_owned()),
             },
-            true,
+            CommandEnding::Cut,
         );
     }
 
-    /// [`App::ran`], where `cut` says the session ending cut the command
-    /// short.
-    fn command_ended(&mut self, mut ran: crate::shell::Ran, cut: bool) {
+    /// [`App::ran`], where `ending` says whether the command ran to an end
+    /// of its own, the session ending cut it short, or it never started.
+    ///
+    /// What a command that ran to an end of its own did is kept for the
+    /// agent, where one is listening and the operator did not stop it: see
+    /// [`App::take_handed`].
+    fn command_ended(&mut self, mut ran: crate::shell::Ran, ending: CommandEnding) {
+        let cut = ending == CommandEnding::Cut;
         let command = match self
             .running_commands
             .iter()
@@ -8567,6 +8612,9 @@ impl App {
                 failures: run.failures,
             }
         });
+        if ending == CommandEnding::Ran && !stopped && self.attached && self.hands_commands {
+            self.handing.push((command.clone(), ran.clone()));
+        }
         self.produce(Event::ToolCallEnd {
             id: ran.id,
             name: crate::shell::OPERATOR_SHELL.to_owned(),
@@ -8582,6 +8630,40 @@ impl App {
         });
         if let Some(tested) = tested {
             self.produce(tested);
+        }
+    }
+
+    /// The commands that ended since the last hand-off, each as typed, and
+    /// the words that tell the agent what they did, for the event loop to
+    /// send as a turn and record as an [`Event::CommandsHanded`] once the
+    /// backend has it. `None` until there is something to hand and a turn
+    /// could start now: none is running, and no clear sent from here waits
+    /// on the backend. Commands that end while a turn runs wait for it and
+    /// go together, rather than being taken in behind the operator's own
+    /// prompts.
+    pub fn take_handed(&mut self) -> Option<(Vec<String>, String)> {
+        let waits = self.session.turn_running() || self.clear_sent || !self.after_clear.is_empty();
+        if self.handing.is_empty() || waits || !self.attached {
+            return None;
+        }
+        let handing = std::mem::take(&mut self.handing);
+        let text = crate::shell::handed(&handing);
+        // Sent from here, so the turn it opens is one this shell shows working.
+        self.sent_here = true;
+        Some((
+            handing.into_iter().map(|(command, _)| command).collect(),
+            text,
+        ))
+    }
+
+    /// Says in the transcript that what `commands` did did not reach the
+    /// agent, and why, as the notice the event loop records.
+    pub fn not_handed(&self, commands: &[String], why: &str) -> Event {
+        Event::Notice {
+            message: format!(
+                "{} ran, but what it did did not reach the agent: {why}",
+                commands_named(commands)
+            ),
         }
     }
 
@@ -8601,14 +8683,17 @@ impl App {
     /// Records that a command the operator ran could not be started, as a
     /// call that failed with the reason.
     pub fn not_run(&mut self, id: &ToolCallId, error: &str) {
-        self.ran(crate::shell::Ran {
-            id: id.clone(),
-            output: String::new(),
-            bytes: 0,
-            whole: true,
-            exit_code: None,
-            error: Some(format!("not run: {error}")),
-        });
+        self.command_ended(
+            crate::shell::Ran {
+                id: id.clone(),
+                output: String::new(),
+                bytes: 0,
+                whole: true,
+                exit_code: None,
+                error: Some(format!("not run: {error}")),
+            },
+            CommandEnding::NotStarted,
+        );
     }
 
     /// What is being looked for in the transcript, while a search is open.
@@ -10261,7 +10346,7 @@ impl App {
     /// The operator first, then the newest call still running, then the reply
     /// being written: the first of them there is, is what the turn is waiting
     /// on. A `!` command the operator ran is none of them: the backend is
-    /// never told of it, so the turn waits on nothing it does, and a reply
+    /// not told of it while it runs, so the turn waits on nothing it does, and a reply
     /// goes on streaming above its row.
     fn doing(&self) -> String {
         if !self.session.pending_permissions().is_empty() {
@@ -11522,6 +11607,32 @@ fn glyph_around(line: &str, col: usize) -> Option<(usize, usize)> {
 /// composer splits lines at. A terminal sends the lines of a paste apart with
 /// a carriage return, as the Enter key is sent; a file copied from elsewhere
 /// may hold `\r\n` or `\n`.
+/// How a command the operator ran came to its end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommandEnding {
+    /// It ran to an end of its own, or the operator stopped it.
+    Ran,
+    /// The session ending cut it short.
+    Cut,
+    /// It never started.
+    NotStarted,
+}
+
+/// The most characters of a command a note about it names.
+const COMMAND_NAMED: usize = 60;
+
+/// `commands` as a note names them: the one by its first line, cut to
+/// [`COMMAND_NAMED`], after its `!`; several by how many.
+fn commands_named(commands: &[String]) -> String {
+    match commands {
+        [one] => format!(
+            "! {}",
+            crate::text::truncate(one.lines().next().unwrap_or_default(), COMMAND_NAMED)
+        ),
+        several => format!("{} ! commands", several.len()),
+    }
+}
+
 fn pasted_lines(text: &str) -> String {
     text.replace("\r\n", "\n").replace('\r', "\n")
 }
@@ -11793,7 +11904,11 @@ const FIND_KEY: &str = "Ctrl+F";
 
 /// What an empty composer says while it holds a command: where it runs, and
 /// the one thing about it an operator could not guess.
-const SHELL_PLACEHOLDER: &str = "A command to run here; the agent does not see what it prints";
+const SHELL_PLACEHOLDER: &str = "A command to run here; the agent is sent what it prints";
+
+/// [`SHELL_PLACEHOLDER`] where the config keeps what commands print from
+/// the agent.
+const SHELL_KEPT_PLACEHOLDER: &str = "A command to run here; the agent does not see what it prints";
 
 /// How many files the list under an `@` word offers at once.
 const MENTION_ROWS: usize = 8;

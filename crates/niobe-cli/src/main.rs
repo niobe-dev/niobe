@@ -459,6 +459,7 @@ fn shell(profile: Option<&str>, asked: &Asked, opening: Opening) -> Result<Optio
                 .with_keymap(loaded.config.keys().clone())
                 .with_alerts(alerts::alerts(loaded.config.notify(), asked.notification))
                 .with_decisions_asked(loaded.config.decisions())
+                .with_commands_handed(loaded.config.hand_commands())
                 .with_theme(chosen_theme(asked, &loaded)?),
         ),
         &loaded,
@@ -2487,7 +2488,11 @@ IN THE SHELL:
     stopped command's shell is ended at once, so nothing more of its line
     runs; what it started is asked to end, and killed if it has not two
     seconds later. Its call ends as stopped by the operator. Ctrl+C does not stop one.
-    The agent is not told it ran and does not see what it printed.
+    Once it ends and no turn is running, the agent is sent the command, how
+    it ended and the last {handed} bytes of what it printed, as a turn of its
+    own, and carries on from there; one that ends while a turn runs waits for
+    it. A command stopped, or one that could not start, is sent to nobody,
+    and hand_commands = false, at the top of a config, sends none.
     Esc, Ctrl+C            While a turn runs, stop it: the call it is running
                            or the reply it is writing is cut off, and the
                            session stays for the next prompt. Ctrl+C closes
@@ -2631,6 +2636,7 @@ BACKENDS:
         name = niobe_core::APP_NAME,
         version = niobe_core::VERSION,
         fkeys = fkey_rows(),
+        handed = niobe_tui::shell::HANDED_BYTES,
     );
 }
 

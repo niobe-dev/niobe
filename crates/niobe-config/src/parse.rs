@@ -62,6 +62,7 @@ impl File<'_> {
                 "titles" => config.titles = Some(self.titles(value, &at)?),
                 "terse" => config.terse = Some(self.boolean(value, &at)?),
                 "decisions" => config.decisions = Some(self.boolean(value, &at)?),
+                "hand_commands" => config.hand_commands = Some(self.boolean(value, &at)?),
                 "trim" => config.trim = Some(self.boolean(value, &at)?),
                 // The switch for the desktop's animation, which the shell no
                 // longer has. A file written to turn it off still loads.
@@ -78,7 +79,8 @@ impl File<'_> {
                         &key.span(),
                         &at,
                         "unknown key; expected `default_profile`, `theme`, `titles`, `terse`, \
-                         `decisions`, `trim`, `profiles`, `permissions`, `keys` or `notify`",
+                         `decisions`, `hand_commands`, `trim`, `profiles`, `permissions`, `keys` \
+                         or `notify`",
                     ));
                 }
             }

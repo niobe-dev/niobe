@@ -1545,7 +1545,7 @@ fn shift_enter_in_modify_other_keys_opens_a_line_and_the_bar_names_it_from_then_
     // As in the Ctrl+J test: were Shift+Enter dropped or read as Enter, the
     // command would not be the two lines that print this.
     terminal.typed(b"!");
-    terminal.shows("the agent does not see");
+    terminal.shows("sent what");
     terminal.typed(b"printf %s \"joined-$((6*7))");
     terminal.typed(SHIFT_ENTER_OTHER_KEYS);
     terminal.typed(b"y\"\r");
@@ -2009,7 +2009,7 @@ fn ctrl_j_opens_a_line_on_a_terminal_that_cannot_report_keys() {
     // not have in the same cells: the terminal is sent only the cells that
     // changed, so a word that coincides with the hint under it arrives cut.
     terminal.typed(b"!");
-    terminal.shows("the agent does not see");
+    terminal.shows("sent what");
     terminal.typed(b"printf %s \"joined-$((6*7))\ny\"\r");
     terminal.shows("joined-42");
     terminal.typed(CTRL_Q);

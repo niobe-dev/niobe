@@ -72,6 +72,15 @@
 //! decisions = false
 //! ```
 //!
+//! and whether what the operator's own `!` commands did — each command, how
+//! it ended and the end of what it printed — is sent to the agent as a turn
+//! once they end; on unless a file turns it off, which a file nobody trusted
+//! may do and may not undo:
+//!
+//! ```toml
+//! hand_commands = false
+//! ```
+//!
 //! and whether a cargo command's output reaches the agent without cargo's
 //! progress and the tests that passed, the whole of it kept under `.niobe/` —
 //! off unless a file turns it on:
@@ -448,6 +457,7 @@ pub struct Config {
     titles: Option<Titles>,
     terse: Option<bool>,
     decisions: Option<bool>,
+    hand_commands: Option<bool>,
     trim: Option<bool>,
     keys: Keymap,
     notify: Notify,
@@ -646,6 +656,9 @@ impl Config {
         if over.decisions.is_some() {
             self.decisions = over.decisions;
         }
+        if over.hand_commands.is_some() {
+            self.hand_commands = over.hand_commands;
+        }
         if over.trim.is_some() {
             self.trim = over.trim;
         }
@@ -697,6 +710,11 @@ impl Config {
         if self.titles == Some(Titles::Model) {
             self.titles = None;
             self.withheld_model_titles = true;
+        }
+        // What the operator's own commands printed reaches a model only with
+        // their leave; a file nobody has read may take it back, not give it.
+        if self.hand_commands == Some(true) {
+            self.hand_commands = None;
         }
         self.untrusted = true;
         self
@@ -826,6 +844,19 @@ impl Config {
     /// switches them.
     pub fn decisions(&self) -> bool {
         self.decisions.unwrap_or(true)
+    }
+
+    /// Whether what the operator's own `!` commands did — each command, how
+    /// it ended and the end of what it printed — is sent to the agent as a
+    /// turn once they end, which is on unless a config says
+    /// `hand_commands = false`.
+    ///
+    /// A file that has not been trusted can turn it off and cannot turn it
+    /// on ([`Config::untrusted`]): what a command printed can be anything the
+    /// operator can read, and a file that arrived with a clone does not
+    /// decide that a model reads it.
+    pub fn hand_commands(&self) -> bool {
+        self.hand_commands.unwrap_or(true)
     }
 
     /// Whether the agent reads a cargo command's output trimmed, which is off
@@ -1760,6 +1791,37 @@ backend = "codex"
     }
 
     #[test]
+    fn commands_are_handed_to_the_agent_until_a_file_turns_it_off_and_the_later_file_wins() {
+        assert!(parsed("").hand_commands());
+        assert!(!parsed("hand_commands = false\n").hand_commands());
+        let on = Config::parse("hand_commands = true\n", &path("repo"))
+            .expect("a boolean is a valid hand_commands switch");
+        assert!(
+            parsed("hand_commands = false\n")
+                .overlay(on)
+                .hand_commands()
+        );
+        assert!(invalid("hand_commands = 1\n").contains("hand_commands"));
+    }
+
+    /// What the operator's own commands printed — a `cat .env` among them —
+    /// reaches a model only with the operator's leave: a file that arrived
+    /// with a clone may stop it and may not start it again.
+    #[test]
+    fn a_file_nobody_trusted_may_stop_commands_reaching_the_agent_and_may_not_start_them() {
+        let user = parsed("hand_commands = false\n");
+        let starts = Config::parse("hand_commands = true\n", &path("repo"))
+            .expect("the text in this test is valid")
+            .untrusted();
+        assert!(!user.overlay(starts).hand_commands());
+
+        let stops = Config::parse("hand_commands = false\n", &path("repo"))
+            .expect("the text in this test is valid")
+            .untrusted();
+        assert!(!parsed("").overlay(stops).hand_commands());
+    }
+
+    #[test]
     fn a_file_nobody_trusted_may_stop_titles_costing_tokens_and_may_not_start_them() {
         let user = parsed("titles = \"first-prompt\"\n");
         let spends = Config::parse("titles = \"model\"\n", &path("repo"))
@@ -1886,8 +1948,8 @@ backend = "codex"
         assert_eq!(
             invalid("\ndefault = \"work\"\n"),
             "/configs/user/config.toml:2: default: unknown key; \
-             expected `default_profile`, `theme`, `titles`, `terse`, `decisions`, `trim`, \
-             `profiles`, `permissions`, `keys` or `notify`"
+             expected `default_profile`, `theme`, `titles`, `terse`, `decisions`, \
+             `hand_commands`, `trim`, `profiles`, `permissions`, `keys` or `notify`"
         );
     }
 

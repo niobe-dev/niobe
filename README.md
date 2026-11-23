@@ -153,6 +153,13 @@ one approach taken over another — on a line that opens `DECISION:`. The projec
 `niobe overview`, or `o` in a side pane — lists them, marked as the agent's own account of its
 reasoning, which it may have wrong. `decisions = false` at the top of a config stops asking; `niobe -p` never asks.
 
+A command typed after `!` in the shell runs in your own shell, and once it ends and no turn is
+running, the agent is sent the command, how it ended and the last 30,000 bytes of what it
+printed, as a turn of its own, so it carries on from the result; the transcript says so under the
+command, with how many bytes went. `hand_commands = false` at the top of a config keeps what your
+commands print from the agent. A repository's config can turn it off, and can turn it back on only
+once you have trusted it.
+
 `trim = true` at the top of a config has the agent read a cargo command's output without cargo's
 build progress and the tests that passed. Every failure, panic, compiler error and `test result:`
 line is kept, and the whole output is written to `.niobe/trim/` and named under what the agent

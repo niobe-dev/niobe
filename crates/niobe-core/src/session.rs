@@ -867,7 +867,9 @@ impl SessionState {
     /// its turn ended opens nothing, and nor does the reply in the turn that
     /// typed a clear, which is no turn of the conversation it starts. A
     /// command the operator ran with `!` is recorded as a call of no agent's,
-    /// and is not the agent's either: the backend is never told of it.
+    /// and is not the agent's either: the backend runs nothing of it, and
+    /// hears of it only once it has ended, in the turn an
+    /// [`Event::CommandsHanded`] opens.
     fn opens_a_turn(&self, event: &Event) -> bool {
         let answers = matches!(
             event,
@@ -879,6 +881,17 @@ impl SessionState {
             Event::ToolCallStart { agent: None, name, .. } if name != OPERATOR_SHELL
         );
         answers && !self.turn_running && !self.clear_open
+    }
+
+    /// Something was sent for the agent to answer: it opens a turn, or
+    /// joins the one running.
+    fn prompted(&mut self) {
+        if !self.turn_running && !self.clear_open {
+            self.turn_began = Some(self.mark());
+            self.window_reported = false;
+            self.usage_reported = false;
+        }
+        self.turn_running = true;
     }
 
     fn fold(&mut self, event: &Event) {
@@ -947,13 +960,13 @@ impl SessionState {
                 if self.first_prompt.is_none() {
                     self.first_prompt = Some(text.clone());
                 }
-                if !self.turn_running && !self.clear_open {
-                    self.turn_began = Some(self.mark());
-                    self.window_reported = false;
-                    self.usage_reported = false;
-                }
-                self.turn_running = true;
+                self.prompted();
             }
+
+            // The operator's commands handed to the agent open a turn, or
+            // join the one running, as a prompt does; the words are Niobe's,
+            // so they are no prompt of the operator's and leave a goal be.
+            Event::CommandsHanded { .. } => self.prompted(),
 
             // An end with no turn running is still a turn, one the fold did
             // not see begin — a command the CLI answers itself sends no
@@ -2930,6 +2943,26 @@ mod tests {
 
         state.apply(&Event::TurnEnded);
         assert!(!state.turn_running());
+    }
+
+    #[test]
+    fn commands_handed_to_the_agent_open_a_turn_and_are_no_prompt_of_the_operators() {
+        let mut state = SessionState::new();
+        state.apply(&Event::CommandsHanded {
+            commands: vec!["cargo test".to_owned()],
+            text: "I ran cargo test".to_owned(),
+        });
+        assert!(state.turn_running());
+        assert_eq!(state.user_messages(), 0);
+        assert_eq!(state.caption(), None, "the session is not named by it");
+
+        state.apply(&Event::AssistantMessage {
+            text: "Two tests fail; fixing them.".to_owned(),
+            agent: None,
+        });
+        state.apply(&Event::TurnEnded);
+        assert!(!state.turn_running());
+        assert_eq!(state.turns().len(), 1, "the turn it opened is counted");
     }
 
     #[test]

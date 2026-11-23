@@ -40,6 +40,7 @@ impl Attention {
             | Event::ModelRefused { .. } => Self::NeedsYou,
 
             Event::UserMessage { .. }
+            | Event::CommandsHanded { .. }
             | Event::TurnEnded
             | Event::SessionLeft
             | Event::TestRun { .. }

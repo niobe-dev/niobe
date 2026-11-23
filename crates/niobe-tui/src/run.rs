@@ -460,6 +460,7 @@ fn event_loop<B: Backend<Error = io::Error>>(
                 }
             }
             send_produced(app, journal, backend, rules);
+            hand_commands(app, journal, backend);
             keep_preferences(app, preferences);
             // An editor drew on the screen while it had the terminal, and a draw
             // sends only what changed since the last frame: a resize to the same
@@ -611,6 +612,30 @@ fn close_out(
         app.leave();
     }
     send_produced(app, journal, backend, rules);
+}
+
+/// Sends the agent what the operator's commands did, as a turn, where the
+/// shell has commands to hand and a turn can start: recorded and folded in
+/// once the backend has it, as what the backend says is, so that a hand-off
+/// that did not reach it is never drawn as one that did. One that did not is
+/// said in the transcript instead.
+///
+/// Counted among what was sent to the conversation, as a prompt is, since
+/// the backend counts it among the turns the files can be put back before.
+fn hand_commands(app: &mut App, journal: &mut dyn Journal, backend: &mut dyn Bridge) {
+    let Some((commands, text)) = app.take_handed() else {
+        return;
+    };
+    let said = match backend.send(&text, &[]) {
+        Ok(()) => {
+            let first = commands.first().map(String::as_str).unwrap_or_default();
+            app.sent_to_backend(&format!("! {first}"));
+            SessionEvent::CommandsHanded { commands, text }
+        }
+        Err(error) => app.not_handed(&commands, &error.to_string()),
+    };
+    journal.append(&said);
+    app.apply(&said);
 }
 
 /// Hands the choices the operator made to `preferences`, and says in the
@@ -815,7 +840,11 @@ fn send_produced(
             // Listed rather than left to a wildcard: an event the shell comes
             // to produce for the backend must be sent from here, and a new
             // variant fails to compile until someone decides whether it is.
-            SessionEvent::SessionMeta(_)
+            // Taken from the shell with `take_handed` and sent by
+            // `hand_commands` instead, once the backend can start a turn:
+            // the shell never produces it.
+            SessionEvent::CommandsHanded { .. }
+            | SessionEvent::SessionMeta(_)
             | SessionEvent::PromptNotSent { .. }
             | SessionEvent::Looked
             | SessionEvent::Goal { .. }
@@ -1311,6 +1340,81 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// A session attached to a backend, with `command` run and ended.
+    fn attached_app_that_ran(command: &str, shell: &mut Running) -> App {
+        let mut app = App::new(Repo::default()).runs_commands().attached();
+        app.on_key(KeyEvent::new(KeyCode::Char('!'), KeyModifiers::NONE));
+        for c in command.chars() {
+            app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        run_commands(&mut app, shell);
+        let (id, _) = shell.started.last().cloned().expect("the command started");
+        shell.ends.push(crate::shell::Ran {
+            id,
+            output: "ok\n".to_owned(),
+            bytes: 3,
+            whole: true,
+            exit_code: Some(0),
+            error: None,
+        });
+        fold_commands(&mut app, shell, &mut Unwatched);
+        app
+    }
+
+    #[test]
+    fn what_a_command_did_is_sent_as_a_turn_then_kept_and_folded_in() {
+        let mut shell = Running::default();
+        let mut app = attached_app_that_ran("make check", &mut shell);
+        let mut kept = Kept::default();
+        let mut backend = Attached::default();
+
+        send_produced(&mut app, &mut kept, &mut backend, &mut Forgotten);
+        hand_commands(&mut app, &mut kept, &mut backend);
+
+        let [sent] = backend.sent.as_slice() else {
+            panic!("one turn was sent: {:?}", backend.sent);
+        };
+        assert!(sent.contains("make check") && sent.contains("ok"), "{sent}");
+        assert!(matches!(
+            kept.events.last(),
+            Some(SessionEvent::CommandsHanded { commands, text })
+                if commands == &["make check"] && text == sent
+        ));
+        assert!(
+            app.session().turn_running(),
+            "the turn it opened is running"
+        );
+        hand_commands(&mut app, &mut kept, &mut backend);
+        assert_eq!(backend.sent.len(), 1, "handed once");
+    }
+
+    #[test]
+    fn a_hand_off_the_backend_refused_is_said_and_opens_no_turn() {
+        let mut shell = Running::default();
+        let mut app = attached_app_that_ran("make check", &mut shell);
+        let mut kept = Kept::default();
+        let mut backend = Attached {
+            refuse: true,
+            ..Attached::default()
+        };
+
+        send_produced(&mut app, &mut kept, &mut backend, &mut Forgotten);
+        hand_commands(&mut app, &mut kept, &mut backend);
+
+        assert!(
+            matches!(
+                kept.events.last(),
+                Some(SessionEvent::Notice { message })
+                    if message.contains("! make check ran")
+                        && message.contains("the subprocess has gone")
+            ),
+            "{:?}",
+            kept.events.last()
+        );
+        assert!(!app.session().turn_running());
     }
 
     #[test]

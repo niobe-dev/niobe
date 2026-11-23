@@ -6936,6 +6936,113 @@ fn run_command(app: &mut App, command: &str) -> niobe_core::event::ToolCallId {
     id
 }
 
+/// How a command the operator ran ended, printing `output`.
+fn exited(id: &niobe_core::event::ToolCallId, output: &str, code: i32) -> niobe_tui::Ran {
+    niobe_tui::Ran {
+        id: id.clone(),
+        output: output.to_owned(),
+        bytes: output.len() as u64,
+        whole: true,
+        exit_code: Some(code),
+        error: None,
+    }
+}
+
+/// What a command did reaches the agent as a turn of its own once the
+/// command ends — failed or not, since what went wrong is what the agent
+/// is most needed for — but never while a turn runs, which would take it in
+/// behind the operator's own prompts.
+#[test]
+fn what_a_command_did_is_handed_to_the_agent_once_no_turn_runs() {
+    let mut app = session_that_runs_commands().attached();
+    app.apply(&Event::UserMessage {
+        text: "deploy it".to_owned(),
+    });
+    let id = run_command(&mut app, "gh secret set NAME --body x");
+    app.ran(exited(&id, "", 0));
+    assert_eq!(app.take_handed(), None, "handed while a turn ran");
+
+    app.apply(&Event::TurnEnded);
+    let other = run_command(&mut app, "ssh host true");
+    app.ran(exited(&other, "usage: ssh [-46AaCf]\n", 255));
+    let (commands, text) = app.take_handed().expect("handed once the turn ended");
+    assert_eq!(commands, ["gh secret set NAME --body x", "ssh host true"]);
+    assert!(text.contains("gh secret set NAME --body x"), "{text}");
+    assert!(
+        text.contains("exited with status 0 and printed nothing"),
+        "{text}"
+    );
+    assert!(text.contains("exited with status 255"), "{text}");
+    assert!(text.contains("usage: ssh [-46AaCf]"), "{text}");
+    assert_eq!(app.take_handed(), None, "handed once");
+}
+
+/// A command the operator stopped, or one that could not be started, says
+/// nothing the agent was waiting on; nor is anything handed where no
+/// backend is listening.
+#[test]
+fn a_command_stopped_or_not_started_or_run_with_no_backend_is_handed_to_nobody() {
+    let mut app = session_that_runs_commands().attached();
+    let id = run_command(&mut app, "sleep 100");
+    app.on_key(ratatui::crossterm::event::KeyEvent::new(
+        ratatui::crossterm::event::KeyCode::Char('g'),
+        ratatui::crossterm::event::KeyModifiers::CONTROL,
+    ));
+    assert_eq!(app.take_stops(), std::slice::from_ref(&id));
+    app.ran(exited(&id, "", 143));
+    let unstarted = run_command(&mut app, "nonesuch");
+    app.not_run(&unstarted, "no sh");
+    assert_eq!(app.take_handed(), None);
+
+    let mut alone = session_that_runs_commands();
+    let id = run_command(&mut alone, "ls");
+    alone.ran(exited(&id, "Cargo.toml\n", 0));
+    assert_eq!(alone.take_handed(), None);
+}
+
+/// Once handed, the transcript says so under the command, with how much was
+/// sent, and the turn it opened is not one of the operator's prompts.
+/// Where the config keeps what commands print from the agent, nothing is
+/// handed, and the bar says so while a command is typed.
+#[test]
+fn a_shell_told_to_keep_commands_from_the_agent_hands_nothing_and_says_so() {
+    use ratatui::crossterm::event::KeyCode;
+
+    let mut app = session_that_runs_commands()
+        .attached()
+        .with_commands_handed(false);
+    press(&mut app, KeyCode::Char('!'));
+    let row = shell_row(&screen(&mut app, 120, 30));
+    assert!(
+        row.contains("the agent does not see what it prints"),
+        "{row}"
+    );
+    press(&mut app, KeyCode::Esc);
+
+    let id = run_command(&mut app, "cat .env");
+    app.ran(exited(&id, "TOKEN=x\n", 0));
+    assert_eq!(app.take_handed(), None);
+}
+
+#[test]
+fn a_hand_off_reads_as_a_note_under_the_command_and_opens_a_turn() {
+    let mut app = session_that_runs_commands().attached();
+    let id = run_command(&mut app, "cargo test");
+    app.ran(exited(&id, "test result: ok. 3 passed\n", 0));
+    let (commands, text) = app.take_handed().expect("handed");
+    let sent = text.len();
+    app.apply(&Event::CommandsHanded { commands, text });
+
+    assert!(app.session().turn_running());
+    let frame = screen(&mut app, 120, 30);
+    assert!(
+        frame.contains(&format!(
+            "Sent the agent what ! cargo test did, {sent} bytes"
+        )),
+        "{frame}"
+    );
+}
+
 #[test]
 fn bang_runs_a_command_that_is_recorded_as_a_call_and_shows_what_it_printed() {
     use niobe_core::event::ToolOutcome;
@@ -6947,7 +7054,7 @@ fn bang_runs_a_command_that_is_recorded_as_a_call_and_shows_what_it_printed() {
     press(&mut app, KeyCode::Char('!'));
     let row = shell_row(&screen(&mut app, 120, 30));
     assert!(
-        row.contains("the agent does not see what it prints"),
+        row.contains("the agent is sent what it prints"),
         "the bar does not say where the output goes:\n{row}"
     );
     let wide = shell_row(&screen(&mut app, 200, 60));

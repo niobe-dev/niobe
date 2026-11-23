@@ -103,8 +103,12 @@ const KINDS: u64 = 40;
 fn event(rng: &mut Rng, kinds: &[u64]) -> Event {
     let call = ToolCallId::new(rng.pick(CALLS));
     match kinds[rng.below(kinds.len() as u64) as usize] {
-        0..=2 => Event::UserMessage {
+        0 | 1 => Event::UserMessage {
             text: "go".to_owned(),
+        },
+        2 => Event::CommandsHanded {
+            commands: vec!["ls".to_owned()],
+            text: "I ran ls".to_owned(),
         },
         3 => Event::AssistantDelta {
             text: "part".to_owned(),
@@ -423,7 +427,9 @@ impl Model {
                     self.bill_what_waited();
                 }
             }
-            Event::UserMessage { .. } if !before.turn_running() && !self.clear_open => {
+            Event::UserMessage { .. } | Event::CommandsHanded { .. }
+                if !before.turn_running() && !self.clear_open =>
+            {
                 self.began_at = Some(self.five_hour.filter(|_| !self.left));
                 self.window_said = false;
                 self.no_turn += self.between;
@@ -784,7 +790,9 @@ impl Open {
             Event::BackgroundCommandEnded { id } => {
                 self.background.remove(id);
             }
-            Event::UserMessage { .. } if !before.turn_running() && !before.clearing() => {
+            Event::UserMessage { .. } | Event::CommandsHanded { .. }
+                if !before.turn_running() && !before.clearing() =>
+            {
                 self.prompted += 1;
             }
             _ => {}

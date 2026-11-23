@@ -112,7 +112,9 @@ reviewers that encode both, for an agent working in this tree.
   (`terse`, off unless a file turns it on, from any file since the words are Niobe's own),
   whether a new conversation is asked to state its decisions (`decisions`, on unless a file
   turns it off, from any file for the same reason),
-  whether the agent reads cargo's output trimmed (`trim`, the same), and
+  whether the agent reads cargo's output trimmed (`trim`, the same), whether what the
+  operator's `!` commands did is sent to the agent (`hand_commands`, on unless a file turns it
+  off, which a file nobody trusted may do and may not undo), and
   whether the shell rings the bell and sends a
   desktop notification when it calls the operator back (`[notify]`). `parse.rs` walks the spanned TOML document by hand so that an
   invalid file is reported as its key and line; `write.rs` splices one rule into the `allow`
@@ -212,7 +214,10 @@ reviewers that encode both, for an agent working in this tree.
   composer and the transcript draw in the theme's command colour — the transcript is searched
   with Ctrl+F — `shell.rs` is the trait the loop
   hands the operator's `!` commands to, and where who allows them and what they reach is written
-  down, `images.rs` the one it asks for an image from — the clipboard on Ctrl+V or an empty paste,
+  down — and the words the agent is sent of what they did once they end, as a turn of its own
+  once no turn runs, which the fold keeps as `CommandsHanded`, no prompt of the operator's — a
+  `!` pasted where a typed one would open a command opening it, and the bar and the rule above
+  it drawn in the theme's command colour while it holds one, `images.rs` the one it asks for an image from — the clipboard on Ctrl+V or an empty paste,
   or the file a pasted or dropped path names — and what numbers each and sends it with the prompt
   it was attached in, where that still holds its placeholder — never with a recalled prompt that
   names its number — `history.rs` the one it asks for the repository's earlier

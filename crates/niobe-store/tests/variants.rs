@@ -54,6 +54,10 @@ fn one_of_each() -> Vec<Event> {
             backend_session: Some(text("b6c1")),
         }),
         Event::UserMessage { text: text("hi") },
+        Event::CommandsHanded {
+            commands: vec![text("cargo test"), text("git status")],
+            text: text("I ran cargo test and git status"),
+        },
         Event::PromptNotSent {
             text: text("lost"),
             why: Some(text("the subprocess has gone")),
@@ -296,6 +300,7 @@ fn every_variant_is_listed() {
         let name = match event {
             Event::SessionMeta(_) => "session_meta",
             Event::UserMessage { .. } => "user_message",
+            Event::CommandsHanded { .. } => "commands_handed",
             Event::PromptNotSent { .. } => "prompt_not_sent",
             Event::Titled { .. } => "titled",
             Event::AssistantDelta { .. } => "assistant_delta",
@@ -344,7 +349,7 @@ fn every_variant_is_listed() {
         assert!(!seen.contains(&name), "{name} is listed twice");
         seen.push(name);
     }
-    assert_eq!(seen.len(), 46, "every variant has one value: {seen:?}");
+    assert_eq!(seen.len(), 47, "every variant has one value: {seen:?}");
 }
 
 #[test]

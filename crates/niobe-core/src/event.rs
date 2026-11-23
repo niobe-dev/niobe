@@ -727,6 +727,21 @@ pub enum Event {
         text: String,
     },
 
+    /// The operator's own commands, run with `!`, handed to the agent once
+    /// they ended — each command, how it ended and what it printed — as a
+    /// turn of its own, so the agent reads what they did and carries on.
+    ///
+    /// Its own event rather than an [`Event::UserMessage`]: the operator
+    /// typed the commands, not these words, so it is not one of the
+    /// session's prompts — not recalled, not what names the session — though
+    /// it opens a turn as one does.
+    CommandsHanded {
+        /// The commands, as the operator typed them, oldest first.
+        commands: Vec<String>,
+        /// The words the agent was sent, whole.
+        text: String,
+    },
+
     /// The operator sent a prompt that reached no backend: the session was
     /// not attached to one, or the one it was attached to would not take it.
     ///
@@ -1385,6 +1400,7 @@ impl Event {
             | Event::Models { .. } => true,
             Event::SessionMeta(_)
             | Event::UserMessage { .. }
+            | Event::CommandsHanded { .. }
             | Event::PromptNotSent { .. }
             | Event::Titled { .. }
             | Event::AssistantDelta { .. }
