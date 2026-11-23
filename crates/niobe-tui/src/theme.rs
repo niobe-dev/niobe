@@ -1591,6 +1591,16 @@ mod tests {
                 (t.command, t.fg, "a command named in a prompt and its words"),
                 (
                     t.command,
+                    t.hot,
+                    "the composer holding a command and a prompt",
+                ),
+                (
+                    t.command,
+                    t.frame,
+                    "the rule over a command and over a prompt",
+                ),
+                (
+                    t.command,
                     t.user,
                     "a command named in a sent prompt and the prompt around it",
                 ),

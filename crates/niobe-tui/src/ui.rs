@@ -1331,7 +1331,11 @@ fn draw_session(frame: &mut Frame, area: Rect, panes: bool, app: &mut App, theme
             divider.width,
             theme,
         ))
-        .style(Style::new().fg(theme.frame).bg(theme.pane_bg)),
+        .style(
+            Style::new()
+                .fg(divider_colour(app, theme))
+                .bg(theme.pane_bg),
+        ),
         divider,
     );
 
@@ -1618,6 +1622,33 @@ fn bar_lead(app: &App) -> (String, &'static str) {
     }
 }
 
+/// Whether the bar is editing a command for the operator's shell: the
+/// composer holds one, and no search is open over it.
+fn holds_a_command(app: &App) -> bool {
+    app.finding().is_none() && app.shell_mode()
+}
+
+/// The colour the bar's badge and marker are drawn in: the theme's accent,
+/// and while the composer holds a command for the operator's shell, the
+/// colour of what will run — so a command reads apart from a prompt before
+/// a word of it is read, as the agent's own CLI recolours its box.
+fn bar_accent(app: &App, theme: &Theme) -> Color {
+    match holds_a_command(app) {
+        true => theme.command,
+        false => theme.hot,
+    }
+}
+
+/// The colour of the rule above the composer: the panes' frame, and the
+/// bar's own colour while it holds a command, so the composer reads as one
+/// box of that colour.
+fn divider_colour(app: &App, theme: &Theme) -> Color {
+    match holds_a_command(app) {
+        true => theme.command,
+        false => theme.frame,
+    }
+}
+
 /// The columns of the badge and the marker.
 fn lead_width(app: &App) -> usize {
     let (badge, marker) = bar_lead(app);
@@ -1648,16 +1679,16 @@ fn draw_ask_bar(
     ])
     .areas(area);
     let pane = Style::new().bg(theme.pane_bg);
+    let accent = bar_accent(app, theme);
     frame.render_widget(
         Paragraph::new(
-            Line::from(badge_text).style(Style::new().fg(theme.pane_bg).bg(theme.hot).bold()),
+            Line::from(badge_text).style(Style::new().fg(theme.pane_bg).bg(accent).bold()),
         )
         .style(pane),
         Rect { height: 1, ..badge },
     );
     frame.render_widget(
-        Paragraph::new(Line::from(marker_text).style(Style::new().fg(theme.hot).bold()))
-            .style(pane),
+        Paragraph::new(Line::from(marker_text).style(Style::new().fg(accent).bold())).style(pane),
         marker,
     );
 
@@ -8882,6 +8913,56 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A command for the operator's shell reads apart from a prompt before a
+    /// word of it is read: the badge, the marker and the rule above the
+    /// composer change colour, not only the marker's glyph.
+    #[test]
+    fn a_command_in_the_composer_draws_the_bar_and_the_rule_above_it_in_the_command_colour() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let drawn = |command: bool| {
+            let mut app = App::new(crate::app::Repo::default()).runs_commands();
+            if command {
+                app.on_key(KeyEvent::new(KeyCode::Char('!'), KeyModifiers::NONE));
+                assert!(app.shell_mode());
+            }
+            let theme = *app.theme();
+            let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30))
+                .expect("a test terminal");
+            terminal
+                .draw(|frame| draw(frame, &mut app))
+                .expect("drawing never fails on a test backend");
+            let buffer = terminal.backend().buffer().clone();
+            let marker = if command { "$" } else { ">" };
+            let bar = (0..buffer.area.height)
+                .rev()
+                .find(|&y| {
+                    as_a_terminal_shows(&buffer, y)
+                        .iter()
+                        .take(20)
+                        .any(|cell| *cell == marker)
+                })
+                .expect("the composer's row is drawn");
+            let column = |y: u16, symbol: &str| {
+                (0..buffer.area.width)
+                    .find(|&x| buffer[(x, y)].symbol() == symbol)
+                    .unwrap_or_else(|| panic!("{symbol:?} is drawn on row {y}"))
+            };
+            let badge = buffer[(column(bar, if command { "s" } else { "—" }), bar)].bg;
+            let marked = buffer[(column(bar, marker), bar)].fg;
+            let rule = buffer[(column(bar - 1, "─"), bar - 1)].fg;
+            (theme, badge, marked, rule)
+        };
+
+        let (theme, badge, marker, rule) = drawn(true);
+        assert_eq!(
+            (badge, marker, rule),
+            (theme.command, theme.command, theme.command)
+        );
+        let (theme, badge, marker, rule) = drawn(false);
+        assert_eq!((badge, marker, rule), (theme.hot, theme.hot, theme.frame));
     }
 
     /// An open menu's list, and the list of what a `/` word could become,
