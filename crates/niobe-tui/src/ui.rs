@@ -7672,12 +7672,15 @@ enum Tag {
     None,
     /// `new`: a file the repository does not track yet.
     New,
-    /// `outside`: a file a turn changed with no edit call reporting it — a
-    /// shell command it ran, a formatter, something outside the session — so
-    /// the session's own edit figures leave it out.
-    Outside,
+    /// `by shell`: a file a turn changed with no edit call reporting it, so
+    /// the session's own edit figures leave it out. Named for what nearly
+    /// always does it — a shell command the agent ran, or a hook or a
+    /// formatter one ran — and not `outside`, which read as a file outside
+    /// the repository. The operator's own `!` commands and the standing
+    /// answers the shell writes for them are never a turn's.
+    Shell,
     /// Both: a new file a turn wrote that way.
-    NewOutside,
+    NewShell,
 }
 
 impl Tag {
@@ -7685,8 +7688,8 @@ impl Tag {
         match (new, outside) {
             (false, false) => Tag::None,
             (true, false) => Tag::New,
-            (false, true) => Tag::Outside,
-            (true, true) => Tag::NewOutside,
+            (false, true) => Tag::Shell,
+            (true, true) => Tag::NewShell,
         }
     }
 
@@ -7695,8 +7698,8 @@ impl Tag {
         match self {
             Tag::None => "",
             Tag::New => "new ",
-            Tag::Outside => "outside ",
-            Tag::NewOutside => "new outside ",
+            Tag::Shell => "by shell ",
+            Tag::NewShell => "new by shell ",
         }
     }
 }

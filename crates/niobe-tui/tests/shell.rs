@@ -126,7 +126,7 @@ fn a_question_about_a_skill_says_which_skill_and_what_it_is_for() {
 /// What the shell finds about a turn of its own — files it changed with no
 /// edit call reporting them, a turn that spent far more than the turns
 /// before it — is the panes' to show, not the conversation's: the Changes
-/// pane tags such a file `outside`, the Usage pane says the turn, and the
+/// pane tags such a file `by shell`, the Usage pane says the turn, and the
 /// transcript holds neither.
 #[test]
 fn a_turns_own_findings_are_drawn_in_the_panes_and_not_in_the_transcript() {
@@ -191,8 +191,8 @@ fn a_turns_own_findings_are_drawn_in_the_panes_and_not_in_the_transcript() {
             .unwrap_or_else(|| panic!("no row for {path}:\n{frame}"))
             .to_owned()
     };
-    assert!(row("main.rs").contains("outside +2 −2"), "{frame}");
-    assert!(!row("notes.md").contains("outside"), "{frame}");
+    assert!(row("main.rs").contains("by shell +2 −2"), "{frame}");
+    assert!(!row("notes.md").contains("by shell"), "{frame}");
     assert!(
         frame.contains("turn 3 spent 4× the average (5000 vs 1100)"),
         "{frame}"
