@@ -9418,9 +9418,10 @@ impl App {
     ///
     /// Its line breaks stay line breaks, so a pasted log is one prompt to
     /// read over and send rather than a turn per line. It goes where typing
-    /// would go, but it presses nothing: no Enter, no `!` opening a command,
-    /// and no answer to a question — a paste is exactly
-    /// what a prompt must not take as one (see [`ASK_QUIET`]).
+    /// would go, but it presses nothing: no Enter and no answer to a
+    /// question — a paste is exactly what a prompt must not take as one (see
+    /// [`ASK_QUIET`]). A paste that opens with `!` where a typed one would
+    /// open a command opens it, and runs nothing until Enter.
     pub fn on_paste(&mut self, pasted: &str) {
         self.hint = None;
         self.escaped = false;
@@ -9501,6 +9502,7 @@ impl App {
         if !self.composer_has_room_for(text.len()) {
             return;
         }
+        let text = self.open_a_pasted_command(&text);
         if self.composer.insert_str(text) {
             self.offer_selected = 0;
             self.reopen_offers();
@@ -9508,6 +9510,25 @@ impl App {
         if left_out.count > 0 {
             self.hint = Some(left_out.said());
         }
+    }
+
+    /// What of `text`, pasted into the composer, goes in as typed: all of it,
+    /// or — where it opens with a `!` and lands where a typed `!` would open
+    /// a command — what follows the `!` and its blanks, with the composer
+    /// opened as a command for it.
+    ///
+    /// A command the agent suggests is copied with its `!`, and pasted as a
+    /// prompt it would reach the agent as words. Opening the command is all
+    /// a paste does: what it pasted runs only on the Enter the operator
+    /// presses after reading it, under the bar that says it is a command.
+    fn open_a_pasted_command<'t>(&mut self, text: &'t str) -> &'t str {
+        let opens = !self.shell_mode && self.runs_commands && self.composer_is_blank();
+        let Some(command) = text.trim_start().strip_prefix('!').filter(|_| opens) else {
+            return text;
+        };
+        empty(&mut self.composer);
+        self.shell_mode = true;
+        command.trim_start_matches([' ', '\t'])
     }
 
     /// Whether `more` bytes still fit in the composer under
@@ -13056,6 +13077,40 @@ mod tests {
 
         assert_eq!(app.take_image_requests(), []);
         assert_eq!(app.composed(), "open /Users/me/Desktop/shot.png");
+    }
+
+    #[test]
+    fn a_command_pasted_with_its_bang_into_an_empty_composer_opens_a_command() {
+        let mut app = app().runs_commands();
+
+        app.on_paste("  ! printf 'a\\n' |\n  wc -l");
+
+        assert!(app.shell_mode(), "the pasted `!` was left as text");
+        assert_eq!(app.composed(), "printf 'a\\n' |\n  wc -l");
+        assert!(app.take_commands().is_empty(), "a paste ran what it held");
+    }
+
+    #[test]
+    fn a_bang_pasted_after_words_or_into_a_session_that_runs_nothing_is_text() {
+        let mut after = app().runs_commands();
+        typed(&mut after, "say ");
+        after.on_paste("!ls");
+        assert!(!after.shell_mode());
+        assert_eq!(after.composed(), "say !ls");
+
+        let mut runs_nothing = app();
+        runs_nothing.on_paste("!ls");
+        assert!(!runs_nothing.shell_mode());
+        assert_eq!(runs_nothing.composed(), "!ls");
+    }
+
+    #[test]
+    fn a_bang_pasted_into_a_command_is_part_of_the_command() {
+        let mut app = app().runs_commands();
+        typed(&mut app, "!");
+        app.on_paste("!! echo");
+        assert!(app.shell_mode());
+        assert_eq!(app.composed(), "!! echo");
     }
 
     #[test]
