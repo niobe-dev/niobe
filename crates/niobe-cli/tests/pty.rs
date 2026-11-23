@@ -2712,6 +2712,21 @@ fn written(path: &Path) -> String {
     panic!("nothing was written to {}", path.display());
 }
 
+/// Waits until `path` holds `wanted`, and gives back all it holds.
+fn written_holding(path: &Path, wanted: &str) -> String {
+    let deadline = Instant::now() + PATIENCE;
+    while Instant::now() < deadline {
+        if let Ok(text) = std::fs::read_to_string(path)
+            && text.contains(wanted)
+        {
+            return text;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let held = std::fs::read_to_string(path).unwrap_or_default();
+    panic!("{} never held {wanted:?}: {held}", path.display());
+}
+
 /// Opened in a subdirectory, the session has one directory: the agent runs
 /// at the repository's root, a `!` command runs there too, and a path an `@`
 /// completion puts in the prompt is one the agent can open from there.
@@ -2750,7 +2765,10 @@ fn a_session_opened_in_a_subdirectory_runs_everything_at_the_repositorys_root() 
     terminal.typed(b"look at @inn");
     terminal.shows("inner.txt");
     terminal.typed(b"\t\r");
-    terminal.shows("answered-the-turn");
+    // The command's hand-off is a turn the stand-in answers too, so its
+    // answer on screen says nothing of the prompt, which may still wait
+    // behind it: the prompt has gone once the stand-in has written it down.
+    let turns = written_holding(&root.join("turns.jsonl"), "look at @");
     terminal.typed(CTRL_Q);
 
     let (_, status) = ended(&mut shell);
@@ -2759,7 +2777,6 @@ fn a_session_opened_in_a_subdirectory_runs_everything_at_the_repositorys_root() 
     let at_root = format!("{}\n", root.display());
     assert_eq!(written(&root.join("claude.cwd")), at_root, "the agent");
     assert_eq!(bang, at_root, "the operator's command");
-    let turns = written(&root.join("turns.jsonl"));
     assert!(
         turns.contains("look at @sub/dir/inner.txt"),
         "the completed path is not the one the agent names the file by: {turns}"
