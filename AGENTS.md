@@ -124,9 +124,11 @@ reviewers that encode both, for an agent working in this tree.
   write or a crash leaves the old file rather than half of the new one; `read.rs` is how every
   config file is read — without waiting on a FIFO, only if it is a regular file and only up to a
   mebibyte — because a repository can commit its config as a link to `/dev/zero`;
-  `preferences.rs` is the theme, and each profile's model and effort, last picked in the shell,
-  kept in `choices.toml` beside the user's config — a file of Niobe's own, rewritten whole under
-  the lock a rule is written under, and read as nothing chosen where it cannot be read;
+  `preferences.rs` is the theme last picked in the shell, in each repository and anywhere, and
+  each profile's model and effort, kept in `choices.toml` beside the user's config — a file of
+  Niobe's own, rewritten whole under the lock a rule is written under, its repositories newest
+  first and the oldest left out past the mebibyte it is read back at, and read as nothing chosen
+  where it cannot be read;
   `trust.rs` records which config files may put an `env`, `args`, a `settings` file or an
   `auth_refresh` in front of a backend — or say how a profile is billed, choose the default
   profile, allow tool calls without asking, or replace one of the user's — as each file's SHA-256 under the user's own config
@@ -515,8 +517,9 @@ reviewers that encode both, for an agent working in this tree.
   external diff the config names run, nothing taken but a commit's whole name, and no more
   than four mebibytes of either;
   `preferences.rs` keeps the shell's picks in the user's `choices.toml`, under the session's
-  profile, and reads them back so that a new shell opens on the theme last picked — over the
-  config's, under `--theme` — and starts its backend with the model and effort last picked under
+  profile, and reads them back so that a new shell opens on the theme last picked in its
+  repository, or else the one last picked anywhere — over the config's, under `--theme`, and
+  `cyber` where nothing names one — and starts its backend with the model and effort last picked under
   its profile, over the profile's own flags;
   `rules.rs` writes a standing answer into the repository's `.niobe/config.toml`, keeping the
   operator's trust decision about that file; `prices.rs` is the price table `niobe prices`

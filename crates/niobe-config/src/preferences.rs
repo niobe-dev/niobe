@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) Viacheslav Shynkarenko
 
-//! The choices the operator made in the shell — the theme, and each
-//! profile's model and effort — kept for the next session to open with.
+//! The choices the operator made in the shell — the theme, in each project
+//! and the last anywhere, and each profile's model and effort — kept for the
+//! next session to open with.
 //!
 //! They are kept in a file of Niobe's own beside the user's config,
 //! [`FILE_NAME`], rather than spliced into the config: the config is the
@@ -15,7 +16,7 @@
 //! file that cannot be read, or holds something other than what this module
 //! writes, reads as no choices made, and the next choice writes it afresh.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use toml::de::{DeTable, DeValue};
@@ -27,15 +28,28 @@ pub const FILE_NAME: &str = "choices.toml";
 
 /// What the file says first, so that an operator who opens it knows who
 /// writes it and that an edit lasts only until the next choice.
-const HEADER: &str = "# Written by niobe: the theme, and each profile's model and effort, last chosen\n\
-                      # in the shell, which the next session opens with. Rewritten whole on each\n\
-                      # choice; `--theme`, and a choice made in the shell, override it.\n";
+const HEADER: &str = "# Written by niobe: the theme last chosen in the shell, anywhere and in each\n\
+                      # project, and each profile's model and effort, which the next session opens\n\
+                      # with. Rewritten whole on each choice; `--theme`, and a choice made in the\n\
+                      # shell, override it.\n";
 
 /// The choices the last sessions made, as the file holds them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Saved {
+    /// The theme last chosen, in whichever project it was.
     theme: Option<String>,
+    /// The theme last chosen in each project, the project chosen in last
+    /// first, so that what the file has no room for is the oldest.
+    projects: Vec<ProjectTheme>,
     profiles: BTreeMap<String, ProfileChoices>,
+}
+
+/// The theme last chosen in one project.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProjectTheme {
+    /// The project's root, as the session that chose it was opened at.
+    root: String,
+    theme: String,
 }
 
 /// What was chosen for one profile.
@@ -54,8 +68,17 @@ impl ProfileChoices {
 /// One choice the operator made, to be kept.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Change<'a> {
-    /// The palette the shell draws in, for every profile.
-    Theme(&'a str),
+    /// The palette the shell draws in, for every profile: the one the
+    /// project rooted at `project` opens in from now on, and the one a
+    /// project with no choice of its own does.
+    Theme {
+        /// The root of the project it was chosen in; `None` where the session
+        /// ran in none, and then it is only the last chosen. A root that is
+        /// not UTF-8 is kept as none, since the file is text.
+        project: Option<&'a Path>,
+        /// The theme, by its name.
+        theme: &'a str,
+    },
     /// The model `profile` answers with; `None` forgets the one kept, as
     /// where the backend refused it.
     Model {
@@ -91,6 +114,10 @@ impl Saved {
         let root = root.get_ref();
         let mut saved = Self {
             theme: root.get("theme").and_then(|value| said(value.get_ref())),
+            projects: root
+                .get("projects")
+                .map(|value| projects(value.get_ref()))
+                .unwrap_or_default(),
             profiles: BTreeMap::new(),
         };
         let Some(DeValue::Table(profiles)) = root.get("profiles").map(|value| value.get_ref())
@@ -112,9 +139,19 @@ impl Saved {
         saved
     }
 
-    /// The theme last chosen.
-    pub fn theme(&self) -> Option<&str> {
+    /// The theme last chosen, in whichever project it was.
+    pub fn last_theme(&self) -> Option<&str> {
         self.theme.as_deref()
+    }
+
+    /// The theme last chosen in the project rooted at `root`; none where
+    /// none was chosen there, or none the file still has room for.
+    pub fn project_theme(&self, root: &Path) -> Option<&str> {
+        let root = root.to_str()?;
+        self.projects
+            .iter()
+            .find(|project| project.root == root)
+            .map(|project| project.theme.as_str())
     }
 
     /// The model last chosen under `profile`.
@@ -130,7 +167,19 @@ impl Saved {
     /// These choices with `change` made.
     fn changed(mut self, change: Change<'_>) -> Self {
         match change {
-            Change::Theme(theme) => self.theme = Some(theme.to_owned()),
+            Change::Theme { project, theme } => {
+                if let Some(root) = project.and_then(Path::to_str) {
+                    self.projects.retain(|project| project.root != root);
+                    self.projects.insert(
+                        0,
+                        ProjectTheme {
+                            root: root.to_owned(),
+                            theme: theme.to_owned(),
+                        },
+                    );
+                }
+                self.theme = Some(theme.to_owned());
+            }
             Change::Model { profile, model } => {
                 let choices = self.profiles.entry(profile.to_owned()).or_default();
                 choices.model = model.map(str::to_owned);
@@ -144,7 +193,9 @@ impl Saved {
         self
     }
 
-    /// The file's text.
+    /// The file's text: everything chosen, and as many projects, newest
+    /// first, as keep it within what [`Saved::read`] reads back — past that
+    /// the whole file would read as nothing chosen.
     fn text(&self) -> String {
         let mut text = HEADER.to_owned();
         if let Some(theme) = &self.theme {
@@ -158,8 +209,46 @@ impl Saved {
                 }
             }
         }
+        let room = usize::try_from(crate::read::LIMIT).unwrap_or(usize::MAX);
+        for project in &self.projects {
+            let entry = format!(
+                "\n[[projects]]\nroot = {}\ntheme = {}\n",
+                crate::write::quoted(&project.root),
+                crate::write::quoted(&project.theme)
+            );
+            if text.len().saturating_add(entry.len()) > room {
+                break;
+            }
+            text.push_str(&entry);
+        }
         text
     }
+}
+
+/// The projects a `projects` array holds, in its order, each table that is
+/// not a root and a theme passed over, and so is a root listed again: the
+/// first listing is the newer.
+fn projects(value: &DeValue<'_>) -> Vec<ProjectTheme> {
+    let DeValue::Array(entries) = value else {
+        return Vec::new();
+    };
+    // A set rather than a search of what is kept: the file may hold tens of
+    // thousands of entries, and it is read before the shell opens.
+    let mut seen = BTreeSet::new();
+    let mut projects = Vec::new();
+    for entry in entries {
+        let DeValue::Table(table) = entry.get_ref() else {
+            continue;
+        };
+        let read = |key: &str| table.get(key).and_then(|value| said(value.get_ref()));
+        let (Some(root), Some(theme)) = (read("root"), read("theme")) else {
+            continue;
+        };
+        if seen.insert(root.clone()) {
+            projects.push(ProjectTheme { root, theme });
+        }
+    }
+    projects
 }
 
 /// A string that says something; a blank one is no choice.
@@ -197,21 +286,164 @@ mod tests {
         dir.join("niobe").join(FILE_NAME)
     }
 
+    /// A theme chosen in no project in particular.
+    fn theme(theme: &str) -> Change<'_> {
+        Change::Theme {
+            project: None,
+            theme,
+        }
+    }
+
+    /// A theme chosen in the project rooted at `root`.
+    fn theme_in<'a>(root: &'a Path, theme: &'a str) -> Change<'a> {
+        Change::Theme {
+            project: Some(root),
+            theme,
+        }
+    }
+
     #[test]
     fn a_theme_kept_where_there_was_no_file_is_read_back() {
         let dir = tempfile::tempdir().expect("a temporary directory can be made");
         let path = kept(dir.path());
 
-        keep(&path, Change::Theme("neo")).expect("the choice is kept");
+        keep(&path, theme("neo")).expect("the choice is kept");
 
-        assert_eq!(Saved::read(&path).theme(), Some("neo"));
+        assert_eq!(Saved::read(&path).last_theme(), Some("neo"));
+    }
+
+    #[test]
+    fn a_theme_chosen_in_a_project_is_that_project_s_and_the_last_chosen_anywhere() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be made");
+        let path = kept(dir.path());
+        let (a, b, c) = (
+            Path::new("/work/a"),
+            Path::new("/work/b"),
+            Path::new("/work/c"),
+        );
+
+        keep(&path, theme_in(a, "neo")).expect("kept");
+        keep(&path, theme_in(b, "classic")).expect("kept");
+
+        let saved = Saved::read(&path);
+        assert_eq!(saved.project_theme(a), Some("neo"));
+        assert_eq!(saved.project_theme(b), Some("classic"));
+        assert_eq!(saved.project_theme(c), None);
+        assert_eq!(saved.last_theme(), Some("classic"));
+    }
+
+    #[test]
+    fn a_project_chosen_in_again_keeps_one_entry_with_the_newer_theme() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be made");
+        let path = kept(dir.path());
+        let (a, b) = (Path::new("/work/a"), Path::new("/work/b"));
+        keep(&path, theme_in(a, "neo")).expect("kept");
+        keep(&path, theme_in(b, "classic")).expect("kept");
+
+        keep(&path, theme_in(a, "modern")).expect("kept");
+        let once = std::fs::read_to_string(&path).expect("the file was written");
+        keep(&path, theme_in(a, "modern")).expect("kept");
+
+        let saved = Saved::read(&path);
+        assert_eq!(saved.project_theme(a), Some("modern"));
+        assert_eq!(saved.project_theme(b), Some("classic"));
+        assert_eq!(saved.last_theme(), Some("modern"));
+        let text = std::fs::read_to_string(&path).expect("the file was written");
+        assert_eq!(text.matches("/work/a").count(), 1, "{text}");
+        assert_eq!(text, once);
+    }
+
+    #[test]
+    fn a_theme_chosen_in_no_project_moves_the_last_chosen_and_leaves_each_project_s() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be made");
+        let path = kept(dir.path());
+        let a = Path::new("/work/a");
+        keep(&path, theme_in(a, "neo")).expect("kept");
+
+        keep(&path, theme("classic")).expect("kept");
+
+        let saved = Saved::read(&path);
+        assert_eq!(saved.project_theme(a), Some("neo"));
+        assert_eq!(saved.last_theme(), Some("classic"));
+    }
+
+    #[test]
+    fn projects_past_what_the_file_is_read_back_at_are_forgotten_oldest_first() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be made");
+        let path = kept(dir.path());
+        let deep = "d".repeat(100_000);
+        let roots: Vec<std::path::PathBuf> = (0..15)
+            .map(|n| Path::new("/").join(&deep).join(n.to_string()))
+            .collect();
+
+        for root in &roots {
+            keep(&path, theme_in(root, "neo")).expect("kept");
+        }
+
+        let length = std::fs::metadata(&path).expect("written").len();
+        assert!(length <= crate::read::LIMIT, "{length} bytes");
+        let saved = Saved::read(&path);
+        assert_eq!(saved.project_theme(&roots[14]), Some("neo"));
+        assert_eq!(saved.project_theme(&roots[0]), None);
+        assert_eq!(saved.last_theme(), Some("neo"));
+    }
+
+    #[test]
+    fn a_file_written_before_themes_were_kept_per_project_reads_its_theme_as_the_last_chosen() {
+        let saved = Saved::parse("theme = \"neo\"\n");
+
+        assert_eq!(saved.last_theme(), Some("neo"));
+        assert_eq!(saved.project_theme(Path::new("/work/a")), None);
+    }
+
+    #[test]
+    fn project_entries_toml_would_misread_or_this_module_does_not_write_are_passed_over() {
+        let saved = Saved::parse("projects = 3\n");
+        assert_eq!(saved.project_theme(Path::new("/a")), None);
+
+        let saved = Saved::parse(
+            "[[projects]]\nroot = \"/a\"\ntheme = \"neo\"\n\
+             [[projects]]\nroot = \"/a\"\ntheme = \"classic\"\n\
+             [[projects]]\nroot = \"/b\"\ntheme = 3\n\
+             [[projects]]\ntheme = \"modern\"\n\
+             [[projects]]\nroot = \"  \"\ntheme = \"modern\"\n",
+        );
+        assert_eq!(saved.project_theme(Path::new("/a")), Some("neo"));
+        assert_eq!(saved.project_theme(Path::new("/b")), None);
+        assert_eq!(saved.last_theme(), None);
+    }
+
+    #[test]
+    fn a_root_with_quotes_and_breaks_in_it_reads_back_as_the_root_it_was() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be made");
+        let path = kept(dir.path());
+        let root = Path::new("/work/my \"odd\"\nproject\\x");
+
+        keep(&path, theme_in(root, "neo")).expect("kept");
+
+        assert_eq!(Saved::read(&path).project_theme(root), Some("neo"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_root_that_is_not_utf_8_keeps_only_the_last_chosen() {
+        use std::os::unix::ffi::OsStrExt as _;
+        let dir = tempfile::tempdir().expect("a temporary directory can be made");
+        let path = kept(dir.path());
+        let root = Path::new(std::ffi::OsStr::from_bytes(b"/work/\xff"));
+
+        keep(&path, theme_in(root, "neo")).expect("kept");
+
+        let saved = Saved::read(&path);
+        assert_eq!(saved.project_theme(root), None);
+        assert_eq!(saved.last_theme(), Some("neo"));
     }
 
     #[test]
     fn a_model_and_an_effort_are_kept_for_their_profile_and_nothing_else_moves() {
         let dir = tempfile::tempdir().expect("a temporary directory can be made");
         let path = kept(dir.path());
-        keep(&path, Change::Theme("classic")).expect("kept");
+        keep(&path, theme("classic")).expect("kept");
         keep(
             &path,
             Change::Model {
@@ -239,7 +471,7 @@ mod tests {
         .expect("kept");
 
         let saved = Saved::read(&path);
-        assert_eq!(saved.theme(), Some("classic"));
+        assert_eq!(saved.last_theme(), Some("classic"));
         assert_eq!(saved.model("max"), Some("opus"));
         assert_eq!(saved.effort("max"), Some("high"));
         assert_eq!(saved.model("work"), Some("sonnet"));
@@ -251,13 +483,13 @@ mod tests {
     fn the_last_choice_of_a_kind_is_the_one_kept_and_keeping_it_again_changes_nothing() {
         let dir = tempfile::tempdir().expect("a temporary directory can be made");
         let path = kept(dir.path());
-        keep(&path, Change::Theme("neo")).expect("kept");
-        keep(&path, Change::Theme("classic")).expect("kept");
+        keep(&path, theme("neo")).expect("kept");
+        keep(&path, theme("classic")).expect("kept");
         let once = std::fs::read_to_string(&path).expect("the file was written");
 
-        keep(&path, Change::Theme("classic")).expect("kept");
+        keep(&path, theme("classic")).expect("kept");
 
-        assert_eq!(Saved::read(&path).theme(), Some("classic"));
+        assert_eq!(Saved::read(&path).last_theme(), Some("classic"));
         assert_eq!(
             std::fs::read_to_string(&path).expect("the file was written"),
             once
@@ -330,9 +562,9 @@ mod tests {
         std::fs::write(&path, "theme = [\nnot toml").expect("written");
         assert_eq!(Saved::read(&path), Saved::default());
 
-        keep(&path, Change::Theme("neo")).expect("kept");
+        keep(&path, theme("neo")).expect("kept");
 
-        assert_eq!(Saved::read(&path).theme(), Some("neo"));
+        assert_eq!(Saved::read(&path).last_theme(), Some("neo"));
     }
 
     #[test]
@@ -342,7 +574,7 @@ mod tests {
              model = \"  \"\neffort = \"high\"\n[profiles.work]\nmodel = [\"opus\"]\n",
         );
 
-        assert_eq!(saved.theme(), None);
+        assert_eq!(saved.last_theme(), None);
         assert_eq!(saved.model("max"), None);
         assert_eq!(saved.effort("max"), Some("high"));
         assert_eq!(saved.model("work"), None);
@@ -356,6 +588,6 @@ mod tests {
         std::fs::create_dir_all(&path).expect("a directory where the file would be");
 
         assert_eq!(Saved::read(&path), Saved::default());
-        assert!(keep(&path, Change::Theme("neo")).is_err());
+        assert!(keep(&path, theme("neo")).is_err());
     }
 }

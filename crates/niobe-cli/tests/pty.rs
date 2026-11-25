@@ -1209,6 +1209,56 @@ fn a_theme_is_selected_by_the_flag_by_the_config_and_from_the_view_menu_and_kept
     reopened.drained();
 }
 
+/// A theme picked in one repository is the one it opens in from then on,
+/// whatever is picked elsewhere, and a repository nothing was picked in opens
+/// in the one picked last anywhere, over the config's.
+#[test]
+fn a_theme_picked_in_a_repository_stays_its_own_and_one_with_none_opens_in_the_last_picked() {
+    let (first, second) = (repo(), repo());
+    let home = user_config("theme = \"neo\"\n");
+    let shell_in = |slave: &File, repo: &tempfile::TempDir| {
+        shell_command(slave, repo.path())
+            .env("XDG_CONFIG_HOME", home.path())
+            .spawn()
+            .expect("the niobe binary runs")
+    };
+    let quit = |terminal: &Terminal, shell: &mut Child| {
+        terminal.typed(CTRL_Q);
+        let (_, status) = ended(shell);
+        assert!(status.success(), "the shell ended with {status}");
+    };
+
+    // `modern`, picked in the first: `neo` is the config's.
+    let (picked, picked_slave) = Terminal::open();
+    let mut shell = shell_in(&picked_slave, &first);
+    picked.shows(NEO_MENU);
+    choose_theme(&picked, DOWN);
+    picked.shows(MODERN_MENU);
+    quit(&picked, &mut shell);
+
+    // The second has no theme of its own, and opens in the one picked last.
+    // `neo`, before `modern` in the list, is then picked there.
+    let (elsewhere, elsewhere_slave) = Terminal::open();
+    let mut shell = shell_in(&elsewhere_slave, &second);
+    elsewhere.shows(MODERN_MENU);
+    choose_theme(&elsewhere, UP);
+    elsewhere.shows(NEO_MENU);
+    quit(&elsewhere, &mut shell);
+
+    // The first still opens in its own, though `neo` was picked since.
+    let (back, back_slave) = Terminal::open();
+    let mut shell = shell_in(&back_slave, &first);
+    back.shows(MODERN_MENU);
+    quit(&back, &mut shell);
+
+    drop(picked_slave);
+    drop(elsewhere_slave);
+    drop(back_slave);
+    picked.drained();
+    elsewhere.drained();
+    back.drained();
+}
+
 /// Opens the View menu's theme list, moves its cursor by `step` and takes
 /// the theme under it.
 fn choose_theme(terminal: &Terminal, step: &[u8]) {

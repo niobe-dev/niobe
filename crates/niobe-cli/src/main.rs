@@ -320,13 +320,13 @@ struct Asked {
     notification: Option<niobe_tui::Notification>,
 }
 
-/// The palette a session opens in: see [`theme_in_force`].
+/// The palette a session opens in at `root`: see [`theme_in_force`].
 ///
 /// A name in the config that no theme answers to is reported at its line
 /// rather than passed over, whatever is in force: an operator who wrote a
 /// theme into their config and got another would read it as the file not
 /// being loaded.
-fn chosen_theme(asked: &Asked, loaded: &config::Loaded) -> Result<Theme, String> {
+fn chosen_theme(asked: &Asked, loaded: &config::Loaded, root: &Path) -> Result<Theme, String> {
     if let Some(problem) = themes::problem() {
         return Err(problem.to_owned());
     }
@@ -342,20 +342,29 @@ fn chosen_theme(asked: &Asked, loaded: &config::Loaded) -> Result<Theme, String>
                 .to_string()
         })?),
     };
+    let saved = preferences::saved();
     Ok(theme_in_force(
         asked.theme,
-        preferences::saved().theme(),
+        saved.project_theme(root),
+        saved.last_theme(),
         configured,
     ))
 }
 
-/// What `--theme` asked for; or the theme last chosen in the shell, where a
-/// theme still answers to its name — View › Theme… is the operator saying
-/// what they want now, which the config they wrote before does not undo —
-/// or what the config names; or the default.
-fn theme_in_force(asked: Option<Theme>, saved: Option<&str>, configured: Option<Theme>) -> Theme {
+/// What `--theme` asked for; or the theme last chosen in the shell in this
+/// project, or else in any, where a theme still answers to its name — View ›
+/// Theme… is the operator saying what they want now, which the config they
+/// wrote before does not undo — or what the config names; or the default,
+/// `cyber`.
+fn theme_in_force(
+    asked: Option<Theme>,
+    project: Option<&str>,
+    last: Option<&str>,
+    configured: Option<Theme>,
+) -> Theme {
     asked
-        .or_else(|| saved.and_then(Theme::by_name))
+        .or_else(|| project.and_then(Theme::by_name))
+        .or_else(|| last.and_then(Theme::by_name))
         .or(configured)
         .unwrap_or_default()
 }
@@ -460,7 +469,7 @@ fn shell(profile: Option<&str>, asked: &Asked, opening: Opening) -> Result<Optio
                 .with_alerts(alerts::alerts(loaded.config.notify(), asked.notification))
                 .with_decisions_asked(loaded.config.decisions())
                 .with_commands_handed(loaded.config.hand_commands())
-                .with_theme(chosen_theme(asked, &loaded)?),
+                .with_theme(chosen_theme(asked, &loaded, &root)?),
         ),
         &loaded,
     );
@@ -534,7 +543,8 @@ fn shell(profile: Option<&str>, asked: &Asked, opening: Opening) -> Result<Optio
             journal: &mut journal,
             backend: started.backend.bridge(),
             rules: &mut rules,
-            preferences: &mut preferences::ChoicesFile::for_profile(
+            preferences: &mut preferences::ChoicesFile::for_session(
+                &root,
                 selected.as_ref().map(|selected| selected.name),
             ),
             watch: &mut watching,
@@ -690,7 +700,7 @@ fn resume(
     let selected = loaded.select(profile)?;
     budget_fits(asked, selected.as_ref())?;
     let tap = backend::stream_tap(&root, std::env::var_os(backend::STREAM_DIR_VAR))?;
-    let theme = chosen_theme(asked, &loaded)?;
+    let theme = chosen_theme(asked, &loaded, &root)?;
 
     let started = Instant::now();
     // Without a terminal the session is only read and printed, so the store
@@ -852,7 +862,8 @@ fn resume(
             journal: &mut journal,
             backend: started.backend.bridge(),
             rules: &mut rules,
-            preferences: &mut preferences::ChoicesFile::for_profile(
+            preferences: &mut preferences::ChoicesFile::for_session(
+                &root,
                 selected.as_ref().map(|selected| selected.name),
             ),
             watch: &mut watching,
@@ -965,7 +976,7 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<Option<
     let selected = loaded.select(profile)?;
     budget_fits(asked, selected.as_ref())?;
     let tap = backend::stream_tap(&root, std::env::var_os(backend::STREAM_DIR_VAR))?;
-    let theme = chosen_theme(asked, &loaded)?;
+    let theme = chosen_theme(asked, &loaded, &root)?;
 
     let started = Instant::now();
     let events = backend::history(
@@ -1107,7 +1118,8 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<Option<
             journal: &mut journal,
             backend: started.backend.bridge(),
             rules: &mut rules,
-            preferences: &mut preferences::ChoicesFile::for_profile(
+            preferences: &mut preferences::ChoicesFile::for_session(
+                &root,
                 selected.as_ref().map(|selected| selected.name),
             ),
             watch: &mut watching,
@@ -1749,7 +1761,7 @@ fn consented(root: &Path, asked: &Asked) -> Result<Option<config::Loaded>, Strin
     while let Some(untrusted) = &loaded.untrusted {
         let behind = App::new(repo::describe(root))
             .with_depth(asked.depth)
-            .with_theme(chosen_theme(asked, &loaded)?);
+            .with_theme(chosen_theme(asked, &loaded, root)?);
         let answer = niobe_tui::ask_trust(behind, consent::question(untrusted))
             .map_err(|e| e.to_string())?;
         match answer {
@@ -2585,8 +2597,10 @@ THEME:
     cyber is green and magenta on black, classic is DOS blue, neo is green on
     black and modern is an editor's grey. --theme <name> opens the shell in
     one, theme = \"neo\" at the top of a config makes it the one every session
-    opens in, and View › Theme… picks another, which the next session opens
-    in too, over the config's, until another is picked.
+    opens in, and View › Theme… picks another, which the next session in the
+    same repository opens in, over the config's, until another is picked
+    there. A repository nothing was picked in opens in the theme picked last
+    anywhere, then the config's, then cyber.
 
     classic is drawn in the sixteen colours the terminal names, so your own
     colour scheme is what they mean. cyber, neo and modern are drawn in their
@@ -2728,23 +2742,48 @@ mod tests {
     }
 
     #[test]
-    fn a_theme_asked_for_beats_the_one_last_chosen_which_beats_the_configs() {
+    fn a_theme_asked_for_beats_the_project_s_which_beats_the_last_chosen_then_the_configs() {
         let theme = |name: &str| Theme::by_name(name).expect("a bundled theme");
-        let (asked, saved, configured) = (theme("neo"), theme("classic"), theme("modern"));
+        let (asked, project, last, configured) = (
+            theme("cyber"),
+            theme("classic"),
+            theme("modern"),
+            theme("neo"),
+        );
+        let in_force = |asked, project, last, configured: Option<Theme>| {
+            theme_in_force(asked, project, last, configured).name
+        };
 
         assert_eq!(
-            theme_in_force(Some(asked), Some(saved.name), Some(configured)).name,
+            in_force(
+                Some(asked),
+                Some(project.name),
+                Some(last.name),
+                Some(configured)
+            ),
             asked.name
         );
         assert_eq!(
-            theme_in_force(None, Some(saved.name), Some(configured)).name,
-            saved.name
+            in_force(None, Some(project.name), Some(last.name), Some(configured)),
+            project.name
         );
         assert_eq!(
-            theme_in_force(None, Some("a theme since deleted"), Some(configured)).name,
+            in_force(None, None, Some(last.name), Some(configured)),
+            last.name
+        );
+        assert_eq!(
+            in_force(None, Some("a theme since deleted"), Some(last.name), None),
+            last.name
+        );
+        assert_eq!(
+            in_force(None, None, Some("a theme since deleted"), Some(configured)),
             configured.name
         );
-        assert_eq!(theme_in_force(None, None, None).name, Theme::default().name);
+    }
+
+    #[test]
+    fn with_nothing_chosen_or_configured_a_session_opens_in_cyber() {
+        assert_eq!(theme_in_force(None, None, None, None).name, "CYBER");
     }
 
     /// A standard error that cannot be written to, the way the terminal a
