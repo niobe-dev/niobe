@@ -2310,6 +2310,11 @@ THEMES:
         [borders]
         border = \"rounded\"
 
+    Code in a reply and in a diff is highlighted in colours of its own:
+    syntax_keyword, syntax_type, syntax_function, syntax_property,
+    syntax_string, syntax_number, syntax_constant, syntax_comment and
+    syntax_attribute.
+
     Every colour left out is the base's. A colour in hex is drawn only on a
     terminal that draws 24-bit colour; where it has the sixteen, the base's
     sixteen-colour table is used with the colours spelled as names laid over

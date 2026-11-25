@@ -10,16 +10,21 @@
 //! unchanged line its number after. The sign is what tells the rows apart,
 //! so the diff still reads on a terminal with no colour.
 //!
-//! No syntax highlighting. A highlighter is a dependency the release binary's
-//! size budget pays for and a grammar per language, and the sign and the
-//! line's colour already say what changed; what a keyword is, the operator
-//! can read.
+//! Where the file is in a language the highlighter reads, its lines are
+//! highlighted: an unchanged line always, and a changed one where the theme
+//! washes it in the added or removed colour, since that wash, with the sign,
+//! is then what says it changed. Where there is no wash — every
+//! sixteen-colour table — a changed line keeps its colour, which is what
+//! tells it from its neighbours. The file before the change and the file
+//! after are read apart, so a comment a removed line opens runs on through
+//! the lines removed with it and not through those added.
 
 use niobe_core::diff::{Hunk, Line as DiffLine};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 
 use crate::app::{Change, Gate};
+use crate::syntax::{Highlighter, Language, Token, paint};
 use crate::text;
 use crate::theme::Theme;
 
@@ -61,8 +66,9 @@ fn cuts(rows: usize) -> bool {
 /// One row of a diff before it is drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Row<'a> {
-    /// A line, with the number the diff shows beside it.
-    Line(u64, &'a DiffLine),
+    /// A line, with the number the diff shows beside it and where it is
+    /// among the change's lines, counted across its hunks.
+    Line(u64, &'a DiffLine, usize),
     /// Unchanged lines left out between two that are shown.
     Elided,
 }
@@ -73,6 +79,7 @@ enum Row<'a> {
 /// which the backend already separated for that reason.
 fn rows(hunks: &[Hunk]) -> Vec<Row<'_>> {
     let mut rows = Vec::new();
+    let mut position = 0;
     for hunk in hunks {
         let lines = hunk.lines();
         let near = near_a_change(lines);
@@ -92,6 +99,7 @@ fn rows(hunks: &[Hunk]) -> Vec<Row<'_>> {
                 DiffLine::Removed(_) => old = old.saturating_add(1),
                 DiffLine::Added(_) => new = new.saturating_add(1),
             }
+            position += 1;
             if !keep {
                 dropped = true;
                 continue;
@@ -100,7 +108,7 @@ fn rows(hunks: &[Hunk]) -> Vec<Row<'_>> {
                 rows.push(Row::Elided);
             }
             dropped = false;
-            rows.push(Row::Line(number, line));
+            rows.push(Row::Line(number, line, position - 1));
         }
     }
     rows
@@ -152,7 +160,7 @@ pub(crate) fn lines(
     let number_width = rows
         .iter()
         .filter_map(|row| match row {
-            Row::Line(number, _) => Some(*number),
+            Row::Line(number, _, _) => Some(*number),
             Row::Elided => None,
         })
         .max()
@@ -163,10 +171,11 @@ pub(crate) fn lines(
         true => rows.len(),
         false => MAX_ROWS,
     };
+    let mut reader = Reader::new(change);
     let mut lines: Vec<Line<'static>> = rows
         .iter()
         .take(shown)
-        .map(|row| draw_row(*row, number_width, width, theme))
+        .map(|row| draw_row(*row, number_width, width, theme, &mut reader))
         .collect();
     let beyond = rows.len().saturating_sub(MAX_ROWS);
     if cut {
@@ -183,7 +192,8 @@ pub(crate) fn lines(
 /// from a change left out, and cut at [`MAX_ROWS`] rows unless `open`.
 ///
 /// Unnumbered, since a proposed edit says what text it replaces and not
-/// where in the file that text is. And wrapped rather than cut at the edge,
+/// where in the file that text is. Highlighted in `language`, as [`lines`]
+/// highlights a change made. And wrapped rather than cut at the edge,
 /// unlike a change already made: what is still to be approved is read whole.
 ///
 /// With the rows, how many lines of the change the marker stands for and are
@@ -193,6 +203,7 @@ pub(crate) fn lines(
 /// width they were counted at, by whoever holds `lines`: see [`RowCount`].
 pub(crate) fn proposed(
     lines: &[DiffLine],
+    language: Option<Language>,
     width: usize,
     open: bool,
     theme: &Theme,
@@ -210,9 +221,15 @@ pub(crate) fn proposed(
     };
     let known = counted.at(width);
     let mut uncounted = 0;
+    let mut sides = language.map(Sides::new);
     for (line, keep) in lines.iter().zip(near_a_change(lines)) {
         if !keep {
             dropped = true;
+            // Read only while rows are still laid out, so a comment it opens
+            // colours them; past the ceiling nothing more is drawn.
+            if let Some(sides) = sides.as_mut().filter(|_| rows.len() <= ceiling) {
+                sides.read(line, line.text());
+            }
             continue;
         }
         if rows.len() > ceiling && known.is_some() {
@@ -234,7 +251,7 @@ pub(crate) fn proposed(
         // minified bundle is one line of megabytes — so it is laid out only
         // as far as the ceiling and the rest of its rows are counted.
         let left = (ceiling + 1).saturating_sub(rows.len());
-        let (laid, all) = wrapped_row(line, width, left, theme);
+        let (laid, all) = wrapped_row(line, width, left, theme, sides.as_mut());
         uncounted += all.saturating_sub(laid.len());
         rows.extend(laid);
     }
@@ -321,19 +338,43 @@ fn rows_of(line: &DiffLine, width: usize) -> usize {
 /// One line of a proposed change as the first `rows` of the rows it wraps
 /// to — its sign on the first, and the rest under its text — and how many
 /// rows it wraps to in all, counted without laying out the ones not drawn.
+/// Highlighted where `sides` reads the change's language and the line is one
+/// [`highlights`] colours.
 fn wrapped_row(
     line: &DiffLine,
     width: usize,
     rows: usize,
     theme: &Theme,
+    sides: Option<&mut Sides>,
 ) -> (Vec<Line<'static>>, usize) {
     let (sign, sign_colour, text_colour, bg) = look(line, theme);
+    let base = Style::new().fg(text_colour).bg(bg);
     let room = row_room(width);
     let all = rows_of(line, width);
     let mut parts = text::wrap_words_exact_first(line.text(), room, rows);
     if parts.is_empty() && rows > 0 {
         parts.push(String::new());
     }
+    let (source, tokens) = match sides {
+        // A line past the highlighter's reach is drawn plain: it reads only
+        // the start of it, and laying the whole of it out again to colour
+        // that start would cost what the cut is there to save.
+        Some(sides) if line.text().len() <= crate::syntax::MAX_LINE_BYTES => {
+            let source = text::laid_out(line.text());
+            let tokens = sides.read(line, &source);
+            (source, tokens)
+        }
+        Some(sides) => {
+            sides.read(line, line.text());
+            (std::borrow::Cow::Borrowed(""), Vec::new())
+        }
+        None => (std::borrow::Cow::Borrowed(""), Vec::new()),
+    };
+    let tokens = match highlights(line, theme) {
+        true => tokens,
+        false => Vec::new(),
+    };
+    let mut from = 0;
     let laid = parts
         .into_iter()
         .enumerate()
@@ -342,15 +383,126 @@ fn wrapped_row(
                 0 => sign,
                 _ => " ",
             };
-            Line::from(vec![
+            let mut spans = vec![
                 Span::styled(sign, Style::new().fg(sign_colour).bg(bg).bold()),
                 Span::styled(" ", Style::new().bg(bg)),
-                Span::styled(text::pad(&part, room), Style::new().fg(text_colour).bg(bg)),
-            ])
-            .style(Style::new().bg(bg))
+            ];
+            spans.extend(coloured(&source, &tokens, from, &part, room, base, theme));
+            from += part.len();
+            Line::from(spans).style(Style::new().bg(bg))
         })
         .collect();
     (laid, all)
+}
+
+/// `piece` of a line — what `source` holds from byte `from` — as spans in
+/// `base` with each of `tokens` in its colour, padded to `room` cells so
+/// the row's background reaches the edge.
+fn coloured(
+    source: &str,
+    tokens: &[Token],
+    from: usize,
+    piece: &str,
+    room: usize,
+    base: Style,
+    theme: &Theme,
+) -> Vec<Span<'static>> {
+    let used = text::width(piece);
+    let mut spans = match tokens.is_empty() {
+        true => vec![Span::styled(piece.to_owned(), base)],
+        false => paint::spans(source, tokens, from, piece, base, theme),
+    };
+    if used < room {
+        spans.push(Span::styled(" ".repeat(room - used), base));
+    }
+    spans
+}
+
+/// Whether `line` is drawn highlighted where its file's language is read:
+/// an unchanged line always, and a changed one only where the theme washes
+/// it, since otherwise its colour is what says it changed.
+fn highlights(line: &DiffLine, theme: &Theme) -> bool {
+    match line {
+        DiffLine::Context(_) => true,
+        DiffLine::Removed(_) => theme.del_bg != theme.diff_bg,
+        DiffLine::Added(_) => theme.add_bg != theme.diff_bg,
+    }
+}
+
+/// The two files a diff is read from, each by a highlighter of its own:
+/// the one before the change, whose lines are the unchanged and the removed
+/// ones, and the one after, whose lines are the unchanged and the added.
+struct Sides {
+    before: Highlighter,
+    after: Highlighter,
+}
+
+impl Sides {
+    fn new(language: Language) -> Self {
+        Self {
+            before: Highlighter::new(language),
+            after: Highlighter::new(language),
+        }
+    }
+
+    /// The tokens of `line`, drawn as `text`, read in the file it is a line
+    /// of — and an unchanged line in both, so each goes on from it.
+    fn read(&mut self, line: &DiffLine, text: &str) -> Vec<Token> {
+        match line {
+            DiffLine::Context(_) => {
+                self.before.line(text);
+                self.after.line(text)
+            }
+            DiffLine::Removed(_) => self.before.line(text),
+            DiffLine::Added(_) => self.after.line(text),
+        }
+    }
+}
+
+/// Every line of a change's hunks, in order.
+type Lines<'a> =
+    std::iter::FlatMap<std::slice::Iter<'a, Hunk>, &'a [DiffLine], fn(&'a Hunk) -> &'a [DiffLine]>;
+
+/// A change's lines read in order as its rows are drawn: the lines between
+/// two rows — the unchanged ones left out — read too, so what one of them
+/// opens still colours the rows after it.
+struct Reader<'a> {
+    sides: Option<Sides>,
+    lines: Lines<'a>,
+    /// How many of the change's lines have been read.
+    read: usize,
+}
+
+impl<'a> Reader<'a> {
+    fn new(change: &'a Change) -> Self {
+        let lines: fn(&'a Hunk) -> &'a [DiffLine] = Hunk::lines;
+        Self {
+            sides: change.language().map(Sides::new),
+            lines: change.hunks().iter().flat_map(lines),
+            read: 0,
+        }
+    }
+
+    /// The tokens of the line at `position` among the change's lines, drawn
+    /// as `text`, having read every line before it. None where the change is
+    /// in no language the highlighter reads.
+    fn tokens(&mut self, position: usize, text: &str) -> Vec<Token> {
+        let Some(sides) = self.sides.as_mut() else {
+            return Vec::new();
+        };
+        while self.read < position {
+            let Some(line) = self.lines.next() else {
+                return Vec::new();
+            };
+            sides.read(line, line.text());
+            self.read += 1;
+        }
+        let Some(line) = self.lines.next() else {
+            return Vec::new();
+        };
+        self.read += 1;
+        sides.read(line, text)
+    }
 }
 
 /// A line's sign, the colour of its sign or number, of its text, and of what
@@ -382,27 +534,41 @@ fn digits(number: u64) -> usize {
 }
 
 /// One row: the number right-aligned in its column, the sign, and the line
-/// cut to what is left, padded so the row's background reaches the edge.
+/// cut to what is left, padded so the row's background reaches the edge, and
+/// highlighted as [`highlights`] says, by `reader`.
 ///
 /// A line too long for the pane is cut rather than wrapped, so a line of the
 /// file is always one row and one number.
-fn draw_row(row: Row<'_>, number_width: usize, width: usize, theme: &Theme) -> Line<'static> {
-    let Row::Line(number, line) = row else {
+fn draw_row(
+    row: Row<'_>,
+    number_width: usize,
+    width: usize,
+    theme: &Theme,
+    reader: &mut Reader<'_>,
+) -> Line<'static> {
+    let Row::Line(number, line, position) = row else {
         return elided(number_width, width, theme);
     };
     let (sign, number_colour, text_colour, bg) = look(line, theme);
     let room = width.saturating_sub(number_width + 3);
-    let shown = text::truncate(&text::expand_tabs(line.text()), room);
-    Line::from(vec![
+    let source = text::expand_tabs(line.text());
+    let shown = text::truncate(&source, room);
+    let tokens = reader.tokens(position, &source);
+    let tokens = match highlights(line, theme) {
+        true => tokens,
+        false => Vec::new(),
+    };
+    let base = Style::new().fg(text_colour).bg(bg);
+    let mut spans = vec![
         Span::styled(
             format!("{number:>number_width$} "),
             Style::new().fg(number_colour).bg(bg),
         ),
         Span::styled(sign, Style::new().fg(number_colour).bg(bg).bold()),
         Span::styled(" ", Style::new().bg(bg)),
-        Span::styled(text::pad(&shown, room), Style::new().fg(text_colour).bg(bg)),
-    ])
-    .style(Style::new().bg(bg))
+    ];
+    spans.extend(coloured(&source, &tokens, 0, &shown, room, base, theme));
+    Line::from(spans).style(Style::new().bg(bg))
 }
 
 /// The row under a diff that is cut (see [`is_cut`]): how many rows are beyond
@@ -461,6 +627,7 @@ fn plural(count: usize, one: &'static str, many: &'static str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::syntax::Language;
     use crate::theme::CLASSIC;
     use niobe_core::event::Mode;
     use ratatui::style::Color;
@@ -504,7 +671,156 @@ mod tests {
     }
 
     fn change(hunks: Vec<Hunk>, gate: Option<Gate>) -> Change {
-        Change::new(hunks, gate)
+        Change::new(hunks, gate, None)
+    }
+
+    /// Each word of the text `rows` draw after their first `lead` spans —
+    /// a number, a sign and a blank, or a sign and a blank — with the
+    /// colour and background it is drawn in.
+    fn words(rows: &[Line<'_>], lead: usize) -> Vec<(String, Option<Color>, Option<Color>)> {
+        rows.iter()
+            .flat_map(|row| row.spans.iter().skip(lead))
+            .filter(|span| !span.content.trim().is_empty())
+            .map(|span| (span.content.trim().to_owned(), span.style.fg, span.style.bg))
+            .collect()
+    }
+
+    fn rust_change(lines: Vec<DiffLine>) -> Change {
+        Change::new(vec![hunk(1, 1, lines)], None, Some(Language::Rust))
+    }
+
+    #[test]
+    fn an_unchanged_line_in_a_language_the_highlighter_reads_is_highlighted_on_the_diffs_background()
+     {
+        let theme = CLASSIC;
+        let diff = rust_change(vec![context("let n = 1;"), added("x")]);
+        let rows = lines(&diff, 40, false, &theme);
+        assert_eq!(
+            words(&rows[..1], 3),
+            [
+                (
+                    "let".to_owned(),
+                    Some(theme.syntax.keyword),
+                    Some(theme.diff_bg)
+                ),
+                ("n =".to_owned(), Some(theme.fg), Some(theme.diff_bg)),
+                (
+                    "1".to_owned(),
+                    Some(theme.syntax.number),
+                    Some(theme.diff_bg)
+                ),
+                (";".to_owned(), Some(theme.fg), Some(theme.diff_bg)),
+            ]
+        );
+        assert_eq!(
+            drawn_as(&diff, 40, false)[0],
+            format!("{:<40}", "1   let n = 1;"),
+            "the row reads as it did before it was coloured"
+        );
+    }
+
+    #[test]
+    fn a_changed_line_is_highlighted_where_its_wash_marks_it_and_keeps_its_colour_where_none_does()
+    {
+        let deep = crate::theme::MODERN_TRUE;
+        let diff = rust_change(vec![removed("let a = 1;"), added("let b = 2;")]);
+        let rows = lines(&diff, 40, false, &deep);
+        assert_eq!(
+            words(&rows, 3)
+                .into_iter()
+                .filter(|(word, _, _)| word == "let")
+                .collect::<Vec<_>>(),
+            [
+                (
+                    "let".to_owned(),
+                    Some(deep.syntax.keyword),
+                    Some(deep.del_bg)
+                ),
+                (
+                    "let".to_owned(),
+                    Some(deep.syntax.keyword),
+                    Some(deep.add_bg)
+                ),
+            ]
+        );
+        let sixteen = CLASSIC;
+        let rows = lines(&diff, 40, false, &sixteen);
+        assert_eq!(
+            words(&rows, 3),
+            [
+                (
+                    "let a = 1;".to_owned(),
+                    Some(sixteen.del),
+                    Some(sixteen.del_bg)
+                ),
+                (
+                    "let b = 2;".to_owned(),
+                    Some(sixteen.add),
+                    Some(sixteen.add_bg)
+                ),
+            ],
+            "with no wash, the line's colour is what says it changed"
+        );
+    }
+
+    #[test]
+    fn a_comment_a_removed_line_opens_runs_on_in_the_old_file_and_not_in_the_new() {
+        let theme = crate::theme::MODERN_TRUE;
+        let diff = rust_change(vec![
+            removed("/* gone"),
+            added("let kept = 1;"),
+            removed("still gone */"),
+            context("fn f() {}"),
+        ]);
+        let rows = lines(&diff, 40, false, &theme);
+        let colour_of = |word: &str| {
+            words(&rows, 3)
+                .into_iter()
+                .find(|(drawn, _, _)| drawn == word)
+                .and_then(|(_, fg, _)| fg)
+        };
+        assert_eq!(colour_of("still gone */"), Some(theme.syntax.comment));
+        assert_eq!(colour_of("let"), Some(theme.syntax.keyword));
+        assert_eq!(colour_of("fn"), Some(theme.syntax.keyword));
+    }
+
+    #[test]
+    fn a_change_in_no_language_the_highlighter_reads_is_drawn_as_before() {
+        let theme = CLASSIC;
+        let diff = change(
+            vec![hunk(1, 1, vec![context("let n = 1;"), added("x")])],
+            None,
+        );
+        assert_eq!(
+            words(&lines(&diff, 40, false, &theme)[..1], 3),
+            [("let n = 1;".to_owned(), Some(theme.fg), Some(theme.diff_bg))]
+        );
+    }
+
+    #[test]
+    fn a_proposed_line_wrapped_to_two_rows_is_highlighted_on_both() {
+        let theme = crate::theme::MODERN_TRUE;
+        let line = [added("let s = \"one two three four five\";")];
+        let (rows, _) = proposed(
+            &line,
+            Some(Language::Rust),
+            22,
+            false,
+            &theme,
+            &RowCount::default(),
+        );
+        let strings: Vec<String> = words(&rows, 2)
+            .into_iter()
+            .filter(|(_, fg, _)| *fg == Some(theme.syntax.string))
+            .map(|(word, _, _)| word)
+            .collect();
+        assert_eq!(strings, ["\"one two", "three four five\""]);
+        assert!(
+            rows.iter()
+                .flat_map(|row| row.spans.iter())
+                .all(|span| span.style.bg == Some(theme.add_bg)),
+            "every cell of the row, the padding too, is on the added line's wash"
+        );
     }
 
     /// The mock's own example: two lines replaced by five, numbered on each
@@ -794,14 +1110,14 @@ mod tests {
                 .collect()
         };
 
-        let (cut, beyond) = proposed(&line, 22, false, &CLASSIC, &RowCount::default());
+        let (cut, beyond) = proposed(&line, None, 22, false, &CLASSIC, &RowCount::default());
         let cut = text(&cut);
         assert_eq!(cut.len(), MAX_ROWS + 1);
         assert_eq!(cut[1], format!("+ {}", "x".repeat(20)));
         assert_eq!(cut[MAX_ROWS].trim_end(), "… 16 more rows");
         assert_eq!(beyond, 16);
 
-        let (open, beyond) = proposed(&line, 22, true, &CLASSIC, &RowCount::default());
+        let (open, beyond) = proposed(&line, None, 22, true, &CLASSIC, &RowCount::default());
         let open = text(&open);
         assert_eq!(
             open.len(),
@@ -818,17 +1134,17 @@ mod tests {
     #[test]
     fn lines_past_the_cut_count_every_row_they_wrap_to() {
         let wide = [added(&"x".repeat(700)), added(&"x".repeat(700))];
-        let (open, _) = proposed(&wide, 22, true, &CLASSIC, &RowCount::default());
+        let (open, _) = proposed(&wide, None, 22, true, &CLASSIC, &RowCount::default());
         assert_eq!(open.len(), 70 + 1, "every row of both lines and the marker");
 
-        let (_, beyond) = proposed(&wide, 22, false, &CLASSIC, &RowCount::default());
+        let (_, beyond) = proposed(&wide, None, 22, false, &CLASSIC, &RowCount::default());
         assert_eq!(beyond, 70 - MAX_ROWS);
 
         let mut apart = vec![added(&"x".repeat(700))];
         apart.extend((0..2 * CONTEXT_LINES + 1).map(|_| context("same")));
         apart.push(added("y"));
-        let (open, _) = proposed(&apart, 22, true, &CLASSIC, &RowCount::default());
-        let (_, beyond) = proposed(&apart, 22, false, &CLASSIC, &RowCount::default());
+        let (open, _) = proposed(&apart, None, 22, true, &CLASSIC, &RowCount::default());
+        let (_, beyond) = proposed(&apart, None, 22, false, &CLASSIC, &RowCount::default());
         assert_eq!(
             beyond,
             open.len() - 1 - MAX_ROWS,
@@ -853,8 +1169,8 @@ mod tests {
             (22, false),
             (22, true),
         ] {
-            let laid = proposed(&lines, width, open, &CLASSIC, &kept);
-            let afresh = proposed(&lines, width, open, &CLASSIC, &RowCount::default());
+            let laid = proposed(&lines, None, width, open, &CLASSIC, &kept);
+            let afresh = proposed(&lines, None, width, open, &CLASSIC, &RowCount::default());
             assert_eq!(laid, afresh, "{width} columns, open: {open}");
         }
     }

@@ -163,6 +163,12 @@ fn no_content_puts_a_control_or_a_direction_mark_on_the_terminal() {
             agent: None,
         }])
     }));
+    all.extend(check("assistant-code-highlighted", |p| {
+        with(vec![Event::AssistantMessage {
+            text: format!("```rust\nfn {p}() {{ \"{p}\" }} // {p}\n/* {p}\n{p} */\n```"),
+            agent: None,
+        }])
+    }));
     all.extend(check("delta", |p| {
         with(vec![Event::AssistantDelta {
             text: format!("stream {p} x"),

@@ -6,8 +6,9 @@
 //! A reply is CommonMark with GitHub's tables, strikethrough and task lists,
 //! and shown raw it reads as asterisks, backticks and pipes. It is parsed here
 //! and drawn as styled lines: emphasis as bold and italic, code in a colour of
-//! its own, lists with hanging indents, code blocks behind a gutter and tables
-//! with their columns lined up.
+//! its own, lists with hanging indents, code blocks behind a gutter —
+//! highlighted where the fence names a language [`crate::syntax`] reads — and
+//! tables with their columns lined up.
 //!
 //! Wrapping is done here, word by word across the styled runs, rather than by
 //! the widget. The transcript scrolls by wrapped lines, so it has to know how
@@ -24,6 +25,7 @@ use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Par
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
+use crate::syntax::{Highlighter, Language, paint};
 use crate::text;
 use crate::theme::Theme;
 
@@ -172,26 +174,29 @@ pub(crate) fn carries_on(above: char, below: char) -> bool {
 /// with the line above, cut for room. `None` for any other row.
 ///
 /// A code row is drawn as the marks of the blocks around it, then the
-/// gutter, then one span of code, so the gutter is the span before the
-/// last: drawn as nothing but the gutter, in the style the gutter is drawn
-/// in, with only blanks and blocks' marks before it. Words of a reply that
-/// happen to read `│ ` are drawn in the style of words. Asked of every row a
-/// copy reads, so the one span is looked at first, and the rest only for a
-/// row it could be.
+/// gutter, then its code — one span, or one for each token of a highlighted
+/// line — so the gutter is the first span that is not a mark or a blank:
+/// drawn as nothing but the gutter, in the style the gutter is drawn in.
+/// Words of a reply that happen to read `│ ` are drawn in the style of
+/// words. Asked of every row a copy reads, so it looks no further than the
+/// first span that is neither.
 pub(crate) fn code_gutter(spans: &[Span<'_>], theme: &Theme) -> Option<(usize, bool)> {
-    let at = spans.len().checked_sub(2)?;
-    let gutter = spans.get(at)?;
-    let cut = match gutter.content.as_ref() {
-        CODE_GUTTER => false,
-        CODE_CUT => true,
-        _ => return None,
-    };
-    let behind_marks = spans.get(..at)?.iter().all(|span| {
-        span.content
-            .chars()
-            .all(|c| c.is_whitespace() || is_carried_mark(c))
-    });
-    (behind_marks && gutter.style == gutter_style(theme)).then_some((at, cut))
+    for (at, span) in spans.iter().enumerate() {
+        let cut = match span.content.as_ref() {
+            CODE_GUTTER => false,
+            CODE_CUT => true,
+            content
+                if content
+                    .chars()
+                    .all(|c| c.is_whitespace() || is_carried_mark(c)) =>
+            {
+                continue;
+            }
+            _ => return None,
+        };
+        return (span.style == gutter_style(theme) && at + 1 < spans.len()).then_some((at, cut));
+    }
+    None
 }
 
 /// The style a code block's gutter is drawn in.
@@ -371,6 +376,9 @@ struct Renderer<'t> {
     lists: Vec<Option<u64>>,
     /// A fenced or indented code block being gathered.
     code: Option<String>,
+    /// The language the code block being gathered is highlighted in: the
+    /// one its fence's label names, where the highlighter reads it.
+    code_language: Option<Language>,
     table: Option<Table>,
     /// For each link or image open, where it leads and how much text had
     /// been gathered when it opened, so its own text can be told apart.
@@ -392,6 +400,7 @@ impl<'t> Renderer<'t> {
             items: 0,
             lists: Vec::new(),
             code: None,
+            code_language: None,
             table: None,
             destinations: Vec::new(),
             unbroken: false,
@@ -543,10 +552,12 @@ impl<'t> Renderer<'t> {
     fn start_code_block(&mut self, kind: CodeBlockKind<'_>) {
         self.flush();
         self.gap();
+        self.code_language = None;
         if let CodeBlockKind::Fenced(label) = kind
             && !label.is_empty()
         {
             self.code_label(&label);
+            self.code_language = Language::from_label(&label);
         }
         self.code = Some(String::new());
     }
@@ -763,27 +774,39 @@ impl<'t> Renderer<'t> {
     /// A code block's lines behind the gutter, as written: code is not
     /// rewrapped, because where its lines break is part of what it says. A line
     /// wider than the pane is cut into pieces, each after the first behind
-    /// [`CODE_CUT`]. Tabs are expanded, since a cell cannot draw one.
+    /// [`CODE_CUT`]. Tabs are expanded, since a cell cannot draw one. In a
+    /// language the highlighter reads, each piece is coloured by what its
+    /// tokens are, and what is none of them is drawn in the code colour.
     fn code_lines(&mut self, code: &str) {
         let room = self.room().saturating_sub(text::width(CODE_GUTTER)).max(1);
         let gutter = gutter_style(self.theme);
         let style = Style::new().fg(self.theme.code);
+        let mut highlighter = self.code_language.map(Highlighter::new);
         for line in code.trim_end_matches('\n').split('\n') {
-            if line.is_empty() {
+            let expanded = text::expand_tabs(line);
+            let tokens = highlighter
+                .as_mut()
+                .map(|highlighter| highlighter.line(&expanded))
+                .unwrap_or_default();
+            if expanded.is_empty() {
                 self.emit(vec![
                     Span::styled(CODE_GUTTER, gutter),
                     Span::styled("", style),
                 ]);
-            } else {
-                let expanded = text::expand_tabs(line);
-                let pieces = text::split_to_width(&expanded, room);
-                for (at, piece) in pieces.into_iter().enumerate() {
-                    let mark = if at == 0 { CODE_GUTTER } else { CODE_CUT };
-                    self.emit(vec![
-                        Span::styled(mark, gutter),
-                        Span::styled(piece.to_owned(), style),
-                    ]);
-                }
+                continue;
+            }
+            let mut from = 0;
+            for (at, piece) in text::split_to_width(&expanded, room)
+                .into_iter()
+                .enumerate()
+            {
+                let mark = if at == 0 { CODE_GUTTER } else { CODE_CUT };
+                let mut spans = vec![Span::styled(mark, gutter)];
+                spans.extend(paint::spans(
+                    &expanded, &tokens, from, piece, style, self.theme,
+                ));
+                from += piece.len();
+                self.emit(spans);
             }
         }
     }
@@ -1381,6 +1404,98 @@ mod tests {
         assert_eq!(gutters("> ```\n> ab\n> ```"), [Some((1, false))]);
         assert_eq!(gutters("│ `x`"), [None], "words that read `│ ` are words");
         assert_eq!(gutters("┆ **x**"), [None]);
+        assert_eq!(
+            gutters("```rust\nlet x = 1; // y\n```"),
+            [None, Some((0, false)), Some((0, true)), Some((0, true))],
+            "a highlighted row's gutter is found before its many spans"
+        );
+    }
+
+    /// The colour of each piece of `text` in the code rows of `source`
+    /// drawn in `theme`, behind their gutters.
+    fn code_colours(source: &str, theme: &Theme) -> Vec<(String, Option<ratatui::style::Color>)> {
+        render(source, 60, theme)
+            .iter()
+            .filter_map(|line| {
+                let (at, _) = code_gutter(&line.spans, theme)?;
+                Some(line.spans[at + 1..].to_vec())
+            })
+            .flatten()
+            .filter(|span| !span.content.trim().is_empty())
+            .map(|span| (span.content.trim().to_owned(), span.style.fg))
+            .collect()
+    }
+
+    #[test]
+    fn a_code_block_in_a_language_it_names_is_highlighted_in_the_themes_colours() {
+        for theme in [CLASSIC, crate::theme::MODERN_TRUE] {
+            let colours = code_colours(
+                "```rust\nfn main() {\n    run(\"x\"); // go\n}\n```",
+                &theme,
+            );
+            let s = theme.syntax;
+            assert_eq!(
+                colours,
+                [
+                    ("fn".to_owned(), Some(s.keyword)),
+                    ("main".to_owned(), Some(s.function)),
+                    ("() {".to_owned(), Some(theme.code)),
+                    ("run".to_owned(), Some(s.function)),
+                    ("(".to_owned(), Some(theme.code)),
+                    ("\"x\"".to_owned(), Some(s.string)),
+                    (");".to_owned(), Some(theme.code)),
+                    ("// go".to_owned(), Some(s.comment)),
+                    ("}".to_owned(), Some(theme.code)),
+                ],
+                "in {}",
+                theme.name
+            );
+        }
+    }
+
+    #[test]
+    fn a_comment_left_open_in_a_code_block_colours_the_lines_until_it_closes() {
+        let colours = code_colours("```c\n/* one\ntwo */ int x;\n```", &CLASSIC);
+        assert_eq!(
+            colours,
+            [
+                ("/* one".to_owned(), Some(CLASSIC.syntax.comment)),
+                ("two */".to_owned(), Some(CLASSIC.syntax.comment)),
+                ("int".to_owned(), Some(CLASSIC.syntax.type_name)),
+                ("x;".to_owned(), Some(CLASSIC.code)),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_code_block_in_no_language_it_reads_stays_in_the_code_colour() {
+        for source in [
+            "```\nfn main() {}\n```",
+            "```text\nfn main() {}\n```",
+            "    fn main() {}",
+        ] {
+            assert_eq!(
+                code_colours(source, &CLASSIC),
+                [("fn main() {}".to_owned(), Some(CLASSIC.code))],
+                "{source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_highlighted_line_cut_for_room_keeps_its_colours_on_both_rows() {
+        let lines = render("```rust\nlet name = \"abcdefgh\";\n```", 14, &CLASSIC);
+        assert_eq!(
+            plain(&lines),
+            ["╭ rust", "│ let name = \"", "┆ abcdefgh\";"]
+        );
+        let strings: Vec<String> = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .filter(|span| span.style.fg == Some(CLASSIC.syntax.string))
+            .map(|span| span.content.to_string())
+            .collect();
+        assert_eq!(strings, ["\"", "abcdefgh\""]);
     }
 
     #[test]

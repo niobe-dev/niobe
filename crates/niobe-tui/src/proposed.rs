@@ -18,6 +18,7 @@ use niobe_core::{Action, Proposal};
 use ratatui::style::Style;
 use ratatui::text::Line;
 
+use crate::syntax::Language;
 use crate::text;
 use crate::theme::Theme;
 use crate::{arguments, hunks, markdown};
@@ -212,10 +213,11 @@ impl Proposed {
             self.others_under(input, width, theme, &mut rows, &mut markers);
             return Some(Call { rows, markers });
         }
-        let (subject, said) = match (self.proposal.action(), &self.lines) {
+        let (subject, said, language) = match (self.proposal.action(), &self.lines) {
             (Action::Replace { path, every, .. }, Some(_)) => (
                 path,
                 every.then_some("replaces every occurrence in the file".to_owned()),
+                Language::from_path(path),
             ),
             (Action::Replace { .. }, None) => return None,
             (
@@ -225,8 +227,12 @@ impl Proposed {
                     existed,
                 },
                 _,
-            ) => (path, Some(written(content, *existed))),
-            (Action::Command { command }, _) => (command, None),
+            ) => (
+                path,
+                Some(written(content, *existed)),
+                Language::from_path(path),
+            ),
+            (Action::Command { command }, _) => (command, None, None),
             (Action::Plan { .. } | Action::Questions { .. } | Action::Skill { .. }, _) => {
                 return None;
             }
@@ -245,7 +251,8 @@ impl Proposed {
         );
         if let Some(lines) = self.lines.as_deref().filter(|lines| !lines.is_empty()) {
             rows.push(Line::from(""));
-            let (change, beyond) = hunks::proposed(lines, width, open, theme, &self.change_count);
+            let (change, beyond) =
+                hunks::proposed(lines, language, width, open, theme, &self.change_count);
             if beyond > 0 {
                 markers.push((rows.len() + change.len() - 1, 1, beyond));
             }

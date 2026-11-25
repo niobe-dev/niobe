@@ -555,8 +555,7 @@ pub fn wrap_words_exact_first(text: &str, columns: usize, rows: usize) -> Vec<St
         if left == 0 {
             break;
         }
-        let shown_line = controls_shown_in_rows(line);
-        let line = tabs_expanded(&shown_line);
+        let line = laid_out(line);
         match line.is_empty() {
             true => shown.push(String::new()),
             false => shown.extend(
@@ -567,6 +566,22 @@ pub fn wrap_words_exact_first(text: &str, columns: usize, rows: usize) -> Vec<St
         }
     }
     shown
+}
+
+/// One line as [`wrap_words_exact`] lays it out before breaking it into
+/// rows: its controls shown and its tabs expanded. The rows are pieces of
+/// it, in order, so a caller that colours the line reads this and colours
+/// each row from where the one before it ended.
+///
+/// Borrowed where there is nothing to show or expand, since the line can be
+/// a megabyte and is laid out on every frame that draws it.
+pub(crate) fn laid_out(line: &str) -> std::borrow::Cow<'_, str> {
+    match controls_shown_in_rows(line) {
+        std::borrow::Cow::Borrowed(shown) => tabs_expanded(shown),
+        std::borrow::Cow::Owned(shown) => {
+            std::borrow::Cow::Owned(tabs_expanded(&shown).into_owned())
+        }
+    }
 }
 
 /// How many rows [`wrap_words_exact`] makes of `text`, without making the

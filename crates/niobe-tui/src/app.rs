@@ -38,6 +38,7 @@ use crate::images::{Attachments, DraftId, Fetched, Source, image_path};
 use crate::preferences::Preference;
 use crate::prices::Prices;
 use crate::proposed::Proposed;
+use crate::syntax::Language;
 use crate::text::{could_be_tag_flag, is_tag, is_tag_flag};
 use crate::theme::{Depth, Theme};
 use crate::trust;
@@ -1386,6 +1387,10 @@ fn events(count: u64) -> String {
 pub struct Change {
     hunks: Vec<Hunk>,
     gate: Option<Gate>,
+    /// The language the changed file is written in, as its name says, which
+    /// its lines are highlighted in; `None` where the name says none the
+    /// highlighter reads.
+    language: Option<Language>,
     /// The hunks hashed once, when the change arrived. The transcript keys
     /// each entry's drawn lines on a hash of the entry, taken every frame,
     /// and a session of edits would otherwise hash every line of every diff
@@ -1399,8 +1404,9 @@ pub struct Change {
 }
 
 impl Change {
-    /// A change of `hunks`, let through as `gate` says.
-    pub fn new(hunks: Vec<Hunk>, gate: Option<Gate>) -> Self {
+    /// A change of `hunks` to a file written in `language`, let through as
+    /// `gate` says.
+    pub fn new(hunks: Vec<Hunk>, gate: Option<Gate>, language: Option<Language>) -> Self {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         hunks.hash(&mut hasher);
@@ -1408,6 +1414,7 @@ impl Change {
             cut: crate::hunks::is_cut(&hunks),
             hunks,
             gate,
+            language,
             fingerprint: hasher.finish(),
         }
     }
@@ -1431,12 +1438,19 @@ impl Change {
     pub fn gate(&self) -> Option<Gate> {
         self.gate
     }
+
+    /// The language the changed file is written in, where its name says one
+    /// the highlighter reads.
+    pub fn language(&self) -> Option<Language> {
+        self.language
+    }
 }
 
 impl std::hash::Hash for Change {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.fingerprint.hash(state);
         self.gate.hash(state);
+        self.language.hash(state);
     }
 }
 
@@ -3557,7 +3571,8 @@ impl App {
                     call.lines = Some((*added, *removed));
                     call.memory = !scope.is_project();
                     if !hunks.is_empty() {
-                        call.change = Some(Change::new(hunks.clone(), gate));
+                        let language = Language::from_path(path);
+                        call.change = Some(Change::new(hunks.clone(), gate, language));
                     }
                 }
             }

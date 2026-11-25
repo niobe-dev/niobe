@@ -248,7 +248,15 @@ reviewers that encode both, for an agent working in this tree.
   sign in to one — `markdown.rs` draws the assistant's replies
   from their markdown and wraps the styled text itself, so the transcript's line count stays
   exact — a code block's line too wide for the pane cut into rows, each after the first behind
-  `┆` rather than the block's `│`, so the operator sees it is one line — `hunks.rs` draws a file change under the call that made it as the lines that changed,
+  `┆` rather than the block's `│`, so the operator sees it is one line, and a block whose fence
+  names a language highlighted in it — `syntax.rs` is that highlighter, one line at a time with
+  what a line leaves open carried to the next as a `State`, so a view or an editor can pick up at
+  any line; `syntax/spec.rs` is a table per language — thirty-odd, Miri among them, as its
+  compiler's lexer tokenises it — that `syntax/lexer.rs` reads code by, `syntax/markup.rs` reads
+  HTML and a diff, and `syntax/paint.rs` colours a cut piece of a line from the theme's `syntax`
+  colours; it names token kinds and byte ranges and nothing of a terminal — `hunks.rs` draws a
+  file change under the call that made it as the lines that changed, highlighted in the file's
+  language where the theme washes a changed line, the file before and after read apart,
   cut at twenty rows until Ctrl+T opens every cut diff in place,
   `summary.rs` sums up the session's calls between two things it said as one dim line of what
   they did — `Read 3 files, edited 1 file +6 −2, ran 2 shell commands, 41 tests passed` — and

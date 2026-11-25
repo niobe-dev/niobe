@@ -109,6 +109,33 @@ pub enum Scene {
     Cyborg,
 }
 
+/// The colours code is highlighted in: one for each kind of token a
+/// highlighter tells apart ([`crate::syntax::TokenKind`]). What is none of
+/// them is drawn in the colour of what holds it — [`Theme::code`] in a
+/// reply's code block, the line's own in a diff — and a diff's added and
+/// removed lines, read as a diff, in [`Theme::add`] and [`Theme::del`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Syntax {
+    /// A reserved word: `fn`, `if`, `return`; a markup tag's name.
+    pub keyword: Color,
+    /// A type's name.
+    pub type_name: Color,
+    /// A function's name, where it is declared or called.
+    pub function: Color,
+    /// A key a value is written under, and a variable a sigil marks.
+    pub property: Color,
+    /// A string.
+    pub string: Color,
+    /// A number.
+    pub number: Color,
+    /// A value the language names: `true`, `None`, `self`.
+    pub constant: Color,
+    /// A comment.
+    pub comment: Color,
+    /// A decorator, an attribute, a preprocessor directive.
+    pub attribute: Color,
+}
+
 /// Every colour the shell draws with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Theme {
@@ -214,8 +241,12 @@ pub struct Theme {
     /// A tool call's glyph and name: an accent of their own, never the
     /// body text's colour, so a call does not read as a reply.
     pub tool: Color,
-    /// Code in the assistant's replies: a code span, a code block.
+    /// Code in the assistant's replies: a code span, a code block, and in a
+    /// highlighted block what is none of the kinds [`Theme::syntax`] colours.
     pub code: Color,
+    /// What highlighted code is drawn in, in a reply's code block and in a
+    /// diff.
+    pub syntax: Syntax,
     /// A `/` command or skill the backend reads where a prompt names it, in
     /// the composer and in a sent prompt, so what will run reads apart from
     /// the words around it.
@@ -326,6 +357,17 @@ pub const CLASSIC: Theme = Theme {
     agent: Color::LightYellow,
     tool: Color::LightCyan,
     code: Color::White,
+    syntax: Syntax {
+        keyword: Color::LightCyan,
+        type_name: Color::LightGreen,
+        function: Color::LightYellow,
+        property: Color::Cyan,
+        string: Color::LightMagenta,
+        number: Color::LightRed,
+        constant: Color::LightRed,
+        comment: Color::Gray,
+        attribute: Color::Yellow,
+    },
     command: Color::LightMagenta,
 
     dialog_bg: Color::Gray,
@@ -403,6 +445,17 @@ pub const NEO: Theme = Theme {
     // Code stands out from the green prose the way a code span stands out in
     // a rendered page: by being the one thing that is not green.
     code: Color::White,
+    syntax: Syntax {
+        keyword: Color::LightGreen,
+        type_name: Color::LightCyan,
+        function: Color::White,
+        property: Color::Cyan,
+        string: Color::LightYellow,
+        number: Color::Yellow,
+        constant: Color::Yellow,
+        comment: Color::Green,
+        attribute: Color::LightCyan,
+    },
     // Not the operator's white: a command is drawn inside a sent prompt, so
     // it has to stand off the prompt as well as off the green prose. The
     // bright cyan is the call name's hue made louder, which is what it is: a
@@ -490,6 +543,17 @@ pub const CYBER: Theme = Theme {
     agent: Color::LightGreen,
     tool: Color::LightBlue,
     code: Color::LightCyan,
+    syntax: Syntax {
+        keyword: Color::LightMagenta,
+        type_name: Color::LightBlue,
+        function: Color::LightGreen,
+        property: Color::Cyan,
+        string: Color::LightYellow,
+        number: Color::LightRed,
+        constant: Color::LightRed,
+        comment: Color::Green,
+        attribute: Color::Magenta,
+    },
     // Not the operator's yellow: a command is drawn inside a sent prompt,
     // which is yellow, so it takes the cyan code is drawn in — it is a name
     // the backend runs, and the two are never on the same row.
@@ -567,6 +631,17 @@ pub const MODERN: Theme = Theme {
     agent: Color::LightBlue,
     tool: Color::LightMagenta,
     code: Color::LightCyan,
+    syntax: Syntax {
+        keyword: Color::LightBlue,
+        type_name: Color::Cyan,
+        function: Color::LightYellow,
+        property: Color::LightCyan,
+        string: Color::Yellow,
+        number: Color::LightGreen,
+        constant: Color::LightBlue,
+        comment: Color::Green,
+        attribute: Color::LightMagenta,
+    },
     command: Color::LightMagenta,
 
     dialog_bg: Color::DarkGray,
@@ -662,6 +737,17 @@ pub const NEO_TRUE: Theme = Theme {
     agent: hex(0x00ff41),
     tool: hex(0x7cff9e),
     code: hex(0xd4ff00),
+    syntax: Syntax {
+        keyword: hex(0x00ff41),
+        type_name: hex(0x5ce1ff),
+        function: hex(0xffffff),
+        property: hex(0x9bffb0),
+        string: hex(0xffb000),
+        number: hex(0x7cff9e),
+        constant: hex(0x7cff9e),
+        comment: hex(0x2e8b44),
+        attribute: hex(0x5ce1ff),
+    },
     command: hex(0x5ce1ff),
 
     dialog_bg: hex(0x0a2211),
@@ -732,6 +818,17 @@ pub const CYBER_TRUE: Theme = Theme {
     agent: hex(0x39ff7a),
     tool: hex(0xb9c1ff),
     code: hex(0xffd23f),
+    syntax: Syntax {
+        keyword: hex(0xff2bd6),
+        type_name: hex(0x2de2ff),
+        function: hex(0x39ff7a),
+        property: hex(0xb9c1ff),
+        string: hex(0xffa94d),
+        number: hex(0xff6ec7),
+        constant: hex(0xff6ec7),
+        comment: hex(0x6b9a7c),
+        attribute: hex(0xc792ff),
+    },
     command: hex(0x2de2ff),
 
     dialog_bg: hex(0x16121f),
@@ -786,6 +883,17 @@ pub const MODERN_TRUE: Theme = Theme {
     agent: hex(0x4fc1ff),
     tool: hex(0xc586c0),
     code: hex(0x9cdcfe),
+    syntax: Syntax {
+        keyword: hex(0x569cd6),
+        type_name: hex(0x4ec9b0),
+        function: hex(0xdcdcaa),
+        property: hex(0x9cdcfe),
+        string: hex(0xce9178),
+        number: hex(0xb5cea8),
+        constant: hex(0x569cd6),
+        comment: hex(0x6a9955),
+        attribute: hex(0xc586c0),
+    },
     command: hex(0xc586c0),
 
     dialog_bg: hex(0x323233),
@@ -881,7 +989,7 @@ impl Theme {
     /// loses its readability in sixteen colours.
     fn pairings(&self) -> Vec<(Color, Color, &'static str)> {
         let t = self;
-        vec![
+        let mut pairs = vec![
             (t.fg, t.pane_bg, "body text"),
             (t.dim, t.pane_bg, "secondary text"),
             (t.frame, t.pane_bg, "a pane border"),
@@ -945,7 +1053,9 @@ impl Theme {
             (t.pane_bg, t.title, "a question's selected answer"),
             (t.shadow, t.dialog_bg, "a dialog's shadow"),
             (t.shadow_fg, t.shadow, "what a dialog's shadow falls on"),
-        ]
+        ];
+        pairs.extend(self.syntax_pairings());
+        pairs
     }
 
     /// The pairings a person reads text in, which have to be told apart by
@@ -955,7 +1065,7 @@ impl Theme {
     /// drawn bold in its border's colour.
     fn legible_pairings(&self) -> Vec<(Color, Color, &'static str)> {
         let t = self;
-        vec![
+        let mut pairs = vec![
             (t.fg, t.pane_bg, "body text"),
             (t.dim, t.pane_bg, "secondary text"),
             (t.title, t.pane_bg, "a pane title"),
@@ -990,7 +1100,58 @@ impl Theme {
             (t.warn, t.dialog_bg, "a failure in a dialog"),
             (t.hot, t.dialog_bg, "a hint in a dialog"),
             (t.cursor_fg, t.cursor_bg, "the cursor row's text"),
-        ]
+        ];
+        pairs.extend(self.syntax_pairings());
+        pairs
+    }
+
+    /// Each colour highlighted code is drawn in, on what it is drawn on: a
+    /// reply's code block sits on the panes, and a diff's lines on its own
+    /// background and on the washes of its added and removed lines.
+    fn syntax_pairings(&self) -> Vec<(Color, Color, &'static str)> {
+        let s = &self.syntax;
+        let kinds = [
+            (
+                s.keyword,
+                "a keyword in a code block",
+                "a keyword in a diff",
+            ),
+            (s.type_name, "a type in a code block", "a type in a diff"),
+            (
+                s.function,
+                "a function in a code block",
+                "a function in a diff",
+            ),
+            (s.property, "a key in a code block", "a key in a diff"),
+            (s.string, "a string in a code block", "a string in a diff"),
+            (s.number, "a number in a code block", "a number in a diff"),
+            (
+                s.constant,
+                "a constant in a code block",
+                "a constant in a diff",
+            ),
+            (
+                s.comment,
+                "a comment in a code block",
+                "a comment in a diff",
+            ),
+            (
+                s.attribute,
+                "an attribute in a code block",
+                "an attribute in a diff",
+            ),
+        ];
+        kinds
+            .into_iter()
+            .flat_map(|(colour, in_block, in_diff)| {
+                [
+                    (colour, self.pane_bg, in_block),
+                    (colour, self.diff_bg, in_diff),
+                    (colour, self.add_bg, in_diff),
+                    (colour, self.del_bg, in_diff),
+                ]
+            })
+            .collect()
     }
 
     /// What this theme draws on top of its own colour, by what it is: empty
@@ -1071,7 +1232,7 @@ pub fn register_user(themes: Vec<UserTheme>) -> bool {
 
 impl Theme {
     /// The colours a theme file may set, by the key it spells them with.
-    pub const COLOUR_KEYS: [&'static str; 40] = [
+    pub const COLOUR_KEYS: [&'static str; 49] = [
         "pane_bg",
         "frame",
         "frame_focus",
@@ -1112,6 +1273,15 @@ impl Theme {
         "cursor_fg",
         "shadow",
         "shadow_fg",
+        "syntax_keyword",
+        "syntax_type",
+        "syntax_function",
+        "syntax_property",
+        "syntax_string",
+        "syntax_number",
+        "syntax_constant",
+        "syntax_comment",
+        "syntax_attribute",
     ];
 
     /// The lines a theme file may set, by the key it spells them with.
@@ -1162,6 +1332,15 @@ impl Theme {
             "cursor_fg" => &mut self.cursor_fg,
             "shadow" => &mut self.shadow,
             "shadow_fg" => &mut self.shadow_fg,
+            "syntax_keyword" => &mut self.syntax.keyword,
+            "syntax_type" => &mut self.syntax.type_name,
+            "syntax_function" => &mut self.syntax.function,
+            "syntax_property" => &mut self.syntax.property,
+            "syntax_string" => &mut self.syntax.string,
+            "syntax_number" => &mut self.syntax.number,
+            "syntax_constant" => &mut self.syntax.constant,
+            "syntax_comment" => &mut self.syntax.comment,
+            "syntax_attribute" => &mut self.syntax.attribute,
             _ => return None,
         };
         *slot = colour;
