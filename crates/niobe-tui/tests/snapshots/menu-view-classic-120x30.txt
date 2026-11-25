@@ -23,8 +23,8 @@
   w  LightCyan on Blue
   x  Blue on White, bold
   y  Blue on White
-  z  LightRed on DarkGray, bold
-  A  LightYellow on DarkGray
+  z  Red on Gray, bold
+  A  LightYellow on Gray
 
 abaaaaaabaaaaaaaabaaaaaaaabaaaaacdccccabaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaeeeeeeaaffffffffffffffffaaggggggggggggggaafffffaa
 hiiijjjiiiiiiiiiiiiiiiiiiiiiiiiiaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaiiiiiiiiiiihkkkkkkkkkkkkkkkkjjjjjjjkkkkkkkkkkkkkkkkkh

@@ -7,18 +7,17 @@
 //! Every scene is worked out whole from the seed, the moment it is drawn at
 //! and where each cell is, and nothing a frame shows depends on the frames
 //! before it: a resize needs nothing redone, and two draws at one moment draw
-//! one frame. The Game of Life keeps the last generation it worked out, and
-//! the black hole where each pixel's ray ends for the last few pane sizes,
-//! only so as not to work them out again, which is the same however they are
-//! reached. Every scene is
+//! one frame. The black hole keeps where each pixel's ray ends for the last
+//! few pane sizes, only so as not to work them out again, which is the same
+//! however they are reached. Every scene is
 //! drawn in its theme's colours — values where the theme has them, the
 //! sixteen names where it does not, with no shade between two of the sixteen
 //! that a terminal could not draw.
 
 mod blackhole;
-mod life;
 mod rain;
 mod skyline;
+mod starfield;
 
 use std::time::Duration;
 
@@ -38,7 +37,7 @@ pub(crate) fn draw(buffer: &mut Buffer, area: Rect, clock: Duration, seed: u64, 
     match theme.scene {
         Scene::Rain => rain::draw(buffer, area, millis, seed, theme),
         Scene::Skyline => skyline::draw(buffer, area, millis, seed, theme),
-        Scene::Life => life::draw(buffer, area, millis, seed, theme),
+        Scene::Starfield => starfield::draw(buffer, area, millis, seed, theme),
         Scene::BlackHole => blackhole::draw(buffer, area, millis, seed, theme),
     }
 }
@@ -52,12 +51,12 @@ pub(crate) fn draw(buffer: &mut Buffer, area: Rect, clock: Duration, seed: u64, 
 /// thirteen cells a second, which reads the same at ten frames; at ten,
 /// iTerm2 spent 15 to 25% on it. The black hole's disk flows a few pixels a
 /// second at its fastest and its stars twinkle every second or so, which ten
-/// frames show as well as thirty. Falling glyphs and a generation of the
-/// Game of Life step visibly at ten, so those keep thirty.
+/// frames show as well as thirty. Falling glyphs and stars racing out to the
+/// pane's edge step visibly at ten, so those keep thirty.
 pub(crate) fn frame(scene: Scene) -> Duration {
     match scene {
         Scene::Skyline | Scene::BlackHole => Duration::from_millis(100),
-        Scene::Rain | Scene::Life => Duration::from_millis(33),
+        Scene::Rain | Scene::Starfield => Duration::from_millis(33),
     }
 }
 
@@ -161,7 +160,12 @@ mod tests {
     #[test]
     fn every_built_in_theme_has_a_scene_of_its_own() {
         let scenes: Vec<Scene> = THEMES.iter().map(|theme| theme.scene).collect();
-        for scene in [Scene::Rain, Scene::Skyline, Scene::Life, Scene::BlackHole] {
+        for scene in [
+            Scene::Rain,
+            Scene::Skyline,
+            Scene::Starfield,
+            Scene::BlackHole,
+        ] {
             assert_eq!(
                 scenes.iter().filter(|drawn| **drawn == scene).count(),
                 1,

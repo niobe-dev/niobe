@@ -283,20 +283,18 @@ fn every_theme_paints_the_shell_at_both_sizes() {
 }
 
 /// The pictures the README shows, one per theme at 120x30, each drawn as a
-/// terminal draws it: the designed themes in 24-bit colour, `classic` in the
-/// sixteen names. Written by the harness rather than captured, so the front
-/// page cannot show a shell the code no longer draws; regenerated with the
-/// other pictures by `UPDATE_SNAPSHOTS=1`.
+/// terminal that draws 24-bit colour draws it, in the theme's own values.
+/// Written by the harness rather than captured, so the front page cannot show
+/// a shell the code no longer draws; regenerated with the other pictures by
+/// `UPDATE_SNAPSHOTS=1`.
 #[test]
 fn every_theme_has_the_picture_the_readme_shows() {
     for theme in THEMES {
         let name = theme.name.to_lowercase();
-        let depth = match theme.name {
-            "CLASSIC" => Depth::Sixteen,
-            _ => Depth::TrueColour,
-        };
         let picture = svg(
-            &mut running_session().with_depth(depth).with_theme(theme),
+            &mut running_session()
+                .with_depth(Depth::TrueColour)
+                .with_theme(theme),
             120,
             30,
         );

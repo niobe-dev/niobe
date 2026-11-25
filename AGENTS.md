@@ -207,7 +207,7 @@ reviewers that encode both, for an agent working in this tree.
   `theme.rs` is the
   palette — one table entry per theme in the sixteen ANSI names, which is what a terminal gets
   unless `COLORTERM` says it draws 24-bit colour; then the designed themes draw their own values,
-  and `classic`, which is the sixteen, still honours the user's scheme — `text.rs` wraps, truncates, pads to a column by cells and expands tabs, `find.rs` finds a query in the transcript as it is drawn and marks
+  and `classic` draws CGA's own values, the sixteen names read through `theme::cga` — `text.rs` wraps, truncates, pads to a column by cells and expands tabs, `find.rs` finds a query in the transcript as it is drawn and marks
   where, `select.rs` is a drag's selection of the transcript as drawn, the text it copies — a
   code block's line the pane cut into rows copied as the one line, without its gutter — and
   the link under a click, `desktop.rs` the trait the loop hands what to copy, what to open and what to edit to,
@@ -314,10 +314,10 @@ reviewers that encode both, for an agent working in this tree.
   row jumps and rewrites every cell it covers — each near tower showing the side that faces the
   pane's middle, with lit windows, flickering neon signs, blinking masts, twinkling stars and
   craft crossing, a few cells a frame;
-  `scene/life.rs` `classic`'s Game of Life on a torus held 64 cells to a word, two board cells
-  to a terminal cell in half blocks, the newborn white and the dead a ghost for a generation,
-  sown again from a random soup every era, the last generation reached kept on the thread only
-  so the next frame steps on from it; `scene/blackhole.rs` `stellar`'s black hole, seen from
+  `scene/starfield.rs` `classic`'s DOS screensaver starfield on black space, each star a point
+  projected by dividing by its depth, which runs down at one pace until it is born again far off
+  at a new place, drawn as a dark grey `.`, a grey `+` and a white `*` as it comes nearer and,
+  in 24-bit colour, in a few greys between; `scene/blackhole.rs` `stellar`'s black hole, seen from
   just above its accretion disk — a ray from every pixel, two to a cell in half blocks, followed
   through a non-rotating hole's gravity until it falls in, meets the disk or leaves for the
   stars, where each ends worked out once for a pane's size and kept for the last few sizes —

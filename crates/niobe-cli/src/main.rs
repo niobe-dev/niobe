@@ -2642,11 +2642,12 @@ THEME:
     picked there. A repository nothing was picked in opens in the theme picked
     last anywhere, then the config's, then cyber.
 
-    classic is drawn in the sixteen colours the terminal names, so your own
-    colour scheme is what they mean. cyber, neo and stellar are drawn in their
-    own 24-bit colours where COLORTERM is truecolor or 24bit, and in the
-    sixteen everywhere else, so a session stays legible over SSH and in
-    screen. NO_COLOR set to anything draws every theme in the sixteen.
+    Every theme is drawn in its own 24-bit colours where COLORTERM is
+    truecolor or 24bit — classic in the CGA palette's, Turbo Pascal's deep
+    blue — and in the sixteen colours the terminal names everywhere else, so
+    a session stays legible over SSH and in screen, and your own colour
+    scheme is what they mean. NO_COLOR set to anything draws every theme in
+    the sixteen.
 
 BUDGET:
     --budget <amount> caps what a session may spend, in dollars, and niobe says

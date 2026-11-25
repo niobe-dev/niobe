@@ -1336,10 +1336,14 @@ fn choose_theme(terminal: &Terminal, step: &[u8]) {
 /// `neo`'s menu row as its design draws it, in 24-bit colour.
 const NEO_MENU_TRUECOLOR: &str = "\u{1b}[38;2;0;255;65;48;2;0;26;8m";
 
+/// `classic`'s menu row in CGA's own values: black on its light grey.
+const CLASSIC_MENU_TRUECOLOR: &str = "\u{1b}[38;2;0;0;0;48;2;170;170;170m";
+
 /// A terminal that says it draws 24-bit colour gets a designed theme in its
-/// own colours, and `classic` still in the sixteen the terminal names.
+/// own colours, and `classic` in the CGA palette's rather than the sixteen
+/// the terminal names.
 #[test]
-fn a_terminal_announcing_truecolor_gets_the_designed_colours_and_classic_stays_named() {
+fn a_terminal_announcing_truecolor_gets_each_themes_own_colours_classic_in_cga() {
     let repo = repo();
     let (terminal, slave) = Terminal::open();
 
@@ -1352,7 +1356,7 @@ fn a_terminal_announcing_truecolor_gets_the_designed_colours_and_classic_stays_n
     terminal.shows(NEO_MENU_TRUECOLOR);
     // `classic` is the theme before `neo` in the list.
     choose_theme(&terminal, UP);
-    terminal.shows(CLASSIC_MENU);
+    terminal.shows(CLASSIC_MENU_TRUECOLOR);
     terminal.typed(CTRL_Q);
     let (_, status) = ended(&mut shell);
     assert!(status.success(), "the shell ended with {status}");

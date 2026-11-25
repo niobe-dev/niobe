@@ -341,6 +341,21 @@ mod tests {
         );
     }
 
+    /// `classic`'s 24-bit table is CGA's values, some of whose pairings are
+    /// under the bar a design is held to, as CGA drew them; a theme laid over
+    /// it is measured on what the file changed, and loads where that reads.
+    #[test]
+    fn a_theme_over_classic_loads_in_cgas_values_and_is_measured_on_its_own_colours() {
+        let user = themed("base = \"classic\"\n[colors]\ntitle = \"#ffff55\"\n")
+            .expect("CGA's own pairings are not held against a theme over classic");
+        assert_eq!(user.deep.pane_bg, ratatui::style::Color::Rgb(0, 0, 0xaa));
+        assert_eq!(user.sixteen.pane_bg, ratatui::style::Color::Blue);
+
+        let said = themed("base = \"classic\"\n[colors]\nhot = \"#b0b0b0\"\n")
+            .expect_err("a grey a shade off the dialog's is a hint nobody can read");
+        assert!(said.contains("a hint in a dialog"), "{said}");
+    }
+
     #[test]
     fn a_colour_that_is_not_one_is_reported_at_its_key_and_its_line() {
         let said = themed("[colors]\nfg = \"white\"\nhot = \"orange\"\n")

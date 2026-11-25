@@ -11,8 +11,8 @@
   k  LightRed on Blue
   l  Blue on White, bold
   m  Blue on White
-  n  LightRed on DarkGray, bold
-  o  LightYellow on DarkGray
+  n  Red on Gray, bold
+  o  LightYellow on Gray
 
 abaaaaaabaaaaaaaabaaaaaaaabaaaaaabaaaaabaaaaaaaaaaaaaaccccccaaddddddddddddddddaa
 eeeeefffeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee

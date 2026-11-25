@@ -17,13 +17,13 @@
 //! sixteen or a different one, and which of the two moves is a decision made
 //! per theme and written down where it was made.
 //!
-//! `classic` is only that table, because the CGA palette it is drawn from is
-//! exactly the sixteen. The designed themes — `neo`, `cyber`, `stellar` — also
-//! carry their design's own 24-bit values, and a terminal at
-//! [`Depth::TrueColour`] draws those instead: their greens and magentas are
-//! specific ones, and the sixteen-colour reduction is a different palette
-//! rather than the same one approximated. On such a terminal those themes
-//! override the user's scheme; `classic` never does.
+//! Every theme also carries 24-bit values, and a terminal at
+//! [`Depth::TrueColour`] draws those instead, overriding the user's scheme.
+//! The designed themes — `neo`, `cyber`, `stellar` — carry their design's own:
+//! their greens and magentas are specific ones, and the sixteen-colour
+//! reduction is a different palette rather than the same one approximated.
+//! `classic` carries the CGA palette's, which the sixteen names were made
+//! from, so its two tables are one palette: the sixteen read through [`cga`].
 //!
 //! A theme also sets the line its panes are drawn in, because a design's
 //! frame is part of its look and the focused pane's line is the one mark of
@@ -101,9 +101,9 @@ pub enum Scene {
     /// A night city at street level: two rows of towers standing still,
     /// lit windows, neon signs, blinking masts and craft crossing between.
     Skyline,
-    /// Conway's Game of Life: cells living, dying and being born, from a
-    /// random soup sown again every so often.
-    Life,
+    /// The DOS screensaver's starfield: stars flying out of the dark
+    /// towards the viewer, brightening as they come.
+    Starfield,
     /// A black hole seen from just above its accretion disk, ray traced in
     /// half-block pixels: the disk's far side bent over and under the
     /// shadow, a ring of light round it, the stars behind pulled into arcs
@@ -287,32 +287,30 @@ pub struct Theme {
 
 /// The DOS-blue theme: Turbo Pascal's IDE.
 ///
-/// The IBM CGA palette, which is exactly what the sixteen ANSI colours encode,
-/// so this theme has no truecolor table: it is drawn in the user's own
-/// sixteen at any depth. The darker navy a bar track and a diff background
-/// would want is outside those sixteen, so they use [`Color::Black`] and
-/// [`Color::Blue`].
+/// The IBM CGA palette, which is exactly what the sixteen ANSI colours
+/// encode: this table names them, so a terminal of sixteen draws it in the
+/// user's own scheme, and [`CLASSIC_TRUE`] is the same table in CGA's own
+/// values, for a terminal that can draw them. The darker navy a diff
+/// background would want is outside those sixteen, so it uses
+/// [`Color::Black`].
 ///
 /// Each role takes the colour Turbo Pascal gives the same role: yellow text
 /// on the blue editor, its words in white where they stand out of it, the
 /// windows framed in light grey and the active one in a white double line
 /// with a white title, black on light grey with red hot letters for the menu
-/// bar and an open menu, black on light grey for the status line, a green bar
-/// for the item under a cursor, black on grey dialogs in a white double
-/// frame, and a black shadow under a dialog that leaves what it falls on dark
-/// grey.
+/// bar and an open menu, one flat light grey status line with black labels
+/// and the keys in red, a green bar for the item under a cursor, black on
+/// grey dialogs in a white double frame under a white title, and a black
+/// shadow under a dialog that leaves what it falls on dark grey.
 ///
-/// Three of Turbo Pascal's choices are not taken. Its status line is one
-/// flat grey with the keys' names in red; here the keys' numbers are the
-/// bright red on a dark grey gap between them, so each label still reads as
-/// a block of its own. The operator's messages sit in dark grey bubbles,
-/// which Turbo Pascal has no counterpart for, so the black shadow they cast
-/// still shows. And it has no colour for a window running low; that takes
-/// the dark yellow CGA draws brown, short of the bright red of what has run
-/// out.
+/// Two of Turbo Pascal's choices are not taken. The operator's messages sit
+/// in dark grey bubbles, which Turbo Pascal has no counterpart for, so the
+/// black shadow they cast still shows. And it has no colour for a window
+/// running low; that takes the dark yellow CGA draws brown, short of the
+/// bright red of what has run out.
 pub const CLASSIC: Theme = Theme {
     name: "CLASSIC",
-    scene: Scene::Life,
+    scene: Scene::Starfield,
     border: BorderType::Plain,
     border_focus: BorderType::Double,
 
@@ -337,8 +335,10 @@ pub const CLASSIC: Theme = Theme {
     pulldown_dim: Color::DarkGray,
     menu_cursor_bg: Color::Green,
     menu_cursor_fg: Color::Black,
-    keybar_bg: Color::DarkGray,
-    keybar_fg: Color::LightRed,
+    // One flat grey, as Turbo Pascal's status line is: the keys' red is what
+    // tells where one label ends and the next key begins.
+    keybar_bg: Color::Gray,
+    keybar_fg: Color::Red,
     fkey_bg: Color::Gray,
     fkey_fg: Color::Black,
 
@@ -378,12 +378,133 @@ pub const CLASSIC: Theme = Theme {
     // face; the panes' grey would be the face itself.
     dialog_dim: Color::DarkGray,
     dialog_frame: Color::White,
-    dialog_title: Color::Black,
+    dialog_title: Color::White,
     cursor_bg: Color::Green,
     cursor_fg: Color::Black,
     shadow: Color::Black,
     shadow_fg: Color::DarkGray,
 };
+
+/// The sixteen names, in the order of the ANSI colour numbers.
+const SIXTEEN: [Color; 16] = [
+    Color::Black,
+    Color::Red,
+    Color::Green,
+    Color::Yellow,
+    Color::Blue,
+    Color::Magenta,
+    Color::Cyan,
+    Color::Gray,
+    Color::DarkGray,
+    Color::LightRed,
+    Color::LightGreen,
+    Color::LightYellow,
+    Color::LightBlue,
+    Color::LightMagenta,
+    Color::LightCyan,
+    Color::White,
+];
+
+/// `colour` in the value CGA gave it where it is one of the sixteen names,
+/// and as it is otherwise. Dark yellow is CGA's brown: the adapter halved
+/// its green rather than draw an olive.
+const fn cga(colour: Color) -> Color {
+    match colour {
+        Color::Black => hex(0x000000),
+        Color::Red => hex(0xaa0000),
+        Color::Green => hex(0x00aa00),
+        Color::Yellow => hex(0xaa5500),
+        Color::Blue => hex(0x0000aa),
+        Color::Magenta => hex(0xaa00aa),
+        Color::Cyan => hex(0x00aaaa),
+        Color::Gray => hex(0xaaaaaa),
+        Color::DarkGray => hex(0x555555),
+        Color::LightRed => hex(0xff5555),
+        Color::LightGreen => hex(0x55ff55),
+        Color::LightYellow => hex(0xffff55),
+        Color::LightBlue => hex(0x5555ff),
+        Color::LightMagenta => hex(0xff55ff),
+        Color::LightCyan => hex(0x55ffff),
+        Color::White => hex(0xffffff),
+        other => other,
+    }
+}
+
+/// Whether `colour` is one of CGA's sixteen values, which is what a terminal
+/// of sixteen names draws on a scheme that keeps them.
+fn in_cga(colour: Color) -> bool {
+    SIXTEEN.iter().any(|name| cga(*name) == colour)
+}
+
+/// `theme` with every colour it names in CGA's value for it. Every field is
+/// written out, so a colour added to [`Theme`] does not compile until it is
+/// read through here too.
+const fn through_cga(theme: Theme) -> Theme {
+    let s = theme.syntax;
+    Theme {
+        name: theme.name,
+        scene: theme.scene,
+        border: theme.border,
+        border_focus: theme.border_focus,
+        pane_bg: cga(theme.pane_bg),
+        frame: cga(theme.frame),
+        frame_focus: cga(theme.frame_focus),
+        title: cga(theme.title),
+        fg: cga(theme.fg),
+        dim: cga(theme.dim),
+        hot: cga(theme.hot),
+        warn: cga(theme.warn),
+        menu_bg: cga(theme.menu_bg),
+        menu_fg: cga(theme.menu_fg),
+        menu_hot: cga(theme.menu_hot),
+        menu_border: theme.menu_border,
+        pulldown_fg: cga(theme.pulldown_fg),
+        pulldown_frame: cga(theme.pulldown_frame),
+        pulldown_dim: cga(theme.pulldown_dim),
+        menu_cursor_bg: cga(theme.menu_cursor_bg),
+        menu_cursor_fg: cga(theme.menu_cursor_fg),
+        keybar_bg: cga(theme.keybar_bg),
+        keybar_fg: cga(theme.keybar_fg),
+        fkey_bg: cga(theme.fkey_bg),
+        fkey_fg: cga(theme.fkey_fg),
+        add: cga(theme.add),
+        del: cga(theme.del),
+        diff_bg: cga(theme.diff_bg),
+        add_bg: cga(theme.add_bg),
+        del_bg: cga(theme.del_bg),
+        user: cga(theme.user),
+        user_bg: cga(theme.user_bg),
+        agent: cga(theme.agent),
+        tool: cga(theme.tool),
+        code: cga(theme.code),
+        syntax: Syntax {
+            keyword: cga(s.keyword),
+            type_name: cga(s.type_name),
+            function: cga(s.function),
+            property: cga(s.property),
+            string: cga(s.string),
+            number: cga(s.number),
+            constant: cga(s.constant),
+            comment: cga(s.comment),
+            attribute: cga(s.attribute),
+        },
+        command: cga(theme.command),
+        dialog_bg: cga(theme.dialog_bg),
+        dialog_fg: cga(theme.dialog_fg),
+        dialog_dim: cga(theme.dialog_dim),
+        dialog_frame: cga(theme.dialog_frame),
+        dialog_title: cga(theme.dialog_title),
+        cursor_bg: cga(theme.cursor_bg),
+        cursor_fg: cga(theme.cursor_fg),
+        shadow: cga(theme.shadow),
+        shadow_fg: cga(theme.shadow_fg),
+    }
+}
+
+/// [`CLASSIC`] in the CGA palette's own values, for a terminal that can draw
+/// them: the deep blue Turbo Pascal's editor was drawn in, which most schemes
+/// now give their blue a lighter shade than.
+pub const CLASSIC_TRUE: Theme = through_cga(CLASSIC);
 
 /// Green on black: the terminal every film puts in front of a hacker.
 ///
@@ -970,7 +1091,7 @@ impl Theme {
         let sixteen = Self::by_name(self.name).unwrap_or(self);
         match depth {
             Depth::Sixteen => sixteen,
-            Depth::TrueColour => [NEO_TRUE, CYBER_TRUE, STELLAR_TRUE]
+            Depth::TrueColour => [CLASSIC_TRUE, NEO_TRUE, CYBER_TRUE, STELLAR_TRUE]
                 .into_iter()
                 .chain(user_themes().iter().map(|user| user.deep))
                 .find(|deep| deep.name == sixteen.name)
@@ -1010,10 +1131,12 @@ pub fn listed() -> String {
 
 impl Theme {
     /// Every foreground the drawing code puts on a background, and the one
-    /// pairing that is not a foreground on a background: an F-key's label
-    /// block has to stand out from the bar it sits in. A pair of one colour
-    /// is a pair nothing can be read in, which is the whole way a palette
-    /// loses its readability in sixteen colours.
+    /// pairing that is not a foreground on a background: where an F-key's
+    /// number is drawn in its label's colour, the label's block has to stand
+    /// out from the bar it sits in, or nothing marks where one label ends and
+    /// the next key begins. A pair of one colour is a pair nothing can be read
+    /// in, which is the whole way a palette loses its readability in sixteen
+    /// colours.
     fn pairings(&self) -> Vec<(Color, Color, &'static str)> {
         let t = self;
         let mut pairs = vec![
@@ -1061,7 +1184,7 @@ impl Theme {
             ),
             (t.keybar_fg, t.keybar_bg, "an F-key's number"),
             (t.fkey_fg, t.fkey_bg, "an F-key label"),
-            (t.fkey_bg, t.keybar_bg, "an F-key label block"),
+            (label_block(t), t.keybar_bg, "an F-key label block"),
             // The menu row carries the session's identity beside the
             // menus, so what it says there is checked against the menu
             // background as well.
@@ -1194,15 +1317,29 @@ impl Theme {
     /// What this theme draws at less than 3 to 1 against its background, by
     /// what it is and the ratio, where both are 24-bit colours: WCAG's bar for
     /// large text. A palette of the sixteen names is not measured, since their
-    /// values are the user's scheme's.
+    /// values are the user's scheme's, and nor is a pairing of two of CGA's
+    /// values, which is those names on the scheme they were made in: CGA's
+    /// blue and grey are a shade apart that no one colour reads on both of.
     pub fn illegible(&self) -> Vec<(&'static str, f64)> {
         self.legible_pairings()
             .into_iter()
+            .filter(|(on, over, _)| !(in_cga(*on) && in_cga(*over)))
             .filter_map(|(on, over, what)| {
                 let ratio = contrast(on, over)?;
                 (ratio < 3.0).then_some((what, ratio))
             })
             .collect()
+    }
+}
+
+/// What an F-key's label block is told from the bar by: its own colour, or
+/// where the key's number has a colour of its own, as on Turbo Pascal's flat
+/// status line, that number — which is never the bar's, since it is drawn on
+/// it.
+fn label_block(theme: &Theme) -> Color {
+    match theme.keybar_fg == theme.fkey_fg {
+        true => theme.fkey_bg,
+        false => theme.keybar_fg,
     }
 }
 
@@ -1623,11 +1760,118 @@ mod tests {
             .collect()
     }
 
+    /// On a terminal that draws 24-bit colour, `classic` is the CGA
+    /// palette's own values, the blue Turbo Pascal's editor was drawn in
+    /// rather than whatever the user's scheme calls blue; elsewhere it is
+    /// the sixteen names, and the scheme decides.
     #[test]
-    fn classic_is_the_sixteen_colours_however_deep_the_terminal_is() {
-        // CGA is the sixteen: a user's own scheme is honoured at any depth.
-        assert_eq!(CLASSIC.at(Depth::TrueColour), CLASSIC);
+    fn classic_on_a_deep_terminal_is_drawn_in_the_cga_palettes_own_values() {
+        let deep = CLASSIC.at(Depth::TrueColour);
+        assert_eq!(deep.name, "CLASSIC");
+        assert_eq!(deep.scene, CLASSIC.scene);
+        for (drawn, cga, what) in [
+            (deep.pane_bg, 0x0000aa, "the editor's blue"),
+            (deep.fg, 0xffff55, "the editor's yellow"),
+            (deep.menu_bg, 0xaaaaaa, "the menu bar's grey"),
+            (deep.menu_hot, 0xaa0000, "a hot letter's red"),
+            (deep.cursor_bg, 0x00aa00, "the cursor bar's green"),
+            (deep.frame_focus, 0xffffff, "the active window's white"),
+            (deep.shadow, 0x000000, "a shadow's black"),
+            (deep.shadow_fg, 0x555555, "what a shadow falls on"),
+            (deep.warn, 0xaa5500, "the dark yellow CGA draws brown"),
+            (deep.tool, 0x55ffff, "light cyan"),
+            (deep.command, 0xff55ff, "light magenta"),
+            (deep.del, 0xff5555, "light red"),
+        ] {
+            assert_eq!(drawn, hex(cga), "{what}");
+        }
+        assert_eq!(deep.border_focus, CLASSIC.border_focus);
+        assert_eq!(deep.at(Depth::Sixteen), CLASSIC);
         assert_eq!(CLASSIC.at(Depth::Sixteen), CLASSIC);
+    }
+
+    /// The adapter's sixteen as IBM's technical reference lists them: each
+    /// channel off, at two thirds or full, with a third added to every
+    /// channel of the bright half, and the dark yellow's green halved.
+    #[test]
+    fn each_of_the_sixteen_names_is_the_value_the_cga_adapter_drew() {
+        let drawn: Vec<Color> = SIXTEEN.into_iter().map(cga).collect();
+        let adapter = [
+            0x000000, 0xaa0000, 0x00aa00, 0xaa5500, 0x0000aa, 0xaa00aa, 0x00aaaa, 0xaaaaaa,
+            0x555555, 0xff5555, 0x55ff55, 0xffff55, 0x5555ff, 0xff55ff, 0x55ffff, 0xffffff,
+        ];
+        assert_eq!(drawn, adapter.map(hex));
+        assert_eq!(
+            cga(hex(0x123456)),
+            hex(0x123456),
+            "a value is left as it is"
+        );
+    }
+
+    /// Each of the sixteen names has the one value CGA gave it, so the 24-bit
+    /// table is the sixteen-colour one read through it, field for field.
+    #[test]
+    fn every_colour_of_classics_deep_table_is_its_named_colour_in_cga() {
+        let deep = CLASSIC.at(Depth::TrueColour);
+        let every = |t: &Theme| {
+            let s = t.syntax;
+            let mut all = colours(t).to_vec();
+            all.extend([t.menu_hot, s.keyword, s.type_name, s.function, s.property]);
+            all.extend([s.string, s.number, s.constant, s.comment, s.attribute]);
+            all
+        };
+        for (named, drawn) in every(&CLASSIC).into_iter().zip(every(&deep)) {
+            assert!(!matches!(named, Color::Rgb(..)), "{named:?}");
+            assert_eq!(drawn, cga(named), "{named:?}");
+        }
+    }
+
+    /// Turbo Pascal's status line is one flat grey, its keys told from their
+    /// labels by their red. A bar like that leaves nothing drawn on its own
+    /// colour, since the key's number marks where each label starts; a flat
+    /// bar whose numbers are the labels' own colour runs them together.
+    #[test]
+    fn a_flat_status_line_is_read_by_its_keys_colour_and_not_without_it() {
+        let flat = Theme {
+            keybar_bg: Color::Gray,
+            fkey_bg: Color::Gray,
+            keybar_fg: Color::Red,
+            fkey_fg: Color::Black,
+            ..CYBER
+        };
+        assert!(
+            !flat.invisible().contains(&"an F-key label block"),
+            "{:?}",
+            flat.invisible()
+        );
+        let unmarked = Theme {
+            keybar_fg: Color::Black,
+            ..flat
+        };
+        assert!(
+            unmarked.invisible().contains(&"an F-key label block"),
+            "{:?}",
+            unmarked.invisible()
+        );
+    }
+
+    /// Two of the CGA sixteen against each other are what the sixteen names
+    /// draw on a scheme with CGA's values, which is not measured; a colour
+    /// that is not one of them is, whatever it is drawn on.
+    #[test]
+    fn a_pairing_of_two_cga_colours_is_not_measured_and_any_other_is() {
+        let deep = CLASSIC.at(Depth::TrueColour);
+        assert!(deep.illegible().is_empty(), "{:?}", deep.illegible());
+        let near = deep
+            .with_colour("hot", hex(0xb0b0b0))
+            .expect("hot is a colour a theme file may set");
+        assert!(
+            near.illegible()
+                .iter()
+                .any(|(what, _)| *what == "a hint in a dialog"),
+            "{:?}",
+            near.illegible()
+        );
     }
 
     /// `classic` is Turbo Pascal's IDE, role for role, where the shell has
@@ -1698,6 +1942,11 @@ mod tests {
                 "the status line",
             ),
             (
+                (t.keybar_fg, t.keybar_bg),
+                (Color::Red, Color::Gray),
+                "a key on the status line",
+            ),
+            (
                 (t.cursor_fg, t.cursor_bg),
                 (Color::Black, Color::Green),
                 "the cursor bar",
@@ -1716,6 +1965,11 @@ mod tests {
                 (t.dialog_frame, t.dialog_bg),
                 (Color::White, Color::Gray),
                 "a dialog's frame",
+            ),
+            (
+                (t.dialog_title, t.dialog_bg),
+                (Color::White, Color::Gray),
+                "a dialog's title",
             ),
             (
                 (t.shadow_fg, t.shadow),
@@ -1747,7 +2001,7 @@ mod tests {
 
     #[test]
     fn a_designed_theme_on_a_deep_terminal_is_drawn_in_nothing_but_its_design() {
-        for theme in [CYBER, NEO, STELLAR] {
+        for theme in [CYBER, CLASSIC, NEO, STELLAR] {
             let deep = theme.at(Depth::TrueColour);
             for colour in colours(&deep) {
                 assert!(

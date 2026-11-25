@@ -14613,7 +14613,7 @@ mod tests {
 
     #[test]
     fn a_shell_on_a_deep_terminal_draws_every_theme_at_that_depth() {
-        use crate::theme::{CLASSIC, CYBER_TRUE, Depth, NEO, NEO_TRUE, STELLAR_TRUE};
+        use crate::theme::{CLASSIC_TRUE, CYBER_TRUE, Depth, NEO, NEO_TRUE, STELLAR_TRUE};
 
         // In either order: the depth is the terminal's, the theme the
         // operator's, and neither is allowed to undo the other.
@@ -14629,7 +14629,7 @@ mod tests {
         for (name, drawn) in [
             (STELLAR_TRUE.name, STELLAR_TRUE),
             (CYBER_TRUE.name, CYBER_TRUE),
-            (CLASSIC.name, CLASSIC),
+            (CLASSIC_TRUE.name, CLASSIC_TRUE),
         ] {
             app.choose(Purpose::Theme, name.to_owned());
             assert_eq!(*app.theme(), drawn);

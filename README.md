@@ -21,8 +21,8 @@ The same session in the other themes — `classic`, `neo` and `stellar`, chosen 
 | ![classic](crates/niobe-tui/tests/snapshots/classic-120x30.svg) | ![neo](crates/niobe-tui/tests/snapshots/neo-120x30.svg) | ![stellar](crates/niobe-tui/tests/snapshots/stellar-120x30.svg) |
 
 These pictures are drawn by the shell's own snapshot tests, so they show what the code draws
-today. `classic` is drawn in the sixteen colours your terminal's scheme gives it; the pictures
-use xterm's.
+today, on a terminal that draws 24-bit colour. Where the terminal draws only the sixteen
+colours it names, every theme is drawn in those, and your scheme decides what they look like.
 
 Niobe drives the official `claude` CLI as a subprocess, so a session runs on whatever that CLI
 is already signed in with. Niobe never reads the CLI's credential files and makes no network
