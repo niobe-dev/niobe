@@ -18,7 +18,7 @@
 //! per theme and written down where it was made.
 //!
 //! `classic` is only that table, because the CGA palette it is drawn from is
-//! exactly the sixteen. The designed themes — `neo`, `cyber`, `modern` — also
+//! exactly the sixteen. The designed themes — `neo`, `cyber`, `stellar` — also
 //! carry their design's own 24-bit values, and a terminal at
 //! [`Depth::TrueColour`] draws those instead: their greens and magentas are
 //! specific ones, and the sixteen-colour reduction is a different palette
@@ -104,9 +104,11 @@ pub enum Scene {
     /// Conway's Game of Life: cells living, dying and being born, from a
     /// random soup sown again every so often.
     Life,
-    /// A cyborg's head in three dimensions, shaded in half-block pixels,
-    /// turning from side to side, grinning and winking.
-    Cyborg,
+    /// A black hole seen from just above its accretion disk, ray traced in
+    /// half-block pixels: the disk's far side bent over and under the
+    /// shadow, a ring of light round it, the stars behind pulled into arcs
+    /// and the disk's gas flowing round.
+    BlackHole,
 }
 
 /// The colours code is highlighted in: one for each kind of token a
@@ -573,27 +575,26 @@ pub const CYBER: Theme = Theme {
     shadow_fg: Color::DarkGray,
 };
 
-/// The palette of a modern editor: grey chrome, a blue accent, and syntax
-/// colours for what the session did.
+/// A modern editor's dark palette — VS Code's Dark Modern — with the warm
+/// light of a black hole's disk in it: near-black chrome, a blue accent for
+/// focus and what the operator can press, and gold where the editor marks
+/// what changed, which here titles the panes and carries the operator's own
+/// words.
 ///
-/// The design's four greys collapse to two — frame, menu bar and dialog share
-/// the dark one, secondary text takes the light one — which is enough,
-/// because no two of those are ever drawn on each other.
+/// The design's near-blacks collapse to the one black, and its greys to the
+/// two the sixteen have — frame, menu bar and dialog share the dark one,
+/// secondary text takes the light one — which is enough, because no two of
+/// those are ever drawn on each other. The menu bar is the one place the
+/// greys part: the design draws it a shade darker than the panes, and on
+/// sixteen colours that is the panes' own black, so the bar takes the dark
+/// grey instead and still reads as a bar. The gold has no counterpart in the
+/// sixteen but the yellows, so the titles take the bright one.
 ///
-/// The editor's blue bars are the one piece of the design that does not
-/// survive. The menu row is where the model, the profile and what the session
-/// is doing are told apart by colour, and on sixteen colours a blue bar leaves
-/// only white legible on it: the accent and the assistant's own blue both
-/// vanish into the background, and the strip goes monochrome. The row takes
-/// the panes' black instead, which keeps every one of those readings, and the
-/// blue stays where it is still an accent — the F-key labels, and everything
-/// the shell wants the operator to look at.
-///
-/// This is the sixteen-colour table; [`MODERN_TRUE`] is the design's own. Its
-/// panes are framed as `cyber`'s are.
-pub const MODERN: Theme = Theme {
-    name: "MODERN",
-    scene: Scene::Cyborg,
+/// This is the sixteen-colour table; [`STELLAR_TRUE`] is the design's own.
+/// Its panes are framed as `cyber`'s are.
+pub const STELLAR: Theme = Theme {
+    name: "STELLAR",
+    scene: Scene::BlackHole,
     border: BorderType::Plain,
     border_focus: BorderType::Thick,
 
@@ -604,7 +605,7 @@ pub const MODERN: Theme = Theme {
     fg: Color::White,
     dim: Color::Gray,
     hot: Color::LightBlue,
-    warn: Color::LightYellow,
+    warn: Color::Yellow,
 
     menu_bg: Color::DarkGray,
     menu_fg: Color::White,
@@ -613,14 +614,14 @@ pub const MODERN: Theme = Theme {
     pulldown_fg: Color::White,
     pulldown_frame: Color::White,
     pulldown_dim: Color::Gray,
-    menu_cursor_bg: Color::LightBlue,
-    menu_cursor_fg: Color::Black,
+    menu_cursor_bg: Color::Blue,
+    menu_cursor_fg: Color::White,
     keybar_bg: Color::DarkGray,
     keybar_fg: Color::LightBlue,
-    fkey_bg: Color::Blue,
+    fkey_bg: Color::Black,
     fkey_fg: Color::White,
 
-    add: Color::Cyan,
+    add: Color::LightGreen,
     del: Color::LightRed,
     diff_bg: Color::Black,
     add_bg: Color::Black,
@@ -647,10 +648,10 @@ pub const MODERN: Theme = Theme {
     dialog_bg: Color::DarkGray,
     dialog_fg: Color::White,
     dialog_dim: Color::Gray,
-    dialog_frame: Color::Gray,
-    dialog_title: Color::Gray,
-    cursor_bg: Color::LightBlue,
-    cursor_fg: Color::Black,
+    dialog_frame: Color::LightBlue,
+    dialog_title: Color::LightBlue,
+    cursor_bg: Color::Blue,
+    cursor_fg: Color::White,
     shadow: Color::Black,
     shadow_fg: Color::DarkGray,
 };
@@ -844,43 +845,48 @@ pub const CYBER_TRUE: Theme = Theme {
     ..CYBER
 };
 
-/// [`MODERN`] as designed, for a terminal that can draw it: an editor's greys,
-/// its blue for focus and the accent, and its syntax colours for what the
-/// session did. The blue that did not survive the sixteen is back on the
-/// focused frame; the menu row keeps the design's grey.
-pub const MODERN_TRUE: Theme = Theme {
-    pane_bg: hex(0x252526),
-    frame: hex(0x3c3c3c),
-    frame_focus: hex(0x007acc),
-    title: hex(0xdcdcaa),
-    fg: hex(0xd4d4d4),
-    dim: hex(0x858585),
-    hot: hex(0x4fc1ff),
-    // The editor's own warning colour, as its error colour is `del`.
+/// [`STELLAR`] as designed, for a terminal that can draw it: VS Code's Dark
+/// Modern, role for role where the editor has the role — its `#1f1f1f`
+/// editor for the panes, its `#181818` title and status bars for the menu
+/// row and the F-key bar, its `#2b2b2b` borders, its `#0078d4` focus border
+/// and buttons, its `#cccccc` text and `#9d9d9d` descriptions, its link blue
+/// for the accent, its error red, warning yellow and added green, its
+/// `#313131` inputs for the F-key labels, its `#222222` quick pick for a
+/// dialog, and its Dark+ token colours for code. The editor's tan for a
+/// modified file, `#e2c08d`, is the theme's gold: the pane titles, the
+/// operator's words and the light of the black hole's disk.
+pub const STELLAR_TRUE: Theme = Theme {
+    pane_bg: hex(0x1f1f1f),
+    frame: hex(0x2b2b2b),
+    frame_focus: hex(0x0078d4),
+    title: hex(0xe2c08d),
+    fg: hex(0xcccccc),
+    dim: hex(0x9d9d9d),
+    hot: hex(0x4daafc),
     warn: hex(0xcca700),
 
-    menu_bg: hex(0x323233),
+    menu_bg: hex(0x181818),
     menu_fg: hex(0xcccccc),
-    menu_hot: hex(0x4fc1ff),
+    menu_hot: hex(0x4daafc),
     pulldown_fg: hex(0xcccccc),
-    pulldown_frame: hex(0xcccccc),
-    pulldown_dim: hex(0x858585),
-    menu_cursor_bg: hex(0x04395e),
+    pulldown_frame: hex(0x454545),
+    pulldown_dim: hex(0x6e7681),
+    menu_cursor_bg: hex(0x0078d4),
     menu_cursor_fg: hex(0xffffff),
-    keybar_bg: hex(0x323233),
-    keybar_fg: hex(0x4fc1ff),
-    fkey_bg: hex(0x0e639c),
-    fkey_fg: hex(0xffffff),
+    keybar_bg: hex(0x181818),
+    keybar_fg: hex(0x4daafc),
+    fkey_bg: hex(0x313131),
+    fkey_fg: hex(0xcccccc),
 
-    add: hex(0x4ec9b0),
-    del: hex(0xf14c4c),
-    diff_bg: hex(0x1e1e1e),
-    add_bg: wash(0x4ec9b0, 0x1e1e1e, WASH),
-    del_bg: wash(0xf14c4c, 0x1e1e1e, WASH),
+    add: hex(0x2ea043),
+    del: hex(0xf85149),
+    diff_bg: hex(0x181818),
+    add_bg: wash(0x2ea043, 0x181818, WASH),
+    del_bg: wash(0xf85149, 0x181818, WASH),
 
-    user: hex(0xdcdcaa),
-    user_bg: wash(0xdcdcaa, 0x252526, BUBBLE),
-    agent: hex(0x4fc1ff),
+    user: hex(0xe2c08d),
+    user_bg: wash(0xe2c08d, 0x1f1f1f, BUBBLE),
+    agent: hex(0x4daafc),
     tool: hex(0xc586c0),
     code: hex(0x9cdcfe),
     syntax: Syntax {
@@ -896,33 +902,54 @@ pub const MODERN_TRUE: Theme = Theme {
     },
     command: hex(0xc586c0),
 
-    dialog_bg: hex(0x323233),
+    dialog_bg: hex(0x222222),
     dialog_fg: hex(0xcccccc),
-    dialog_dim: hex(0x858585),
-    dialog_frame: hex(0x007acc),
-    dialog_title: hex(0x007acc),
+    dialog_dim: hex(0x9d9d9d),
+    dialog_frame: hex(0x0078d4),
+    dialog_title: hex(0x0078d4),
     cursor_bg: hex(0x04395e),
     cursor_fg: hex(0xffffff),
     shadow: hex(0x000000),
-    shadow_fg: wash(0xd4d4d4, 0x000000, SHADED),
+    shadow_fg: wash(0xcccccc, 0x000000, SHADED),
 
-    ..MODERN
+    ..STELLAR
 };
+
+/// The names a built-in theme went by before, and the name it goes by now:
+/// `stellar` was `modern` until it took VS Code's newer palette and a black
+/// hole for its scene.
+const FORMER_NAMES: [(&str, &str); 1] = [("modern", "stellar")];
 
 /// Every theme there is, as its sixteen-colour table, in the order the theme
 /// list offers them. The first is the default.
-pub const THEMES: [Theme; 4] = [CYBER, CLASSIC, NEO, MODERN];
+pub const THEMES: [Theme; 4] = [CYBER, CLASSIC, NEO, STELLAR];
 
 impl Theme {
-    /// The theme `name` selects — `cyber`, `classic`, `neo`, `modern` — as its
-    /// sixteen-colour table, or `None` where no theme is called that.
+    /// The theme `name` selects — `cyber`, `classic`, `neo`, `stellar` — as
+    /// its sixteen-colour table, or `None` where no theme is called that.
     ///
     /// Case is ignored: the name is written in a config file and on a command
     /// line, and the menu bar shows it in capitals.
     pub fn by_name(name: &str) -> Option<Self> {
+        Self::builtin(name).or_else(|| {
+            user_themes()
+                .iter()
+                .map(|user| user.sixteen)
+                .find(|theme| theme.name.eq_ignore_ascii_case(name))
+        })
+    }
+
+    /// The built-in theme `name` selects, as its sixteen-colour table: by
+    /// its name, or by a name it was called before, so that a config, a
+    /// theme file's base or a remembered pick written under that name still
+    /// opens in it rather than being refused.
+    pub fn builtin(name: &str) -> Option<Self> {
+        let name = FORMER_NAMES
+            .iter()
+            .find(|(former, _)| former.eq_ignore_ascii_case(name))
+            .map_or(name, |(_, now)| now);
         THEMES
             .into_iter()
-            .chain(user_themes().iter().map(|user| user.sixteen))
             .find(|theme| theme.name.eq_ignore_ascii_case(name))
     }
 
@@ -943,7 +970,7 @@ impl Theme {
         let sixteen = Self::by_name(self.name).unwrap_or(self);
         match depth {
             Depth::Sixteen => sixteen,
-            Depth::TrueColour => [NEO_TRUE, CYBER_TRUE, MODERN_TRUE]
+            Depth::TrueColour => [NEO_TRUE, CYBER_TRUE, STELLAR_TRUE]
                 .into_iter()
                 .chain(user_themes().iter().map(|user| user.deep))
                 .find(|deep| deep.name == sixteen.name)
@@ -1567,7 +1594,7 @@ mod tests {
     /// what it said.
     #[test]
     fn every_truecolor_palette_draws_a_tool_darker_than_a_reply() {
-        for theme in [CYBER, NEO, MODERN] {
+        for theme in [CYBER, NEO, STELLAR] {
             let t = theme.at(Depth::TrueColour);
             assert!(
                 contrast(t.tool, t.pane_bg) < contrast(t.fg, t.pane_bg),
@@ -1711,8 +1738,8 @@ mod tests {
         assert_eq!(cyber.fg, Color::Rgb(0xe6, 0xe9, 0xff));
         assert_eq!(NEO.at(Depth::TrueColour).fg, Color::Rgb(0x9b, 0xff, 0xb0));
         assert_eq!(
-            MODERN.at(Depth::TrueColour).frame_focus,
-            Color::Rgb(0x00, 0x7a, 0xcc)
+            STELLAR.at(Depth::TrueColour).frame_focus,
+            Color::Rgb(0x00, 0x78, 0xd4)
         );
         // And the way back is the sixteen-colour table itself.
         assert_eq!(cyber.at(Depth::Sixteen), CYBER);
@@ -1720,7 +1747,7 @@ mod tests {
 
     #[test]
     fn a_designed_theme_on_a_deep_terminal_is_drawn_in_nothing_but_its_design() {
-        for theme in [CYBER, NEO, MODERN] {
+        for theme in [CYBER, NEO, STELLAR] {
             let deep = theme.at(Depth::TrueColour);
             for colour in colours(&deep) {
                 assert!(
@@ -1740,7 +1767,7 @@ mod tests {
     /// palette choosing near-neighbours, not a certification.
     #[test]
     fn every_truecolor_palette_draws_its_text_legibly() {
-        for theme in [CYBER, NEO, MODERN] {
+        for theme in [CYBER, NEO, STELLAR] {
             let t = theme.at(Depth::TrueColour);
             assert!(
                 t.illegible().is_empty(),
@@ -1808,7 +1835,7 @@ mod tests {
                 (BorderType::Plain, BorderType::Double)
             );
         }
-        for t in [CYBER, MODERN] {
+        for t in [CYBER, STELLAR] {
             assert_eq!(
                 (t.border, t.border_focus),
                 (BorderType::Plain, BorderType::Thick)
@@ -1819,7 +1846,7 @@ mod tests {
     #[test]
     fn cycling_from_a_truecolor_palette_moves_to_the_next_theme() {
         assert_eq!(CYBER.at(Depth::TrueColour).next(), CLASSIC);
-        assert_eq!(MODERN.at(Depth::TrueColour).next(), CYBER);
+        assert_eq!(STELLAR.at(Depth::TrueColour).next(), CYBER);
     }
 
     #[test]
@@ -1836,12 +1863,60 @@ mod tests {
     fn a_theme_is_selected_by_its_name_however_it_is_capitalised() {
         assert_eq!(Theme::by_name("classic"), Some(CLASSIC));
         assert_eq!(Theme::by_name("cyber"), Some(CYBER));
-        assert_eq!(Theme::by_name("modern"), Some(MODERN));
+        assert_eq!(Theme::by_name("stellar"), Some(STELLAR));
         assert_eq!(Theme::by_name("neo"), Some(NEO));
         assert_eq!(Theme::by_name("NEO"), Some(NEO));
         assert_eq!(Theme::by_name("Neo"), Some(NEO));
         assert_eq!(Theme::by_name("matrix"), None);
         assert_eq!(Theme::by_name(""), None);
+    }
+
+    /// `stellar` was called `modern`, and a config, a theme file's base or a
+    /// remembered pick written then still says so: it opens in `stellar`
+    /// rather than refusing to start, while the theme list offers only the
+    /// name it has now.
+    #[test]
+    fn a_theme_is_still_found_by_the_name_it_went_by_before() {
+        assert_eq!(Theme::by_name("modern"), Some(STELLAR));
+        assert_eq!(Theme::by_name("MODERN"), Some(STELLAR));
+        assert_eq!(Theme::builtin("Modern"), Some(STELLAR));
+        assert!(Theme::all().iter().all(|theme| theme.name != "MODERN"));
+        assert!(!listed().contains("modern"));
+    }
+
+    /// The stellar theme is VS Code's Dark Modern where the editor has the
+    /// role: each pair here is the value the editor's own theme file gives
+    /// that part of its window.
+    #[test]
+    fn stellar_draws_each_part_of_the_screen_in_vs_codes_dark_modern_colours() {
+        let t = STELLAR.at(Depth::TrueColour);
+        let rgb = |value: u32| {
+            let [_, r, g, b] = value.to_be_bytes();
+            Color::Rgb(r, g, b)
+        };
+        for (ours, code, what) in [
+            (t.pane_bg, 0x1f1f1f, "editor.background"),
+            (t.menu_bg, 0x181818, "titleBar.activeBackground"),
+            (t.keybar_bg, 0x181818, "statusBar.background"),
+            (t.frame, 0x2b2b2b, "sideBar.border"),
+            (t.frame_focus, 0x0078d4, "focusBorder"),
+            (t.fg, 0xcccccc, "foreground"),
+            (t.dim, 0x9d9d9d, "descriptionForeground"),
+            (t.hot, 0x4daafc, "textLink.foreground"),
+            (t.del, 0xf85149, "errorForeground"),
+            (t.warn, 0xcca700, "editorWarning.foreground"),
+            (t.add, 0x2ea043, "editorGutter.addedBackground"),
+            (
+                t.title,
+                0xe2c08d,
+                "gitDecoration.modifiedResourceForeground",
+            ),
+            (t.fkey_bg, 0x313131, "button.secondaryBackground"),
+            (t.dialog_bg, 0x222222, "quickInput.background"),
+            (t.menu_cursor_bg, 0x0078d4, "menu.selectionBackground"),
+        ] {
+            assert_eq!(ours, rgb(code), "{what}");
+        }
     }
 
     #[test]
@@ -1859,7 +1934,7 @@ mod tests {
 
     #[test]
     fn the_names_are_listed_the_way_a_sentence_lists_them() {
-        assert_eq!(listed(), "`cyber`, `classic`, `neo` or `modern`");
+        assert_eq!(listed(), "`cyber`, `classic`, `neo` or `stellar`");
     }
 
     #[test]

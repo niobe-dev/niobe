@@ -722,7 +722,7 @@ mod tests {
     #[test]
     fn a_changed_line_is_highlighted_where_its_wash_marks_it_and_keeps_its_colour_where_none_does()
     {
-        let deep = crate::theme::MODERN_TRUE;
+        let deep = crate::theme::STELLAR_TRUE;
         let diff = rust_change(vec![removed("let a = 1;"), added("let b = 2;")]);
         let rows = lines(&diff, 40, false, &deep);
         assert_eq!(
@@ -765,7 +765,7 @@ mod tests {
 
     #[test]
     fn a_comment_a_removed_line_opens_runs_on_in_the_old_file_and_not_in_the_new() {
-        let theme = crate::theme::MODERN_TRUE;
+        let theme = crate::theme::STELLAR_TRUE;
         let diff = rust_change(vec![
             removed("/* gone"),
             added("let kept = 1;"),
@@ -799,7 +799,7 @@ mod tests {
 
     #[test]
     fn a_proposed_line_wrapped_to_two_rows_is_highlighted_on_both() {
-        let theme = crate::theme::MODERN_TRUE;
+        let theme = crate::theme::STELLAR_TRUE;
         let line = [added("let s = \"one two three four five\";")];
         let (rows, _) = proposed(
             &line,

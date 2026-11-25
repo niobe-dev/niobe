@@ -317,15 +317,18 @@ reviewers that encode both, for an agent working in this tree.
   `scene/life.rs` `classic`'s Game of Life on a torus held 64 cells to a word, two board cells
   to a terminal cell in half blocks, the newborn white and the dead a ghost for a generation,
   sown again from a random soup every era, the last generation reached kept on the thread only
-  so the next frame steps on from it; `scene/cyborg.rs` `modern`'s cyborg head, ellipsoids met by
-  a ray from every pixel — two to a cell, in half blocks — and lit as skin or metal by a key
-  light, an accent rim light and the red eye's glow, each light rounded to a few steps, half
-  plated round that eye, turning from side to side, grinning and winking — each worked out from a seed and the
+  so the next frame steps on from it; `scene/blackhole.rs` `stellar`'s black hole, seen from
+  just above its accretion disk — a ray from every pixel, two to a cell in half blocks, followed
+  through a non-rotating hole's gravity until it falls in, meets the disk or leaves for the
+  stars, where each ends worked out once for a pane's size and kept for the last few sizes —
+  the disk's far side bent over and under the shadow, the photon ring round it, the stars
+  lensed into arcs, the disk's light shifted by the gas's motion and the hole's well and its
+  streaks going round at each radius's orbital pace, each light rounded to a few steps — each worked out from a seed and the
   wall clock the loop last read, so two draws
   at one moment draw one frame, drawn in the theme's values or its sixteen names with no shade a
   terminal could not draw, and drawn by the loop while it shows at the frame `scene::frame` gives
-  it — 100 ms for the skyline, whose lights read the same at ten frames a second, 33 ms for the
-  rest — and not at all while the composer holds text, the scene held at the moment its last
+  it — 100 ms for the skyline and the black hole, whose lights and slow disk read the same at
+  ten frames a second, 33 ms for the rest — and not at all while the composer holds text, the scene held at the moment its last
   frame was drawn, since every frame is one the terminal repaints and the keys typed wait behind
   those repaints — and `spike.rs` finds a turn that spent more than three times the tokens the session's earlier
   turns averaged, which the loop, never the fold, keeps for the Usage pane to say by the turn's
@@ -846,7 +849,7 @@ Where tests live:
     `UPDATE_SNAPSHOTS=1 cargo test -p niobe-tui --test shell` and **read the diff** of the
     snapshot files before accepting it. The session both draw is in `tests/common/mod.rs`.
   - `niobe-tui/tests/frame_budget.rs` times a 200×60 resize, a resize of a reply quoted thousands
-    deep, a resize of a paragraph of thousands of links, a resize of linked images nested thousands deep, and the steady redraw of a long session of markdown replies, and the scene an empty session pane shows in every theme, against a 16 ms budget, and a
+    deep, a resize of a paragraph of thousands of links, a resize of linked images nested thousands deep, and the steady redraw of a long session of markdown replies, and the scene an empty session pane shows in every theme, played and resized to a new size each frame, against a 16 ms budget, and a
     frame of a 2,000-turn session in which nothing changed against 2 ms, and a long line typed or pasted into
     the composer: a paste as long as the composer holds against 50 ms, a key typed into it
     against 16 ms, and keys read together against a linear ratio — and a

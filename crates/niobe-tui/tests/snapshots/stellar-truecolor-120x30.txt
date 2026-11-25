@@ -1,30 +1,29 @@
-  a  Rgb(204, 204, 204) on Rgb(50, 50, 51)
-  b  Rgb(79, 193, 255) on Rgb(50, 50, 51), bold | underlined
-  c  Rgb(204, 204, 204) on Rgb(50, 50, 51), bold
-  d  Rgb(204, 204, 204) on Rgb(50, 50, 51), dim
-  e  Rgb(79, 193, 255) on Rgb(50, 50, 51)
-  f  Rgb(212, 212, 212) on Rgb(37, 37, 38)
-  g  Rgb(0, 122, 204) on Rgb(37, 37, 38)
-  h  Rgb(220, 220, 170) on Rgb(37, 37, 38), bold
-  i  Rgb(220, 220, 170) on Rgb(37, 37, 38)
-  j  Rgb(60, 60, 60) on Rgb(37, 37, 38)
-  k  Rgb(79, 193, 255) on Rgb(37, 37, 38), bold
-  l  Rgb(133, 133, 133) on Rgb(37, 37, 38)
-  m  Rgb(204, 167, 0) on Rgb(37, 37, 38), bold
-  n  Rgb(204, 167, 0) on Rgb(37, 37, 38)
-  o  Rgb(212, 212, 212) on Rgb(37, 37, 38), bold
-  p  Rgb(79, 193, 255) on Rgb(37, 37, 38)
-  q  Rgb(78, 201, 176) on Rgb(37, 37, 38), bold
-  r  Rgb(78, 201, 176) on Rgb(37, 37, 38)
-  s  Rgb(241, 76, 76) on Rgb(37, 37, 38), bold
-  t  Rgb(241, 76, 76) on Rgb(37, 37, 38)
-  u  Rgb(197, 134, 192) on Rgb(37, 37, 38)
-  v  Rgb(37, 37, 38) on Rgb(79, 193, 255), bold
-  w  Rgb(37, 37, 38) on Rgb(79, 193, 255)
-  x  Rgb(79, 193, 255) on Rgb(50, 50, 51), bold
-  y  Rgb(255, 255, 255) on Rgb(14, 99, 156), dim
-  z  Rgb(212, 212, 212) on Rgb(50, 50, 51)
-  A  Rgb(255, 255, 255) on Rgb(14, 99, 156)
+  a  Rgb(204, 204, 204) on Rgb(24, 24, 24)
+  b  Rgb(77, 170, 252) on Rgb(24, 24, 24), bold | underlined
+  c  Rgb(204, 204, 204) on Rgb(24, 24, 24), bold
+  d  Rgb(204, 204, 204) on Rgb(24, 24, 24), dim
+  e  Rgb(77, 170, 252) on Rgb(24, 24, 24)
+  f  Rgb(204, 204, 204) on Rgb(31, 31, 31)
+  g  Rgb(0, 120, 212) on Rgb(31, 31, 31)
+  h  Rgb(226, 192, 141) on Rgb(31, 31, 31), bold
+  i  Rgb(226, 192, 141) on Rgb(31, 31, 31)
+  j  Rgb(43, 43, 43) on Rgb(31, 31, 31)
+  k  Rgb(77, 170, 252) on Rgb(31, 31, 31), bold
+  l  Rgb(157, 157, 157) on Rgb(31, 31, 31)
+  m  Rgb(204, 167, 0) on Rgb(31, 31, 31), bold
+  n  Rgb(204, 167, 0) on Rgb(31, 31, 31)
+  o  Rgb(204, 204, 204) on Rgb(31, 31, 31), bold
+  p  Rgb(77, 170, 252) on Rgb(31, 31, 31)
+  q  Rgb(46, 160, 67) on Rgb(31, 31, 31), bold
+  r  Rgb(46, 160, 67) on Rgb(31, 31, 31)
+  s  Rgb(248, 81, 73) on Rgb(31, 31, 31), bold
+  t  Rgb(248, 81, 73) on Rgb(31, 31, 31)
+  u  Rgb(197, 134, 192) on Rgb(31, 31, 31)
+  v  Rgb(31, 31, 31) on Rgb(77, 170, 252), bold
+  w  Rgb(31, 31, 31) on Rgb(77, 170, 252)
+  x  Rgb(77, 170, 252) on Rgb(24, 24, 24), bold
+  y  Rgb(204, 204, 204) on Rgb(49, 49, 49), dim
+  z  Rgb(204, 204, 204) on Rgb(49, 49, 49)
 
 abaaaaaabaaaaaaaabaaaaaaaabaaaaaabaaaaabaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaccccccaaddddddddddddddddaaeeeeeeeeeeeeeeaadddddaa
 fggghhhiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiggggfjjjjjjjjjjjjjjjjhhhhhhhjjjjjjjjjjjjjjjjjf
@@ -55,4 +54,4 @@ fgfffllkkkkkfppppfffffffffffffffffffpppllllllllllllllllllllllllllllllpppppppfgfj
 fgfjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjfgfjffffflllllllllllffffffffffffffffffffffjf
 fgfvvvvvkkkwlllllllllllllllllllllllllllllllllllllllfffffffffffllllllllllllllfgfjffffffffffffffffffffffffffffffrrrffttfjf
 fgggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggfjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjf
-xxxyyyyzxAAAAAAAAzxyyyyyyyyyyyzxyyyyyyyyyzxyyyyyyyyyzxAAAAAAAAzxyyyyyyyyyyzxAAAAAAAzxAAAAAAAAAAzxAAAAAAAAAAAAzxAAAAAAAAz
+xxxyyyyaxzzzzzzzzaxyyyyyyyyyyyaxyyyyyyyyyaxyyyyyyyyyaxzzzzzzzzaxyyyyyyyyyyaxzzzzzzzaxzzzzzzzzzzaxzzzzzzzzzzzzaxzzzzzzzza

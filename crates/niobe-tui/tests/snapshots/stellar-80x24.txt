@@ -14,8 +14,7 @@
   n  Black on LightBlue, bold
   o  Black on LightBlue
   p  LightBlue on DarkGray, bold
-  q  White on Blue, dim
-  r  White on Blue
+  q  White on Black, dim
 
 abaaaaaabaaaaaaaabaaaaaaaabaaaaaabaaaaabaaaaaaaaaaaaaaccccccaaddddddddddddddddaa
 eeeeefffgggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggeeeee
@@ -40,4 +39,4 @@ ehhhiijjjjjheeeehhhhhhhhhhhhhhhhhhhhhheeeiiiiiiiiiiiiiiiiiiiiiiiiiiiiiieeeeeeehe
 ehmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmhe
 ehnnnnnjjjoiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiihhhhhhhhhhhhhhiiiiiiiiiiiiiihe
 eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
-pppqqqqaprrrrapqqqqqqqapqqqqqapqqqqqaprrrrapqqqqqqaprrraprrrrrraprrrrrrrraprrrra
+pppqqqqaphhhhapqqqqqqqapqqqqqapqqqqqaphhhhapqqqqqqaphhhaphhhhhhaphhhhhhhhaphhhha

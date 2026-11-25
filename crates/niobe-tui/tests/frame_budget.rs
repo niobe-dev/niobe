@@ -105,6 +105,38 @@ fn the_scene_in_an_empty_session_pane_plays_inside_a_frame_budget() {
     }
 }
 
+/// A terminal dragged larger while the empty session pane shows its scene:
+/// every frame is at a size not drawn before, so a scene that works out
+/// something once per size — the black hole's rays — works it out on every
+/// one of them, and that has to fit in a frame too.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "a frame is timed in an optimised build")]
+fn the_scene_in_an_empty_session_pane_resizes_inside_a_frame_budget() {
+    let _alone = ALONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for theme in THEMES {
+        let mut app = App::new(niobe_tui::app::Repo::default())
+            .attached()
+            .with_depth(Depth::TrueColour)
+            .with_theme(theme);
+        let sizes: Vec<(u16, u16)> = (0..FRAMES)
+            .map(|frame| {
+                let grown = u16::try_from(frame).expect("FRAMES fits a terminal");
+                (170 + grown, 50 + grown / 3)
+            })
+            .collect();
+        let median = median_frame(&mut app, &sizes);
+
+        assert!(
+            median <= FRAME_BUDGET,
+            "{}: the median frame of its scene, resized each time up to 200x60, took \
+             {median:?}, over the {FRAME_BUDGET:?} budget",
+            theme.name
+        );
+    }
+}
+
 const QUOTE_DEPTH: usize = 8000;
 const QUOTED_LINES: usize = 2000;
 

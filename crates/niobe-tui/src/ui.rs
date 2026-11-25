@@ -11918,7 +11918,7 @@ mod tests {
     /// the last branch.
     #[test]
     fn what_is_at_work_hangs_from_branches_under_its_head() {
-        let theme = crate::theme::MODERN;
+        let theme = crate::theme::STELLAR;
         let live = live_of("head", &["$ make", "[•_•] test", "& dev"]);
         let rows: Vec<String> = fit_live(live, 10, &theme).iter().map(line_text).collect();
         assert_eq!(rows, ["head", "  ├ $ make", "  ├ [•_•] test", "  └ & dev"]);
@@ -11928,7 +11928,7 @@ mod tests {
     /// head.
     #[test]
     fn what_is_at_work_is_cut_between_things_and_counts_the_rest() {
-        let theme = crate::theme::MODERN;
+        let theme = crate::theme::STELLAR;
         let live = || live_of("head", &["$ make", "[•_•] test", "& dev"]);
         let rows: Vec<String> = fit_live(live(), 3, &theme).iter().map(line_text).collect();
         assert_eq!(rows, ["head", "  ├ $ make", "  └ +2 more at work"]);
@@ -12031,7 +12031,7 @@ mod tests {
     /// the model and its status, filling the row exactly.
     #[test]
     fn an_agents_row_says_what_it_is_doing_beside_its_task() {
-        let theme = crate::theme::MODERN;
+        let theme = crate::theme::STELLAR;
         let row = line_text(&agent_row(
             agent_line("test", "Cover the cache", Some("running echo · grep")),
             columns_for(None, "running echo · grep").fitted(100),
@@ -12049,7 +12049,7 @@ mod tests {
     /// and the task is kept: it is what tells one agent from another.
     #[test]
     fn a_narrow_agents_row_gives_up_its_model_then_what_it_is_doing() {
-        let theme = crate::theme::MODERN;
+        let theme = crate::theme::STELLAR;
         let doing = "running echo · grep";
         let row = |width| {
             line_text(&agent_row(
@@ -12096,7 +12096,7 @@ mod tests {
     /// so the models and times of the agents around it stay in line.
     #[test]
     fn an_agent_that_said_nothing_keeps_the_doing_column_blank() {
-        let theme = crate::theme::MODERN;
+        let theme = crate::theme::STELLAR;
         let columns = columns_for(None, "reading cache.rs").fitted(90);
         let said = line_text(&agent_row(
             agent_line("test", "Cover", Some("reading cache.rs")),
@@ -12120,7 +12120,7 @@ mod tests {
     /// first, then the bar, and the clock never.
     #[test]
     fn a_running_commands_row_gives_up_its_bar_before_its_clock() {
-        let theme = crate::theme::MODERN;
+        let theme = crate::theme::STELLAR;
         let ran = Some(std::time::Duration::from_secs(60));
         let tests = shell("cargo test --workspace", Some(150));
         let row = |width| line_text(&live_shell_row(&tests, ran, width, &theme));

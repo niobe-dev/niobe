@@ -289,9 +289,7 @@ fn string<'a>(
 
 /// The built-in theme called `name`.
 fn builtin(name: &str) -> Option<Theme> {
-    theme::THEMES
-        .into_iter()
-        .find(|theme| theme.name.eq_ignore_ascii_case(name))
+    Theme::builtin(name)
 }
 
 fn builtin_names() -> String {

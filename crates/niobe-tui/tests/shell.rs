@@ -39,7 +39,7 @@ use niobe_core::event::{
 };
 use niobe_core::{Action, FailedTests, Proposal, TestCounts, TestRunRecord};
 use niobe_tui::app::{App, Pane, Repo, Section, SelectedProfile};
-use niobe_tui::theme::{CLASSIC, CYBER, Depth, MODERN, NEO, THEMES, Theme};
+use niobe_tui::theme::{CLASSIC, CYBER, Depth, NEO, STELLAR, THEMES, Theme};
 use ratatui::style::{Color, Style};
 
 /// What the bridge reads a shell call's arguments as: the command, and no
@@ -528,7 +528,7 @@ fn a_prompt_sent_while_the_agent_works_is_drawn_queued_until_taken_in() {
 /// design names, cell by cell.
 #[test]
 fn the_designed_themes_paint_their_own_colours_on_a_deep_terminal() {
-    for theme in [CYBER, NEO, MODERN] {
+    for theme in [CYBER, NEO, STELLAR] {
         let name = theme.name.to_lowercase();
         assert_snapshot(
             &format!("{name}-truecolor-120x30"),
@@ -575,7 +575,7 @@ fn a_terminal_without_truecolor_is_drawn_in_the_sixteen_names_only() {
 /// which a user's own scheme would repaint under the design.
 #[test]
 fn a_designed_theme_on_a_deep_terminal_draws_every_cell_in_its_design() {
-    for theme in [CYBER, NEO, MODERN] {
+    for theme in [CYBER, NEO, STELLAR] {
         let mut app = session_waiting_on_a_prompt()
             .with_depth(Depth::TrueColour)
             .with_theme(theme);

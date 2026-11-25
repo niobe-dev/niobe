@@ -1428,7 +1428,7 @@ mod tests {
 
     #[test]
     fn a_code_block_in_a_language_it_names_is_highlighted_in_the_themes_colours() {
-        for theme in [CLASSIC, crate::theme::MODERN_TRUE] {
+        for theme in [CLASSIC, crate::theme::STELLAR_TRUE] {
             let colours = code_colours(
                 "```rust\nfn main() {\n    run(\"x\"); // go\n}\n```",
                 &theme,

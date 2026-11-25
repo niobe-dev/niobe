@@ -14,11 +14,11 @@ is no figure, the screen shows an em dash.
 failed test run, and beside them the plan's windows and the tokens, the branch and the working
 tree as a tree of its directories, and the sub-agent and the tools at work](crates/niobe-tui/tests/snapshots/cyber-120x30.svg)
 
-The same session in the other themes — `classic`, `neo` and `modern`, chosen with `--theme`:
+The same session in the other themes — `classic`, `neo` and `stellar`, chosen with `--theme`:
 
-| classic | neo | modern |
+| classic | neo | stellar |
 | --- | --- | --- |
-| ![classic](crates/niobe-tui/tests/snapshots/classic-120x30.svg) | ![neo](crates/niobe-tui/tests/snapshots/neo-120x30.svg) | ![modern](crates/niobe-tui/tests/snapshots/modern-120x30.svg) |
+| ![classic](crates/niobe-tui/tests/snapshots/classic-120x30.svg) | ![neo](crates/niobe-tui/tests/snapshots/neo-120x30.svg) | ![stellar](crates/niobe-tui/tests/snapshots/stellar-120x30.svg) |
 
 These pictures are drawn by the shell's own snapshot tests, so they show what the code draws
 today. `classic` is drawn in the sixteen colours your terminal's scheme gives it; the pictures

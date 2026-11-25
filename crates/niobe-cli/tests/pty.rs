@@ -1148,7 +1148,7 @@ fn a_settings_file_a_profile_names_and_this_machine_has_not_stops_the_session() 
 /// its own background, as ratatui writes an ANSI-256 pair. Nothing on screen
 /// names the palette in force, so this is what a choice of one is read off.
 const NEO_MENU: &str = "\u{1b}[38;5;2;48;5;0m";
-const MODERN_MENU: &str = "\u{1b}[38;5;15;48;5;8m";
+const STELLAR_MENU: &str = "\u{1b}[38;5;15;48;5;8m";
 const CLASSIC_MENU: &str = "\u{1b}[38;5;0;48;5;7m";
 
 /// The three ways a palette is chosen, on the one screen that can show it: the
@@ -1165,10 +1165,10 @@ fn a_theme_is_selected_by_the_flag_by_the_config_and_from_the_view_menu_and_kept
         .spawn()
         .expect("the niobe binary runs");
     terminal.shows(NEO_MENU);
-    // The list opens on the theme in force, and the table has `modern`
+    // The list opens on the theme in force, and the table has `stellar`
     // after `neo`.
     choose_theme(&terminal, DOWN);
-    terminal.shows(MODERN_MENU);
+    terminal.shows(STELLAR_MENU);
     // F9 reaches the shell as itself, and opens the settings.
     let mark = terminal.mark();
     terminal.typed(F9);
@@ -1197,13 +1197,13 @@ fn a_theme_is_selected_by_the_flag_by_the_config_and_from_the_view_menu_and_kept
         .env("XDG_CONFIG_HOME", home.path())
         .spawn()
         .expect("the niobe binary runs");
-    reopened.shows(MODERN_MENU);
+    reopened.shows(STELLAR_MENU);
     reopened.typed(CTRL_Q);
     let (_, status) = ended(&mut shell);
     assert!(status.success(), "the shell ended with {status}");
     let kept = std::fs::read_to_string(home.path().join("niobe").join("choices.toml"))
         .expect("the choice was kept beside the user's config");
-    assert!(kept.contains("theme = \"MODERN\""), "{kept}");
+    assert!(kept.contains("theme = \"STELLAR\""), "{kept}");
 
     drop(slave);
     drop(flagged_slave);
@@ -1232,19 +1232,19 @@ fn a_theme_picked_in_a_repository_stays_its_own_and_one_with_none_opens_in_the_l
         assert!(status.success(), "the shell ended with {status}");
     };
 
-    // `modern`, picked in the first: `neo` is the config's.
+    // `stellar`, picked in the first: `neo` is the config's.
     let (picked, picked_slave) = Terminal::open();
     let mut shell = shell_in(&picked_slave, &first);
     picked.shows(NEO_MENU);
     choose_theme(&picked, DOWN);
-    picked.shows(MODERN_MENU);
+    picked.shows(STELLAR_MENU);
     quit(&picked, &mut shell);
 
     // The second has no theme of its own, and opens in the one picked last.
-    // `neo`, before `modern` in the list, is then picked there.
+    // `neo`, before `stellar` in the list, is then picked there.
     let (elsewhere, elsewhere_slave) = Terminal::open();
     let mut shell = shell_in(&elsewhere_slave, &second);
-    elsewhere.shows(MODERN_MENU);
+    elsewhere.shows(STELLAR_MENU);
     choose_theme(&elsewhere, UP);
     elsewhere.shows(NEO_MENU);
     quit(&elsewhere, &mut shell);
@@ -1252,7 +1252,7 @@ fn a_theme_picked_in_a_repository_stays_its_own_and_one_with_none_opens_in_the_l
     // The first still opens in its own, though `neo` was picked since.
     let (back, back_slave) = Terminal::open();
     let mut shell = shell_in(&back_slave, &first);
-    back.shows(MODERN_MENU);
+    back.shows(STELLAR_MENU);
     quit(&back, &mut shell);
 
     drop(picked_slave);

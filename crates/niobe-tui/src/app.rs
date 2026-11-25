@@ -14613,7 +14613,7 @@ mod tests {
 
     #[test]
     fn a_shell_on_a_deep_terminal_draws_every_theme_at_that_depth() {
-        use crate::theme::{CLASSIC, CYBER_TRUE, Depth, MODERN_TRUE, NEO, NEO_TRUE};
+        use crate::theme::{CLASSIC, CYBER_TRUE, Depth, NEO, NEO_TRUE, STELLAR_TRUE};
 
         // In either order: the depth is the terminal's, the theme the
         // operator's, and neither is allowed to undo the other.
@@ -14627,7 +14627,7 @@ mod tests {
         );
 
         for (name, drawn) in [
-            (MODERN_TRUE.name, MODERN_TRUE),
+            (STELLAR_TRUE.name, STELLAR_TRUE),
             (CYBER_TRUE.name, CYBER_TRUE),
             (CLASSIC.name, CLASSIC),
         ] {
@@ -25113,18 +25113,21 @@ mod tests {
 
     /// Each frame of a scene is one the terminal repaints whole, so a scene
     /// asks for no more of them than its motion needs: the skyline's lights
-    /// read the same at ten a second, the rest move at thirty. A session pane
-    /// that shows no scene asks for none.
+    /// and the black hole's flowing disk read the same at ten a second, the
+    /// rest move at thirty. A session pane that shows no scene asks for none.
     #[test]
     fn a_scene_asks_to_be_drawn_only_as_often_as_its_motion_needs() {
         let frame = |theme: Theme| app().attached().with_theme(theme).scene_frame();
 
-        assert_eq!(frame(crate::theme::CYBER), Some(Duration::from_millis(100)));
-        for theme in [
-            crate::theme::NEO,
-            crate::theme::CLASSIC,
-            crate::theme::MODERN,
-        ] {
+        for theme in [crate::theme::CYBER, crate::theme::STELLAR] {
+            assert_eq!(
+                frame(theme),
+                Some(Duration::from_millis(100)),
+                "{}",
+                theme.name
+            );
+        }
+        for theme in [crate::theme::NEO, crate::theme::CLASSIC] {
             assert_eq!(
                 frame(theme),
                 Some(Duration::from_millis(33)),

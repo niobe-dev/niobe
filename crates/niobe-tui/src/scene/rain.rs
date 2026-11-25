@@ -266,7 +266,7 @@ mod tests {
 
     use std::time::Duration;
 
-    use crate::theme::{CLASSIC, Depth, MODERN, NEO, Scene};
+    use crate::theme::{CLASSIC, Depth, NEO, STELLAR, Scene};
 
     /// The rain drawn in `theme`'s colours, whatever scene the theme has.
     fn rained(theme: &Theme, millis: u64) -> Buffer {
@@ -355,7 +355,7 @@ mod tests {
             g > r && g > b
         };
         assert!(greenest(&NEO));
-        assert!(!greenest(&MODERN));
+        assert!(!greenest(&STELLAR));
         let sixteen = Ink::of(&CLASSIC);
         assert_eq!(sixteen.trail[0].fg, Some(CLASSIC.hot));
         assert_eq!(sixteen.trail[3].fg, Some(Color::Gray));

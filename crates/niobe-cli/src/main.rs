@@ -2258,7 +2258,7 @@ OPTIONS:
     --budget <amount>      Stop the session once it has cost this many dollars
                            (refused on a profile billed as a plan)
     --theme <name>         Draw the shell in this palette: cyber, classic, neo
-                           or modern
+                           or stellar
     --terse <on|off>       Ask a new conversation for terse replies, or not, beating the
                            config's terse
     --allow <rule>         For -p and bench: answer the calls this rule covers, as a
@@ -2634,15 +2634,16 @@ MODE AND MODEL:
 
 THEME:
     cyber is green and magenta on black, classic is DOS blue, neo is green on
-    black and modern is an editor's grey. --theme <name> opens the shell in
-    one, theme = \"neo\" at the top of a config makes it the one every session
-    opens in, and View › Theme… picks another, which the next session in the
-    same repository opens in, over the config's, until another is picked
-    there. A repository nothing was picked in opens in the theme picked last
-    anywhere, then the config's, then cyber.
+    black and stellar is VS Code's dark grey with a black hole's gold, and
+    still answers to modern, its former name. --theme <name> opens the shell
+    in one, theme = \"neo\" at the top of a config makes it the one every
+    session opens in, and View › Theme… picks another, which the next session
+    in the same repository opens in, over the config's, until another is
+    picked there. A repository nothing was picked in opens in the theme picked
+    last anywhere, then the config's, then cyber.
 
     classic is drawn in the sixteen colours the terminal names, so your own
-    colour scheme is what they mean. cyber, neo and modern are drawn in their
+    colour scheme is what they mean. cyber, neo and stellar are drawn in their
     own 24-bit colours where COLORTERM is truecolor or 24bit, and in the
     sixteen everywhere else, so a session stays legible over SSH and in
     screen. NO_COLOR set to anything draws every theme in the sixteen.
@@ -2786,7 +2787,7 @@ mod tests {
         let (asked, project, last, configured) = (
             theme("cyber"),
             theme("classic"),
-            theme("modern"),
+            theme("stellar"),
             theme("neo"),
         );
         let in_force = |asked, project, last, configured: Option<Theme>| {
