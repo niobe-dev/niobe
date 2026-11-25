@@ -2660,6 +2660,59 @@ mod tests {
             Some(&SessionEvent::ModeSelected { mode: Mode::Plan }),
             "a resumed session would read the refused mode as the one it ran in"
         );
+        let mut chosen = Chosen::default();
+        keep_preferences(&mut app, &mut chosen);
+        assert_eq!(
+            chosen.kept,
+            [],
+            "neither refused mode is the next session's"
+        );
+    }
+
+    /// `ask` and `auto` are how the operator wants the project's calls gated
+    /// from now on; `plan` is a step on the way to a change, and a session
+    /// that opened in it would edit nothing until moved off it.
+    #[test]
+    fn ask_or_auto_taken_by_the_backend_is_kept_for_the_next_session_and_plan_is_not() {
+        use crate::preferences::Preference;
+        let mut app = App::new(Repo::default()).attached();
+        let mut journal = Kept::default();
+        let mut backend = Attached::default();
+        let mut chosen = Chosen::default();
+        app.apply(&SessionEvent::ModeSelected { mode: Mode::Ask });
+
+        for _ in 0..3 {
+            app.on_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+            send_produced(&mut app, &mut journal, &mut backend, &mut Forgotten);
+            keep_preferences(&mut app, &mut chosen);
+        }
+
+        assert_eq!(backend.modes, [Mode::Auto, Mode::Plan, Mode::Ask]);
+        assert_eq!(
+            chosen.kept,
+            [Preference::Mode(Mode::Auto), Preference::Mode(Mode::Ask)]
+        );
+    }
+
+    /// A session nothing has reported a mode for goes back, on a refusal, to
+    /// the mode the backend was started in, which is where it still is.
+    #[test]
+    fn a_mode_refused_before_any_was_reported_goes_back_to_the_one_the_backend_started_in() {
+        let mut app = App::new(Repo::default()).attached().started_in(Mode::Auto);
+        let mut journal = Kept::default();
+        let mut backend = Attached {
+            refuse: true,
+            ..Attached::default()
+        };
+
+        app.on_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+        send_produced(&mut app, &mut journal, &mut backend, &mut Forgotten);
+
+        assert_eq!(app.session().mode(), Some(Mode::Auto));
+        assert_eq!(
+            journal.events.last(),
+            Some(&SessionEvent::ModeSelected { mode: Mode::Auto })
+        );
     }
 
     #[test]

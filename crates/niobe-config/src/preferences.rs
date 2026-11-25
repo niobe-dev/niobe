@@ -2,8 +2,9 @@
 // Copyright (c) Viacheslav Shynkarenko
 
 //! The choices the operator made in the shell — the theme, in each project
-//! and the last anywhere, and each profile's model and effort — kept for the
-//! next session to open with.
+//! and the last anywhere, the mode each project's tool calls are gated in,
+//! and each profile's model and effort — kept for the next session to open
+//! with.
 //!
 //! They are kept in a file of Niobe's own beside the user's config,
 //! [`FILE_NAME`], rather than spliced into the config: the config is the
@@ -19,6 +20,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
+use niobe_core::event::Mode;
 use toml::de::{DeTable, DeValue};
 
 use crate::ConfigError;
@@ -29,27 +31,28 @@ pub const FILE_NAME: &str = "choices.toml";
 /// What the file says first, so that an operator who opens it knows who
 /// writes it and that an edit lasts only until the next choice.
 const HEADER: &str = "# Written by niobe: the theme last chosen in the shell, anywhere and in each\n\
-                      # project, and each profile's model and effort, which the next session opens\n\
-                      # with. Rewritten whole on each choice; `--theme`, and a choice made in the\n\
-                      # shell, override it.\n";
+                      # project, the mode each project's tool calls were last gated in, and each\n\
+                      # profile's model and effort, which the next session opens with. Rewritten\n\
+                      # whole on each choice; `--theme`, and a choice made in the shell, override it.\n";
 
 /// The choices the last sessions made, as the file holds them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Saved {
     /// The theme last chosen, in whichever project it was.
     theme: Option<String>,
-    /// The theme last chosen in each project, the project chosen in last
+    /// What was last chosen in each project, the project chosen in last
     /// first, so that what the file has no room for is the oldest.
-    projects: Vec<ProjectTheme>,
+    projects: Vec<ProjectChoices>,
     profiles: BTreeMap<String, ProfileChoices>,
 }
 
-/// The theme last chosen in one project.
+/// What was last chosen in one project: at least one of a theme and a mode.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ProjectTheme {
+struct ProjectChoices {
     /// The project's root, as the session that chose it was opened at.
     root: String,
-    theme: String,
+    theme: Option<String>,
+    mode: Option<Mode>,
 }
 
 /// What was chosen for one profile.
@@ -78,6 +81,15 @@ pub enum Change<'a> {
         project: Option<&'a Path>,
         /// The theme, by its name.
         theme: &'a str,
+    },
+    /// The mode the project rooted at `project` gates tool calls in from
+    /// now on. Kept for that project alone, and not at all where its root is
+    /// not UTF-8, since the file is text.
+    Mode {
+        /// The root of the project it was chosen in.
+        project: &'a Path,
+        /// The mode.
+        mode: Mode,
     },
     /// The model `profile` answers with; `None` forgets the one kept, as
     /// where the backend refused it.
@@ -147,11 +159,38 @@ impl Saved {
     /// The theme last chosen in the project rooted at `root`; none where
     /// none was chosen there, or none the file still has room for.
     pub fn project_theme(&self, root: &Path) -> Option<&str> {
+        self.project(root)?.theme.as_deref()
+    }
+
+    /// The mode last chosen in the project rooted at `root`; none where
+    /// none was chosen there, or none the file still has room for.
+    pub fn project_mode(&self, root: &Path) -> Option<Mode> {
+        self.project(root)?.mode
+    }
+
+    /// What was last chosen in the project rooted at `root`.
+    fn project(&self, root: &Path) -> Option<&ProjectChoices> {
         let root = root.to_str()?;
-        self.projects
+        self.projects.iter().find(|project| project.root == root)
+    }
+
+    /// The choices of the project rooted at `root`, moved to the front as
+    /// the one chosen in last, and made where it had none.
+    fn chosen_in(&mut self, root: &str) -> &mut ProjectChoices {
+        let earlier = self
+            .projects
             .iter()
-            .find(|project| project.root == root)
-            .map(|project| project.theme.as_str())
+            .position(|project| project.root == root)
+            .map(|at| self.projects.remove(at));
+        self.projects.insert(
+            0,
+            earlier.unwrap_or_else(|| ProjectChoices {
+                root: root.to_owned(),
+                theme: None,
+                mode: None,
+            }),
+        );
+        &mut self.projects[0]
     }
 
     /// The model last chosen under `profile`.
@@ -169,16 +208,14 @@ impl Saved {
         match change {
             Change::Theme { project, theme } => {
                 if let Some(root) = project.and_then(Path::to_str) {
-                    self.projects.retain(|project| project.root != root);
-                    self.projects.insert(
-                        0,
-                        ProjectTheme {
-                            root: root.to_owned(),
-                            theme: theme.to_owned(),
-                        },
-                    );
+                    self.chosen_in(root).theme = Some(theme.to_owned());
                 }
                 self.theme = Some(theme.to_owned());
+            }
+            Change::Mode { project, mode } => {
+                if let Some(root) = project.to_str() {
+                    self.chosen_in(root).mode = Some(mode);
+                }
             }
             Change::Model { profile, model } => {
                 let choices = self.profiles.entry(profile.to_owned()).or_default();
@@ -211,11 +248,16 @@ impl Saved {
         }
         let room = usize::try_from(crate::read::LIMIT).unwrap_or(usize::MAX);
         for project in &self.projects {
-            let entry = format!(
-                "\n[[projects]]\nroot = {}\ntheme = {}\n",
-                crate::write::quoted(&project.root),
-                crate::write::quoted(&project.theme)
+            let mut entry = format!(
+                "\n[[projects]]\nroot = {}\n",
+                crate::write::quoted(&project.root)
             );
+            if let Some(theme) = &project.theme {
+                entry.push_str(&format!("theme = {}\n", crate::write::quoted(theme)));
+            }
+            if let Some(mode) = project.mode {
+                entry.push_str(&format!("mode = {}\n", crate::write::quoted(mode.as_str())));
+            }
             if text.len().saturating_add(entry.len()) > room {
                 break;
             }
@@ -226,9 +268,9 @@ impl Saved {
 }
 
 /// The projects a `projects` array holds, in its order, each table that is
-/// not a root and a theme passed over, and so is a root listed again: the
-/// first listing is the newer.
-fn projects(value: &DeValue<'_>) -> Vec<ProjectTheme> {
+/// not a root and a theme or a mode passed over, and so is a root listed
+/// again: the first listing is the newer.
+fn projects(value: &DeValue<'_>) -> Vec<ProjectChoices> {
     let DeValue::Array(entries) = value else {
         return Vec::new();
     };
@@ -241,14 +283,24 @@ fn projects(value: &DeValue<'_>) -> Vec<ProjectTheme> {
             continue;
         };
         let read = |key: &str| table.get(key).and_then(|value| said(value.get_ref()));
-        let (Some(root), Some(theme)) = (read("root"), read("theme")) else {
+        let Some(root) = read("root") else {
             continue;
         };
-        if seen.insert(root.clone()) {
-            projects.push(ProjectTheme { root, theme });
+        let theme = read("theme");
+        let mode = read("mode").and_then(|mode| named(&mode));
+        if (theme.is_some() || mode.is_some()) && seen.insert(root.clone()) {
+            projects.push(ProjectChoices { root, theme, mode });
         }
     }
     projects
+}
+
+/// The mode the shell calls `name`; none for a name it has no mode for,
+/// such as one of the backend's own that the shell does not model.
+fn named(name: &str) -> Option<Mode> {
+    [Mode::Plan, Mode::Ask, Mode::Auto]
+        .into_iter()
+        .find(|mode| mode.as_str() == name)
 }
 
 /// A string that says something; a blank one is no choice.
@@ -281,6 +333,7 @@ pub fn keep(path: &Path, change: Change<'_>) -> Result<(), ConfigError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use niobe_core::event::Mode;
 
     fn kept(dir: &Path) -> std::path::PathBuf {
         dir.join("niobe").join(FILE_NAME)
@@ -437,6 +490,114 @@ mod tests {
         let saved = Saved::read(&path);
         assert_eq!(saved.project_theme(root), None);
         assert_eq!(saved.last_theme(), Some("neo"));
+    }
+
+    /// A mode chosen in the project rooted at `root`.
+    fn mode_in(root: &Path, mode: Mode) -> Change<'_> {
+        Change::Mode {
+            project: root,
+            mode,
+        }
+    }
+
+    #[test]
+    fn a_mode_chosen_in_a_project_is_that_project_s_alone() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be made");
+        let path = kept(dir.path());
+        let (a, b, c) = (
+            Path::new("/work/a"),
+            Path::new("/work/b"),
+            Path::new("/work/c"),
+        );
+
+        keep(&path, mode_in(a, Mode::Ask)).expect("kept");
+        keep(&path, mode_in(b, Mode::Auto)).expect("kept");
+
+        let saved = Saved::read(&path);
+        assert_eq!(saved.project_mode(a), Some(Mode::Ask));
+        assert_eq!(saved.project_mode(b), Some(Mode::Auto));
+        assert_eq!(saved.project_mode(c), None);
+        assert_eq!(saved.last_theme(), None, "a mode is no theme");
+    }
+
+    #[test]
+    fn a_project_s_mode_and_theme_are_kept_together_and_each_choice_leaves_the_other() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be made");
+        let path = kept(dir.path());
+        let (a, b) = (Path::new("/work/a"), Path::new("/work/b"));
+        keep(&path, theme_in(a, "neo")).expect("kept");
+        keep(&path, theme_in(b, "classic")).expect("kept");
+
+        keep(&path, mode_in(a, Mode::Ask)).expect("kept");
+        keep(&path, theme_in(a, "modern")).expect("kept");
+        keep(&path, mode_in(a, Mode::Auto)).expect("kept");
+        let once = std::fs::read_to_string(&path).expect("the file was written");
+        keep(&path, mode_in(a, Mode::Auto)).expect("kept");
+
+        let saved = Saved::read(&path);
+        assert_eq!(saved.project_mode(a), Some(Mode::Auto));
+        assert_eq!(saved.project_theme(a), Some("modern"));
+        assert_eq!(saved.project_theme(b), Some("classic"));
+        assert_eq!(saved.project_mode(b), None);
+        assert_eq!(saved.last_theme(), Some("modern"));
+        let text = std::fs::read_to_string(&path).expect("the file was written");
+        assert_eq!(text.matches("/work/a").count(), 1, "{text}");
+        assert_eq!(text, once, "keeping the same mode again changes nothing");
+    }
+
+    #[test]
+    fn a_project_chosen_a_mode_in_last_is_the_last_forgotten() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be made");
+        let path = kept(dir.path());
+        let deep = "d".repeat(100_000);
+        let roots: Vec<std::path::PathBuf> = (0..15)
+            .map(|n| Path::new("/").join(&deep).join(n.to_string()))
+            .collect();
+        for root in &roots {
+            keep(&path, theme_in(root, "neo")).expect("kept");
+        }
+
+        keep(&path, mode_in(&roots[0], Mode::Ask)).expect("kept");
+
+        let saved = Saved::read(&path);
+        assert_eq!(saved.project_mode(&roots[0]), Some(Mode::Ask));
+        assert_eq!(
+            saved.project_theme(&roots[0]),
+            None,
+            "its theme was forgotten"
+        );
+        assert_eq!(saved.project_theme(&roots[1]), None);
+        assert_eq!(saved.project_theme(&roots[14]), Some("neo"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_mode_chosen_at_a_root_that_is_not_utf_8_is_not_kept() {
+        use std::os::unix::ffi::OsStrExt as _;
+        let dir = tempfile::tempdir().expect("a temporary directory can be made");
+        let path = kept(dir.path());
+        let root = Path::new(std::ffi::OsStr::from_bytes(b"/work/\xff"));
+
+        keep(&path, mode_in(root, Mode::Ask)).expect("kept");
+
+        assert_eq!(Saved::read(&path).project_mode(root), None);
+    }
+
+    #[test]
+    fn a_mode_the_shell_has_no_name_for_is_passed_over_and_the_entry_s_theme_kept() {
+        let saved = Saved::parse(
+            "[[projects]]\nroot = \"/a\"\ntheme = \"neo\"\nmode = \"acceptEdits\"\n\
+             [[projects]]\nroot = \"/b\"\nmode = \"ask\"\n\
+             [[projects]]\nroot = \"/c\"\nmode = 3\n\
+             [[projects]]\nroot = \"/d\"\nmode = \"plan\"\n",
+        );
+
+        assert_eq!(saved.project_mode(Path::new("/a")), None);
+        assert_eq!(saved.project_theme(Path::new("/a")), Some("neo"));
+        assert_eq!(saved.project_mode(Path::new("/b")), Some(Mode::Ask));
+        assert_eq!(saved.project_theme(Path::new("/b")), None);
+        assert_eq!(saved.project_mode(Path::new("/c")), None);
+        assert_eq!(saved.project_mode(Path::new("/d")), Some(Mode::Plan));
     }
 
     #[test]

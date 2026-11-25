@@ -28,9 +28,8 @@ use niobe_tui::bridge::{Bridge, BridgeError, Detached};
 pub struct Attach {
     /// The id the backend calls an earlier session by, where one was recorded.
     pub resume: Option<String>,
-    /// How tool calls are gated. `None` leaves it at what a new session starts
-    /// in, which is the mode the shell shows before anything has said.
-    pub mode: Option<Mode>,
+    /// How tool calls are gated as the backend starts.
+    pub mode: Gating,
     /// The most the session may spend, in USD.
     pub budget_usd: Option<f64>,
     /// Whether the backend is asked to title the session from its first
@@ -65,6 +64,40 @@ pub struct Attach {
     /// left to be started again by a next prompt that never comes: its end
     /// is the session's, which a run waiting on its background work ends on.
     pub one_turn: bool,
+}
+
+/// How a session's tool calls are gated as its backend starts, and whether
+/// that gives way to a `--permission-mode` among the profile's own
+/// arguments.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Gating {
+    /// The mode a session starts in where it holds none of its own, which
+    /// the profile's flag overrides: the profile is the operator's standing
+    /// word on how its sessions run, and a default is nobody's.
+    Fallback(Mode),
+    /// The session's own mode — the one a conversation carried on was left
+    /// in, or the one the operator last chose in the project — over the
+    /// profile's flag, as a model chosen in the shell is.
+    Own(Mode),
+}
+
+impl Gating {
+    /// The mode the backend is started in, unless a profile's flag overrides
+    /// a [`Gating::Fallback`].
+    pub fn mode(self) -> Mode {
+        match self {
+            Self::Fallback(mode) | Self::Own(mode) => mode,
+        }
+    }
+}
+
+impl Default for Gating {
+    /// `ask`, under the profile's flag: a session nothing says anything of —
+    /// a run of `niobe -p` among them — is asked about every call no rule
+    /// allows, rather than left to the backend to decide.
+    fn default() -> Self {
+        Self::Fallback(Mode::Ask)
+    }
 }
 
 /// What a terse conversation appends to the backend's system prompt.
@@ -623,15 +656,10 @@ fn claude_options(
     options.effort = with.effort.clone();
     options.budget_usd = with.budget_usd;
     options.tap = with.tap.clone();
-    // A resumed session starts the CLI in the mode it was left in; a new one
-    // leaves it at the default, which is the mode the shell shows until
-    // something says otherwise.
-    if let Some(mode) = with.mode {
-        options.mode = mode;
-    }
     // A resumed session that recorded no mode Niobe models was in the one
     // the profile's own arguments put it in, which it is taken up in again.
-    options.mode_known = with.mode.is_some();
+    options.mode = with.mode.mode();
+    options.mode_known = matches!(with.mode, Gating::Own(_));
     // The shell answers permission prompts, so the CLI is told to ask. The
     // flag is not set for a backend with nothing answering: the CLI stops the
     // turn on every gated call and waits for an answer that would never come.
@@ -965,7 +993,7 @@ mod tests {
             &selected,
             &Attach {
                 resume: Some("s-1".to_owned()),
-                mode: Some(niobe_core::event::Mode::Plan),
+                mode: Gating::Own(niobe_core::event::Mode::Plan),
                 budget_usd: None,
                 title: false,
                 terse: false,
@@ -1666,7 +1694,7 @@ mod tests {
             &selected,
             &Attach {
                 resume: None,
-                mode: Some(Mode::Plan),
+                mode: Gating::Own(Mode::Plan),
                 budget_usd: Some(0.5),
                 title: false,
                 terse: false,
@@ -1720,7 +1748,7 @@ mod tests {
             .select(Some("max"))
             .expect("the profile is defined")
             .expect("a profile was selected");
-        let mode_taken = |mode: Option<Mode>| {
+        let mode_taken = |mode: Gating| {
             let argv = claude_options(
                 Path::new("/repo"),
                 &selected,
@@ -1740,12 +1768,54 @@ mod tests {
             argv[at + 1].clone()
         };
 
-        assert_eq!(mode_taken(None), "acceptEdits");
-        assert_eq!(mode_taken(Some(Mode::Plan)), "plan");
+        assert_eq!(mode_taken(Gating::Fallback(Mode::Auto)), "acceptEdits");
+        assert_eq!(mode_taken(Gating::Own(Mode::Plan)), "plan");
     }
 
+    /// A new conversation starts in the mode the operator last chose in the
+    /// project over the profile's own, and in the default only where the
+    /// profile names none.
     #[test]
-    fn a_session_that_says_nothing_about_its_mode_starts_where_the_shell_shows_it() {
+    fn a_new_conversation_starts_in_the_mode_chosen_over_the_profiles_and_the_default_under_it() {
+        let started_in = |profile: &str, mode: Gating| {
+            let config = config(profile);
+            let selected = config
+                .select(Some("max"))
+                .expect("the profile is defined")
+                .expect("a profile was selected");
+            let argv = claude_options(
+                Path::new("/repo"),
+                &selected,
+                &Attach {
+                    mode,
+                    ..Attach::default()
+                },
+                NO_HOME,
+            )
+            .expect("the profile names no settings file to be missing")
+            .argv();
+            let at = argv
+                .iter()
+                .rposition(|arg| arg == "--permission-mode")
+                .expect("a mode is passed");
+            argv[at + 1].clone()
+        };
+        let plain = "[profiles.max]\nbackend = \"claude\"\n";
+        let accepting = "[profiles.max]\nbackend = \"claude\"\n\
+                         args = [\"--permission-mode\", \"acceptEdits\"]\n";
+
+        assert_eq!(started_in(plain, Gating::Fallback(Mode::Auto)), "auto");
+        assert_eq!(
+            started_in(accepting, Gating::Fallback(Mode::Auto)),
+            "acceptEdits"
+        );
+        assert_eq!(started_in(accepting, Gating::Own(Mode::Ask)), "default");
+    }
+
+    /// What `niobe -p` starts in: no one watches its calls, so it is asked
+    /// about every one no rule allows rather than left to the backend.
+    #[test]
+    fn a_session_that_says_nothing_about_its_mode_starts_asking_under_the_profile() {
         let config = config("[profiles.max]\nbackend = \"claude\"\n");
         let selected = config
             .select(Some("max"))
@@ -1755,9 +1825,8 @@ mod tests {
         let options = claude_options(Path::new("/repo"), &selected, &Attach::default(), NO_HOME)
             .expect("the profile names no settings file to be missing");
 
-        // The shell cycles from `ask` when nothing has reported a mode, so a
-        // session that starts anywhere else would move on the first keypress.
         assert_eq!(options.mode, Mode::Ask);
+        assert!(!options.mode_known, "a profile's own flag still holds");
         assert_eq!(options.budget_usd, None);
     }
 

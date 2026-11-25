@@ -124,7 +124,8 @@ reviewers that encode both, for an agent working in this tree.
   write or a crash leaves the old file rather than half of the new one; `read.rs` is how every
   config file is read — without waiting on a FIFO, only if it is a regular file and only up to a
   mebibyte — because a repository can commit its config as a link to `/dev/zero`;
-  `preferences.rs` is the theme last picked in the shell, in each repository and anywhere, and
+  `preferences.rs` is the theme last picked in the shell, in each repository and anywhere, the
+  mode each repository's tool calls were last gated in, and
   each profile's model and effort, kept in `choices.toml` beside the user's config — a file of
   Niobe's own, rewritten whole under the lock a rule is written under, its repositories newest
   first and the oldest left out past the mebibyte it is read back at, and read as nothing chosen
@@ -520,7 +521,9 @@ reviewers that encode both, for an agent working in this tree.
   profile, and reads them back so that a new shell opens on the theme last picked in its
   repository, or else the one last picked anywhere — over the config's, under `--theme`, and
   `cyber` where nothing names one — and starts its backend with the model and effort last picked under
-  its profile, over the profile's own flags;
+  its profile, over the profile's own flags, and a new conversation in the mode last taken in its
+  repository, `ask` or `auto`, over the profile's `--permission-mode`, or else in `auto` under it;
+  `niobe -p` still starts in `ask`, since what it is not asked about no one sees;
   `rules.rs` writes a standing answer into the repository's `.niobe/config.toml`, keeping the
   operator's trust decision about that file; `prices.rs` is the price table `niobe prices`
   prints and the sheet the shell values tokens with, at the rates of the days a session

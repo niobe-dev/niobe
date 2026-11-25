@@ -217,6 +217,10 @@ const UP: &[u8] = b"\x1b[A";
 const DOWN: &[u8] = b"\x1b[B";
 const ENTER: &[u8] = b"\r";
 
+/// Shift+Tab, which moves the session to the next mode, as a terminal sends
+/// it.
+const SHIFT_TAB: &[u8] = b"\x1b[Z";
+
 /// The variable the binary reads to panic inside the event loop, which is the
 /// only way in to the one exit path nothing else can reach. The binary compiles
 /// it in only with debug assertions on, which is how `cargo test` builds it.
@@ -1257,6 +1261,61 @@ fn a_theme_picked_in_a_repository_stays_its_own_and_one_with_none_opens_in_the_l
     picked.drained();
     elsewhere.drained();
     back.drained();
+}
+
+/// A `claude` that writes down how it was started and then reads whatever it
+/// is sent, answering nothing, so that no mode it reports moves the shell's.
+const ONLY_WRITES_DOWN_ITS_ARGUMENTS_CLAUDE: &str = "#!/bin/sh\n\
+    printf '%s\\n' \"$*\" >> args.log\n\
+    while read -r line; do :; done\n";
+
+/// A new session starts its CLI in `auto`; `ask`, chosen with Shift+Tab in
+/// one repository, is the mode that repository's next session starts in,
+/// and another repository still starts in `auto`.
+#[test]
+fn a_mode_chosen_in_a_repository_starts_its_next_session_and_one_with_none_starts_in_auto() {
+    let (first, second) = (repo(), repo());
+    put_stand_in(first.path(), ONLY_WRITES_DOWN_ITS_ARGUMENTS_CLAUDE);
+    put_stand_in(second.path(), ONLY_WRITES_DOWN_ITS_ARGUMENTS_CLAUDE);
+    let home = user_config("default_profile = \"max\"\n\n[profiles.max]\nbackend = \"claude\"\n");
+    let choices = home.path().join("niobe").join("choices.toml");
+    // The spawn line of the session `run` drives in `repo`, which is its
+    // `nth` there.
+    let started = |repo: &tempfile::TempDir, nth: usize, run: &dyn Fn(&Terminal)| {
+        let (terminal, slave) = Terminal::open();
+        let mut shell = shell_driving_the_stand_in(&slave, repo.path(), home.path())
+            .spawn()
+            .expect("the niobe binary runs");
+        terminal.shows(OPENING_FRAME);
+        let log = lines_written(&repo.path().join("args.log"), nth);
+        run(&terminal);
+        terminal.typed(CTRL_Q);
+        let (_, status) = ended(&mut shell);
+        let (drawn, _) = released(terminal, slave);
+        assert!(status.success(), "ended with {status}: {drawn}");
+        log.lines()
+            .nth(nth - 1)
+            .expect("the line waited for")
+            .to_owned()
+    };
+
+    let opened = started(&first, 1, &|terminal| {
+        // From `auto`, through `plan`, to `ask`.
+        terminal.typed(SHIFT_TAB);
+        terminal.typed(SHIFT_TAB);
+        let deadline = Instant::now() + PATIENCE;
+        while !std::fs::read_to_string(&choices).is_ok_and(|text| text.contains("mode = \"ask\"")) {
+            assert!(Instant::now() < deadline, "`ask` was never kept");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    });
+    assert!(opened.contains("--permission-mode auto"), "{opened}");
+
+    let reopened = started(&first, 2, &|_| {});
+    assert!(reopened.contains("--permission-mode default"), "{reopened}");
+
+    let elsewhere = started(&second, 1, &|_| {});
+    assert!(elsewhere.contains("--permission-mode auto"), "{elsewhere}");
 }
 
 /// Opens the View menu's theme list, moves its cursor by `step` and takes

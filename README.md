@@ -192,8 +192,11 @@ A terminal that eats an F-key can give the bar's action another one: `[keys]` wi
 The theme you pick from View › Theme… is the one the next session in that repository opens with,
 and a repository you have picked none in opens with the one you picked last anywhere — `cyber`
 where you have never picked one and the config names none. The model and effort you pick for a
-profile are what its next session opens with. Niobe keeps them in `~/.config/niobe/choices.toml`,
-apart from the config you write; `--theme` still wins for one run.
+profile are what its next session opens with. A new session starts in `auto` mode, where the CLI
+decides which calls to ask about; switch to `ask` with Shift+Tab and that repository's next sessions
+start in `ask`. `plan` is not kept, and a profile's own `--permission-mode` still holds where you
+have not switched. Niobe keeps all of these in `~/.config/niobe/choices.toml`, apart from the config
+you write; `--theme` still wins for one run.
 
 A theme of your own is a TOML file in `~/.config/niobe/themes`: a `base` theme and the colours to
 change, in hex or the sixteen names. `niobe --help` has the format; one that cannot be read is

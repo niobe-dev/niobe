@@ -2,11 +2,14 @@
 // Copyright (c) Viacheslav Shynkarenko
 
 //! Where the choices the operator makes in the shell are kept — the theme,
-//! the model, the effort — so that the next session opens with them.
+//! the mode, the model, the effort — so that the next session opens with
+//! them.
 //!
 //! The shell touches no filesystem, so it says what it needs, as it does for
 //! a standing answer in [`crate::rules`], and the binary hands it something
 //! that keeps them. A choice that is not kept still holds for this session.
+
+use niobe_core::event::Mode;
 
 /// Why a choice could not be kept. Shown to the operator as it reads.
 pub type PreferencesError = Box<dyn std::error::Error + Send + Sync>;
@@ -16,6 +19,9 @@ pub type PreferencesError = Box<dyn std::error::Error + Send + Sync>;
 pub enum Preference {
     /// The palette the shell draws in, by its name.
     Theme(String),
+    /// How the project's tool calls are gated: `ask` or `auto`, as the
+    /// backend took it.
+    Mode(Mode),
     /// The model the session answers with, as the operator named it; `None`
     /// where the backend refused the one chosen and the choice is not to be
     /// kept.
@@ -30,6 +36,7 @@ impl Preference {
     pub fn described(&self) -> String {
         match self {
             Preference::Theme(theme) => format!("theme {theme}"),
+            Preference::Mode(mode) => format!("mode {mode}"),
             Preference::Model(Some(model)) => format!("model {model}"),
             Preference::Model(None) => "no model".to_owned(),
             Preference::Effort(effort) => format!("effort {effort}"),

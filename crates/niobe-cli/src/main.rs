@@ -51,7 +51,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, Instant, SystemTime};
 
-use niobe_core::event::Event;
+use niobe_core::event::{Event, Mode};
 use niobe_core::permission::Rule;
 use niobe_ledger::Date;
 use niobe_store::{Recorder, SessionId, read_dated_log};
@@ -394,6 +394,24 @@ fn saved_choices(
     )
 }
 
+/// How a shell's backend gates tool calls as it starts: in the mode the
+/// session `recorded`, where it recorded one; for a conversation that is not
+/// `carried_on`, in the mode last chosen in the `project`; and otherwise in
+/// `auto`, which a profile's own `--permission-mode` overrides.
+///
+/// A conversation carried on that recorded no mode was in one Niobe has no
+/// word for, which the profile's flag put it in, so the project's choice is
+/// not laid over it.
+fn gating(recorded: Option<Mode>, carried_on: bool, project: Option<Mode>) -> backend::Gating {
+    match (recorded, carried_on) {
+        (Some(mode), _) => backend::Gating::Own(mode),
+        (None, false) => {
+            project.map_or(backend::Gating::Fallback(Mode::Auto), backend::Gating::Own)
+        }
+        (None, true) => backend::Gating::Fallback(Mode::Auto),
+    }
+}
+
 /// Refuses a `--budget` for a session on a profile billed as a plan.
 ///
 /// A budget is counted in dollars, and a plan has none to count: no money
@@ -498,7 +516,9 @@ fn shell(profile: Option<&str>, asked: &Asked, opening: Opening) -> Result<Optio
         selected.as_ref(),
     );
 
-    let (model, effort) = saved_choices(&preferences::saved(), selected.as_ref());
+    let saved = preferences::saved();
+    let (model, effort) = saved_choices(&saved, selected.as_ref());
+    let mode = gating(None, false, saved.project_mode(&root));
     // Spawned after the terminal check and before the shell takes the screen:
     // a piped run starts no subprocess, and a backend that will not start says
     // why on a screen that is still the operator's.
@@ -506,6 +526,7 @@ fn shell(profile: Option<&str>, asked: &Asked, opening: Opening) -> Result<Optio
         &root,
         selected.as_ref(),
         &backend::Attach {
+            mode,
             budget_usd: asked.budget,
             tap: tap.clone(),
             trim: trim_for(&root, loaded.config.trim())?,
@@ -517,7 +538,9 @@ fn shell(profile: Option<&str>, asked: &Asked, opening: Opening) -> Result<Optio
         std::env::var_os("HOME"),
     );
     let (backend, app) = attached_or_noticed(&loaded, attempt, app)?;
-    let app = say_tap(app, tap.as_deref()).with_effort(effort);
+    let app = say_tap(app, tap.as_deref())
+        .with_effort(effort)
+        .started_in(mode.mode());
     let app = if backend.attached() {
         app.attached()
     } else {
@@ -820,7 +843,13 @@ fn resume(
     // stopped, and the backend is started that way: a session that came back
     // asking about everything it had been told to stop asking about would have
     // lost a decision the operator made.
-    let (model, effort) = saved_choices(&preferences::saved(), selected.as_ref());
+    let saved = preferences::saved();
+    let (model, effort) = saved_choices(&saved, selected.as_ref());
+    let mode = gating(
+        app.session().mode(),
+        continuing.is_some(),
+        saved.project_mode(&root),
+    );
     let attempt = backend::attach(
         &root,
         selected.as_ref(),
@@ -828,7 +857,7 @@ fn resume(
             // `None` where the session never reached a turn, and the CLI
             // then starts a conversation of its own, asked what a new one is.
             resume: continuing,
-            mode: app.session().mode(),
+            mode,
             budget_usd: asked.budget,
             tap: tap.clone(),
             trim: trim_for(&root, loaded.config.trim())?,
@@ -841,7 +870,9 @@ fn resume(
         std::env::var_os("HOME"),
     );
     let (backend, app) = attached_or_noticed(&loaded, attempt, app)?;
-    let app = say_tap(app, tap.as_deref()).with_effort(effort);
+    let app = say_tap(app, tap.as_deref())
+        .with_effort(effort)
+        .started_in(mode.mode());
     let app = if backend.attached() {
         app.attached()
     } else {
@@ -1058,6 +1089,7 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<Option<
     keys_can_be_read()?;
 
     let (model, effort) = saved_choices(&preferences::saved(), selected.as_ref());
+    let mode = gating(app.session().mode(), true, None);
     let attempt = backend::attach(
         &root,
         selected.as_ref(),
@@ -1065,7 +1097,7 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<Option<
             // The CLI's own id, which is the only thing that can hand the
             // conversation back.
             resume: Some(session.to_owned()),
-            mode: app.session().mode(),
+            mode,
             budget_usd: asked.budget,
             tap: tap.clone(),
             trim: trim_for(&root, loaded.config.trim())?,
@@ -1078,7 +1110,9 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<Option<
         std::env::var_os("HOME"),
     );
     let (backend, app) = attached_or_noticed(&loaded, attempt, app)?;
-    let mut app = say_tap(app, tap.as_deref()).with_effort(effort);
+    let mut app = say_tap(app, tap.as_deref())
+        .with_effort(effort)
+        .started_in(mode.mode());
 
     // Recorded only once there is a terminal to continue it on and a backend
     // started to continue it with: a piped run is a look at the transcript,
@@ -2784,6 +2818,22 @@ mod tests {
     #[test]
     fn with_nothing_chosen_or_configured_a_session_opens_in_cyber() {
         assert_eq!(theme_in_force(None, None, None, None).name, "CYBER");
+    }
+
+    #[test]
+    fn a_recorded_mode_beats_the_project_s_which_beats_auto_and_a_conversation_keeps_its_own() {
+        use backend::Gating::{Fallback, Own};
+        use niobe_core::event::Mode::{Ask, Auto, Plan};
+
+        assert_eq!(gating(Some(Plan), false, Some(Ask)), Own(Plan));
+        assert_eq!(gating(Some(Plan), true, Some(Ask)), Own(Plan));
+        assert_eq!(gating(None, false, Some(Ask)), Own(Ask));
+        assert_eq!(gating(None, false, None), Fallback(Auto));
+        assert_eq!(
+            gating(None, true, Some(Ask)),
+            Fallback(Auto),
+            "a conversation that recorded no mode Niobe models was in the profile's"
+        );
     }
 
     /// A standard error that cannot be written to, the way the terminal a

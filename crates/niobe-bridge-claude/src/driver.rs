@@ -285,10 +285,9 @@ pub struct Options {
     /// Arguments appended after the ones this bridge passes, so that a profile
     /// can reach a flag Niobe does not model. A `--model` among them is left
     /// out where [`Options::model`] names one, an `--effort` where
-    /// [`Options::effort`] does, and a `--permission-mode`
-    /// where [`Options::resume`] carries a conversation on in
-    /// [`Options::mode`] and [`Options::mode_known`] says that is the mode it
-    /// was in: those are the session's, which the profile's would undo.
+    /// [`Options::effort`] does, and a `--permission-mode` where
+    /// [`Options::mode_known`] says [`Options::mode`] is the session's own:
+    /// those are the session's, which the profile's would undo.
     pub args: Vec<String>,
     /// The profile the session runs under, for [`Event::SessionMeta`].
     pub profile: String,
@@ -302,14 +301,17 @@ pub struct Options {
     pub effort: Option<String>,
     /// How tool calls are gated.
     pub mode: Mode,
-    /// Whether [`Options::mode`] is the mode the conversation was last in.
+    /// Whether [`Options::mode`] is the session's own — the mode the
+    /// conversation was last in, or one the operator chose — which the CLI
+    /// is started in over a profile's own `--permission-mode`.
     ///
-    /// Off where the CLI last said it gates calls in a mode Niobe has no word
-    /// for — `acceptEdits`, `dontAsk` — or nothing recorded a mode. A
-    /// profile's own `--permission-mode` is how Niobe's CLI comes to be in
-    /// such a mode, so a conversation carried on then keeps the profile's
-    /// flag rather than being moved to [`Options::mode`], which the CLI was
-    /// not in.
+    /// Off where [`Options::mode`] is only what a session starts in when
+    /// nothing says otherwise, which a profile's flag does; and where the CLI
+    /// last said it gates calls in a mode Niobe has no word for —
+    /// `acceptEdits`, `dontAsk` — or nothing recorded a mode. A profile's own
+    /// `--permission-mode` is how Niobe's CLI comes to be in such a mode, so
+    /// a conversation carried on then keeps the profile's flag rather than
+    /// being moved to [`Options::mode`], which the CLI was not in.
     pub mode_known: bool,
     /// The most the CLI may spend on this session, in USD. `None` leaves it
     /// unlimited. The CLI checks it between turns, so a session can finish
@@ -407,7 +409,7 @@ impl Options {
             model: None,
             effort: None,
             mode: Mode::Ask,
-            mode_known: true,
+            mode_known: false,
             budget_usd: None,
             resume: None,
             spent: Spent::default(),
@@ -470,13 +472,12 @@ impl Options {
     ///
     /// The CLI takes the last of a flag given twice, so a profile's
     /// `--model`, `--effort` or `--permission-mode`, coming last, would
-    /// otherwise undo what the operator chose: a model or an effort picked
-    /// in the shell, or a mode a
-    /// conversation carried on was left in — plan undone into a mode that
-    /// edits without asking, after the CLI is started again on the
-    /// conversation. Where the session holds nothing of its own, or does not
-    /// know the mode the conversation is in, the profile's flag is the one
-    /// the CLI starts with.
+    /// otherwise undo what the operator chose: a model, an effort or a mode
+    /// picked in the shell, or a mode a conversation carried on was left in —
+    /// plan undone into a mode that edits without asking, after the CLI is
+    /// started again on the conversation. Where the session holds nothing of
+    /// its own, or does not know the mode the conversation is in, the
+    /// profile's flag is the one the CLI starts with.
     fn own_args(&self) -> Vec<String> {
         let mut overridden = Vec::new();
         if self.model.is_some() {
@@ -485,7 +486,7 @@ impl Options {
         if self.effort.is_some() {
             overridden.push("--effort");
         }
-        if self.resume.is_some() && self.mode_known {
+        if self.mode_known {
             overridden.push("--permission-mode");
         }
         without(&self.args, &overridden)
@@ -2697,9 +2698,33 @@ mod tests {
 
         options.resume = Some("s-9".to_owned());
         options.mode = Mode::Plan;
+        options.mode_known = true;
         let argv = options.argv();
 
         assert_eq!(taken(&argv, "--permission-mode"), Some("plan"), "{argv:?}");
+    }
+
+    /// A mode the session holds as its own — the one the operator last chose
+    /// in the project — starts a new conversation over the profile's; a mode
+    /// the session only defaults to gives way to it.
+    #[test]
+    fn a_new_conversation_starts_in_its_own_mode_over_the_profiles_and_a_default_gives_way() {
+        let mut options = options();
+        options.args = ["--permission-mode=acceptEdits", "--add-dir", "/other"]
+            .map(str::to_owned)
+            .to_vec();
+        options.mode = Mode::Auto;
+        assert_eq!(
+            taken(&options.argv(), "--permission-mode"),
+            Some("acceptEdits"),
+            "a default gives way to the profile"
+        );
+
+        options.mode_known = true;
+        let argv = options.argv();
+
+        assert_eq!(taken(&argv, "--permission-mode"), Some("auto"), "{argv:?}");
+        assert_eq!(&argv[argv.len() - 2..], ["--add-dir", "/other"]);
     }
 
     #[test]

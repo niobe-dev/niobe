@@ -2005,10 +2005,14 @@ pub struct App {
     /// is the one bit of it the transcript needs, so that a prompt with nowhere
     /// to go says so instead of looking sent.
     attached: bool,
-    /// The mode the session was in before each mode change handed out to the
-    /// backend that it has not yet taken or refused, oldest first: what the
-    /// session goes back to if the backend will not take the change.
-    modes_before: VecDeque<Option<Mode>>,
+    /// Each mode change handed out to the backend that it has not yet taken
+    /// or refused, oldest first: the mode the session was in before it, which
+    /// the session goes back to if the backend will not take the change, and
+    /// the mode it moved to, which is kept for the next session once taken.
+    modes_before: VecDeque<(Option<Mode>, Mode)>,
+    /// The mode the backend was started in, which is where a session no
+    /// backend has reported a mode for still is.
+    started_in: Mode,
     /// Whether a prompt was sent to the backend from this process. A turn the
     /// fold says is running may be one read back from a record, which nothing
     /// is working on now; only one sent from here can be shown as working.
@@ -2589,6 +2593,7 @@ impl App {
             turn_edits: BTreeSet::new(),
             attached: false,
             modes_before: VecDeque::new(),
+            started_in: Mode::Ask,
             sent_here: false,
             first_prompt_unsent: false,
             heard: false,
@@ -5087,9 +5092,19 @@ impl App {
         });
     }
 
-    /// Settles the oldest mode change handed out to the backend as taken.
+    /// Settles the oldest mode change handed out to the backend as taken,
+    /// and keeps it for the next session where it is `ask` or `auto`: those
+    /// are how the operator wants the project's calls gated, where `plan` is
+    /// a step on the way to a change, and a session that opened in it would
+    /// change nothing until it was moved off it.
     pub fn mode_taken(&mut self) {
-        self.modes_before.pop_front();
+        let Some((_, mode)) = self.modes_before.pop_front() else {
+            return;
+        };
+        match mode {
+            Mode::Ask | Mode::Auto => self.preferred.push(Preference::Mode(mode)),
+            Mode::Plan => {}
+        }
     }
 
     /// Settles the oldest mode change handed out to the backend as refused:
@@ -5099,17 +5114,18 @@ impl App {
     /// Where a later change is still to be handed out, the session is left
     /// on it, and it is the later one's refusal that goes back, to the mode
     /// before this one. A session no backend had reported a mode for goes
-    /// back to `ask`, which is what the bridge spawns the CLI in and what
-    /// [`App::cycle_mode`] counts from.
+    /// back to the mode the backend was started in, which is what
+    /// [`App::cycle_mode`] counts from. Nothing refused is kept for the next
+    /// session.
     pub fn mode_not_taken(&mut self, error: &str) -> Option<Event> {
         self.not_changed("mode", error);
-        let before = self.modes_before.pop_front()?;
-        if let Some(later) = self.modes_before.front_mut() {
+        let (before, _) = self.modes_before.pop_front()?;
+        if let Some((later, _)) = self.modes_before.front_mut() {
             *later = before;
             return None;
         }
         let back = Event::ModeSelected {
-            mode: before.unwrap_or(Mode::Ask),
+            mode: before.unwrap_or(self.started_in),
         };
         self.fold_event(&back);
         Some(back)
@@ -6941,9 +6957,9 @@ impl App {
 
     /// Moves the session to the next mode in the cycle.
     ///
-    /// A session no backend has reported a mode for cycles from `ask`, which is
-    /// what the bridge spawns the CLI in: one keypress then lands where it
-    /// would have from a mode that had been reported.
+    /// A session no backend has reported a mode for cycles from the mode the
+    /// backend was started in: one keypress then lands where it would have
+    /// from a mode that had been reported.
     ///
     /// On a model the backend said cannot run `auto`, the cycle passes over
     /// it to the mode after, as the CLI's own cycle skips a mode that is not
@@ -6962,7 +6978,7 @@ impl App {
             return;
         }
         let before = self.session.mode();
-        let mut mode = before.unwrap_or(Mode::Ask).next();
+        let mut mode = before.unwrap_or(self.started_in).next();
         if mode == Mode::Auto && self.model_cannot_run_auto() {
             mode = mode.next();
             self.hint = Some(format!(
@@ -6971,7 +6987,7 @@ impl App {
                 self.key_for(niobe_core::Bindable::Model)
             ));
         }
-        self.modes_before.push_back(before);
+        self.modes_before.push_back((before, mode));
         self.produce(Event::ModeSelected { mode });
     }
 
@@ -7153,6 +7169,16 @@ impl App {
     #[must_use]
     pub fn with_effort(mut self, effort: Option<String>) -> Self {
         self.effort = effort;
+        self
+    }
+
+    /// The same shell on a backend started in `mode`, which a session no
+    /// backend has reported a mode for is taken to be in: Shift+Tab moves on
+    /// from it, and a change refused goes back to it. `ask` where nothing
+    /// says.
+    #[must_use]
+    pub fn started_in(mut self, mode: Mode) -> Self {
+        self.started_in = mode;
         self
     }
 
@@ -16328,6 +16354,19 @@ mod tests {
             app.session().mode(),
             Some(Mode::Auto),
             "cycling from nowhere landed somewhere other than one step past `ask`"
+        );
+    }
+
+    #[test]
+    fn a_session_whose_backend_started_in_auto_cycles_from_auto_before_it_reports() {
+        let mut app = app().attached().started_in(Mode::Auto);
+
+        app.on_key(back_tab());
+
+        assert_eq!(
+            app.session().mode(),
+            Some(Mode::Plan),
+            "one keypress did not move the session off the mode it started in"
         );
     }
 
