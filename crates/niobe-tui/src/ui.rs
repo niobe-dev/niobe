@@ -7210,7 +7210,7 @@ impl PaneRow {
                 columns,
             } => match app.repo().working.get(at) {
                 Some(file) => working_file_row(
-                    (file, file_tag(app, file)),
+                    (file, file_tag(file)),
                     (depth, under),
                     columns,
                     width,
@@ -7570,7 +7570,7 @@ fn working_tree_rows(
         return;
     }
 
-    let columns = Columns::of(app, &repo.working);
+    let columns = Columns::of(&repo.working);
     let shut = |path: &str| app.folded(Section::Directory(path.to_owned()));
     for node in app.tree().visible(shut) {
         match node {
@@ -7660,13 +7660,9 @@ fn working_counts(repo: &crate::app::Repo) -> (String, String) {
     (side(|file| file.added, '+'), side(|file| file.removed, '−'))
 }
 
-/// How a working-tree file's row is tagged: whether the repository tracks it,
-/// and whether a turn of this conversation changed it with no edit call
-/// reporting it. The second is looked up only where some turn did, so a tree
-/// of fifty thousand files that none did costs no lookup a file.
-fn file_tag(app: &App, file: &crate::app::WorkingFile) -> Tag {
-    let outside = app.any_changed_outside() && app.changed_outside_by(&file.path).is_some();
-    Tag::of(file.new, outside)
+/// How a working-tree file's row is tagged: whether the repository tracks it.
+fn file_tag(file: &crate::app::WorkingFile) -> Tag {
+    Tag::of(file.new)
 }
 
 /// A working-tree file's row, its path less the `under` bytes the directory
@@ -7944,28 +7940,17 @@ const ROW_INDENT: &str = "  ";
 /// What a counted row says of its file between the name and the counts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tag {
-    /// Nothing: a file the repository already tracks, or the session's own.
+    /// Nothing: a file the repository already tracks, however it was changed.
     None,
     /// `new`: a file the repository does not track yet.
     New,
-    /// `by shell`: a file a turn changed with no edit call reporting it, so
-    /// the session's own edit figures leave it out. Named for what nearly
-    /// always does it — a shell command the agent ran, or a hook or a
-    /// formatter one ran — and not `outside`, which read as a file outside
-    /// the repository. The operator's own `!` commands and the standing
-    /// answers the shell writes for them are never a turn's.
-    Shell,
-    /// Both: a new file a turn wrote that way.
-    NewShell,
 }
 
 impl Tag {
-    fn of(new: bool, outside: bool) -> Self {
-        match (new, outside) {
-            (false, false) => Tag::None,
-            (true, false) => Tag::New,
-            (false, true) => Tag::Shell,
-            (true, true) => Tag::NewShell,
+    fn of(new: bool) -> Self {
+        match new {
+            false => Tag::None,
+            true => Tag::New,
         }
     }
 
@@ -7974,8 +7959,6 @@ impl Tag {
         match self {
             Tag::None => "",
             Tag::New => "new ",
-            Tag::Shell => "by shell ",
-            Tag::NewShell => "new by shell ",
         }
     }
 }
@@ -7993,10 +7976,10 @@ struct Columns {
 impl Columns {
     /// The columns as wide as the widest of each part across `files`, each
     /// tagged as [`file_tag`] tags it.
-    fn of(app: &App, files: &[crate::app::WorkingFile]) -> Self {
+    fn of(files: &[crate::app::WorkingFile]) -> Self {
         files.iter().fold(Columns::default(), |columns, file| {
             columns.widened(
-                file_tag(app, file),
+                file_tag(file),
                 &measured('+', file.added),
                 &removed_of(file),
             )

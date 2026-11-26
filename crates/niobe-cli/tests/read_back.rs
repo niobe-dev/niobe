@@ -19,9 +19,9 @@
 //! What a read-back is documented to show apart from the live shell is left
 //! out of the comparison, each for its reason: [`App::resumed`] dates the
 //! plan's windows as from before the session opened again, which is what it
-//! is for, and what the loop finds of its own — the budget's notice, a
-//! spike and files changed outside the edit tools, which the panes show —
-//! is found once, by the loop, never by the fold.
+//! is for, and what the loop finds of its own — the budget's notice and a
+//! spike, which the panes show — is found once, by the loop, never by the
+//! fold.
 
 #![allow(
     clippy::expect_used,

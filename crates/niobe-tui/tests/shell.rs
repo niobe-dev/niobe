@@ -123,42 +123,34 @@ fn a_question_about_a_skill_says_which_skill_and_what_it_is_for() {
     );
 }
 
-/// What the shell finds about a turn of its own — files it changed with no
-/// edit call reporting them, a turn that spent far more than the turns
-/// before it — is the panes' to show, not the conversation's: the Changes
-/// pane tags such a file `by shell`, the Usage pane says the turn, and the
-/// transcript holds neither.
+/// What the shell finds about a turn of its own — a turn that spent far more
+/// than the turns before it — is the panes' to show, not the conversation's:
+/// the Usage pane says the turn and the transcript does not. The Changes pane
+/// lists what the turn changed with its counts and no tag but `new`, however
+/// it was changed.
 #[test]
 fn a_turns_own_findings_are_drawn_in_the_panes_and_not_in_the_transcript() {
     use niobe_tui::app::WorkingFile;
-    use std::time::{Duration, Instant};
 
-    let start = Instant::now();
-    let at = |ms| start + Duration::from_millis(ms);
     let file = |path: &str, added, removed| WorkingFile {
         path: path.to_owned(),
         added: Some(added),
         removed: Some(removed),
         new: false,
     };
-    let read = |ms, working: Vec<WorkingFile>| Repo {
+    let read = |working: Vec<WorkingFile>| Repo {
         name: "niobe".to_owned(),
         branch: Some("main".to_owned()),
         read: true,
-        began: Some(at(ms)),
         working,
         ..Repo::default()
     };
-    let mut app = App::new(read(0, Vec::new()));
+    let mut app = App::new(read(Vec::new()));
     app.settle_spikes();
     for (step, input) in [1_000_u64, 1_200, 5_000].into_iter().enumerate() {
-        let base = 10 * u64::try_from(step).expect("three steps");
         app.apply(&Event::UserMessage {
             text: "go on".to_owned(),
         });
-        app.settle_tree(at(base));
-        app.set_repo(read(base + 1, vec![file("notes.md", 5, 0)]));
-        app.settle_tree(at(base + 2));
         app.apply(&Event::Usage(Usage {
             input,
             output: 0,
@@ -172,14 +164,11 @@ fn a_turns_own_findings_are_drawn_in_the_panes_and_not_in_the_transcript() {
             fast: false,
         }));
         app.apply(&Event::TurnEnded);
-        app.settle_tree(at(base + 3));
         let mut after = vec![file("notes.md", 5, 0)];
         if step == 2 {
             after.push(file("src/main.rs", 2, 2));
         }
-        app.set_repo(read(base + 4, after));
-        app.settle_tree(at(base + 5));
-        app.settle_tree(at(base + 6));
+        app.set_repo(read(after));
         app.settle_spikes();
     }
 
@@ -191,16 +180,14 @@ fn a_turns_own_findings_are_drawn_in_the_panes_and_not_in_the_transcript() {
             .unwrap_or_else(|| panic!("no row for {path}:\n{frame}"))
             .to_owned()
     };
-    assert!(row("main.rs").contains("by shell +2 −2"), "{frame}");
-    assert!(!row("notes.md").contains("by shell"), "{frame}");
+    assert!(row("main.rs").contains("+2 −2"), "{frame}");
+    assert!(!frame.contains("by shell"), "{frame}");
     assert!(
         frame.contains("turn 3 spent 4× the average (5000 vs 1100)"),
         "{frame}"
     );
     assert!(
-        app.entries()
-            .iter()
-            .all(|entry| entry.head != "spike" && entry.head != "outside the edit tools"),
+        app.entries().iter().all(|entry| entry.head != "spike"),
         "{:?}",
         app.entries()
     );

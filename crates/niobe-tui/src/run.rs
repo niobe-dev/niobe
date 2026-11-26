@@ -428,9 +428,6 @@ fn event_loop<B: Backend<Error = io::Error>>(
             if let Some(repo) = watch.look() {
                 app.set_repo(repo);
             }
-            if let Some(began) = watch.failed() {
-                app.tree_read_failed(began);
-            }
             fold_commit(app, watch);
             // Before the draw, so that a prompt a standing rule already answers is
             // never on screen for the frame it takes to answer it.
@@ -443,11 +440,6 @@ fn event_loop<B: Backend<Error = io::Error>>(
             // what a recording being read back spent under one it knew nothing of.
             app.settle_budget();
             app.settle_spikes();
-            // A turn that began or ended wants the working tree read as of
-            // now, to name what it changed that no edit call reported.
-            if app.settle_tree(std::time::Instant::now()) {
-                watch.changed();
-            }
             run_commands(app, shell);
             fetch_images(app, images);
             let lent = hand_off(app, desktop, machine.suspend)?;
@@ -922,11 +914,6 @@ fn send_produced(
             Ok(Reach::UntilTrusted) => app.kept_until_trusted(&rule),
             Err(error) => app.not_remembered(&rule, &error.to_string()),
         }
-        // Said even where the write failed: it may have got as far as
-        // changing the file, and whatever it did is the operator's.
-        if let Some(path) = rules.kept_in() {
-            app.kept_rule_in(path);
-        }
     }
 }
 
@@ -1212,14 +1199,9 @@ mod tests {
         rules: Vec<Rule>,
         refuse: bool,
         until_trusted: bool,
-        file: Option<&'static str>,
     }
 
     impl Rules for Remembered {
-        fn kept_in(&self) -> Option<&str> {
-            self.file
-        }
-
         fn remember(&mut self, rule: &Rule) -> Result<Reach, RulesError> {
             if self.refuse {
                 return Err("the config is read-only".into());
@@ -2358,70 +2340,6 @@ mod tests {
 
         assert_eq!(remembered.rules, [Rule::targeted("Bash", "cargo test")]);
         assert!(app.allowed().allows("Bash", Some("cargo test")));
-    }
-
-    #[test]
-    fn the_file_a_rule_is_kept_in_is_not_said_to_be_changed_by_the_running_turn() {
-        use crate::app::WorkingFile;
-        use std::time::{Duration, Instant};
-
-        let start = Instant::now();
-        let at = |ms| start + Duration::from_millis(ms);
-        let file = |path: &str, added, new| WorkingFile {
-            path: path.to_owned(),
-            added: Some(added),
-            removed: Some(0),
-            new,
-        };
-        let read = |ms, working: Vec<WorkingFile>| Repo {
-            read: true,
-            began: Some(at(ms)),
-            working,
-            ..Repo::default()
-        };
-        let mut app = App::new(read(0, Vec::new())).attached();
-        app.apply(&SessionEvent::UserMessage {
-            text: "go on".to_owned(),
-        });
-        app.settle_tree(at(1));
-        app.set_repo(read(2, Vec::new()));
-        app.settle_tree(at(3));
-        app.apply(&SessionEvent::PermissionRequest {
-            id: "t1".into(),
-            tool: "Bash".to_owned(),
-            input: r#"{"command":"cargo test"}"#.to_owned(),
-            target: None,
-            proposal: None,
-            reason: None,
-            agent: None,
-        });
-        app.answer(Answer::AlwaysTool);
-        send_produced(
-            &mut app,
-            &mut Kept::default(),
-            &mut Attached::default(),
-            &mut Remembered {
-                file: Some(".niobe/config.toml"),
-                ..Remembered::default()
-            },
-        );
-        app.apply(&SessionEvent::TurnEnded);
-        app.settle_tree(at(4));
-        app.set_repo(read(
-            5,
-            vec![
-                file(".niobe/config.toml", 13, true),
-                file("src/main.rs", 2, false),
-            ],
-        ));
-        app.settle_tree(at(6));
-
-        assert_eq!(app.changed_outside_by(".niobe/config.toml"), None);
-        assert_eq!(
-            app.changed_outside_by("src/main.rs"),
-            Some(1),
-            "what the turn did by shell is still its own"
-        );
     }
 
     #[test]
