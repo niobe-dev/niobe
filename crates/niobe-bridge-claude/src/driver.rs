@@ -2209,8 +2209,19 @@ fn control_request(request_id: &str, body: serde_json::Value) -> serde_json::Val
 /// its answer, as the CLI reads them back off an approved `AskUserQuestion`;
 /// `input` as it came where nothing was answered, or where it is not an
 /// object to put them in.
+///
+/// What the operator added to an answer goes under `annotations`, keyed by
+/// the question's text as the answers are: their `notes`, and the `preview`
+/// of the option they chose where it had one, which the CLI hands the agent
+/// as the design that was picked. A question with neither has no entry.
 fn with_answers(input: &serde_json::Value, answers: &[Answered]) -> serde_json::Value {
     let mut input = input.clone();
+    let annotations: serde_json::Map<String, serde_json::Value> = answers
+        .iter()
+        .filter_map(|answered| {
+            annotation(&input, answered).map(|noted| (answered.question.clone(), noted))
+        })
+        .collect();
     if let (false, Some(fields)) = (answers.is_empty(), input.as_object_mut()) {
         let answered: serde_json::Map<String, serde_json::Value> = answers
             .iter()
@@ -2222,8 +2233,47 @@ fn with_answers(input: &serde_json::Value, answers: &[Answered]) -> serde_json::
             })
             .collect();
         fields.insert("answers".to_owned(), serde_json::Value::Object(answered));
+        if !annotations.is_empty() {
+            fields.insert(
+                "annotations".to_owned(),
+                serde_json::Value::Object(annotations),
+            );
+        }
     }
     input
+}
+
+/// What goes under `annotations` for `answered`: its notes, and the preview
+/// of the one option of its question, as `input` asked it, whose label is
+/// the answer. `None` where there is neither.
+fn annotation(input: &serde_json::Value, answered: &Answered) -> Option<serde_json::Value> {
+    let preview = input
+        .get("questions")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .find(|asked| {
+            asked.get("question").and_then(serde_json::Value::as_str)
+                == Some(answered.question.as_str())
+        })
+        .and_then(|asked| asked.get("options"))
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .find(|option| {
+            option.get("label").and_then(serde_json::Value::as_str)
+                == Some(answered.answer.as_str())
+        })
+        .and_then(|option| option.get("preview"))
+        .and_then(serde_json::Value::as_str);
+    let mut noted = serde_json::Map::new();
+    if let Some(preview) = preview {
+        noted.insert("preview".to_owned(), preview.into());
+    }
+    if let Some(notes) = answered.notes.as_deref() {
+        noted.insert("notes".to_owned(), notes.into());
+    }
+    (!noted.is_empty()).then_some(serde_json::Value::Object(noted))
 }
 
 /// The line that answers one permission prompt.
@@ -2884,10 +2934,12 @@ mod tests {
             Answered {
                 question: "Cut a release?".to_owned(),
                 answer: "No".to_owned(),
+                notes: None,
             },
             Answered {
                 question: "Which platforms?".to_owned(),
                 answer: "macOS, Linux".to_owned(),
+                notes: None,
             },
         ];
 
@@ -2898,6 +2950,52 @@ mod tests {
         assert_eq!(
             approved["answers"],
             serde_json::json!({ "Cut a release?": "No", "Which platforms?": "macOS, Linux" })
+        );
+        assert!(
+            approved.get("annotations").is_none(),
+            "nothing was added to an answer: {approved}"
+        );
+    }
+
+    #[test]
+    fn notes_and_the_chosen_preview_go_back_under_annotations() {
+        // The CLI (2.1.332) hands the agent `notes` beside an answer, and
+        // takes `preview` only as the chosen option's own.
+        let input = serde_json::json!({
+            "questions": [
+                { "question": "Which layout?", "multiSelect": false,
+                  "options": [{ "label": "Tabs", "preview": "[a] [b]" }, { "label": "Split" }] },
+                { "question": "Which split?", "multiSelect": false,
+                  "options": [{ "label": "Left", "preview": "|a|b|" }, { "label": "Right" }] },
+                { "question": "Name it?" },
+            ],
+        });
+        let answers = [
+            Answered {
+                question: "Which layout?".to_owned(),
+                answer: "Tabs".to_owned(),
+                notes: Some("but closable".to_owned()),
+            },
+            Answered {
+                question: "Which split?".to_owned(),
+                answer: "Left".to_owned(),
+                notes: None,
+            },
+            Answered {
+                question: "Name it?".to_owned(),
+                answer: "niobe".to_owned(),
+                notes: None,
+            },
+        ];
+
+        let allowed = control_response("c5", &input, PermissionDecision::Allow, None, &answers);
+
+        assert_eq!(
+            allowed["response"]["response"]["updatedInput"]["annotations"],
+            serde_json::json!({
+                "Which layout?": { "preview": "[a] [b]", "notes": "but closable" },
+                "Which split?": { "preview": "|a|b|" },
+            })
         );
     }
 

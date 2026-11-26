@@ -18,10 +18,10 @@
  ┃   │ ▶ 1. [x] macOS                                        │ █ │     fetch.ts          +149 −12 █
  ┃   │   2. [ ] Linux                                        │ █ │     etag.ts            +88 −41 │
  ┃   │   3. [ ] Windows                                      │ █ │   ▾ docs/                      │
- ┃   │   4. Don't answer            the agent gets no answer │ █ │     ▾ adr/                     │
+ ┃   │   4. Chat about this   the agent asks what to clarify │ █ │     ▾ adr/                     │
  ┃   │                                                       │ █ │       0004-etags.md    +34  −1 │
  ┃   │ ↑↓ move · 1-4 jump · Space tick · Enter answer        │ █ │     ▾ diagrams/                │
- ┃   │ Tab write your own · Esc decide later                 │ █ │       cache.png          —   — │
+ ┃   │ Tab write your own · n notes · Esc decide later       │ █ │       cache.png          —   — │
  ┃   └───────────────────────────────────────────────────────┘ █ │     caching.md         +64 −22 │
  ┃                                                             █ │   ▾ server/                    │
  ┃ ─────────────────────────────────────────────────────────── ┃ │     ▾ handlers/                │

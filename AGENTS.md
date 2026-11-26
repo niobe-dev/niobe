@@ -58,9 +58,11 @@ reviewers that encode both, for an agent working in this tree.
   `proposal.rs` is what a call
   waiting on the operator would do — replace text in a file, write a file whole, run a command,
   let a plan go ahead, put questions to the operator, use a skill — as the backend read it out of the call's
-  arguments, and which arguments that reading covers, and the answers the operator gave
-  questions, which no standing rule ever gives, since leave alone reaches the agent as questions
-  nobody answered; `test_run.rs` recognises a shell
+  arguments, and which arguments that reading covers — a question's answers each with the
+  preview the agent drew of it — and the answers the operator gave
+  questions, with any notes they added, which no standing rule ever gives, since leave alone
+  reaches the agent as questions nobody answered, and the words a question the operator would
+  rather talk over is refused with; `test_run.rs` recognises a shell
   command that runs `cargo test` and reads the counts out of its output, only where the output
   holds the whole run, and where it does not, whether what is left shows the run failing after its
   tests started, and which tests each failing binary listed wherever its list survived, so
@@ -297,9 +299,13 @@ reviewers that encode both, for an agent working in this tree.
   "keep planning", a skill as `to use skill <name>` with the first line the CLI describes it
   with and what it is handed, its standing answers that skill and every skill — and the
   arguments that reading does not cover by key; the questions a call
-  puts to the operator are drawn in the question's frame instead of the tool, one at a time, each
-  with its answers and what each means, ticked with Space where several may be chosen, Tab
-  writing an answer of the operator's own, and go back with the leave to go ahead, `tags.rs` names each sub-agent by one short word of the kind of agent
+  puts to the operator are drawn in the question's frame instead of the tool, one at a time, as the
+  agent's markdown, each with its answers and what each means, the preview of the one under the
+  cursor beneath them, ticked with Space where several may be chosen, Tab writing an answer of
+  the operator's own and `n` notes on the one chosen, either on several lines, and "Chat about
+  this" refusing them to talk them over, and go back with the leave to go ahead; the frame takes
+  the transcript's width, and one put aside with Esc says so on the prompt, and a click on it
+  brings it back, `tags.rs` names each sub-agent by one short word of the kind of agent
   it was asked to be, numbered where two would read alike, `compaction.rs` draws the row a
   compaction leaves, with what it shrank the context from and to; the end of a turn draws
   nothing, the next prompt's bubble being where the next turn starts. `usage.rs` is the arithmetic under the Usage
@@ -412,7 +418,7 @@ reviewers that encode both, for an agent working in this tree.
   standard input open for the life of the session and writes it from a queue on a thread of its
   own, so a CLI that is not reading never holds up the screen, answers the permission prompts the CLI
   stops turns on — an `AskUserQuestion` approved with the operator's answers under `answers`,
-  where the CLI reads them — and starts it as the leader of a process group of its own, which a closing
+  where the CLI reads them, and their notes and the chosen answer's preview under `annotations` — and starts it as the leader of a process group of its own, which a closing
   session ends whole, and so does a CLI that leaves mid-session, so nothing the CLI started
   outlives it or holds the quit, or the report of its end, up on its pipes — a CLI that something
   stops with a signal between turns is reported with a notice rather than as the session's end,

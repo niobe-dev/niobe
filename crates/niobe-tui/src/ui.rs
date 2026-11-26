@@ -70,11 +70,16 @@ const DESKTOP_MARGIN: u16 = 1;
 /// Columns the transcript gives to an entry's glyph.
 const GUTTER: usize = 2;
 
-/// Widest a question in the transcript is drawn, in columns. Wide enough for
-/// a shell command that has a path in it, and capped rather than filling the
-/// pane, so on a wide screen it reads as an interruption in the transcript
-/// rather than as one more pane.
-const ASK_COLUMNS: usize = 72;
+/// Columns a question's frame leaves on the transcript's right: the two its
+/// shadow falls in. The frame takes every other column the transcript
+/// has under the gutter, since an agent's questions run to paragraphs, lists
+/// and previews that a narrow frame wrapped into a column of fragments.
+const ASK_SHADOW: usize = 2;
+
+/// The width below which a question's frame takes the shadow's columns too:
+/// on a narrow pane a command's rule and a consequence need them more than
+/// the frame needs to stand off.
+const ASK_LEAST: usize = 72;
 
 /// Columns a question's frame and padding take from its width: a border and a
 /// column of room on each side.
@@ -4076,9 +4081,15 @@ fn question_lines(
     (width, height): (usize, usize),
     theme: &Theme,
 ) -> Question {
-    let outer = width.saturating_sub(GUTTER).min(ASK_COLUMNS);
+    let room = width.saturating_sub(GUTTER);
+    let outer = room.saturating_sub(ASK_SHADOW).max(room.min(ASK_LEAST));
     let inner = outer.saturating_sub(ASK_INSET);
-    let border = Style::new().fg(theme.hot);
+    // Put aside, the frame does not have the keys, and its border says so as
+    // a pane's does.
+    let border = match app.ask_focus() {
+        AskFocus::Deferred => Style::new().fg(theme.dim),
+        AskFocus::Choosing | AskFocus::Writing | AskFocus::Noting => Style::new().fg(theme.hot),
+    };
     let indent = " ".repeat(GUTTER);
 
     let body = question_body(app, ask, inner, theme);
@@ -4156,7 +4167,10 @@ struct QuestionBody {
     consequences: Vec<Line<'static>>,
     /// The numbered answers, after a blank row.
     answers: Vec<Line<'static>>,
-    /// The answer being written, and the keys.
+    /// What the answer under the cursor would look like, where the agent
+    /// drew it, after a blank row: the first part given up to a short pane.
+    preview: Vec<Line<'static>>,
+    /// The notes and the answer being written, and the keys.
     rest: Vec<Line<'static>>,
 }
 
@@ -4166,6 +4180,7 @@ impl QuestionBody {
             + self.call.rows.len()
             + self.answers.len()
             + self.consequences.len()
+            + self.preview.len()
             + self.rest.len()
     }
 
@@ -4174,6 +4189,7 @@ impl QuestionBody {
         lines.extend(self.call.rows);
         lines.extend(self.consequences);
         lines.extend(self.answers);
+        lines.extend(self.preview);
         lines.extend(self.rest);
         lines
     }
@@ -4184,6 +4200,23 @@ impl QuestionBody {
     /// question uncut.
     fn cut(mut self, rows: usize, inner: usize, theme: &Theme) -> Self {
         let fixed = self.head.len() + self.answers.len() + self.rest.len() + 1;
+        // A preview is what an answer would look like, and gives way first:
+        // the answers it is about must stay on screen. Fewer than its head
+        // and a row of it is no preview, and is not drawn.
+        let room = rows.saturating_sub(fixed + self.call.rows.len().min(1));
+        if self.preview.len() > room {
+            match room {
+                0..=2 => self.preview.clear(),
+                room => {
+                    self.preview.truncate(room - 1);
+                    self.preview.push(
+                        Line::from(text::truncate(PREVIEW_CUT, inner))
+                            .style(Style::new().fg(theme.hot)),
+                    );
+                }
+            }
+        }
+        let fixed = fixed + self.preview.len();
         let room = rows.saturating_sub(fixed);
         let kept = room.clamp(1, self.call.rows.len().max(1));
         // The lines of the call that are not drawn, which the operator reads
@@ -4248,8 +4281,8 @@ fn question_body(app: &App, ask: &Ask, inner: usize, theme: &Theme) -> QuestionB
                         })
                         .unwrap_or_default(),
                     (Answer::No, Some(_)) => (
-                        "Don't answer".to_owned(),
-                        "the agent gets no answer".to_owned(),
+                        "Chat about this".to_owned(),
+                        "the agent asks what to clarify".to_owned(),
                     ),
                     (
                         Answer::Once
@@ -4298,7 +4331,8 @@ fn question_body(app: &App, ask: &Ask, inner: usize, theme: &Theme) -> QuestionB
         app.with_question_laid((inner, app.diffs_open(), theme.name), lay, |laid| {
             let mut answers = vec![Line::from("")];
             for (at, (answer, label, hint)) in laid.words.iter().enumerate() {
-                let lit = focus == AskFocus::Choosing && *answer == selected;
+                let lit =
+                    matches!(focus, AskFocus::Choosing | AskFocus::Noting) && *answer == selected;
                 match answer {
                     Answer::Choose(choice) => answers.extend(choice_rows(
                         at + 1,
@@ -4320,7 +4354,33 @@ fn question_body(app: &App, ask: &Ask, inner: usize, theme: &Theme) -> QuestionB
                 laid.consequences.clone(),
             )
         });
+    let preview = match (selected, on_screen) {
+        (Answer::Choose(at), Some((question, _))) => question
+            .options
+            .get(at)
+            .and_then(|choice| choice_preview(at + 1, choice, (inner, app.diffs_open()), theme))
+            .unwrap_or_default(),
+        (
+            Answer::Once
+            | Answer::AlwaysTool
+            | Answer::AlwaysTarget
+            | Answer::No
+            | Answer::Choose(_),
+            _,
+        ) => Vec::new(),
+    };
     let mut rest = Vec::new();
+    let noting = focus == AskFocus::Noting;
+    if noting || !app.ask_notes().is_empty() {
+        rest.push(Line::from(""));
+        rest.extend(typed_rows(
+            NOTES_MARK,
+            app.ask_notes(),
+            noting,
+            inner,
+            Style::new().fg(theme.hot),
+        ));
+    }
     if focus == AskFocus::Writing {
         rest.push(Line::from(""));
         rest.extend(written_answer(
@@ -4341,8 +4401,47 @@ fn question_body(app: &App, ask: &Ask, inner: usize, theme: &Theme) -> QuestionB
         call,
         answers,
         consequences,
+        preview,
         rest,
     }
+}
+
+/// How many rows of an answer's preview a question shows until Ctrl+T: enough
+/// for a snippet or a sketch of a layout, and few enough that the answers stay
+/// on a short pane.
+const PREVIEW_ROWS: usize = 12;
+
+/// The row saying a preview goes on past what is shown.
+const PREVIEW_CUT: &str = "… the rest of the preview · Ctrl+T shows it";
+
+/// What the notes being written open with.
+const NOTES_MARK: &str = "Notes: ";
+
+/// The preview the agent drew of the answer numbered `number`, `inner`
+/// columns wide, after a blank row and a dim head naming the answer: its
+/// first [`PREVIEW_ROWS`] rows and a row saying there are more, or all of it
+/// where `open`. `None` where it drew none.
+fn choice_preview(
+    number: usize,
+    choice: &niobe_core::Choice,
+    (inner, open): (usize, bool),
+    theme: &Theme,
+) -> Option<Vec<Line<'static>>> {
+    let drawn = choice.preview.as_deref()?;
+    let mut rows = vec![Line::from("")];
+    rows.extend(agent_words(
+        &format!("Preview of {number}. {}", choice.label),
+        inner,
+        Style::new().fg(theme.dim),
+    ));
+    let mut preview = agent_markdown(drawn, inner, theme, Style::new());
+    if !open && preview.len() > PREVIEW_ROWS {
+        preview.truncate(PREVIEW_ROWS);
+        preview
+            .push(Line::from(text::truncate(PREVIEW_CUT, inner)).style(Style::new().fg(theme.hot)));
+    }
+    rows.extend(preview);
+    Some(rows)
 }
 
 /// A consequence said again whole, `inner` columns wide — but for one that
@@ -4764,22 +4863,56 @@ fn answer_words(answer: Answer, ask: &Ask, spelled: bool) -> (String, String) {
     }
 }
 
-/// The answer being written in place of the numbered ones, wrapped, with a
-/// cursor at its end and a line saying where it goes.
-fn written_answer(draft: &str, question: bool, width: usize, theme: &Theme) -> Vec<Line<'static>> {
-    let mut lines: Vec<Line<'static>> = text::wrap(&format!("› {draft}▏"), width)
-        .into_iter()
-        .map(|wrapped| Line::from(wrapped).style(Style::new().fg(theme.hot)))
-        .collect();
-    let said = match question {
-        true => "Sent as your answer to this question, word for word.",
-        false => "Sent with a refusal: the call does not run, and the agent is given these words.",
+/// What an answer being written opens with, before its first line.
+const ANSWER_MARK: &str = "› ";
+
+/// `words` someone is writing, `width` columns wide in `style`, after `mark`,
+/// with a cursor at their end where `cursor`: each line they broke wrapped on
+/// its own, under the first's text rather than under the mark, so the words
+/// read as one block.
+fn typed_rows(
+    mark: &str,
+    words: &str,
+    cursor: bool,
+    width: usize,
+    style: Style,
+) -> Vec<Line<'static>> {
+    let indent = " ".repeat(text::width(mark));
+    let room = width.saturating_sub(indent.len()).max(1);
+    let typed = match cursor {
+        true => format!("{words}▏"),
+        false => words.to_owned(),
     };
-    lines.extend(
-        text::wrap(said, width)
+    let mut lines = Vec::new();
+    for (at, line) in typed.split('\n').enumerate() {
+        for (row, wrapped) in text::wrap(line, room).into_iter().enumerate() {
+            let lead = match (at, row) {
+                (0, 0) => mark,
+                _ => indent.as_str(),
+            };
+            lines.push(Line::from(format!("{lead}{wrapped}")).style(style));
+        }
+    }
+    lines
+}
+
+/// The answer being written in place of the numbered ones, wrapped, with a
+/// cursor at its end — and, written in place of leave to run a call, a line
+/// saying that the call is refused with it. Written at a question, it is
+/// plainly the answer, and a line saying so only stood between the operator
+/// and what they were writing.
+fn written_answer(draft: &str, question: bool, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    let mut lines = typed_rows(ANSWER_MARK, draft, true, width, Style::new().fg(theme.hot));
+    if !question {
+        lines.extend(
+            text::wrap(
+                "Sent with a refusal: the call does not run, and the agent is given these words.",
+                width,
+            )
             .into_iter()
             .map(|wrapped| Line::from(wrapped).style(Style::new().fg(theme.dim).italic())),
-    );
+        );
+    }
     lines
 }
 
@@ -4804,11 +4937,47 @@ fn agent_words(said: &str, width: usize, style: Style) -> Vec<Line<'static>> {
         .collect()
 }
 
+/// `said`, the agent's markdown, drawn as markdown `width` columns wide, at
+/// most [`QUESTION_CHARS`] of it and a row counting the rest, with `style`
+/// laid over every span — but as words, wrapped, where markdown would draw
+/// some of them as nothing or they hold a control, as a plan is: the
+/// operator answers every word of it.
+fn agent_markdown(said: &str, width: usize, theme: &Theme, style: Style) -> Vec<Line<'static>> {
+    let (shown, more) = capped(said.trim(), QUESTION_CHARS);
+    let hidden = crate::markdown::hides_text(shown)
+        || matches!(
+            text::controls_shown_in_rows(shown),
+            std::borrow::Cow::Owned(_)
+        );
+    if hidden {
+        return agent_words(said, width, style);
+    }
+    let mut rows: Vec<Line<'static>> = crate::markdown::render(shown, width, theme)
+        .into_iter()
+        .map(|line| {
+            let spans = line
+                .spans
+                .into_iter()
+                .map(|span| span.patch_style(style))
+                .collect::<Vec<_>>();
+            Line::from(spans).style(line.style)
+        })
+        .collect();
+    if more > 0 {
+        rows.extend(agent_words(
+            &format!("… ({more} more characters)"),
+            width,
+            Style::new().fg(theme.dim),
+        ));
+    }
+    rows
+}
+
 /// The question on screen of those a call puts to the operator, `inner`
 /// columns wide, in place of the tool it runs: the word it is filed under
-/// and how far through them it is, dimmed, then what is asked, in bold. The
-/// words are the agent's, so they wrap between words, and how the call's
-/// arguments were sent is still behind Ctrl+T.
+/// and how far through them it is, dimmed, then what is asked, drawn as the
+/// markdown the agent wrote it in. How the call's arguments were sent is
+/// still behind Ctrl+T.
 fn put_question(
     question: &niobe_core::Question,
     step: usize,
@@ -4830,11 +4999,7 @@ fn put_question(
     let mut rows: Vec<Line<'static>> = place
         .map(|place| agent_words(&place, inner, Style::new().fg(theme.dim)))
         .unwrap_or_default();
-    rows.extend(agent_words(
-        &question.text,
-        inner,
-        Style::new().fg(theme.fg).bold(),
-    ));
+    rows.extend(agent_markdown(&question.text, inner, theme, Style::new()));
     if question.options.is_empty() {
         rows.extend(agent_words(
             "It offers no answers to choose from: Tab writes yours.",
@@ -4847,8 +5012,9 @@ fn put_question(
 
 /// One answer a question offers, numbered `number`: its name on the row,
 /// with a tick box where `ticked` says whether it is ticked, and what it
-/// means wrapped under the name, dimmed. The selected answer's row is a solid
-/// bar with the `▶` beside it, as every other answer's is.
+/// means under the name, dimmed, drawn as the agent's markdown. The selected
+/// answer's row is a solid bar with the `▶` beside it, as every other
+/// answer's is.
 fn choice_rows(
     number: usize,
     (label, means): (&str, &str),
@@ -4894,7 +5060,7 @@ fn choice_rows(
     }
     let indent = " ".repeat(under);
     rows.extend(
-        agent_words(means, room, Style::new().fg(theme.dim))
+        agent_markdown(means, room, theme, Style::new().fg(theme.dim))
             .into_iter()
             .map(|line| {
                 let mut spans = vec![Span::raw(indent.clone())];
@@ -4906,7 +5072,8 @@ fn choice_rows(
 }
 
 /// The keys that work at a question a call puts to the operator, for the
-/// state it is in: Space ticks where it takes several answers.
+/// state it is in: Space ticks where it takes several answers, and `n`
+/// writes notes where it offers answers to choose.
 fn question_keys(focus: AskFocus, options: usize, several: bool) -> Vec<(String, &'static str)> {
     match focus {
         AskFocus::Choosing => {
@@ -4917,10 +5084,20 @@ fn question_keys(focus: AskFocus, options: usize, several: bool) -> Vec<(String,
             keys.extend([
                 ("Enter".to_owned(), "answer"),
                 ("Tab".to_owned(), "write your own"),
-                ("Esc".to_owned(), "decide later"),
             ]);
+            // Every question offers Chat about this; one that offers more
+            // has answers to write notes on.
+            if options > 1 {
+                keys.push(("n".to_owned(), "notes"));
+            }
+            keys.push(("Esc".to_owned(), "decide later"));
             keys
         }
+        AskFocus::Noting => vec![
+            ("Enter".to_owned(), "answer"),
+            ("Ctrl+J".to_owned(), "new line"),
+            ("Esc".to_owned(), "back to the options"),
+        ],
         AskFocus::Writing | AskFocus::Deferred => ask_keys(focus, options),
     }
 }
@@ -4936,13 +5113,15 @@ fn ask_keys(focus: AskFocus, options: usize) -> Vec<(String, &'static str)> {
             ("Tab".to_owned(), "type your own"),
             ("Esc".to_owned(), "decide later"),
         ],
-        AskFocus::Writing => vec![
+        // Notes are written only at a question, whose keys say so.
+        AskFocus::Writing | AskFocus::Noting => vec![
             ("Enter".to_owned(), "send"),
+            ("Ctrl+J".to_owned(), "new line"),
             ("Esc".to_owned(), "back to the options"),
         ],
         AskFocus::Deferred => vec![
-            (String::new(), "put off · the turn is still waiting on it"),
-            ("Esc".to_owned(), "answer it"),
+            (String::new(), "put aside · the turn waits on your answer"),
+            ("Esc".to_owned(), "back to this question"),
         ],
     }
 }
@@ -8282,6 +8461,19 @@ mod tests {
         // Ending above the pane's last row, nothing of it is under the way down.
         assert_eq!(question_on_screen((95, 18), (0, 100), 0, false), 95..100);
     }
+    /// `n` writes notes on a chosen answer, and is offered only where there
+    /// are answers to choose; at a question that takes only words it types.
+    #[test]
+    fn notes_are_offered_only_where_there_are_answers_to_choose() {
+        let offers_notes = |options| {
+            question_keys(AskFocus::Choosing, options, false)
+                .iter()
+                .any(|(key, _)| key == "n")
+        };
+        assert!(offers_notes(3), "two answers and Chat about this");
+        assert!(!offers_notes(1), "Chat about this alone");
+    }
+
     use niobe_core::event::UsageWindows;
 
     #[test]

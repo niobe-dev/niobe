@@ -18,10 +18,10 @@
  ┃   │   2. Also cut a release now                           │ █ │     fetch.ts          +149 −12 █
  ┃   │      Run the gate, bump the version, tag it and push  │ █ │     etag.ts            +88 −41 │
  ┃   │      the tag.                                         │ █ │   ▾ docs/                      │
- ┃   │   3. Don't answer            the agent gets no answer │ █ │     ▾ adr/                     │
+ ┃   │   3. Chat about this   the agent asks what to clarify │ █ │     ▾ adr/                     │
  ┃   │                                                       │ █ │       0004-etags.md    +34  −1 │
  ┃   │ ↑↓ move · 1-3 jump · Enter answer                     │ █ │     ▾ diagrams/                │
- ┃   │ Tab write your own · Esc decide later                 │ █ │       cache.png          —   — │
+ ┃   │ Tab write your own · n notes · Esc decide later       │ █ │       cache.png          —   — │
  ┃   └───────────────────────────────────────────────────────┘ █ │     caching.md         +64 −22 │
  ┃                                                             █ │   ▾ server/                    │
  ┃ ─────────────────────────────────────────────────────────── ┃ │     ▾ handlers/                │

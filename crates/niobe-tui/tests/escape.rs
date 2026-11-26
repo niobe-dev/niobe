@@ -260,10 +260,12 @@ fn no_content_puts_a_control_or_a_direction_mark_on_the_terminal() {
                     niobe_core::Choice {
                         label: format!("label {p}"),
                         description: Some(format!("means {p}")),
+                        preview: Some(format!("drawn {p}")),
                     },
                     niobe_core::Choice {
                         label: p.to_owned(),
                         description: None,
+                        preview: None,
                     },
                 ],
                 multiple: true,

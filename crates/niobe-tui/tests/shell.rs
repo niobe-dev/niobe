@@ -1924,6 +1924,7 @@ fn session_asking_questions() -> App {
     let choice = |label: &str, means: Option<&str>| niobe_core::Choice {
         label: label.to_owned(),
         description: means.map(str::to_owned),
+        preview: None,
     };
     app.apply(&Event::PermissionRequest {
         id: "toolu_questions".into(),
@@ -2008,7 +2009,7 @@ fn a_question_the_agent_asks_is_drawn_as_its_question_and_answers() {
         "{frame}"
     );
     assert!(
-        rows.iter().any(|row| row.starts_with("3. Don't answer")),
+        rows.iter().any(|row| row.starts_with("3. Chat about this")),
         "{frame}"
     );
     assert_snapshot("questions-asked-100x30", &frame);
@@ -2059,6 +2060,269 @@ fn the_answers_to_the_agents_questions_stay_in_the_transcript() {
 }
 
 /// The rows of the question box, with its borders and the pane's taken off.
+/// A session the agent put one question to, written in markdown — a list,
+/// emphasis and code — with answers that carry previews, as Claude Code's
+/// `AskUserQuestion` offers them.
+fn session_asking_in_markdown() -> App {
+    let mut app = running_session();
+    let choice = |label: &str, means: &str, preview: Option<&str>| niobe_core::Choice {
+        label: label.to_owned(),
+        description: Some(means.to_owned()),
+        preview: preview.map(str::to_owned),
+    };
+    app.apply(&Event::PermissionRequest {
+        id: "toolu_markdown".into(),
+        tool: "AskUserQuestion".to_owned(),
+        input: r#"{"questions":[{"question":"Where do the raw generations live?"}]}"#.to_owned(),
+        target: None,
+        proposal: Some(Proposal::new(
+            Action::Questions {
+                questions: vec![niobe_core::Question {
+                    header: Some("Large files".to_owned()),
+                    text: "Where do **raw generations** live? Each is:\n\n\
+                           - about 1–2 MB\n\
+                           - kept under `art/sources/`"
+                        .to_owned(),
+                    options: vec![
+                        choice(
+                            "Outside git (Recommended)",
+                            "Ignored by git; only *approved* art is committed.",
+                            Some("```gitignore\nart/sources/\n```"),
+                        ),
+                        choice("Git LFS", "Everything versioned.", None),
+                    ],
+                    multiple: false,
+                }],
+            },
+            ["questions"],
+        )),
+        reason: None,
+        agent: None,
+    });
+    app
+}
+
+/// The frame takes the transcript's width but for its shadow, and the
+/// agent's markdown is drawn as markdown: a list as a list, emphasis and
+/// code without their marks.
+#[test]
+fn a_question_in_markdown_is_drawn_as_markdown_across_the_transcript() {
+    let mut app = session_asking_in_markdown().attached();
+    app.tick(std::time::Instant::now(), None);
+    let frame = screen(&mut app, 160, 40);
+    let rows = question_rows(&frame);
+    assert!(
+        rows.iter()
+            .any(|row| row == "Where do raw generations live? Each is:"),
+        "{frame}"
+    );
+    assert!(rows.iter().any(|row| row == "• about 1–2 MB"), "{frame}");
+    assert!(
+        rows.iter().any(|row| row == "• kept under art/sources/"),
+        "{frame}"
+    );
+    assert!(
+        rows.iter()
+            .any(|row| row == "Ignored by git; only approved art is committed."),
+        "{frame}"
+    );
+    assert!(!frame.contains("**") && !frame.contains('`'), "{frame}");
+    let top = frame
+        .lines()
+        .find(|row| row.contains("? claude asks"))
+        .expect("the question is framed");
+    let corner = top
+        .chars()
+        .position(|c| c == '┐')
+        .expect("its top right corner");
+    let pane = top
+        .chars()
+        .skip(corner + 1)
+        .position(|c| c == '┃' || c == '█')
+        .unwrap_or_else(|| panic!("the pane's right edge: {frame}"));
+    // Its shadow's two columns, and the transcript's own margin.
+    assert!(
+        pane <= 3,
+        "the frame stops {pane} columns short of the pane: {frame}"
+    );
+}
+
+/// An answer being written is the answer and nothing else: the keys under
+/// it say what Enter does.
+#[test]
+fn an_answer_being_written_is_not_explained_under_itself() {
+    use niobe_tui::app::ASK_QUIET;
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use std::time::Instant;
+
+    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+    let mut app = session_asking_in_markdown().attached();
+    let shown = Instant::now();
+    app.tick(shown, None);
+    app.on_key_read(key(KeyCode::Tab), alone(shown + ASK_QUIET * 2));
+    for c in "great".chars() {
+        app.on_key(key(KeyCode::Char(c)));
+    }
+    let frame = screen(&mut app, 100, 30);
+    let rows = question_rows(&frame);
+    assert!(rows.iter().any(|row| row == "› great▏"), "{frame}");
+    assert!(!frame.contains("Sent as your answer"), "{frame}");
+    assert!(frame.contains("Ctrl+J new line"), "{frame}");
+
+    app.on_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL));
+    for c in "but dark".chars() {
+        app.on_key(key(KeyCode::Char(c)));
+    }
+    let frame = screen(&mut app, 100, 30);
+    let cells = question_cells(&frame);
+    let at = cells
+        .iter()
+        .position(|row| row.trim_end() == "› great")
+        .unwrap_or_else(|| panic!("the first line: {frame}"));
+    assert_eq!(
+        cells.get(at + 1).map(|row| row.trim_end()),
+        Some("  but dark▏"),
+        "{frame}"
+    );
+}
+
+/// A question put aside with Esc says so where the keys went — the prompt —
+/// and on itself, and a click on it brings the keyboard back to it.
+#[test]
+fn a_question_put_aside_says_how_to_come_back_and_a_click_on_it_does() {
+    use niobe_tui::app::{ASK_QUIET, AskFocus};
+    use ratatui::crossterm::event::{
+        KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    };
+    use std::time::Instant;
+
+    let mut app = session_asking_in_markdown().attached();
+    let shown = Instant::now();
+    app.tick(shown, None);
+    app.on_key_read(
+        KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        alone(shown + ASK_QUIET * 2),
+    );
+    assert_eq!(app.ask_focus(), AskFocus::Deferred);
+    let frame = screen(&mut app, 100, 30);
+    assert!(frame.contains("Esc back to this question"), "{frame}");
+    assert!(
+        frame.contains("Esc goes back to the question"),
+        "the prompt says where the keys went: {frame}"
+    );
+
+    let row = frame
+        .lines()
+        .position(|row| row.contains("Git LFS"))
+        .expect("the question is on screen");
+    let column = frame
+        .lines()
+        .nth(row)
+        .and_then(|line| line.chars().position(|c| c == 'G'));
+    let at = |kind| MouseEvent {
+        kind,
+        column: u16::try_from(column.expect("a column")).expect("narrow"),
+        row: u16::try_from(row).expect("short"),
+        modifiers: KeyModifiers::NONE,
+    };
+    app.on_mouse(at(MouseEventKind::Down(MouseButton::Left)));
+    app.on_mouse(at(MouseEventKind::Up(MouseButton::Left)));
+    assert_eq!(app.ask_focus(), AskFocus::Choosing);
+}
+
+/// The answer under the cursor shows the preview the agent drew of it, and
+/// `n` writes notes that are drawn under the answers.
+#[test]
+fn the_answer_under_the_cursor_shows_its_preview_and_n_writes_notes() {
+    use niobe_tui::app::ASK_QUIET;
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use std::time::Instant;
+
+    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+    let mut app = session_asking_in_markdown().attached();
+    let shown = Instant::now();
+    app.tick(shown, None);
+    let frame = screen(&mut app, 120, 40);
+    let lines: Vec<&str> = frame.lines().collect();
+    let preview = lines
+        .iter()
+        .position(|row| row.contains("│ Preview of 1. Outside git"))
+        .unwrap_or_else(|| panic!("the preview is headed: {frame}"));
+    // Drawn as markdown: the fence's language is its head, and the line in
+    // it is behind the code block's own gutter.
+    assert!(lines[preview + 1].contains("╭ gitignore"), "{frame}");
+    assert!(lines[preview + 2].contains("│ art/sources/"), "{frame}");
+    assert!(frame.contains("n notes"), "{frame}");
+
+    app.on_key_read(key(KeyCode::Down), alone(shown + ASK_QUIET * 2));
+    let frame = screen(&mut app, 120, 40);
+    assert!(!frame.contains("Preview of"), "Git LFS has none: {frame}");
+
+    app.on_key(key(KeyCode::Char('n')));
+    for c in "dark".chars() {
+        app.on_key(key(KeyCode::Char(c)));
+    }
+    let frame = screen(&mut app, 120, 40);
+    let rows = question_rows(&frame);
+    assert!(rows.iter().any(|row| row == "Notes: dark▏"), "{frame}");
+    assert!(
+        rows.iter().any(|row| row.starts_with("▶ 2. Git LFS")),
+        "the answer the notes are about stays lit: {frame}"
+    );
+}
+
+/// A preview longer than the pane has room for gives way before the
+/// answers it is about: they stay on screen, and Enter still answers.
+#[test]
+fn a_long_preview_gives_way_to_the_answers_on_a_short_pane() {
+    use niobe_tui::app::ASK_QUIET;
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use std::time::Instant;
+
+    let mut app = running_session();
+    let long: String = (1..=60).map(|n| format!("line {n}\n\n")).collect();
+    app.apply(&Event::PermissionRequest {
+        id: "toolu_long".into(),
+        tool: "AskUserQuestion".to_owned(),
+        input: "{}".to_owned(),
+        target: None,
+        proposal: Some(Proposal::new(
+            Action::Questions {
+                questions: vec![niobe_core::Question {
+                    header: None,
+                    text: "Which?".to_owned(),
+                    options: vec![niobe_core::Choice {
+                        label: "This one".to_owned(),
+                        description: None,
+                        preview: Some(long),
+                    }],
+                    multiple: false,
+                }],
+            },
+            ["questions"],
+        )),
+        reason: None,
+        agent: None,
+    });
+    let mut app = app.attached();
+    let shown = Instant::now();
+    app.tick(shown, None);
+    let frame = screen(&mut app, 80, 24);
+    let rows = question_rows(&frame);
+    assert!(
+        rows.iter().any(|row| row.starts_with("▶ 1. This one")),
+        "{frame}"
+    );
+    assert!(frame.contains("Ctrl+T shows it"), "{frame}");
+    assert!(!frame.contains("line 60"), "{frame}");
+
+    app.on_key_read(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        alone(shown + ASK_QUIET * 2),
+    );
+    assert!(app.asking().is_none(), "the answer on screen was taken");
+}
+
 fn question_rows(frame: &str) -> Vec<String> {
     frame
         .lines()
@@ -2806,8 +3070,8 @@ fn a_question_put_off_stays_in_the_transcript_and_says_it_is_waiting() {
     let frame = screen(&mut app, 120, 30);
 
     assert!(frame.contains("? claude asks"), "{frame}");
-    assert!(frame.contains("the turn is still waiting on it"), "{frame}");
-    assert!(frame.contains("Esc answer it"), "{frame}");
+    assert!(frame.contains("the turn waits on your answer"), "{frame}");
+    assert!(frame.contains("Esc back to this question"), "{frame}");
     assert!(
         !frame.contains("▶"),
         "a put-off question still shows a live selection"

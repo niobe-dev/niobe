@@ -149,6 +149,10 @@ pub struct Choice {
     /// What choosing it means, where the agent said.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// What choosing it would look like — a snippet of code, a layout — in
+    /// markdown, where the agent drew one to compare the answers by.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<String>,
 }
 
 /// The operator's answer to one question: the labels of the answers chosen,
@@ -160,6 +164,38 @@ pub struct Answered {
     /// The answer: one label, several joined by `, `, or the operator's own
     /// words.
     pub answer: String,
+    /// What the operator added about the answer they chose, where they
+    /// added anything: handed to the agent beside the answer, never in
+    /// place of it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+}
+
+/// What the agent is told when the operator would rather talk the questions
+/// over than answer them: the call is refused with these words, which ask
+/// the agent to find out what the operator wants to clarify before asking
+/// again, and name every question with whatever answer it was already given.
+pub fn wants_to_talk(questions: &[Question], answered: &[Answered]) -> String {
+    let mut said = String::from(
+        "The operator wants to talk these questions over before answering them. \
+         They may have more context, or questions of their own. Ask them what they \
+         would like to clarify, take their reply into account, and ask the questions \
+         again, reworded if that helps.\nThe questions asked:",
+    );
+    for question in questions {
+        said.push_str(&format!("\n- \"{}\"", question.text));
+        let given = answered
+            .iter()
+            .find(|answered| answered.question == question.text);
+        match given {
+            Some(given) => said.push_str(&format!("\n  Answer: {}", given.answer)),
+            None => said.push_str("\n  (No answer given)"),
+        }
+        if let Some(notes) = given.and_then(|given| given.notes.as_deref()) {
+            said.push_str(&format!("\n  Notes: {notes}"));
+        }
+    }
+    said
 }
 
 #[cfg(test)]
@@ -204,10 +240,12 @@ mod tests {
                         Choice {
                             label: "Yes".to_owned(),
                             description: None,
+                            preview: None,
                         },
                         Choice {
                             label: "No".to_owned(),
                             description: Some("Push only.".to_owned()),
+                            preview: Some("```sh\ngit push\n```".to_owned()),
                         },
                     ],
                     multiple: false,
@@ -244,6 +282,47 @@ mod tests {
         assert!(!stored.contains("multiple"), "{stored}");
         let read: Proposal = serde_json::from_str(&stored).expect("and read back");
         assert_eq!(read, proposal);
+    }
+
+    #[test]
+    fn an_answer_without_notes_is_stored_as_it_was_before_notes_were_kept() {
+        let answered = Answered {
+            question: "Cut a release?".to_owned(),
+            answer: "No".to_owned(),
+            notes: None,
+        };
+        let stored = serde_json::to_string(&answered).expect("an answer serializes");
+        assert_eq!(stored, r#"{"question":"Cut a release?","answer":"No"}"#);
+        let read: Answered = serde_json::from_str(&stored).expect("and reads back");
+        assert_eq!(read, answered);
+    }
+
+    #[test]
+    fn talking_it_over_names_every_question_and_what_was_already_answered() {
+        let Action::Questions { questions } = questions().action().clone() else {
+            unreachable!("questions() builds questions");
+        };
+        let mut asked = questions.clone();
+        asked.push(Question {
+            header: None,
+            text: "Which platforms?".to_owned(),
+            options: Vec::new(),
+            multiple: true,
+        });
+        let answered = [Answered {
+            question: "Cut a release?".to_owned(),
+            answer: "No".to_owned(),
+            notes: Some("after the tag".to_owned()),
+        }];
+        let said = wants_to_talk(&asked, &answered);
+        assert!(said.starts_with("The operator wants to talk"), "{said}");
+        assert!(
+            said.ends_with(
+                "- \"Cut a release?\"\n  Answer: No\n  Notes: after the tag\n\
+                 - \"Which platforms?\"\n  (No answer given)"
+            ),
+            "{said}"
+        );
     }
 
     #[test]

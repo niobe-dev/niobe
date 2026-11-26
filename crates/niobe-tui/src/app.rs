@@ -584,6 +584,9 @@ pub enum AskFocus {
     Choosing,
     /// On an answer the operator is writing in place of the numbered ones.
     Writing,
+    /// On notes the operator is writing about the answer they choose to a
+    /// question put to them, which go to the agent beside that answer.
+    Noting,
     /// Put off with Esc: the question stays in the transcript unanswered, the
     /// turn stays waiting on it, and the keyboard is the shell's until Esc
     /// brings the operator back.
@@ -1855,6 +1858,10 @@ pub struct App {
     ask_focus: AskFocus,
     /// The answer being written in place of the numbered ones.
     ask_draft: String,
+    /// The notes written about the answer to the question on screen, at
+    /// most [`NOTES_CHARS`] characters, handed over with whichever answer it
+    /// is given.
+    ask_notes: String,
     /// What the operator answered of the questions the front prompt puts to
     /// them, in order: the question on screen is the one after these.
     ask_answers: Vec<niobe_core::Answered>,
@@ -2557,6 +2564,7 @@ impl App {
             ask_selected: 0,
             ask_focus: AskFocus::Choosing,
             ask_draft: String::new(),
+            ask_notes: String::new(),
             ask_answers: Vec::new(),
             ask_ticked: BTreeSet::new(),
             allowed: Allowlist::new(),
@@ -3282,7 +3290,12 @@ impl App {
             kind: EntryKind::User,
             head: answered.question.clone(),
             meta: String::new(),
-            body: answered.answer.clone(),
+            // The notes went to the agent with the answer, so they are drawn
+            // with it.
+            body: match &answered.notes {
+                Some(notes) => format!("{}\n\nNotes: {notes}", answered.answer),
+                None => answered.answer.clone(),
+            },
             streaming: false,
             at: self.at,
             calls: Vec::new(),
@@ -3816,6 +3829,13 @@ impl App {
                     self.push_answer(answered);
                 }
                 let asked = self.forget_ask(id);
+                // A question is refused only to talk it over, in words of
+                // Niobe's own that say so to the agent: they are not words
+                // the operator wrote.
+                let written = match asked.as_ref().is_some_and(Ask::asks_the_operator) {
+                    true => None,
+                    false => message.clone(),
+                };
                 if decision.allowed() {
                     self.answered.insert(id.clone(), *decision);
                     self.restart_clock(id);
@@ -3835,7 +3855,7 @@ impl App {
                         .get_mut(at)
                         .and_then(|entry| entry.calls.get_mut(index))
                     {
-                        call.answer = message.clone();
+                        call.answer = written;
                     }
                 } else if *decision == PermissionDecision::Deny {
                     let agent = asked.as_ref().and_then(|ask| ask.agent.clone());
@@ -3859,8 +3879,7 @@ impl App {
                             true => tool.clone(),
                             false => format!("{tool} · {what}"),
                         },
-                        body: message
-                            .as_ref()
+                        body: written
                             .map(|said| format!("You answered instead: {said}"))
                             .unwrap_or_default(),
                         streaming: false,
@@ -4475,6 +4494,7 @@ impl App {
             self.ask_selected = 0;
             self.ask_focus = AskFocus::Choosing;
             self.ask_draft.clear();
+            self.ask_notes.clear();
             self.ask_answers.clear();
             self.ask_ticked.clear();
             self.ask_quiet_since = self.latest_instant();
@@ -4577,7 +4597,16 @@ impl App {
     /// prompt takes those keys but no Enter among them sends it, and an
     /// answer being written is moved into an empty prompt rather than lost.
     fn front_ask_taken_away(&mut self) {
-        let draft = std::mem::take(&mut self.ask_draft);
+        // Notes are the operator's words as much as an answer is, and are
+        // kept the same way, after it.
+        let draft = [
+            std::mem::take(&mut self.ask_draft),
+            std::mem::take(&mut self.ask_notes),
+        ]
+        .into_iter()
+        .filter(|words| !words.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
         let had_keyboard = self.ask_focus != AskFocus::Deferred;
         self.ask_selected = 0;
         self.ask_answers.clear();
@@ -4675,12 +4704,18 @@ impl App {
     /// one — or, where it was the last, lets the call go ahead with every
     /// answer given, which is what the agent is handed.
     fn answer_question(&mut self, said: String) {
-        let Some((question, _)) = self.question_on_screen() else {
+        let Some(question) = self
+            .question_on_screen()
+            .map(|(question, _)| question.text.clone())
+        else {
             return;
         };
+        let notes = std::mem::take(&mut self.ask_notes);
+        let notes = notes.trim();
         let answered = niobe_core::Answered {
-            question: question.text.clone(),
+            question,
             answer: said,
+            notes: (!notes.is_empty()).then(|| notes.to_owned()),
         };
         self.ask_answers.push(answered);
         self.ask_ticked.clear();
@@ -4725,6 +4760,11 @@ impl App {
     /// What the operator has written so far in place of the numbered answers.
     pub fn ask_draft(&self) -> &str {
         &self.ask_draft
+    }
+
+    /// The notes written so far about the answer to the question on screen.
+    pub fn ask_notes(&self) -> &str {
+        &self.ask_notes
     }
 
     /// Moves the selection one option along, `forward` or back, wrapping at
@@ -4865,10 +4905,27 @@ impl App {
             (_, true) => PermissionDecision::AllowAlways,
             (_, false) => PermissionDecision::Allow,
         };
+        // Refused, a question is one the operator would rather talk over:
+        // the agent is told so, and what was answered before it, rather
+        // than that its call was refused.
+        let message = match (answer, ask.questions()) {
+            (Answer::No, Some(questions)) => Some(niobe_core::wants_to_talk(
+                questions,
+                &std::mem::take(&mut self.ask_answers),
+            )),
+            (
+                Answer::Once
+                | Answer::AlwaysTool
+                | Answer::AlwaysTarget
+                | Answer::No
+                | Answer::Choose(_),
+                _,
+            ) => None,
+        };
         self.produce(Event::PermissionResponse {
             id: ask.id,
             decision,
-            message: None,
+            message,
             answers: Vec::new(),
         });
         self.scroll_to_tail();
@@ -8129,12 +8186,17 @@ impl App {
     /// would be sent for it, matter more than a reminder of what the composer
     /// can do.
     pub(crate) fn fit_placeholder(&mut self, columns: usize) {
-        let said = match self.shell_mode {
-            true => match self.hands_commands {
+        let aside = self.asking().is_some() && self.ask_focus == AskFocus::Deferred;
+        let said = match (self.shell_mode, aside) {
+            (true, _) => match self.hands_commands {
                 true => SHELL_PLACEHOLDER.to_owned(),
                 false => SHELL_KEPT_PLACEHOLDER.to_owned(),
             },
-            false => placeholder(
+            // The keys came here from a question the turn still waits on,
+            // which an operator who put it aside by typing past it may not
+            // know: the prompt says how to go back to it.
+            (false, true) => ASIDE_PLACEHOLDER.to_owned(),
+            (false, false) => placeholder(
                 columns,
                 Offers {
                     files: !self.repo.files.is_empty(),
@@ -9146,6 +9208,11 @@ impl App {
                 } else if let Some(focus) = over {
                     self.focus = focus;
                     self.pressed = self.transcript_point(mouse.column, mouse.row);
+                    if self.ask_focus == AskFocus::Deferred
+                        && self.on_question(mouse.column, mouse.row)
+                    {
+                        self.ask_focus = AskFocus::Choosing;
+                    }
                 }
             }
             MouseEventKind::Drag(MouseButton::Left) => self.drag_to(mouse.column, mouse.row),
@@ -9192,6 +9259,17 @@ impl App {
             Overlay::History => self.on_browser_key(key),
             Overlay::List => self.on_pick_key(key),
         }
+    }
+
+    /// Whether a place on the screen is on the question waiting, which the
+    /// last frame drew under the transcript's own lines.
+    fn on_question(&self, column: u16, row: u16) -> bool {
+        let Some((area, lines)) = self.transcript_drawn else {
+            return false;
+        };
+        self.asking().is_some()
+            && area.contains((column, row).into())
+            && self.scroll() + usize::from(row - area.y) >= lines
     }
 
     /// The transcript cell at a place on the screen, or `None` where the
@@ -9527,8 +9605,13 @@ impl App {
         }
         if self.asking().is_some() {
             match self.ask_focus {
+                // A written answer holds lines, as the prompt does.
                 AskFocus::Writing => {
-                    self.ask_draft.push_str(&joined_lines(&text));
+                    self.ask_draft.push_str(&text);
+                    return;
+                }
+                AskFocus::Noting => {
+                    self.note(&text);
                     return;
                 }
                 // What is pasted at the numbered answers is the operator's
@@ -9834,7 +9917,7 @@ impl App {
         // next turn.
         if self.asking().is_some() {
             match self.ask_focus {
-                AskFocus::Choosing | AskFocus::Writing => {
+                AskFocus::Choosing | AskFocus::Writing | AskFocus::Noting => {
                     self.on_ask_key(key);
                     return;
                 }
@@ -10070,7 +10153,9 @@ impl App {
         // than the answers themselves leaves one out; what is shown of the
         // call above them is the operator's to read or not, and Ctrl+T shows
         // the rest of it.
-        if !self.question_answers_drawn && self.ask_focus != AskFocus::Writing {
+        if !self.question_answers_drawn
+            && !matches!(self.ask_focus, AskFocus::Writing | AskFocus::Noting)
+        {
             self.hint = Some(ANSWERS_OFF_SCREEN_HINT.to_owned());
             return;
         }
@@ -10079,6 +10164,22 @@ impl App {
         // held to the guard against keys that were not meant for it.
         if self.ask_focus == AskFocus::Writing && !is_plain_enter(key) {
             self.on_writing_key(key);
+            return;
+        }
+        if self.ask_focus == AskFocus::Noting && !is_plain_enter(key) {
+            self.on_noting_key(key);
+            return;
+        }
+        // `n` writes notes on the answer, as it does in Claude Code, where
+        // the question offers answers to choose: it is not a word typed past
+        // the question.
+        if self.ask_focus == AskFocus::Choosing
+            && typed_char(key) == Some('n')
+            && self
+                .question_on_screen()
+                .is_some_and(|(question, _)| !question.options.is_empty())
+        {
+            self.ask_focus = AskFocus::Noting;
             return;
         }
         // A letter answers nothing, so it is never held back: a word typed
@@ -10107,6 +10208,8 @@ impl App {
         }
         match self.ask_focus {
             AskFocus::Writing => self.on_writing_key(key),
+            // Enter on notes answers with the choice they are about.
+            AskFocus::Noting => self.answer(self.ask_selected()),
             AskFocus::Choosing | AskFocus::Deferred => self.on_choosing_key(key),
         }
     }
@@ -10184,41 +10287,47 @@ impl App {
         }
     }
 
-    /// One key, on an answer being written.
+    /// One key, on an answer being written: the keys that open a line in
+    /// the prompt open one here, and Enter sends it.
     fn on_writing_key(&mut self, key: ratatui::crossterm::event::KeyEvent) {
         use ratatui::crossterm::event::KeyCode;
 
-        let Some(code) = answer_key(key) else {
+        if answer_key(key) == Some(KeyCode::Enter) && !opens_a_line(key) {
+            let words = self.ask_draft.clone();
+            self.answer_saying(&words);
             return;
-        };
-        match code {
-            KeyCode::Enter => {
-                let words = self.ask_draft.clone();
-                self.answer_saying(&words);
-            }
-            // Held to what is drawn, as the composer is: the answer reaches
-            // the model word for word, and a word drawn as nothing would be
-            // sent where the operator never saw it.
-            KeyCode::Char(c) => {
-                let before = match is_tag(c) {
-                    true => self.ask_draft.graphemes(true).next_back().unwrap_or(""),
-                    false => "",
-                };
-                if drawn_when_typed(before, c) {
-                    self.ask_draft.push(c);
-                }
-            }
-            KeyCode::Backspace => {
-                let kept = self
-                    .ask_draft
-                    .grapheme_indices(true)
-                    .next_back()
-                    .map_or(0, |(at, _)| at);
-                self.ask_draft.truncate(kept);
-            }
-            KeyCode::Esc => self.ask_focus = AskFocus::Choosing,
-            _ => {}
         }
+        if !edit_words(&mut self.ask_draft, key, usize::MAX) {
+            return;
+        }
+        if answer_key(key) == Some(KeyCode::Esc) {
+            self.ask_focus = AskFocus::Choosing;
+        }
+    }
+
+    /// One key, on notes being written; Enter is the answer's, and Esc goes
+    /// back to the answers with the notes kept.
+    fn on_noting_key(&mut self, key: ratatui::crossterm::event::KeyEvent) {
+        use ratatui::crossterm::event::KeyCode;
+
+        if answer_key(key) == Some(KeyCode::Esc) {
+            self.ask_focus = AskFocus::Choosing;
+            return;
+        }
+        let room = NOTES_CHARS.saturating_sub(self.ask_notes.chars().count());
+        if !edit_words(&mut self.ask_notes, key, room) {
+            self.hint = Some(NOTES_FULL_HINT.to_owned());
+        }
+    }
+
+    /// `text` added to the notes being written, as far as they have room.
+    fn note(&mut self, text: &str) {
+        let room = NOTES_CHARS.saturating_sub(self.ask_notes.chars().count());
+        let kept: String = text.chars().take(room).collect();
+        if kept.len() < text.len() {
+            self.hint = Some(NOTES_FULL_HINT.to_owned());
+        }
+        self.ask_notes.push_str(&kept);
     }
 
     /// Hands in the clock, once per pass of the event loop.
@@ -11885,6 +11994,10 @@ const PLACEHOLDER: [&str; 5] = [
 /// The key that searches the transcript.
 const FIND_KEY: &str = "Ctrl+F";
 
+/// What an empty composer says while a question the turn waits on is put
+/// aside under it.
+const ASIDE_PLACEHOLDER: &str = "Esc goes back to the question the turn waits on";
+
 /// What an empty composer says while it holds a command: where it runs, and
 /// the one thing about it an operator could not guess.
 const SHELL_PLACEHOLDER: &str = "A command to run here; the agent is sent what it prints";
@@ -11942,6 +12055,53 @@ fn answer_key(
         code => (key.modifiers == KeyModifiers::NONE).then_some(code),
     }
 }
+
+/// `key` applied to `words` someone is writing at a question, at most `room`
+/// characters more: a new line from the keys that open one in the prompt, a
+/// character that is drawn, or the last one taken off with Backspace. Held
+/// to what is drawn, as the composer is: the words reach the model as they
+/// are, and a word drawn as nothing would be sent where the operator never
+/// saw it. Returns `false` only where a character did not fit in `room`.
+fn edit_words(words: &mut String, key: ratatui::crossterm::event::KeyEvent, room: usize) -> bool {
+    use ratatui::crossterm::event::KeyCode;
+
+    let typed = match opens_a_line(key) {
+        true => Some('\n'),
+        false => match answer_key(key) {
+            Some(KeyCode::Char(c)) => Some(c),
+            Some(KeyCode::Backspace) => {
+                let kept = words
+                    .grapheme_indices(true)
+                    .next_back()
+                    .map_or(0, |(at, _)| at);
+                words.truncate(kept);
+                None
+            }
+            _ => None,
+        },
+    };
+    let Some(c) = typed else {
+        return true;
+    };
+    if room == 0 {
+        return false;
+    }
+    let before = match is_tag(c) {
+        true => words.graphemes(true).next_back().unwrap_or(""),
+        false => "",
+    };
+    if drawn_when_typed(before, c) {
+        words.push(c);
+    }
+    true
+}
+
+/// The most characters of notes an answer is sent with. Each is at most two
+/// UTF-16 units, so they are always within the 8,192 Claude Code takes.
+pub(crate) const NOTES_CHARS: usize = 4_096;
+
+/// What the bar says when the notes are as long as they can be.
+const NOTES_FULL_HINT: &str = "The notes are as long as an answer is sent with: 4,096 characters";
 
 /// Whether `key` is Enter with nothing held, which sends the prompt.
 fn is_plain_enter(key: ratatui::crossterm::event::KeyEvent) -> bool {
@@ -14315,6 +14475,7 @@ mod tests {
         let choice = |label: &str| niobe_core::Choice {
             label: label.to_owned(),
             description: Some(format!("What {label} means.")),
+            preview: None,
         };
         Event::PermissionRequest {
             id: "q1".into(),
@@ -14349,6 +14510,7 @@ mod tests {
         niobe_core::Answered {
             question: question.to_owned(),
             answer: answer.to_owned(),
+            notes: None,
         }
     }
 
@@ -14477,22 +14639,130 @@ mod tests {
     }
 
     #[test]
-    fn a_question_not_answered_is_refused_and_nothing_answered_goes_with_it() {
+    fn a_written_answer_takes_new_lines_from_the_keys_and_from_a_paste() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut app = app().attached();
+        app.apply(&questions_asked());
+        app.on_key(key(KeyCode::Tab));
+
+        app.on_key(key(KeyCode::Char('a')));
+        app.on_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL));
+        app.on_key(key(KeyCode::Char('b')));
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
+        app.on_paste("c\r\nd");
+        assert_eq!(app.ask_draft(), "a\nb\nc\nd");
+        assert!(
+            app.take_produced().is_empty(),
+            "no new line sends the answer"
+        );
+
+        app.on_key(key(KeyCode::Enter));
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(
+            app.take_produced(),
+            [Event::PermissionResponse {
+                id: "q1".into(),
+                decision: PermissionDecision::Allow,
+                message: None,
+                answers: vec![
+                    answer_to("Cut a release?", "a\nb\nc\nd"),
+                    answer_to("Which platforms?", "macOS"),
+                ],
+            }]
+        );
+    }
+
+    #[test]
+    fn notes_written_with_n_go_with_the_answer_chosen_after_them() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut app = app().attached();
+        app.apply(&questions_asked());
+
+        app.on_key(key(KeyCode::Char('2')));
+        app.on_key(key(KeyCode::Char('n')));
+        assert_eq!(app.ask_focus(), AskFocus::Noting);
+        for c in "after".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        app.on_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL));
+        for c in "the tagx".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        app.on_key(key(KeyCode::Backspace));
+        assert_eq!(app.ask_notes(), "after\nthe tag");
+        assert_eq!(app.composed(), "", "notes are not the next prompt");
+        // Esc keeps them, and the answer chosen afterwards carries them.
+        app.on_key(key(KeyCode::Esc));
+        assert_eq!(app.ask_focus(), AskFocus::Choosing);
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(app.ask_notes(), "", "the next question starts with none");
+        app.on_key(key(KeyCode::Char('n')));
+        app.on_key(key(KeyCode::Char('x')));
+        app.on_key(key(KeyCode::Enter));
+
+        let mut noted = answer_to("Cut a release?", "Release");
+        noted.notes = Some("after\nthe tag".to_owned());
+        let mut also = answer_to("Which platforms?", "macOS");
+        also.notes = Some("x".to_owned());
+        assert_eq!(
+            app.take_produced(),
+            [Event::PermissionResponse {
+                id: "q1".into(),
+                decision: PermissionDecision::Allow,
+                message: None,
+                answers: vec![noted, also],
+            }]
+        );
+        let bubble = app
+            .entries()
+            .iter()
+            .find(|entry| entry.kind == EntryKind::User && entry.head == "Cut a release?")
+            .expect("the answer is in the transcript");
+        assert_eq!(
+            bubble.body, "Release\n\nNotes: after\nthe tag",
+            "what was sent"
+        );
+    }
+
+    #[test]
+    fn notes_stop_at_the_length_a_backend_is_sure_to_take() {
         use ratatui::crossterm::event::KeyCode;
         let mut app = app().attached();
         app.apply(&questions_asked());
+        app.on_key(key(KeyCode::Char('n')));
+        app.on_paste(&"a".repeat(NOTES_CHARS + 10));
+        app.on_key(key(KeyCode::Char('b')));
+        assert_eq!(app.ask_notes().chars().count(), NOTES_CHARS);
+        assert!(
+            app.hint().is_some(),
+            "the bar says why nothing more went in"
+        );
+    }
+
+    #[test]
+    fn chatting_about_the_questions_refuses_them_saying_what_was_answered_so_far() {
+        use ratatui::crossterm::event::KeyCode;
+        let mut app = app().attached();
+        app.apply(&questions_asked());
+        let questions = app
+            .asking()
+            .and_then(Ask::questions)
+            .expect("the call puts questions")
+            .to_vec();
         app.on_key(key(KeyCode::Enter));
 
         app.on_key(key(KeyCode::Char('4')));
         assert_eq!(app.ask_selected(), Answer::No);
         app.on_key(key(KeyCode::Enter));
 
+        let said =
+            niobe_core::wants_to_talk(&questions, &[answer_to("Cut a release?", "Push only")]);
         assert_eq!(
             app.take_produced(),
             [Event::PermissionResponse {
                 id: "q1".into(),
                 decision: PermissionDecision::Deny,
-                message: None,
+                message: Some(said),
                 answers: Vec::new(),
             }]
         );
@@ -18898,7 +19168,9 @@ mod tests {
             app.on_key(KeyEvent::new(KeyCode::Enter, held));
         }
         assert_eq!(app.take_produced(), []);
-        assert_eq!(app.ask_draft(), "no");
+        // Shift and Alt open a line, as they do in the prompt; Ctrl does
+        // nothing.
+        assert_eq!(app.ask_draft(), "no\n\n");
 
         press(&mut app, KeyCode::Enter);
         assert_eq!(
@@ -19836,6 +20108,20 @@ mod tests {
         assert!(!call.interrupted, "a refused call was not cut short");
         assert!(!app.entries()[0].streaming);
         assert_eq!(call.answer.as_deref(), Some("Do not create b.txt."));
+    }
+
+    #[test]
+    fn questions_talked_over_are_not_drawn_as_words_the_operator_wrote() {
+        let mut app = app().attached();
+        app.apply(&start("q1", "AskUserQuestion", "{}", None));
+        app.apply(&questions_asked());
+        app.on_key(key(ratatui::crossterm::event::KeyCode::Char('3')));
+        app.on_key(key(ratatui::crossterm::event::KeyCode::Enter));
+        assert_eq!(app.take_produced().len(), 1, "the questions were refused");
+
+        let call = &app.entries()[0].calls[0];
+        assert_eq!(call.outcome, Some(ToolOutcome::Denied));
+        assert_eq!(call.answer, None, "Niobe's words, not the operator's");
     }
 
     fn millis(ms: u64) -> Stamp {
@@ -20779,7 +21065,7 @@ mod tests {
 
         app.on_paste("keep\rbuild");
 
-        assert_eq!(app.ask_draft(), "keep build");
+        assert_eq!(app.ask_draft(), "keep\nbuild");
         assert!(app.asking().is_some(), "the paste sent the answer");
     }
 
@@ -20899,6 +21185,21 @@ mod tests {
         typed(&mut queued, "no, use rg");
         queued.apply(&Event::PermissionWithdrawn { id: "t1".into() });
         assert_eq!(queued.composed(), "no, use rg");
+    }
+
+    /// Notes are as much the operator's words as an answer: a question taken
+    /// away while they were written leaves them in the prompt.
+    #[test]
+    fn notes_being_written_are_kept_when_their_question_is_withdrawn() {
+        let mut app = app().attached();
+        app.apply(&questions_asked());
+        app.on_key(key(KeyCode::Char('n')));
+        for c in "only on main".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        app.apply(&Event::PermissionWithdrawn { id: "q1".into() });
+        assert_eq!(app.composed(), "only on main");
+        assert_eq!(app.ask_notes(), "");
     }
 
     #[test]

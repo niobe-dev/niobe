@@ -4381,7 +4381,8 @@ pub(crate) fn kind_of(line: &str) -> String {
 
 /// The questions an `AskUserQuestion` call puts to the operator, read from
 /// its `questions`: each one's text, the word it is filed under, the answers
-/// it offers and whether several may be chosen. `None` where any question has
+/// it offers — each with what choosing it means and the preview drawn of it,
+/// where the agent gave them — and whether several may be chosen. `None` where any question has
 /// no text, or the list is empty or not one — the call is then shown by its
 /// arguments, as one this does not know how to ask.
 ///
@@ -4408,6 +4409,8 @@ fn questions_of(input: &serde_json::Value) -> Option<Proposal> {
                             label: text(option, "label")?,
                             description: text(option, "description")
                                 .filter(|said| !said.trim().is_empty()),
+                            preview: text(option, "preview")
+                                .filter(|drawn| !drawn.trim().is_empty()),
                         })
                     })
                     .collect::<Option<Vec<_>>>()?,
@@ -8245,10 +8248,12 @@ mod tests {
                         Choice {
                             label: "Push only (Recommended)".to_owned(),
                             description: Some("Already on main.".to_owned()),
+                            preview: None,
                         },
                         Choice {
                             label: "Release".to_owned(),
                             description: None,
+                            preview: None,
                         },
                     ],
                     multiple: false,
@@ -8260,10 +8265,12 @@ mod tests {
                         Choice {
                             label: "macOS".to_owned(),
                             description: None,
+                            preview: None,
                         },
                         Choice {
                             label: "Linux".to_owned(),
                             description: None,
+                            preview: None,
                         },
                     ],
                     multiple: true,
@@ -8273,6 +8280,26 @@ mod tests {
         assert!(proposal.asks_the_operator());
         assert!(proposal.covers("questions"));
         assert!(!proposal.covers("metadata"));
+    }
+
+    #[test]
+    fn an_option_drawn_as_a_preview_is_proposed_with_it() {
+        // The shape Claude Code 2.1.332 offers previews in: markdown beside
+        // an option's label, to compare the answers by.
+        let proposal = proposal_asked(
+            r#"{"type":"control_request","request_id":"c1","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{"questions":[{"question":"Which layout?","header":"Layout","multiSelect":false,"options":[{"label":"Tabs","description":"One per file.","preview":"```\n[a.rs] [b.rs]\n```"},{"label":"Split","preview":"  "}]}]},"tool_use_id":"toolu_1"}}"#,
+            &mut translator(),
+        )
+        .expect("questions are read");
+        let Action::Questions { questions } = proposal.action() else {
+            panic!("read as {:?}", proposal.action());
+        };
+        let previews: Vec<Option<&str>> = questions[0]
+            .options
+            .iter()
+            .map(|choice| choice.preview.as_deref())
+            .collect();
+        assert_eq!(previews, [Some("```\n[a.rs] [b.rs]\n```"), None]);
     }
 
     #[test]
