@@ -2,8 +2,8 @@
   b  Rgb(77, 170, 252) on Rgb(24, 24, 24), bold | underlined
   c  Rgb(24, 24, 24) on Rgb(77, 170, 252), bold
   d  Rgb(204, 204, 204) on Rgb(24, 24, 24), bold
-  e  Rgb(204, 204, 204) on Rgb(24, 24, 24), dim
-  f  Rgb(77, 170, 252) on Rgb(24, 24, 24)
+  e  Rgb(77, 170, 252) on Rgb(24, 24, 24)
+  f  Rgb(204, 204, 204) on Rgb(24, 24, 24), dim
   g  Rgb(204, 204, 204) on Rgb(31, 31, 31)
   h  Rgb(0, 120, 212) on Rgb(31, 31, 31)
   i  Rgb(226, 192, 141) on Rgb(31, 31, 31), bold
@@ -26,7 +26,7 @@
   z  Rgb(204, 204, 204) on Rgb(49, 49, 49), dim
   A  Rgb(204, 204, 204) on Rgb(49, 49, 49)
 
-abaaaaaabaaaaaaaabaaaaaaaabaaaaaabaaaaabaaaaaaaaaaaaacccccccccccccaaaaaddddddaaeeeeeeeeeeeeeeeeaaffffffffffffffaaeeeeeaa
+abaaaaaabaaaaaaaabaaaaaaaabaaaaaabaaaaabaaaaaaaaaaaaacccccccccccccaaaaaaaaaaaaaaaaaaaaaaaddddddaaeeeeeeeeeeeeeeaafffffaa
 ghhhiiijjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjhhhhgkkkkkkkkkkkkkkkkiiiiiiikkkkkkkkkkkkkkkkkg
 ghgllgggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggghgkgmmmmmmmmmmnnnngoommmmmmmmmmmmmmmgggggkg
 ghggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggghgkgmmmmmmmmmmppppggmmmmmmmmmmmmmmmmmmmmgkg

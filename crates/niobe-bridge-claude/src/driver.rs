@@ -3298,7 +3298,7 @@ mod tests {
         let scratch = tempfile::tempdir().expect("a scratch directory");
         let asked = scratch.path().join("asked");
         let initialized = r#"{"type":"control_response","response":{"subtype":"success","request_id":"niobe-1","response":{"commands":[{"name":"compact"}],"account":{"subscriptionType":"Claude Ultra"}}}}"#;
-        let settings = r#"{"type":"control_response","response":{"subtype":"success","request_id":"niobe-3","response":{"applied":{"model":"claude-opus-5-5"}}}}"#;
+        let settings = r#"{"type":"control_response","response":{"subtype":"success","request_id":"niobe-3","response":{"applied":{"model":"claude-opus-5-5","effort":"high"}}}}"#;
         let (mut session, _dir) = started(&format!(
             "read -r initialize\nprintf '%s\\n' '{initialized}'\n\
              read -r usage\nread -r settings\nprintf '%s\\n' \"$settings\" > '{asked}'\n\
@@ -3318,7 +3318,8 @@ mod tests {
         );
         assert!(
             events.contains(&Event::ModelConfigured {
-                model: "claude-opus-5-5".to_owned()
+                model: "claude-opus-5-5".to_owned(),
+                effort: Some("high".to_owned()),
             }),
             "{events:#?}"
         );

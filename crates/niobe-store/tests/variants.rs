@@ -173,6 +173,7 @@ fn one_of_each() -> Vec<Event> {
         },
         Event::ModelConfigured {
             model: text("claude-opus-5-5"),
+            effort: Some(text("high")),
         },
         Event::Account {
             plan: Some(text("Claude Ultra")),

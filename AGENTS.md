@@ -405,7 +405,8 @@ reviewers that encode both, for an agent working in this tree.
   seven-day windows stand, which the CLI reads from the claude.ai usage endpoint with its own
   sign-in and which becomes the `UsageWindows` a turn's `rate_limit_event` does, so a session
   shows them before its first turn, and with `get_settings` which model its settings start it
-  on, which the menu row names until a turn's `init` does, beside the plan the `initialize`
+  on, which the menu row names until a turn's `init` does, and the effort they start it at, which
+  it names beside the model until one is picked here, beside the plan the `initialize`
   answer says the sign-in is on, in the CLI's words and with nothing of who is signed in — asks it
   `mcp_status` whenever an `init` lists a server standing otherwise than it last said, and after
   `mcp_reconnect`, which it sends for the MCP view's `r` — starts it with
@@ -417,7 +418,7 @@ reviewers that encode both, for an agent working in this tree.
   three (`generate_session_title`, which the CLI answers from its small model, in the order it
   finishes them, and bills into the session's running totals; the first title kept in the CLI's
   transcript, an answer older than one already heard passed over), and the only place the models the signed-in account can run are
-  listed, which the model picker offers — keeps its
+  listed, which the model picker offers, with the effort beside them that ←→ move — keeps its
   standard input open for the life of the session and writes it from a queue on a thread of its
   own, so a CLI that is not reading never holds up the screen, answers the permission prompts the CLI
   stops turns on — an `AskUserQuestion` approved with the operator's answers under `answers`,

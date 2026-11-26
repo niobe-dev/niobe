@@ -669,6 +669,51 @@ pub struct Picker {
     /// profile narrowed it: the list says so, rather than reading as all
     /// there is.
     pub more: usize,
+    /// The effort the model list sets with the model it switches to, which
+    /// Left and Right move; `None` on every other list, and on the model
+    /// list of a backend that does not take `/effort` now.
+    pub effort: Option<EffortDial>,
+}
+
+/// The effort a model list sets with the model: the level it shows, and the
+/// level in force as it opened, which Enter leaves alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EffortDial {
+    /// The level shown, a place in [`EFFORTS`]; `None` until it is moved
+    /// where no level is known to be in force, since the backend may be at
+    /// one the list would otherwise claim it is.
+    at: Option<usize>,
+    /// The level in force as the list opened.
+    was: Option<usize>,
+}
+
+impl EffortDial {
+    /// A dial on `level`, where it is one of [`EFFORTS`].
+    pub(crate) fn on(level: Option<&str>) -> Self {
+        let at = level.and_then(|level| EFFORTS.iter().position(|known| *known == level));
+        Self { at, was: at }
+    }
+
+    /// The level shown, where one is.
+    pub fn level(self) -> Option<&'static str> {
+        self.at.and_then(|at| EFFORTS.get(at).copied())
+    }
+
+    /// The level to send, where it was moved off the one in force.
+    fn moved(self) -> Option<&'static str> {
+        (self.at != self.was).then(|| self.level()).flatten()
+    }
+
+    /// One level lower, staying on the lowest; the lowest from none.
+    fn lower(&mut self) {
+        self.at = Some(self.at.map_or(0, |at| at.saturating_sub(1)));
+    }
+
+    /// One level higher, staying on the highest; the lowest from none.
+    pub(crate) fn higher(&mut self) {
+        let last = EFFORTS.len().saturating_sub(1);
+        self.at = Some(self.at.map_or(0, |at| at.saturating_add(1).min(last)));
+    }
 }
 
 /// One row of a [`Picker`]: what choosing it sends, and what it is called and
@@ -5019,6 +5064,15 @@ impl App {
         self.produce(Event::ModelSelected { model });
     }
 
+    /// How hard the model works on a turn: the level chosen here or the
+    /// backend was started with, or else the one the backend said its
+    /// settings start it at; `None` where nothing has said.
+    pub fn effort(&self) -> Option<&str> {
+        self.effort
+            .as_deref()
+            .or_else(|| self.session.configured_effort())
+    }
+
     /// Notes `effort` as the level in force, and keeps it for the next
     /// session.
     fn chose_effort(&mut self, effort: &str) {
@@ -5638,11 +5692,16 @@ impl App {
         }
 
         let at = in_force(&options, self.session.models(), self.session.model()).unwrap_or(0);
+        let effort = self
+            .can_send("effort")
+            .is_ok()
+            .then(|| EffortDial::on(self.effort()));
         self.picking = Some(Picker {
             purpose: Purpose::Model,
             options,
             at,
             more,
+            effort,
         });
     }
 
@@ -5663,12 +5722,13 @@ impl App {
             options,
             at,
             more: 0,
+            effort: None,
         });
     }
 
     /// The row of `options` that is the effort in force, where it is known.
     fn effort_row(&self, options: &[Choice]) -> Option<usize> {
-        let effort = self.effort.as_deref()?;
+        let effort = self.effort()?;
         options.iter().position(|choice| choice.value == effort)
     }
 
@@ -5761,6 +5821,7 @@ impl App {
             at: options.len().saturating_sub(1),
             options,
             more: 0,
+            effort: None,
         });
     }
 
@@ -5817,6 +5878,7 @@ impl App {
             at: options.len().saturating_sub(1),
             options,
             more: 0,
+            effort: None,
         });
     }
 
@@ -5835,6 +5897,7 @@ impl App {
             options,
             at,
             more: 0,
+            effort: None,
         });
     }
 
@@ -5871,6 +5934,8 @@ impl App {
         match key.code {
             KeyCode::Up => picker.at = picker.at.saturating_sub(1),
             KeyCode::Down => picker.at = picker.at.saturating_add(1).min(last),
+            KeyCode::Left => picker.effort.iter_mut().for_each(EffortDial::lower),
+            KeyCode::Right => picker.effort.iter_mut().for_each(EffortDial::higher),
             KeyCode::Esc => self.picking = None,
             KeyCode::Enter => {
                 let purpose = picker.purpose;
@@ -5878,9 +5943,13 @@ impl App {
                     .options
                     .get(picker.at)
                     .map(|choice| choice.value.clone());
+                let effort = picker.effort.and_then(EffortDial::moved);
                 self.picking = None;
                 if let Some(chosen) = chosen {
                     self.choose(purpose, chosen);
+                }
+                if let Some(level) = effort {
+                    self.choose(Purpose::Effort, level.to_owned());
                 }
             }
             _ => {}
@@ -6390,6 +6459,7 @@ impl App {
             options,
             at: 0,
             more: 0,
+            effort: None,
         });
     }
 
@@ -6553,6 +6623,7 @@ impl App {
         let mut rows = vec![
             format!("{:<10}{backend}", "Profile"),
             format!("{:<10}{model}", "Model"),
+            format!("{:<10}{}", "Effort", self.effort().unwrap_or("—")),
             format!("{:<10}{mode}", "Mode"),
             format!("{:<10}{}", "Theme", self.theme.name.to_lowercase()),
             String::new(),
@@ -16895,6 +16966,182 @@ mod tests {
         assert!(app.asking().is_some());
     }
 
+    /// A shell under a profile naming `opus` and `sonnet`, whose backend
+    /// takes `/effort` and said its settings start it on `opus` at `high`.
+    fn on_opus_at_high() -> App {
+        let mut app = under_a_profile(&["opus", "sonnet"]);
+        app.apply(&Event::Commands {
+            commands: vec![SlashCommand {
+                name: "effort".to_owned(),
+                description: String::new(),
+                argument_hint: None,
+                mid_prompt: false,
+            }],
+        });
+        app.apply(&Event::ModelConfigured {
+            model: "opus".to_owned(),
+            effort: Some("high".to_owned()),
+        });
+        app
+    }
+
+    #[test]
+    fn the_effort_in_force_is_the_one_chosen_here_or_else_the_one_the_backend_said() {
+        let mut reported = app();
+        assert_eq!(reported.effort(), None);
+        reported.apply(&Event::ModelConfigured {
+            model: "opus".to_owned(),
+            effort: Some("high".to_owned()),
+        });
+        assert_eq!(reported.effort(), Some("high"));
+        let mut started = app().with_effort(Some("low".to_owned()));
+        started.apply(&Event::ModelConfigured {
+            model: "opus".to_owned(),
+            effort: Some("high".to_owned()),
+        });
+        assert_eq!(
+            started.effort(),
+            Some("low"),
+            "a level chosen here gave way to the start's report"
+        );
+    }
+
+    #[test]
+    fn the_model_list_opens_on_the_effort_in_force_and_left_and_right_move_it_within_the_levels() {
+        use ratatui::crossterm::event::KeyCode;
+        let mut app = on_opus_at_high();
+
+        app.on_key(key(KeyCode::F(4)));
+        let shown = |app: &App| {
+            app.picking()
+                .and_then(|picker| picker.effort)
+                .and_then(|dial| dial.level())
+        };
+        assert_eq!(shown(&app), Some("high"));
+        app.on_key(key(KeyCode::Right));
+        assert_eq!(shown(&app), Some("xhigh"));
+        for _ in 0..3 {
+            app.on_key(key(KeyCode::Right));
+        }
+        assert_eq!(shown(&app), Some("max"), "moved past the last level");
+        for _ in 0..9 {
+            app.on_key(key(KeyCode::Left));
+        }
+        assert_eq!(shown(&app), Some("low"), "moved past the first level");
+        assert!(app.take_produced().is_empty(), "moving the effort sent it");
+    }
+
+    #[test]
+    fn enter_on_the_model_list_switches_the_model_and_sends_an_effort_moved_once() {
+        use ratatui::crossterm::event::KeyCode;
+        let mut app = on_opus_at_high();
+
+        app.on_key(key(KeyCode::F(4)));
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Right));
+        app.on_key(key(KeyCode::Right));
+        app.on_key(key(KeyCode::Enter));
+
+        assert_eq!(
+            app.take_produced(),
+            [
+                Event::ModelSelected {
+                    model: "sonnet".to_owned()
+                },
+                Event::UserMessage {
+                    text: "/effort max".to_owned()
+                },
+            ]
+        );
+        assert_eq!(
+            app.take_preferences(),
+            [
+                Preference::Model(Some("sonnet".to_owned())),
+                Preference::Effort("max".to_owned()),
+            ]
+        );
+        assert_eq!(app.effort(), Some("max"));
+        assert!(app.picking().is_none());
+    }
+
+    #[test]
+    fn an_effort_moved_and_moved_back_on_the_model_list_sends_no_effort() {
+        use ratatui::crossterm::event::KeyCode;
+        let mut app = on_opus_at_high();
+
+        app.on_key(key(KeyCode::F(4)));
+        app.on_key(key(KeyCode::Left));
+        app.on_key(key(KeyCode::Right));
+        app.on_key(key(KeyCode::Enter));
+
+        assert_eq!(
+            app.take_produced(),
+            [Event::ModelSelected {
+                model: "opus".to_owned()
+            }]
+        );
+        assert_eq!(app.effort(), Some("high"));
+    }
+
+    #[test]
+    fn an_effort_moved_on_a_model_list_left_with_esc_is_not_sent_or_kept() {
+        use ratatui::crossterm::event::KeyCode;
+        let mut app = on_opus_at_high();
+
+        app.on_key(key(KeyCode::F(4)));
+        app.on_key(key(KeyCode::Left));
+        app.on_key(key(KeyCode::Esc));
+
+        assert!(app.take_produced().is_empty());
+        assert!(app.take_preferences().is_empty());
+        assert_eq!(app.effort(), Some("high"));
+    }
+
+    #[test]
+    fn the_model_list_of_a_backend_that_takes_no_effort_carries_none() {
+        use ratatui::crossterm::event::KeyCode;
+        let mut app = under_a_profile(&["opus", "sonnet"]);
+
+        app.on_key(key(KeyCode::F(4)));
+        assert_eq!(app.picking().and_then(|picker| picker.effort), None);
+        app.on_key(key(KeyCode::Right));
+        app.on_key(key(KeyCode::Enter));
+
+        assert_eq!(
+            app.take_produced(),
+            [Event::ModelSelected {
+                model: "opus".to_owned()
+            }]
+        );
+    }
+
+    #[test]
+    fn the_model_list_where_no_effort_is_known_shows_none_until_it_is_moved() {
+        use ratatui::crossterm::event::KeyCode;
+        let mut app = on_opus_at_high();
+        app.apply(&Event::ModelConfigured {
+            model: "opus".to_owned(),
+            effort: None,
+        });
+
+        app.on_key(key(KeyCode::F(4)));
+        let dial = app.picking().and_then(|picker| picker.effort);
+        assert_eq!(dial.and_then(|dial| dial.level()), None);
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(
+            app.take_produced(),
+            [Event::ModelSelected {
+                model: "opus".to_owned()
+            }],
+            "an effort nobody chose was sent"
+        );
+
+        app.on_key(key(KeyCode::F(4)));
+        app.on_key(key(KeyCode::Right));
+        let dial = app.picking().and_then(|picker| picker.effort);
+        assert_eq!(dial.and_then(|dial| dial.level()), Some("low"));
+    }
+
     /// A turn that spent `input` tokens and ended.
     fn turn_of(input: u64) -> [Event; 3] {
         [
@@ -21473,6 +21720,7 @@ mod tests {
                 .collect(),
             at: 59,
             more: 0,
+            effort: None,
         });
         let screen = screen_of(&mut app);
         let (column, row) = spot(&screen, "level-50");
@@ -22755,6 +23003,18 @@ mod tests {
         );
         assert!(text.contains("not there"), "{text}");
         assert!(text.contains("cyber"), "the theme in force: {text}");
+        assert!(
+            text.contains("Effort    —"),
+            "an effort nothing said is a dash: {text}"
+        );
+        app.on_key(key(KeyCode::Esc));
+        app.apply(&Event::ModelConfigured {
+            model: "opus".to_owned(),
+            effort: Some("high".to_owned()),
+        });
+        app.on_key(key(KeyCode::F(9)));
+        let text = app.sheet().expect("F9 opens the settings").rows.join("\n");
+        assert!(text.contains("Effort    high"), "{text}");
 
         app.on_key(key(KeyCode::Char('o')));
         assert_eq!(

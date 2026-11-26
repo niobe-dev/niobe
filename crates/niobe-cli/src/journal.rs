@@ -557,6 +557,7 @@ mod tests {
             },
             Event::ModelConfigured {
                 model: "claude-opus-4-1".to_owned(),
+                effort: Some("high".to_owned()),
             },
             Event::Models { models: Vec::new() },
         ]

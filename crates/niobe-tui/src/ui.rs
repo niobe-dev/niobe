@@ -41,8 +41,8 @@ use niobe_core::goal::Goal;
 use niobe_core::session::{SessionState, ToolTotals, Totals, WorkTotals};
 
 use crate::app::{
-    Activity, Answer, App, Ask, AskFocus, Change, DialogDrawn, Entry, EntryKind, Focus, Overlay,
-    Pane, Picker, PlanWindows, Purpose, Section, SelectedProfile, SubAgent, tool_label,
+    Activity, Answer, App, Ask, AskFocus, Change, DialogDrawn, EFFORTS, EffortDial, Entry,
+    EntryKind, Focus, Overlay, Pane, Picker, PlanWindows, Purpose, Section, SubAgent, tool_label,
 };
 use crate::calls::Detail;
 use crate::clock::{self, Stamp};
@@ -280,6 +280,10 @@ fn draw_pick(
     }
 
     let (title, footer, keys) = pick_words(picker.purpose);
+    let keys = match picker.effort {
+        Some(_) => MODEL_AND_EFFORT_KEYS,
+        None => keys,
+    };
     let text_width = usize::from(width).saturating_sub(DIALOG_INSET);
     let room = text_width.saturating_sub(2);
     let columns = PickColumns::of(picker, described);
@@ -298,6 +302,10 @@ fn draw_pick(
             ))
             .style(Style::new().fg(theme.dialog_dim)),
         );
+    }
+    if let Some(dial) = picker.effort {
+        tail.push(Line::from(""));
+        tail.push(effort_line(dial, text_width, theme));
     }
     tail.push(Line::from(""));
     // Wrapped to the box, which is sized for what it offers: cut at its edge
@@ -346,6 +354,36 @@ fn draw_pick(
     let inner = dialog(frame, body, (width, lines.len()), (title, footer), theme);
     frame.render_widget(Paragraph::new(lines), inner);
     Some(DialogDrawn::listing(Overlay::List, inner, 1, shown))
+}
+
+/// The model list's keys where it sets the effort too.
+const MODEL_AND_EFFORT_KEYS: &str = "↑↓ choose · ←→ effort · Enter switch · Esc keep this one";
+
+/// The effort a model list sets with the model: every level, the one shown
+/// drawn as the cursor is, so where it stands on the scale is read at a
+/// glance; where the scale does not fit, the level shown alone between the
+/// arrows that move it. No level is marked where none is known to be in
+/// force, and an em dash stands for it where the scale does not fit.
+fn effort_line(dial: EffortDial, width: usize, theme: &Theme) -> Line<'static> {
+    let label = Span::styled("Effort ", Style::new().fg(theme.dialog_fg));
+    let chosen = Style::new().bg(theme.cursor_bg).fg(theme.cursor_fg).bold();
+    let scale: usize = EFFORTS.iter().map(|level| text::width(level) + 2).sum();
+    if text::width(&label.content) + scale > width {
+        let shown = dial.level().unwrap_or("—");
+        return Line::from(vec![
+            label,
+            Span::styled(format!("‹ {shown} ›"), Style::new().fg(theme.dialog_fg)),
+        ]);
+    }
+    let mut spans = vec![label];
+    spans.extend(EFFORTS.iter().map(|level| {
+        let style = match dial.level() == Some(*level) {
+            true => chosen,
+            false => Style::new().fg(theme.dialog_dim),
+        };
+        Span::styled(format!(" {level} "), style)
+    }));
+    Line::from(spans)
 }
 
 /// How wide a described list's name and id columns are: as wide as the widest
@@ -989,26 +1027,27 @@ fn identity_segments(app: &App, theme: &Theme) -> Vec<Segment> {
         });
     }
 
-    let (model, under) = identity(app.session(), app.profile());
-    if let Some(model) = model {
+    if let Some(model) = model_named(app.session()) {
         segments.push(Segment {
-            text: model,
+            text: model.to_owned(),
             style: Style::new().fg(theme.menu_fg).bold(),
         });
     }
-    // The plan as the backend named it, between the model and the profile it
-    // was signed in under: which subscription the session draws on is what
-    // its usage windows are windows of.
+    // Beside the model, since it is how hard that model works on a turn.
+    if let Some(effort) = app.effort() {
+        segments.push(Segment {
+            text: format!("{effort} effort"),
+            style: Style::new().fg(theme.menu_fg),
+        });
+    }
+    // The plan as the backend named it: which subscription the session draws
+    // on is what its usage windows are windows of. The backend and the
+    // profile are not named beside it — the Settings sheet names them — since
+    // a profile called after a plan read as a second, different plan.
     if let Some(plan) = app.session().plan() {
         segments.push(Segment {
             text: plan.to_owned(),
             style: Style::new().fg(theme.menu_fg),
-        });
-    }
-    if let Some(under) = under {
-        segments.push(Segment {
-            text: under,
-            style: Style::new().fg(theme.menu_fg).dim(),
         });
     }
 
@@ -8090,43 +8129,18 @@ fn draw_fkeys(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     frame.render_widget(Paragraph::new(Line::from(spans)).style(bar), area);
 }
 
-/// What the session is on, and what it is running under.
+/// What the session is on.
 ///
-/// The model is `None` until a backend has said which one it ended up on: a
-/// profile names a backend, not a model, so naming one before the backend has
-/// would be a guess in the place the operator reads to know what they are
-/// paying for. A backend's own report wins over the profile that was selected
-/// to start it.
-///
-/// What it runs under is the backend and the profile that chose it, and it is
-/// `None` where no profile has been selected and no backend has spoken — the
-/// state segment is what says so. Which plan or contract that profile is on is
-/// the CLI's own business and is nowhere in the stream, so the row says what
-/// was reported and stops there.
-fn identity(
-    session: &SessionState,
-    profile: Option<&SelectedProfile>,
-) -> (Option<String>, Option<String>) {
-    match (session.meta(), profile) {
-        // The model comes off the fold rather than off the meta: a model the
-        // operator has just chosen is what the session is on from its next
-        // turn, and naming the one it is moving off would read as a switch
-        // that did not land.
-        (Some(meta), _) => (
-            session.model().or(meta.model.as_deref()).map(str::to_owned),
-            Some(match meta.profile.is_empty() {
-                true => meta.backend.to_string(),
-                false => format!("{} · {}", meta.backend, meta.profile),
-            }),
-        ),
-        // Before the backend has said what it runs, a model the operator
-        // chose is what its first turn will run on.
-        (None, Some(profile)) => (
-            session.model().map(str::to_owned),
-            Some(format!("{} · {}", profile.backend, profile.name)),
-        ),
-        (None, None) => (session.model().map(str::to_owned), None),
-    }
+/// `None` until a backend has said which model it ended up on or the operator
+/// chose one: a profile names a backend, not a model, so naming one before
+/// either would be a guess in the place the operator reads to know what they
+/// are paying for. The model comes off the fold before the meta: a model the
+/// operator has just chosen is what the session is on from its next turn, and
+/// naming the one it is moving off would read as a switch that did not land.
+fn model_named(session: &SessionState) -> Option<&str> {
+    session
+        .model()
+        .or_else(|| session.meta().and_then(|meta| meta.model.as_deref()))
 }
 
 /// Which of a session's dollar figures are money, from what was said of how
@@ -8805,9 +8819,9 @@ mod tests {
     #[test]
     fn an_unstarted_session_names_no_model_it_was_never_told_about() {
         assert_eq!(
-            identity(&SessionState::new(), None),
-            (None, None),
-            "nothing has said what this session is or what it runs under"
+            model_named(&SessionState::new()),
+            None,
+            "nothing has said what this session is on"
         );
 
         let running = SessionState::replay(&[niobe_core::event::Event::SessionMeta(SessionMeta {
@@ -8816,13 +8830,7 @@ mod tests {
             model: Some("gpt-5-codex".to_owned()),
             backend_session: None,
         })]);
-        assert_eq!(
-            identity(&running, None),
-            (
-                Some("gpt-5-codex".to_owned()),
-                Some("codex · default".to_owned())
-            )
-        );
+        assert_eq!(model_named(&running), Some("gpt-5-codex"));
     }
 
     /// A session read in from a conversation no reply named a model in knows
@@ -8836,40 +8844,32 @@ mod tests {
             model: None,
             backend_session: Some("conv-1".to_owned()),
         })]);
-        assert_eq!(
-            identity(&unnamed, None),
-            (None, Some("claude · max".to_owned()))
-        );
+        assert_eq!(model_named(&unnamed), None);
     }
 
+    /// The backend and the profile are named in the Settings sheet, not on
+    /// the row: beside the plan the backend named, a profile called `max`
+    /// read as a second plan.
     #[test]
-    fn a_selected_profile_is_named_until_a_backend_says_what_it_runs() {
-        let work = SelectedProfile {
-            name: "work".to_owned(),
+    fn the_menu_row_names_neither_the_backend_nor_the_profile() {
+        let mut app = started_on_max();
+        app.apply(&niobe_core::event::Event::SessionMeta(SessionMeta {
             backend: Backend::Claude,
-            models: Vec::new(),
-            billing: None,
-        };
-        assert_eq!(
-            identity(&SessionState::new(), Some(&work)),
-            (None, Some("claude · work".to_owned()))
-        );
-
-        let running = SessionState::replay(&[niobe_core::event::Event::SessionMeta(SessionMeta {
-            backend: Backend::Claude,
-            profile: "work".to_owned(),
-            model: Some("opus-5".to_owned()),
+            profile: "max".to_owned(),
+            model: Some("claude-opus-5-5".to_owned()),
             backend_session: None,
-        })]);
-        assert_eq!(
-            identity(&running, Some(&work)),
-            (Some("opus-5".to_owned()), Some("claude · work".to_owned()))
+        }));
+        let row = row_of(&app);
+        assert!(
+            !row.iter()
+                .any(|segment| segment.contains("claude ·") || segment.contains("max")),
+            "{row:?}"
         );
     }
 
     #[test]
     fn a_backend_that_has_started_and_not_yet_spoken_is_starting_not_absent() {
-        let max = SelectedProfile {
+        let max = crate::app::SelectedProfile {
             name: "max".to_owned(),
             backend: Backend::Claude,
             models: Vec::new(),
@@ -8884,12 +8884,12 @@ mod tests {
 
         assert_eq!(
             row_of(&selected),
-            vec!["claude · max".to_owned(), "○ not attached".to_owned()],
+            vec!["○ not attached".to_owned()],
             "a prompt typed here would go nowhere, and the row says so"
         );
         assert_eq!(
             row_of(&selected.attached()),
-            vec!["claude · max".to_owned(), "○ starting".to_owned()],
+            vec!["○ starting".to_owned()],
             "a subprocess that has not spoken is starting, not absent"
         );
     }
@@ -8900,7 +8900,7 @@ mod tests {
             branch: None,
             ..Default::default()
         })
-        .with_profile(SelectedProfile {
+        .with_profile(crate::app::SelectedProfile {
             name: "max".to_owned(),
             backend: Backend::Claude,
             models: Vec::new(),
@@ -9002,10 +9002,7 @@ mod tests {
         let sent = std::time::Instant::now();
         app.tick(sent, None);
         app.tick(sent + std::time::Duration::from_secs(30), None);
-        assert_eq!(
-            row_of(&app),
-            vec!["claude · max".to_owned(), "● no answer yet 30s".to_owned()]
-        );
+        assert_eq!(row_of(&app), vec!["● no answer yet 30s".to_owned()]);
 
         app.apply(&niobe_core::event::Event::SessionMeta(SessionMeta {
             backend: Backend::Claude,
@@ -9026,14 +9023,79 @@ mod tests {
         });
         app.apply(&niobe_core::event::Event::ModelConfigured {
             model: "claude-opus-5-5".to_owned(),
+            effort: None,
         });
         assert_eq!(
             row_of(&app)[..3],
             [
                 "claude-opus-5-5".to_owned(),
                 "Claude Ultra".to_owned(),
-                "claude · max".to_owned()
+                "○ idle".to_owned()
             ]
+        );
+    }
+
+    /// The effort the backend's settings start it at is named beside the
+    /// model, and a level chosen here replaces it there.
+    #[test]
+    fn the_row_names_the_effort_in_force_beside_the_model() {
+        let mut app = started_on_max();
+        app.apply(&niobe_core::event::Event::Account {
+            plan: Some("Claude Ultra".to_owned()),
+        });
+        app.apply(&niobe_core::event::Event::ModelConfigured {
+            model: "claude-opus-5-5".to_owned(),
+            effort: Some("high".to_owned()),
+        });
+        assert_eq!(
+            row_of(&app)[..3],
+            [
+                "claude-opus-5-5".to_owned(),
+                "high effort".to_owned(),
+                "Claude Ultra".to_owned(),
+            ]
+        );
+
+        let chosen = started_on_max().with_effort(Some("max".to_owned()));
+        assert_eq!(
+            row_of(&chosen)[..2],
+            ["max effort".to_owned(), "○ starting".to_owned()]
+        );
+    }
+
+    /// The scale, where it fits, marks the level shown and no other; where
+    /// it does not, the level alone stands between the arrows, and an em
+    /// dash where none is known.
+    #[test]
+    fn the_effort_line_is_the_scale_where_it_fits_and_the_level_alone_where_not() {
+        let theme = Theme::default();
+        let mut dial = EffortDial::on(Some("high"));
+        let wide = effort_line(dial, 38, &theme);
+        assert_eq!(line_text(&wide), "Effort  low  medium  high  xhigh  max ");
+        let marked: Vec<&str> = wide
+            .spans
+            .iter()
+            .filter(|span| span.style.bg == Some(theme.cursor_bg))
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert_eq!(marked, [" high "]);
+
+        dial.higher();
+        assert_eq!(
+            line_text(&effort_line(dial, 37, &theme)),
+            "Effort ‹ xhigh ›"
+        );
+        assert_eq!(
+            line_text(&effort_line(EffortDial::on(None), 20, &theme)),
+            "Effort ‹ — ›"
+        );
+        let unknown = effort_line(EffortDial::on(Some("auto")), 38, &theme);
+        assert!(
+            unknown
+                .spans
+                .iter()
+                .all(|span| span.style.bg != Some(theme.cursor_bg)),
+            "a level the scale does not hold marked one it does"
         );
     }
 
@@ -9140,14 +9202,10 @@ mod tests {
     }
 
     #[test]
-    fn the_menu_row_says_what_the_session_is_on_and_what_it_runs_under() {
+    fn the_menu_row_says_what_the_session_is_on_and_what_it_is_doing() {
         assert_eq!(
             row_of(&attached_session()),
-            vec![
-                "claude-opus-5".to_owned(),
-                "claude · max".to_owned(),
-                "○ idle".to_owned(),
-            ],
+            vec!["claude-opus-5".to_owned(), "○ idle".to_owned()],
         );
     }
 
@@ -9182,14 +9240,14 @@ mod tests {
 
         app.tick(t0, None);
         assert_eq!(
-            row_of(&app).get(2).map(String::as_str),
+            row_of(&app).get(1).map(String::as_str),
             Some("○ idle 0s"),
             "a session that has not been asked anything is idle, and says for how long"
         );
 
         app.tick(t0 + std::time::Duration::from_secs(72), None);
         assert_eq!(
-            row_of(&app).get(2).map(String::as_str),
+            row_of(&app).get(1).map(String::as_str),
             Some("○ idle 1m 12s")
         );
 
@@ -9201,7 +9259,7 @@ mod tests {
         app.tick(t0 + std::time::Duration::from_secs(72), None);
         app.tick(t0 + std::time::Duration::from_secs(110), None);
         assert_eq!(
-            row_of(&app).get(2).map(String::as_str),
+            row_of(&app).get(1).map(String::as_str),
             Some("● working 38s"),
             "a turn sent from here fills the glyph and is timed from when the shell saw it"
         );
@@ -9242,11 +9300,7 @@ mod tests {
         let kept = drawn_segments(&app, full - 1);
         assert_eq!(
             kept,
-            vec![
-                "claude-opus-5".to_owned(),
-                "claude · max".to_owned(),
-                "○ idle 0s".to_owned()
-            ]
+            vec!["claude-opus-5".to_owned(), "○ idle 0s".to_owned()]
         );
 
         assert_eq!(

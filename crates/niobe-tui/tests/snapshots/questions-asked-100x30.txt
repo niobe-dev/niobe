@@ -1,4 +1,4 @@
- Niobe  Session  Context  Model  View  Help    example-app     opus-5  claude · default  ○ idle 0s
+ Niobe  Session  Context  Model  View  Help    example-app                       opus-5  ○ idle 0s
  ┏━━━ > add etag support to the catalog fetcher so we stop… ━━━┓ ┌──────────── Usage ─────────────┐
  ┃ ✗ Bash           npm test                     exit 1 · 0.4s ┃ │ 5h          —                  │
  ┃   └ 1 failing: fetch returns the cached body on a 304       ┃ │ 7d          —                  │

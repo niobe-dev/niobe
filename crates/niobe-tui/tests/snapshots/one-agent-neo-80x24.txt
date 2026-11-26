@@ -1,4 +1,4 @@
- Niobe  Session  Context  Model  View  Help           opus-5  claude · default
+ Niobe  Session  Context  Model  View  Help      opus-5  ○ not attached  13:41
 ╔═════════════ only deep2's entries · s in a side pane shows all ══════════════╗
 ║ ↳ deep2  deep-reasoner: Review cache.py                                      ║
 ║   Let me check how eviction is triggered.                                    ║

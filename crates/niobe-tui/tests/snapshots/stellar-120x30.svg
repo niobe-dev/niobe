@@ -27,12 +27,9 @@
 <text x="360" y="13" textLength="117" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#cccccc">elp          </text>
 <rect x="477" y="0" width="117" height="18" fill="#4daafc"/>
 <text x="477" y="13" textLength="117" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#181818" font-weight="bold"> example-app </text>
-<rect x="594" y="0" width="45" height="18" fill="#181818"/>
-<rect x="639" y="0" width="54" height="18" fill="#181818"/>
-<text x="639" y="13" textLength="54" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#cccccc" font-weight="bold">opus-5</text>
-<rect x="693" y="0" width="18" height="18" fill="#181818"/>
-<rect x="711" y="0" width="144" height="18" fill="#181818"/>
-<text x="711" y="13" textLength="144" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#cccccc" opacity="0.6">claude · default</text>
+<rect x="594" y="0" width="207" height="18" fill="#181818"/>
+<rect x="801" y="0" width="54" height="18" fill="#181818"/>
+<text x="801" y="13" textLength="54" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#cccccc" font-weight="bold">opus-5</text>
 <rect x="855" y="0" width="18" height="18" fill="#181818"/>
 <rect x="873" y="0" width="126" height="18" fill="#181818"/>
 <text x="873" y="13" textLength="126" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#4daafc">○ not attached</text>

@@ -3355,8 +3355,10 @@ fn a_compaction_is_shown_as_one_while_it_runs_and_after() {
     assert_snapshot("compacted-80x24", &frame);
 }
 
+/// The profile is the Settings sheet's to name: on the menu row, beside the
+/// plan the backend names, a profile called after a plan read as a second.
 #[test]
-fn a_selected_profile_is_named_in_the_menu_row_with_nothing_yet_listening() {
+fn a_selected_profile_is_not_named_in_the_menu_row_with_nothing_yet_listening() {
     let mut app = empty_session().with_profile(SelectedProfile {
         name: "work".to_owned(),
         backend: Backend::Claude,
@@ -3364,15 +3366,16 @@ fn a_selected_profile_is_named_in_the_menu_row_with_nothing_yet_listening() {
         billing: None,
     });
 
-    // At the narrowest the shell draws in there is room for what it runs
-    // under and not for the rest, so that is what is kept.
-    let narrow = screen(&mut app, 80, 24);
-    let menu = narrow.lines().next().unwrap_or_default();
-    assert!(menu.contains("claude · work"), "{narrow}");
-
+    for (width, height) in [(80, 24), (120, 30)] {
+        let frame = screen(&mut app, width, height);
+        let menu = frame.lines().next().unwrap_or_default();
+        assert!(
+            !menu.contains("work") && !menu.contains("claude ·"),
+            "{frame}"
+        );
+    }
     let wide = screen(&mut app, 120, 30);
     let menu = wide.lines().next().unwrap_or_default();
-    assert!(menu.contains("claude · work"), "{wide}");
     assert!(
         menu.contains("○ not attached"),
         "a prompt typed here goes nowhere and the row did not say so:\n{wide}"
@@ -3434,6 +3437,48 @@ fn the_model_list_shows_what_the_profile_offers_and_when_a_choice_lands() {
             "{frame}"
         );
         assert_snapshot(&format!("model-list-{width}x{height}"), &frame);
+    }
+}
+
+/// Where the backend takes `/effort`, the model list carries the effort
+/// too: every level, the one shown marked, and the keys that move it.
+#[test]
+fn the_model_list_sets_the_effort_beside_the_model() {
+    let mut app = running_session().attached().with_profile(SelectedProfile {
+        name: "max".to_owned(),
+        backend: Backend::Claude,
+        models: vec!["opus-5".to_owned(), "sonnet-5".to_owned()],
+        billing: None,
+    });
+    app.apply(&Event::Commands {
+        commands: vec![niobe_core::event::SlashCommand {
+            name: "effort".to_owned(),
+            description: String::new(),
+            argument_hint: None,
+            mid_prompt: false,
+        }],
+    });
+    app.apply(&Event::ModelConfigured {
+        model: "opus-5".to_owned(),
+        effort: Some("high".to_owned()),
+    });
+    let wide = screen(&mut app, 120, 30);
+    let row = wide.lines().next().unwrap_or_default();
+    assert!(row.contains("opus-5  high effort"), "{wide}");
+    app.on_key(f4());
+    app.on_key(ratatui::crossterm::event::KeyEvent::new(
+        ratatui::crossterm::event::KeyCode::Right,
+        ratatui::crossterm::event::KeyModifiers::NONE,
+    ));
+
+    for (width, height) in [(80, 24), (120, 30)] {
+        let frame = screen(&mut app, width, height);
+        assert!(
+            frame.contains("Effort  low  medium  high  xhigh  max"),
+            "{frame}"
+        );
+        assert!(frame.contains("←→ effort"), "{frame}");
+        assert_snapshot(&format!("model-list-effort-{width}x{height}"), &frame);
     }
 }
 

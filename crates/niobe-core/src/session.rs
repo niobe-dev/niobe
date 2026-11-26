@@ -646,6 +646,10 @@ pub struct SessionState {
     /// The model the backend's settings start it on, as it said before a turn
     /// named one: what a refused change falls back to where no turn has.
     configured_model: Option<String>,
+    /// The effort the backend's settings start it at, as it said before a
+    /// turn: the backend reports no change to it after that, so a level the
+    /// operator chose since is the shell's to know.
+    configured_effort: Option<String>,
     /// The plan the backend's sign-in is on, as the backend last named it.
     plan: Option<String>,
     totals: Totals,
@@ -933,8 +937,9 @@ impl SessionState {
             // Said before any turn, and so the session's model only where
             // nothing truer has named one: a turn's report, or the operator's
             // choice.
-            Event::ModelConfigured { model } => {
+            Event::ModelConfigured { model, effort } => {
                 self.configured_model = Some(model.clone());
+                self.configured_effort = effort.clone();
                 if self.model.is_none() {
                     self.model = Some(model.clone());
                 }
@@ -1493,6 +1498,7 @@ impl SessionState {
             mode: self.mode,
             model: self.model.take(),
             configured_model: self.configured_model.take(),
+            configured_effort: self.configured_effort.take(),
             plan: self.plan.take(),
             usage_windows: self.usage_windows.take(),
             five_hour_left: self.five_hour_left,
@@ -1700,6 +1706,13 @@ impl SessionState {
     /// the operator has since chosen and it has not yet confirmed.
     pub fn model(&self) -> Option<&str> {
         self.model.as_deref()
+    }
+
+    /// The effort the backend's settings started the session at, where it
+    /// said; a level chosen since is not folded here, since the backend does
+    /// not report one.
+    pub fn configured_effort(&self) -> Option<&str> {
+        self.configured_effort.as_deref()
     }
 
     /// Token and cost totals.
@@ -4138,6 +4151,7 @@ mod tests {
         let mut state = SessionState::new();
         state.apply(&Event::ModelConfigured {
             model: "claude-opus-5-5".to_owned(),
+            effort: None,
         });
         assert_eq!(state.model(), Some("claude-opus-5-5"));
 
@@ -4155,6 +4169,7 @@ mod tests {
         }));
         state.apply(&Event::ModelConfigured {
             model: "claude-opus-5-5".to_owned(),
+            effort: None,
         });
         assert_eq!(state.model(), Some("claude-sonnet-5-5"));
     }
@@ -4169,8 +4184,30 @@ mod tests {
         });
         state.apply(&Event::ModelConfigured {
             model: "claude-opus-5-5".to_owned(),
+            effort: None,
         });
         assert_eq!(state.model(), Some("haiku"));
+    }
+
+    /// The effort the backend's settings start it at is kept as the backend
+    /// last said it, through a clear, and is nothing where it said none.
+    #[test]
+    fn the_configured_effort_is_the_one_the_backend_last_said_and_outlasts_a_clear() {
+        let mut state = SessionState::new();
+        assert_eq!(state.configured_effort(), None);
+        state.apply(&Event::ModelConfigured {
+            model: "claude-opus-5-5".to_owned(),
+            effort: Some("high".to_owned()),
+        });
+        assert_eq!(state.configured_effort(), Some("high"));
+        state.apply(&Event::Cleared);
+        assert_eq!(state.configured_effort(), Some("high"));
+
+        state.apply(&Event::ModelConfigured {
+            model: "claude-opus-5-5".to_owned(),
+            effort: None,
+        });
+        assert_eq!(state.configured_effort(), None);
     }
 
     #[test]

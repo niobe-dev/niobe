@@ -191,7 +191,8 @@ A terminal that eats an F-key can give the bar's action another one: `[keys]` wi
 
 The theme you pick from View › Theme… is the one the next session in that repository opens with,
 and a repository you have picked none in opens with the one you picked last anywhere — `cyber`
-where you have never picked one and the config names none. The model and effort you pick for a
+where you have never picked one and the config names none. The model list (F4) sets the effort
+too, with ← and →, and the menu row names both. The model and effort you pick for a
 profile are what its next session opens with. A new session starts in `auto` mode, where the CLI
 decides which calls to ask about; switch to `ask` with Shift+Tab and that repository's next sessions
 start in `ask`. `plan` is not kept, and a profile's own `--permission-mode` still holds where you

@@ -2,8 +2,8 @@
   b  LightBlue on DarkGray, bold | underlined
   c  DarkGray on LightBlue, bold
   d  White on DarkGray, bold
-  e  White on DarkGray, dim
-  f  LightBlue on DarkGray
+  e  LightBlue on DarkGray
+  f  White on DarkGray, dim
   g  White on Black
   h  LightBlue on Black
   i  LightYellow on Black, bold
@@ -25,7 +25,7 @@
   y  LightBlue on DarkGray, bold
   z  White on Black, dim
 
-abaaaaaabaaaaaaaabaaaaaaaabaaaaaabaaaaabaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaacccccccccccccaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaddddddaaeeeeeeeeeeeeeeeeaaffffffffffffffaaeeeeeaa
+abaaaaaabaaaaaaaabaaaaaaaabaaaaaabaaaaabaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaacccccccccccccaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaddddddaaeeeeeeeeeeeeeeaafffffaa
 ghhhhhhhhhhhhhhhhhhhhhhhhhhhhiiijjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjhhhhhhhhhhhhhhhhhhhhhhhhhhhhgkkkkkkkkkkkkkkkkkkkkkkiiiiiiikkkkkkkkkkkkkkkkkkkkkkkg
 ghggggggggggggggggggggggggggggggggggggggggggggggggggggggkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkgghgkgllllllllllmmmmgnnnnnnnllllllllllllllllllgggggggggkg
 ghggggggggggggggggggggggggggggggggggggggggggggggggggggggaoooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooagghgkgllllllllllppppggglllllllllllllllllllllllllllgggggkg

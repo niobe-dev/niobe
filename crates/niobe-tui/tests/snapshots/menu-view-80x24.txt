@@ -1,4 +1,4 @@
- Niobe  Session  Context  Model  View  Help           opus-5  claude · default
+ Niobe  Session  Context  Model  View  Help      opus-5  ○ not attached  13:41
 ┏━━━━ > add etag support to the ┌─────────────────────────────────┐oading… ━━━━┓
 ┃   └ 404 object_not_found — the│ Diff                 F5  Ctrl+T │ation       ┃
 ┃                               │ Group by agent                a │            ┃

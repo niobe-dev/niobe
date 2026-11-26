@@ -1118,6 +1118,9 @@ pub(crate) struct Account {
 pub(crate) struct Applied {
     /// The model the session runs on until it is told otherwise.
     pub(crate) model: Option<String>,
+    /// How hard the model works on a turn until it is told otherwise, in
+    /// the CLI's word for the level (`high`).
+    pub(crate) effort: Option<String>,
 }
 
 /// The plan's windows as the answer to `get_usage` has them.

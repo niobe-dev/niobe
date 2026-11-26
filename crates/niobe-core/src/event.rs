@@ -946,8 +946,9 @@ pub enum Event {
         plan: Option<String>,
     },
 
-    /// The model the backend's own settings start the session on, as the
-    /// backend said before any turn named the model it runs.
+    /// The model the backend's own settings start the session on, and the
+    /// effort they start it at, as the backend said before any turn named the
+    /// model it runs.
     ///
     /// The model a turn reports, in [`Event::SessionMeta`], and one the
     /// operator chose are truer, so this names the session's model only until
@@ -956,6 +957,11 @@ pub enum Event {
     ModelConfigured {
         /// The model, as the backend names it.
         model: String,
+        /// How hard the model works on a turn, in the backend's word for
+        /// it (`high`), where its settings say; `None` where they say
+        /// nothing, which an event recorded before it was read reads as.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        effort: Option<String>,
     },
 
     /// How much the main agent's last request put in front of the model.
@@ -1544,6 +1550,30 @@ mod tests {
         );
     }
     use super::*;
+
+    /// A configured model stored before its effort was read reads back with
+    /// no effort, and one stored with an effort keeps it.
+    #[test]
+    fn a_stored_configured_model_reads_back_with_its_effort_or_with_none() {
+        let old: Event =
+            serde_json::from_str(r#"{"type":"model_configured","model":"claude-opus-5-5"}"#)
+                .expect("a configured model stored with no effort reads");
+        assert_eq!(
+            old,
+            Event::ModelConfigured {
+                model: "claude-opus-5-5".to_owned(),
+                effort: None,
+            }
+        );
+
+        let new = Event::ModelConfigured {
+            model: "claude-opus-5-5".to_owned(),
+            effort: Some("max".to_owned()),
+        };
+        let stored = serde_json::to_string(&new).expect("it is stored");
+        let read: Event = serde_json::from_str(&stored).expect("and read back");
+        assert_eq!(read, new);
+    }
 
     /// A meta stored before its model could be absent holds the model as a
     /// string, and still reads as that model; one stored with none reads

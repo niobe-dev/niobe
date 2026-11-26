@@ -79,8 +79,9 @@
 //! * The answer to `initialize` names the plan the sign-in is on, which
 //!   becomes [`Event::Account`]; who is signed in is not read. The answer to
 //!   `get_settings`, asked beside `get_usage`, names the model the settings
-//!   start the session on, which becomes [`Event::ModelConfigured`] — the
-//!   one place the model is said before a turn's `init`.
+//!   start the session on and the effort they start it at, which become
+//!   [`Event::ModelConfigured`] — the one place the model is said before a
+//!   turn's `init`, and the only place the effort is said at all.
 //! * `system`/`init` carries the CLI's version, its tool list and the state of
 //!   each MCP server. [`SessionMeta`] carries the model and the CLI's own
 //!   session id, and the mode it reports becomes [`Event::ModeSelected`]; the
@@ -1525,13 +1526,11 @@ impl Translator {
         if let Some(id) = outcome.request_id.as_deref()
             && self.settings_requests.remove(id)
         {
-            if let Some(model) = outcome
-                .response
-                .and_then(|answer| answer.applied)
-                .and_then(|applied| applied.model)
-                .filter(|model| !model.is_empty())
+            if let Some(applied) = outcome.response.and_then(|answer| answer.applied)
+                && let Some(model) = applied.model.filter(|model| !model.is_empty())
             {
-                out.push(Event::ModelConfigured { model });
+                let effort = applied.effort.filter(|effort| !effort.is_empty());
+                out.push(Event::ModelConfigured { model, effort });
             }
             return;
         }
@@ -12468,15 +12467,35 @@ error: could not compile `demo` (lib test) due to 1 previous error";
     const SETTINGS_ANSWER: &str = r#"{"type":"control_response","response":{"subtype":"success","request_id":"niobe-3","response":{"effective":{"model":"opus","effortLevel":"high"},"sources":[{"source":"flagSettings","settings":{"model":"opus"}}],"applied":{"model":"claude-opus-5-5","effort":"high","advisor":null}}}}"#;
 
     #[test]
-    fn the_answer_to_get_settings_names_the_model_the_session_starts_on() {
+    fn the_answer_to_get_settings_names_the_model_and_effort_the_session_starts_on() {
         let mut translator = Translator::new("max");
         translator.asked_for_settings("niobe-3");
         assert_eq!(
             translator.line(SETTINGS_ANSWER),
             [Event::ModelConfigured {
                 model: "claude-opus-5-5".to_owned(),
+                effort: Some("high".to_owned()),
             }]
         );
+    }
+
+    #[test]
+    fn an_answer_to_get_settings_naming_no_effort_names_the_model_alone() {
+        let mut translator = Translator::new("max");
+        translator.asked_for_settings("niobe-3");
+        translator.asked_for_settings("niobe-4");
+        for (id, effort) in [("niobe-3", r#""effort":"","#), ("niobe-4", "")] {
+            let line = format!(
+                r#"{{"type":"control_response","response":{{"subtype":"success","request_id":"{id}","response":{{"applied":{{{effort}"model":"claude-opus-5-5"}}}}}}}}"#
+            );
+            assert_eq!(
+                translator.line(&line),
+                [Event::ModelConfigured {
+                    model: "claude-opus-5-5".to_owned(),
+                    effort: None,
+                }]
+            );
+        }
     }
 
     #[test]

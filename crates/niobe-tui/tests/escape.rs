@@ -717,6 +717,20 @@ fn model_picker(p: &str) -> App {
     app
 }
 
+/// What the backend said its settings and sign-in start the session on, as
+/// the menu row names them: the model, the effort and the plan.
+fn configured(p: &str) -> App {
+    with(vec![
+        Event::Account {
+            plan: Some(format!("plan{p}")),
+        },
+        Event::ModelConfigured {
+            model: format!("model{p}"),
+            effort: Some(format!("level{p}")),
+        },
+    ])
+}
+
 fn proposal_open(action: fn(&str) -> Action, p: &str) -> App {
     let mut app = with(vec![Event::PermissionRequest {
         id: "perm".into(),
@@ -770,6 +784,7 @@ fn command_open(p: &str) -> App {
 type Site = (&'static str, fn(&str) -> App, &'static str);
 
 const SITES: &[Site] = &[
+    ("configured", configured, "effort"),
     ("mcp-list", mcp_list, "srv"),
     ("mcp-detail", mcp_detail, "reports"),
     ("memory-list", memory_list, "notes/"),

@@ -1,4 +1,4 @@
- Niobe  Session  Context  Model  View  Help           example-app      opus-5  claude · default  ○ not attached  13:41
+ Niobe  Session  Context  Model  View  Help           example-app                        opus-5  ○ not attached  13:41
  ┏━━ > add etag support to the catalog fetcher so we stop re-downloading… ━━━┓ ┌─────────────── Usage ────────────────┐
  ┃ ✗ Notion·update… {}                                                failed ┃ │ 5h         62% ▓▓░░ resets 16:40     │
  ┃   └ 404 object_not_found — the page is not shared with the integration    ┃ │ 7d         18% ▓░░░ resets Tue 15:00 │
