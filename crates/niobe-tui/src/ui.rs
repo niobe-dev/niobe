@@ -49,7 +49,7 @@ use crate::clock::{self, Stamp};
 use crate::meter::meter;
 use crate::prices::Prices;
 use crate::text;
-use crate::theme::Theme;
+use crate::theme::{Theme, Track};
 use crate::tree;
 use crate::trust;
 use crate::usage;
@@ -3664,8 +3664,9 @@ fn transcript_detail(app: &App) -> Detail {
 }
 
 /// Where the view is in a transcript longer than the pane, drawn over the
-/// pane's right border beside the lines it measures. A transcript that fits
-/// has no scrollbar, so the border reads as a border.
+/// pane's right border beside the lines it measures, along the theme's
+/// [`Track`]. A transcript that fits has no scrollbar, so the border reads as
+/// a border.
 fn draw_scrollbar(
     frame: &mut Frame,
     area: Rect,
@@ -3682,17 +3683,32 @@ fn draw_scrollbar(
     let mut state = ScrollbarState::new(lines.saturating_sub(height))
         .viewport_content_length(height)
         .position(start);
-    frame.render_stateful_widget(
-        Scrollbar::new(ScrollbarOrientation::VerticalRight)
+    frame.render_stateful_widget(scrollbar(border, theme), track, &mut state);
+}
+
+/// The scrollbar a pane framed by `border` is drawn with in `theme`.
+fn scrollbar(border: Border, theme: &Theme) -> Scrollbar<'static> {
+    let bar = Scrollbar::new(ScrollbarOrientation::VerticalRight);
+    match theme.scroll_track {
+        Track::Border => bar
             .begin_symbol(None)
             .end_symbol(None)
             .track_symbol(Some(border.track))
             .track_style(border.style)
             .thumb_symbol("█")
-            .thumb_style(Style::new().fg(theme.hot)),
-        track,
-        &mut state,
-    );
+            .thumb_style(Style::new().fg(theme.scroll_thumb)),
+        Track::Shaded(colour) => {
+            let raised = Style::new().fg(theme.pane_bg).bg(theme.scroll_thumb);
+            bar.begin_symbol(Some("▲"))
+                .begin_style(raised)
+                .end_symbol(Some("▼"))
+                .end_style(raised)
+                .track_symbol(Some("▒"))
+                .track_style(Style::new().fg(colour).bg(theme.pane_bg))
+                .thumb_symbol("■")
+                .thumb_style(raised)
+        }
+    }
 }
 
 /// The frames of the working line's spinner, one per tenth of a second.

@@ -1329,12 +1329,51 @@ fn tab_indented_code_in_a_reply_keeps_its_nesting() {
     assert_snapshot("markdown-tabs-80x24", &frame);
 }
 
-/// A theme is a palette and the line its focused pane is drawn in, and
-/// nothing else: every character stays where it was, so the one committed
-/// picture of the layout covers every theme. Nothing on screen names the
-/// palette in force — `9 Theme` in the F-key row is where one is changed.
+/// `frame` and `default`, each with the cells blanked where `frame` draws a
+/// shaded scrollbar band, which has arrows a border's line has not and so a
+/// thumb of another length.
+fn without_a_shaded_band(frame: &str, default: &str) -> (String, String) {
+    let band = |c: char| matches!(c, '▲' | '▼' | '▒' | '■');
+    frame
+        .lines()
+        .zip(default.lines())
+        .map(|(ours, theirs)| {
+            let ours: Vec<char> = ours.chars().collect();
+            let mut theirs: Vec<char> = theirs.chars().collect();
+            let ours = ours
+                .iter()
+                .enumerate()
+                .map(|(at, c)| match band(*c) {
+                    true => {
+                        if let Some(cell) = theirs.get_mut(at) {
+                            *cell = '·';
+                        }
+                        '·'
+                    }
+                    false => *c,
+                })
+                .collect::<String>();
+            (ours, theirs.into_iter().collect::<String>())
+        })
+        .fold(
+            (String::new(), String::new()),
+            |(mut a, mut b), (ours, theirs)| {
+                a.push_str(&ours);
+                a.push('\n');
+                b.push_str(&theirs);
+                b.push('\n');
+                (a, b)
+            },
+        )
+}
+
+/// A theme is a palette, the line its focused pane is drawn in and the band
+/// its scrollbar runs along, and nothing else: every other character stays
+/// where it was, so the one committed picture of the layout covers every
+/// theme. Nothing on screen names the palette in force — `9 Theme` in the
+/// F-key row is where one is changed.
 #[test]
-fn a_theme_moves_no_character_on_screen_but_the_focus_line() {
+fn a_theme_moves_no_character_on_screen_but_the_focus_line_and_the_scrollbar() {
     let in_the_default_line = |theme: Theme, frame: String| {
         let (from, to) = (
             theme.border_focus.to_border_set(),
@@ -1357,6 +1396,7 @@ fn a_theme_moves_no_character_on_screen_but_the_focus_line() {
         let default = screen(&mut running_session(), width, height);
         for theme in THEMES {
             let frame = screen(&mut running_session().with_theme(theme), width, height);
+            let (frame, default) = without_a_shaded_band(&frame, &default);
             assert_eq!(
                 in_the_default_line(theme, frame),
                 default,
@@ -7674,6 +7714,44 @@ fn an_open_menus_hot_letter_is_never_drawn_on_its_own_colour() {
                 theme.name
             );
         }
+    }
+}
+
+/// `classic` scrolls a pane as Turbo Pascal scrolled a window: down its right
+/// edge a cyan `▒` band with an arrow at either end, the thumb a blue `■` on
+/// cyan. The other themes keep the scrollbar on the border's own line.
+#[test]
+fn classic_scrolls_a_pane_on_turbo_pascals_shaded_band_and_the_others_on_the_border() {
+    let mut classic = running_session()
+        .with_depth(Depth::Sixteen)
+        .with_theme(CLASSIC);
+    let frame = screen(&mut classic, 120, 30);
+    let rows: Vec<Vec<char>> = frame.lines().map(|row| row.chars().collect()).collect();
+    let (top, column) = rows
+        .iter()
+        .enumerate()
+        .find_map(|(y, row)| Some((y, row.iter().position(|c| *c == '▲')?)))
+        .unwrap_or_else(|| panic!("no arrow heads the band:\n{frame}"));
+    let edge: String = rows[top..].iter().map(|row| row[column]).collect();
+    let band = edge.split('▼').next().unwrap_or_default();
+    assert!(band.len() < edge.len(), "the band ends in an arrow: {edge}");
+    assert!(
+        band.chars().skip(1).all(|c| matches!(c, '▒' | '■')),
+        "{edge}"
+    );
+    assert!(band.contains('■') && band.contains('▒'), "{edge}");
+
+    let raised = Style::new().fg(Color::Blue).bg(Color::Cyan);
+    let shaded = Style::new().fg(Color::Cyan).bg(Color::Blue);
+    for (glyph, style) in [("▲", raised), ("■", raised), ("▒", shaded), ("▼", raised)] {
+        let drawn = style_at(&mut classic, 120, 30, glyph).expect("drawn");
+        assert_eq!((drawn.fg, drawn.bg), (style.fg, style.bg), "{glyph}");
+    }
+
+    for theme in [CYBER, NEO, STELLAR] {
+        let frame = screen(&mut running_session().with_theme(theme), 120, 30);
+        assert!(frame.contains('█'), "{}: no thumb\n{frame}", theme.name);
+        assert!(!frame.contains(['▒', '▲', '▼']), "{}\n{frame}", theme.name);
     }
 }
 

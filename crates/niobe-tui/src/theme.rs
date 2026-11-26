@@ -111,6 +111,20 @@ pub enum Scene {
     BlackHole,
 }
 
+/// What a pane's scrollbar runs along, down the pane's right border.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Track {
+    /// The border's own line, in the border's colour, so a pane with
+    /// something to scroll is framed as one with nothing is; the thumb is a
+    /// block in [`Theme::scroll_thumb`].
+    Border,
+    /// A shaded band, `▒` in this colour on the panes' background, with an
+    /// arrow at either end, as Turbo Vision drew its scroll bars: the thumb
+    /// and the arrows are cells of [`Theme::scroll_thumb`] marked in the
+    /// panes' background.
+    Shaded(Color),
+}
+
 /// The colours code is highlighted in: one for each kind of token a
 /// highlighter tells apart ([`crate::syntax::TokenKind`]). What is none of
 /// them is drawn in the colour of what holds it — [`Theme::code`] in a
@@ -283,6 +297,12 @@ pub struct Theme {
     /// is then told by its own face, which no theme draws in the panes'
     /// colour.
     pub shadow_fg: Color,
+
+    /// What a pane's scrollbar runs along.
+    pub scroll_track: Track,
+    /// A scrollbar's thumb, which says where the view is in what the pane
+    /// holds; see [`Track`] for how it is drawn on each.
+    pub scroll_thumb: Color,
 }
 
 /// The DOS-blue theme: Turbo Pascal's IDE.
@@ -300,8 +320,10 @@ pub struct Theme {
 /// with a white title, black on light grey with red hot letters for the menu
 /// bar and an open menu, one flat light grey status line with black labels
 /// and the keys in red, a green bar for the item under a cursor, black on
-/// grey dialogs in a white double frame under a white title, and a black
-/// shadow under a dialog that leaves what it falls on dark grey.
+/// grey dialogs in a white double frame under a white title, a black shadow
+/// under a dialog that leaves what it falls on dark grey, and a scroll bar
+/// that is a cyan shaded band down a window's edge with an arrow at either
+/// end and a cyan thumb.
 ///
 /// Two of Turbo Pascal's choices are not taken. The operator's messages sit
 /// in dark grey bubbles, which Turbo Pascal has no counterpart for, so the
@@ -383,6 +405,11 @@ pub const CLASSIC: Theme = Theme {
     cursor_fg: Color::Black,
     shadow: Color::Black,
     shadow_fg: Color::DarkGray,
+
+    // Turbo Pascal's scroll bar: a cyan band down the window's right edge,
+    // its thumb and arrows cyan cells marked in the blue.
+    scroll_track: Track::Shaded(Color::Cyan),
+    scroll_thumb: Color::Cyan,
 };
 
 /// The sixteen names, in the order of the ANSI colour numbers.
@@ -498,6 +525,11 @@ const fn through_cga(theme: Theme) -> Theme {
         cursor_fg: cga(theme.cursor_fg),
         shadow: cga(theme.shadow),
         shadow_fg: cga(theme.shadow_fg),
+        scroll_track: match theme.scroll_track {
+            Track::Border => Track::Border,
+            Track::Shaded(colour) => Track::Shaded(cga(colour)),
+        },
+        scroll_thumb: cga(theme.scroll_thumb),
     }
 }
 
@@ -600,6 +632,8 @@ pub const NEO: Theme = Theme {
     cursor_fg: Color::Black,
     shadow: Color::Black,
     shadow_fg: Color::DarkGray,
+    scroll_track: Track::Border,
+    scroll_thumb: Color::LightGreen,
 };
 
 /// Green and magenta on near-black: the default.
@@ -694,6 +728,8 @@ pub const CYBER: Theme = Theme {
     cursor_fg: Color::Black,
     shadow: Color::Black,
     shadow_fg: Color::DarkGray,
+    scroll_track: Track::Border,
+    scroll_thumb: Color::LightGreen,
 };
 
 /// A modern editor's dark palette — VS Code's Dark Modern — with the warm
@@ -775,6 +811,8 @@ pub const STELLAR: Theme = Theme {
     cursor_fg: Color::White,
     shadow: Color::Black,
     shadow_fg: Color::DarkGray,
+    scroll_track: Track::Border,
+    scroll_thumb: Color::LightBlue,
 };
 
 /// A colour written as the design writes it, `0xRRGGBB`.
@@ -881,6 +919,7 @@ pub const NEO_TRUE: Theme = Theme {
     cursor_fg: hex(0x000000),
     shadow: hex(0x000000),
     shadow_fg: wash(0x9bffb0, 0x000000, SHADED),
+    scroll_thumb: hex(0x00ff41),
 
     ..NEO
 };
@@ -962,6 +1001,7 @@ pub const CYBER_TRUE: Theme = Theme {
     cursor_fg: hex(0x07060d),
     shadow: hex(0x000000),
     shadow_fg: wash(0xe6e9ff, 0x000000, SHADED),
+    scroll_thumb: hex(0x39ff7a),
 
     ..CYBER
 };
@@ -1032,6 +1072,7 @@ pub const STELLAR_TRUE: Theme = Theme {
     cursor_fg: hex(0xffffff),
     shadow: hex(0x000000),
     shadow_fg: wash(0xcccccc, 0x000000, SHADED),
+    scroll_thumb: hex(0x4daafc),
 
     ..STELLAR
 };
@@ -1203,7 +1244,11 @@ impl Theme {
             (t.pane_bg, t.title, "a question's selected answer"),
             (t.shadow, t.dialog_bg, "a dialog's shadow"),
             (t.shadow_fg, t.shadow, "what a dialog's shadow falls on"),
+            (t.scroll_thumb, t.pane_bg, "a scrollbar's thumb"),
         ];
+        if let Track::Shaded(track) = t.scroll_track {
+            pairs.push((track, t.pane_bg, "a scrollbar's track"));
+        }
         pairs.extend(self.syntax_pairings());
         pairs
     }
@@ -1396,7 +1441,7 @@ pub fn register_user(themes: Vec<UserTheme>) -> bool {
 
 impl Theme {
     /// The colours a theme file may set, by the key it spells them with.
-    pub const COLOUR_KEYS: [&'static str; 49] = [
+    pub const COLOUR_KEYS: [&'static str; 51] = [
         "pane_bg",
         "frame",
         "frame_focus",
@@ -1446,16 +1491,24 @@ impl Theme {
         "syntax_constant",
         "syntax_comment",
         "syntax_attribute",
+        "scroll_track",
+        "scroll_thumb",
     ];
 
     /// The lines a theme file may set, by the key it spells them with.
     pub const BORDER_KEYS: [&'static str; 3] = ["border", "border_focus", "menu_border"];
 
     /// This theme with the colour `key` set to `colour`, or `None` where no
-    /// colour is called that.
+    /// colour is called that. `scroll_track` shades the track in `colour`,
+    /// in place of the border's line.
     #[must_use]
     pub fn with_colour(mut self, key: &str, colour: Color) -> Option<Self> {
         let slot = match key {
+            "scroll_track" => {
+                self.scroll_track = Track::Shaded(colour);
+                return Some(self);
+            }
+            "scroll_thumb" => &mut self.scroll_thumb,
             "pane_bg" => &mut self.pane_bg,
             "frame" => &mut self.frame,
             "frame_focus" => &mut self.frame_focus,
@@ -1609,7 +1662,7 @@ mod tests {
 
     /// Every colour of one theme, so that a field added to [`Theme`] and left
     /// out of a check here is a field the checks below do not cover.
-    fn colours(t: &Theme) -> [Color; 39] {
+    fn colours(t: &Theme) -> [Color; 40] {
         [
             t.pane_bg,
             t.frame,
@@ -1650,6 +1703,7 @@ mod tests {
             t.cursor_fg,
             t.shadow,
             t.shadow_fg,
+            t.scroll_thumb,
         ]
     }
 
@@ -1806,6 +1860,52 @@ mod tests {
             hex(0x123456),
             "a value is left as it is"
         );
+    }
+
+    /// `classic`'s scroll bars are Turbo Pascal's: a cyan shaded band whose
+    /// thumb and arrows are cyan cells, in CGA's cyan on a deep terminal.
+    #[test]
+    fn classic_scrolls_on_turbo_pascals_cyan_band() {
+        assert_eq!(CLASSIC.scroll_track, Track::Shaded(Color::Cyan));
+        assert_eq!(CLASSIC.scroll_thumb, Color::Cyan);
+        let deep = CLASSIC.at(Depth::TrueColour);
+        assert_eq!(deep.scroll_track, Track::Shaded(hex(0x00aaaa)));
+        assert_eq!(deep.scroll_thumb, hex(0x00aaaa));
+    }
+
+    /// Every other theme scrolls as it always has: on the pane's own border,
+    /// with a thumb in its accent, at either depth.
+    #[test]
+    fn every_other_theme_scrolls_on_its_border_with_its_accent_for_a_thumb() {
+        for t in every_palette()
+            .into_iter()
+            .filter(|t| t.name != CLASSIC.name)
+        {
+            assert_eq!(t.scroll_track, Track::Border, "{}", t.name);
+            assert_eq!(t.scroll_thumb, t.hot, "{}", t.name);
+        }
+    }
+
+    /// A theme file colours a thumb by `scroll_thumb`, and by `scroll_track`
+    /// shades the track in a colour of its own instead of the border's line.
+    #[test]
+    fn a_theme_file_shades_the_track_and_colours_the_thumb() {
+        let shaded = CYBER
+            .with_colour("scroll_track", Color::Cyan)
+            .and_then(|t| t.with_colour("scroll_thumb", Color::Yellow))
+            .expect("both are colours a theme file may set");
+        assert_eq!(shaded.scroll_track, Track::Shaded(Color::Cyan));
+        assert_eq!(shaded.scroll_thumb, Color::Yellow);
+        assert!(Theme::COLOUR_KEYS.contains(&"scroll_track"));
+        assert!(Theme::COLOUR_KEYS.contains(&"scroll_thumb"));
+        let lost = shaded
+            .with_colour("scroll_track", shaded.pane_bg)
+            .expect("a colour");
+        assert!(lost.invisible().contains(&"a scrollbar's track"));
+        let thumbless = CYBER
+            .with_colour("scroll_thumb", CYBER.pane_bg)
+            .expect("a colour");
+        assert!(thumbless.invisible().contains(&"a scrollbar's thumb"));
     }
 
     /// Each of the sixteen names has the one value CGA gave it, so the 24-bit

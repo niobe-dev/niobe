@@ -2313,7 +2313,9 @@ THEMES:
     Code in a reply and in a diff is highlighted in colours of its own:
     syntax_keyword, syntax_type, syntax_function, syntax_property,
     syntax_string, syntax_number, syntax_constant, syntax_comment and
-    syntax_attribute.
+    syntax_attribute. A pane's scrollbar runs down its right border with a
+    thumb in scroll_thumb; scroll_track draws the track as a shaded band in
+    its own colour, with an arrow at either end, as classic does.
 
     Every colour left out is the base's. A colour in hex is drawn only on a
     terminal that draws 24-bit colour; where it has the sixteen, the base's

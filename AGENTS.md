@@ -207,7 +207,9 @@ reviewers that encode both, for an agent working in this tree.
   `theme.rs` is the
   palette — one table entry per theme in the sixteen ANSI names, which is what a terminal gets
   unless `COLORTERM` says it draws 24-bit colour; then the designed themes draw their own values,
-  and `classic` draws CGA's own values, the sixteen names read through `theme::cga` — `text.rs` wraps, truncates, pads to a column by cells and expands tabs, `find.rs` finds a query in the transcript as it is drawn and marks
+  and `classic` draws CGA's own values, the sixteen names read through `theme::cga`; a theme's
+  scrollbar runs along its `Track`, the border's own line or, in `classic`, Turbo Pascal's shaded
+  band with an arrow at either end — `text.rs` wraps, truncates, pads to a column by cells and expands tabs, `find.rs` finds a query in the transcript as it is drawn and marks
   where, `select.rs` is a drag's selection of the transcript as drawn, the text it copies — a
   code block's line the pane cut into rows copied as the one line, without its gutter — and
   the link under a click, `desktop.rs` the trait the loop hands what to copy, what to open and what to edit to,
