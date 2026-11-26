@@ -757,7 +757,15 @@ pub enum Purpose {
     /// A prompt sent from here, to put the files back as they were before.
     /// A choice's value is where the prompt is among those sent.
     Rewind,
+    /// Whether to end the session: [`QUIT`] or [`STAY`].
+    Quit,
 }
+
+/// The value of the confirmation's row that ends the session.
+const QUIT: &str = "quit";
+
+/// The value of the confirmation's row that keeps it.
+const STAY: &str = "stay";
 
 /// The Shortcuts sheet's rows on what a typed command does: the names that
 /// open the shell's own view rather than reach the backend, each beside the
@@ -5659,6 +5667,7 @@ impl App {
             }
             Purpose::Effort => self.effort_row(&picker.options),
             Purpose::Rewind => None,
+            Purpose::Quit => None,
             Purpose::Call => None,
             Purpose::Agent => None,
             Purpose::Theme => picker
@@ -5740,7 +5749,45 @@ impl App {
                     self.open_call(at);
                 }
             }
+            Purpose::Quit => {
+                if chosen == QUIT {
+                    self.quit();
+                }
+            }
         }
+    }
+
+    /// Asks whether to end the session, for the Quit action however it was
+    /// reached: the bar's Quit is one stray click, or Esc then 0, away from
+    /// ending everything the session runs. Asked again while it asks, it
+    /// quits, so F10 twice does what F10 did. Under the trust question there
+    /// is no session yet to lose, and the question takes every key, so it
+    /// quits at once.
+    fn ask_to_quit(&mut self) {
+        let asking = self
+            .picking
+            .as_ref()
+            .is_some_and(|picker| picker.purpose == Purpose::Quit);
+        if asking || self.trusting.is_some() {
+            self.picking = None;
+            self.quit();
+            return;
+        }
+        let row = |value: &str, name: &str, note: &str| Choice {
+            value: value.to_owned(),
+            name: Some(name.to_owned()),
+            note: Some(note.to_owned()),
+        };
+        self.picking = Some(Picker {
+            purpose: Purpose::Quit,
+            options: vec![
+                row(QUIT, "Quit", "end the session and what it runs"),
+                row(STAY, "Stay", "keep working"),
+            ],
+            at: 0,
+            more: 0,
+            effort: None,
+        });
     }
 
     /// The menu that is open, and the item its cursor is on.
@@ -5870,7 +5917,7 @@ impl App {
             Action::Permissions => self.sheet = Some(self.permissions()),
             Action::SignIn => self.hint = Some(self.sign_in_hint()),
             Action::Doctor => self.send_command("doctor", None),
-            Action::Quit => self.quit(),
+            Action::Quit => self.ask_to_quit(),
             Action::NewSession => self.send_command("clear", None),
             Action::Compact => self.send_command("compact", None),
             Action::Resume => match self.remembers {
@@ -9659,10 +9706,14 @@ impl App {
         };
         // Quitting is always available: a session with a prompt up is still a
         // session the operator may need to leave, and the backend is told the
-        // same way it is told about any other way out.
-        if let (KeyCode::F(10), _) | (KeyCode::Char('q'), KeyModifiers::CONTROL) =
-            (key.code, key.modifiers)
-        {
+        // same way it is told about any other way out. F10 is the bar's Quit
+        // and asks first, as a click on it does; Ctrl+Q is a chord nobody
+        // presses by accident, and quits at once.
+        if key.code == KeyCode::F(10) {
+            self.ask_to_quit();
+            return;
+        }
+        if (key.code, key.modifiers) == (KeyCode::Char('q'), KeyModifiers::CONTROL) {
             self.quit();
             return;
         }
@@ -14600,7 +14651,11 @@ mod tests {
 
         app.on_key(key(KeyCode::Esc));
         app.on_key(key(KeyCode::Char('0')));
-        assert!(app.should_quit(), "Esc then 0 is F10");
+        assert_eq!(
+            app.picking().map(|picker| picker.purpose),
+            Some(Purpose::Quit),
+            "Esc then 0 is F10, which asks to quit"
+        );
     }
 
     #[test]
@@ -14614,7 +14669,11 @@ mod tests {
         assert!(app.diffs_open());
         assert_eq!(app.composer().lines(), [""]);
         app.on_key(KeyEvent::new(KeyCode::Char('0'), KeyModifiers::ALT));
-        assert!(app.should_quit(), "Alt+0 is F10");
+        assert_eq!(
+            app.picking().map(|picker| picker.purpose),
+            Some(crate::app::Purpose::Quit),
+            "Alt+0 is F10, which asks to quit"
+        );
     }
 
     #[test]
@@ -17720,12 +17779,16 @@ mod tests {
     }
 
     #[test]
-    fn f10_and_ctrl_q_still_quit_with_one_press() {
-        for quit in [key(KeyCode::F(10)), ctrl('q')] {
-            let mut app = app().attached();
-            app.on_key(quit);
-            assert!(app.should_quit(), "{quit:?}");
-        }
+    fn ctrl_q_quits_with_one_press_and_f10_with_two() {
+        let mut chord = app().attached();
+        chord.on_key(ctrl('q'));
+        assert!(chord.should_quit(), "Ctrl+Q");
+
+        let mut f10 = app().attached();
+        f10.on_key(key(KeyCode::F(10)));
+        assert!(!f10.should_quit(), "F10 asks first");
+        f10.on_key(key(KeyCode::F(10)));
+        assert!(f10.should_quit(), "F10 twice");
     }
 
     #[test]
@@ -21244,7 +21307,61 @@ mod tests {
         app.on_mouse(click_at(start(4) + 2, 29));
         assert!(app.diffs_open(), "5 Diff");
         app.on_mouse(click_at(start(9) + 2, 29));
-        assert!(app.should_quit(), "0 Quit");
+        assert!(!app.should_quit(), "0 Quit asks first");
+        assert_eq!(app.picking().map(|p| p.purpose), Some(Purpose::Quit));
+        app.on_key(key(KeyCode::Enter));
+        assert!(app.should_quit(), "0 Quit, confirmed");
+    }
+
+    /// Quitting ends the session and everything running in it, and the
+    /// bar's Quit is one stray click — or Esc then 0 — away, so the action
+    /// asks first, whichever way it was reached. Ctrl+Q is a chord nobody
+    /// presses by accident, as Ctrl+C twice is, and still quits at once.
+    #[test]
+    fn quit_asks_before_ending_the_session_and_enter_confirms_it() {
+        let asked = |how: &dyn Fn(&mut App)| {
+            let mut app = app();
+            how(&mut app);
+            assert!(!app.should_quit());
+            let picker = app.picking().expect("the confirmation is open");
+            assert_eq!(picker.purpose, Purpose::Quit);
+            assert_eq!(
+                picker.options[picker.at].value, "quit",
+                "the cursor on Quit"
+            );
+            app
+        };
+        let ways: [&dyn Fn(&mut App); 3] = [
+            &|app| app.perform(crate::menu::Action::Quit),
+            &|app| app.on_key(key(KeyCode::F(10))),
+            &|app| {
+                app.on_key(key(KeyCode::Esc));
+                app.on_key(key(KeyCode::Char('0')));
+            },
+        ];
+        for how in ways {
+            let mut confirmed = asked(how);
+            confirmed.on_key(key(KeyCode::Enter));
+            assert!(confirmed.should_quit(), "Enter quits");
+
+            let mut kept = asked(how);
+            kept.on_key(key(KeyCode::Esc));
+            assert!(!kept.should_quit(), "Esc stays");
+            assert!(kept.picking().is_none());
+
+            let mut stayed = asked(how);
+            stayed.on_key(key(KeyCode::Down));
+            stayed.on_key(key(KeyCode::Enter));
+            assert!(!stayed.should_quit(), "Stay stays");
+
+            let mut twice = asked(how);
+            twice.on_key(key(KeyCode::F(10)));
+            assert!(twice.should_quit(), "F10 again quits");
+        }
+
+        let mut chord = app();
+        chord.on_key(ctrl('q'));
+        assert!(chord.should_quit(), "Ctrl+Q quits at once");
     }
 
     /// Whether anything that takes keys of its own, or answers for the
@@ -21279,11 +21396,15 @@ mod tests {
 
                     app.on_mouse(click_at(column, row));
 
-                    assert_eq!(
-                        opened_over(&app),
-                        [] as [&str; 0],
-                        "{focus:?} {column},{row}"
-                    );
+                    // Quitting is always available, and asks first.
+                    let confirming = app
+                        .picking()
+                        .is_some_and(|picker| picker.purpose == Purpose::Quit);
+                    let opened: Vec<_> = opened_over(&app)
+                        .into_iter()
+                        .filter(|what| !(confirming && *what == "a list"))
+                        .collect();
+                    assert_eq!(opened, [] as [&str; 0], "{focus:?} {column},{row}");
                     assert_eq!(app.ask_focus(), focus, "{column},{row}");
                     assert!(app.asking().is_some(), "{column},{row}");
                     assert_eq!(app.take_produced(), [], "{column},{row}");
@@ -21327,8 +21448,16 @@ mod tests {
         let quit = crate::menu::stop_columns() + widths[..9].iter().sum::<u16>() + 2;
 
         app.on_mouse(click_at(quit, 29));
+        assert!(!app.should_quit(), "it asks first");
+        app.on_key(key(KeyCode::Enter));
 
         assert!(app.should_quit());
+        assert!(
+            app.take_produced()
+                .iter()
+                .all(|event| !matches!(event, Event::PermissionResponse { .. })),
+            "the Enter confirmed the quit and answered nothing"
+        );
     }
 
     #[test]
@@ -21346,16 +21475,20 @@ mod tests {
 
                 app.on_mouse(click_at(title + 2, row));
 
-                assert_eq!(opened_over(&app), [] as [&str; 0], "{}", item.label);
+                let quit = item.action == Action::Quit;
+                assert_eq!(
+                    app.picking().map(|picker| picker.purpose),
+                    quit.then_some(Purpose::Quit),
+                    "{}: only Quit opens its confirmation",
+                    item.label
+                );
+                if !quit {
+                    assert_eq!(opened_over(&app), [] as [&str; 0], "{}", item.label);
+                }
                 assert!(app.asking().is_some(), "{}", item.label);
                 assert_eq!(app.take_produced(), [], "{}", item.label);
                 assert!(app.take_handoffs().is_empty(), "{}", item.label);
-                assert_eq!(
-                    app.should_quit(),
-                    item.action == Action::Quit,
-                    "{}",
-                    item.label
-                );
+                assert!(!app.should_quit(), "{}", item.label);
             }
         }
     }

@@ -247,6 +247,7 @@ fn pick_words(purpose: Purpose) -> (&'static str, &'static str, &'static str) {
             " the conversation keeps what was said ",
             "↑↓ choose · Enter put back · Esc leave them",
         ),
+        Purpose::Quit => ("Quit niobe?", "", "↑↓ choose · Enter · Esc stay"),
     }
 }
 
@@ -419,7 +420,7 @@ impl PickColumns {
             Purpose::Model | Purpose::Effort => choice.value.clone(),
             // Where the call is in the list is what choosing sends, and the
             // list already says it by where the row is.
-            Purpose::Call | Purpose::Agent | Purpose::Rewind => String::new(),
+            Purpose::Call | Purpose::Agent | Purpose::Rewind | Purpose::Quit => String::new(),
         };
         if !self.described {
             return (value, String::new());
