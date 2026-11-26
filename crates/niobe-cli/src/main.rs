@@ -2582,7 +2582,8 @@ IN THE SHELL:
                            command under a shell call's row, and a call's
                            arguments as they were sent
     Ctrl+V                 Attach the image on the clipboard to the prompt;
-                           a pasted or dropped path to an image attaches it
+                           a dropped image file attaches it, and a relative
+                           path pasted stays text
     drag                   Copy what it covers
     click                  Open the link under it, or the tool call whose
                            row it is, read whole

@@ -15,9 +15,11 @@
 //!   the clipboard reaches the shell as nothing at all, or not at all.
 //! * A paste that is nothing asks for it too, since a terminal that pastes an
 //!   image it cannot give as text pastes an empty string.
-//! * A paste that is one path to an image file — which is also what dropping
-//!   a file on most terminals types — attaches that file instead of its path.
-//!   A path that is not attached goes into the prompt as it was pasted.
+//! * A paste that is one whole path to an image file — from the root or `~/`,
+//!   or a `file://` address, which is what dropping a file on a terminal
+//!   types — attaches that file instead of its path. A relative path is one
+//!   the operator copied, and goes into the prompt as text, as does a path
+//!   that is not attached.
 //!
 //! What is attached is written into the prompt as `[Image #N]`, where it went,
 //! numbered across the session as Claude Code numbers them, and sent with the
@@ -45,8 +47,9 @@ pub enum Source {
     /// The image on the clipboard.
     Clipboard,
     /// The file at a path the operator pasted, as it was pasted once its
-    /// quoting, escapes or `file://` address were taken off: a relative path
-    /// is the session's directory's, and `~` is the operator's home.
+    /// quoting, escapes or `file://` address were taken off: a path from the
+    /// root, or one under `~`, the operator's home. A relative path, which
+    /// the shell never asks for, is the session's directory's.
     File(String),
 }
 
@@ -253,8 +256,13 @@ fn named_in(texts: &[(DraftId, &str)], draft: DraftId, number: u32) -> bool {
 /// takes them. What the file holds is still read from its bytes.
 const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp"];
 
-/// The path in `pasted`, where the paste is one path to an image file and
-/// nothing else.
+/// The path in `pasted`, where the paste is a dropped image file: one path to
+/// an image file, from the root or the operator's home, and nothing else.
+///
+/// A terminal types a dropped file as the whole path, so a relative path is
+/// one the operator copied as text, and goes into the prompt as it was
+/// pasted; the two reach the shell as the same paste, and nothing else tells
+/// them apart.
 ///
 /// A dropped file arrives quoted, or with its spaces escaped, or as a
 /// `file://` address, depending on the terminal; each is taken back to the
@@ -275,7 +283,13 @@ pub fn image_path(pasted: &str) -> Option<String> {
         Some(address) => file_address_path(address)?,
         None => unquoted,
     };
-    names_an_image(&path).then_some(path)
+    (is_whole(&path) && names_an_image(&path)).then_some(path)
+}
+
+/// Whether `path` is written whole — from the root, or from the operator's
+/// home as `~/` — as a terminal types a file dropped on it.
+fn is_whole(path: &str) -> bool {
+    path.starts_with('/') || path.starts_with("~/")
 }
 
 /// Whether `path`, a path as it is written on disk, names an image file by
@@ -386,7 +400,25 @@ mod tests {
             image_path(r"/Users/me/Screen\ Shot\ 1.JPG").as_deref(),
             Some("/Users/me/Screen Shot 1.JPG")
         );
-        assert_eq!(image_path("shots/a.webp").as_deref(), Some("shots/a.webp"));
+        assert_eq!(
+            image_path("~/shots/a.webp").as_deref(),
+            Some("~/shots/a.webp")
+        );
+    }
+
+    #[test]
+    fn a_relative_image_path_is_text_the_operator_copied() {
+        for pasted in [
+            "art/sources/ui-bar-a-001.jpg",
+            "shot.png",
+            "./shots/a.webp",
+            "../a.gif",
+            "'art/my shot.png'",
+            r"art/my\ shot.png",
+            "~me/shot.png",
+        ] {
+            assert_eq!(image_path(pasted), None, "{pasted:?}");
+        }
     }
 
     #[test]
@@ -414,8 +446,8 @@ mod tests {
             assert_eq!(image_path(pasted), None, "{pasted:?}");
         }
         assert_eq!(
-            image_path("'rename the logo to logo.png'").as_deref(),
-            Some("rename the logo to logo.png")
+            image_path("'/Users/me/rename the logo to logo.png'").as_deref(),
+            Some("/Users/me/rename the logo to logo.png")
         );
     }
 

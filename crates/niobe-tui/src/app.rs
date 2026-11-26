@@ -13173,6 +13173,15 @@ mod tests {
     }
 
     #[test]
+    fn a_copied_relative_image_path_is_pasted_as_the_path() {
+        let mut app = app();
+        app.on_paste("art/sources/ui-bar-a-001.jpg");
+
+        assert_eq!(app.take_image_requests(), []);
+        assert_eq!(app.composed(), "art/sources/ui-bar-a-001.jpg");
+    }
+
+    #[test]
     fn an_image_path_pasted_into_a_shell_command_is_the_path() {
         let mut app = app().runs_commands();
         typed(&mut app, "!open ");
@@ -13362,8 +13371,8 @@ mod tests {
     #[test]
     fn a_pasted_path_that_cannot_be_read_goes_back_as_it_was_pasted() {
         for (pasted, path) in [
-            (r"^shot\d+\.png", "^shotd+.png"),
-            ("\"assets/logo.png\"", "assets/logo.png"),
+            (r"/tmp/^shot\d+\.png", "/tmp/^shotd+.png"),
+            ("\"/repo/assets/logo.png\"", "/repo/assets/logo.png"),
         ] {
             let mut app = app();
             app.on_paste(pasted);
