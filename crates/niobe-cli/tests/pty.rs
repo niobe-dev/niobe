@@ -3503,7 +3503,13 @@ fn a_dropped_image_file_goes_to_the_cli_with_the_prompt() {
         .expect("the niobe binary runs");
     terminal.shows(OPENING_FRAME);
 
-    terminal.typed(b"\x1b[200~'shot one.png'\x1b[201~");
+    // A terminal types a dropped file as its whole path; a relative one is
+    // text the operator copied.
+    let dropped = format!(
+        "\x1b[200~'{}'\x1b[201~",
+        repo.path().join("shot one.png").display()
+    );
+    terminal.typed(dropped.as_bytes());
     terminal.shows("[Image #1]");
     terminal.typed(b"look\r");
     terminal.shows("answered-the-turn");
