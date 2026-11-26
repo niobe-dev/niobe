@@ -1,4 +1,4 @@
- Niobe  Session  Context  Model  View  Help                                                                     ○ idle
+ Niobe  Session  Context  Model  View  Help           example-app                                               ○ idle
  ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ > /compact ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓ ┌─────────────── Usage ────────────────┐
  ┃                                                               ▄▄▄▄▄▄▄▄▄▄  ┃ │ no tokens reported yet               │
  ┃                                                                /compact   ┃ │ ──────────────────────────────────── │

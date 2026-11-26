@@ -164,7 +164,10 @@ reviewers that encode both, for an agent working in this tree.
   dim, saying so, until the backend says it took one in or the turn they waited behind ends, and
   which are held behind a clear the backend has not answered yet, said on the rule above the
   composer and sent once it has, so they are the new conversation's — `ui.rs`
-  draws it, leaving the routine entries out where `n` is pressed in a side pane, each run of them
+  draws it, the menu row naming the project the session runs in, by its directory, centred
+  between the menus and the model and drawn as a block in the menus' hot colour, cut or left
+  off where the row has no room once the model and the session's state are drawn, and
+  leaving the routine entries out where `n` is pressed in a side pane, each run of them
   a row that counts them, beside the session a stack a third of the body wide, between 34 and
   52 columns, of the Usage pane and the Changes pane — the branch, the working tree, and the
   commits made since the session began — for one resumed, its first event — newest first by

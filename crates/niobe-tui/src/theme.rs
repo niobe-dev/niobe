@@ -1230,6 +1230,7 @@ impl Theme {
             // menus, so what it says there is checked against the menu
             // background as well.
             (t.del, t.menu_bg, "an error count in the menu row"),
+            (t.menu_bg, t.menu_hot, "the project's name in the menu row"),
             (t.dialog_bg, t.pane_bg, "a dialog over the panes"),
             (t.dialog_fg, t.dialog_bg, "dialog text"),
             (t.dialog_dim, t.dialog_bg, "secondary text in a dialog"),
@@ -1282,6 +1283,7 @@ impl Theme {
             (t.menu_fg, t.menu_bg, "the menu bar"),
             (t.menu_hot, t.menu_bg, "a menu hot key"),
             (t.del, t.menu_bg, "an error count in the menu row"),
+            (t.menu_bg, t.menu_hot, "the project's name in the menu row"),
             (t.fkey_fg, t.fkey_bg, "an F-key label"),
             (t.keybar_fg, t.keybar_bg, "an F-key's number"),
             (t.pulldown_fg, t.menu_bg, "an open menu's item"),

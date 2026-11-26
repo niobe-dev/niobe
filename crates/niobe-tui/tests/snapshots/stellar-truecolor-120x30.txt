@@ -1,57 +1,58 @@
   a  Rgb(204, 204, 204) on Rgb(24, 24, 24)
   b  Rgb(77, 170, 252) on Rgb(24, 24, 24), bold | underlined
-  c  Rgb(204, 204, 204) on Rgb(24, 24, 24), bold
-  d  Rgb(204, 204, 204) on Rgb(24, 24, 24), dim
-  e  Rgb(77, 170, 252) on Rgb(24, 24, 24)
-  f  Rgb(204, 204, 204) on Rgb(31, 31, 31)
-  g  Rgb(0, 120, 212) on Rgb(31, 31, 31)
-  h  Rgb(226, 192, 141) on Rgb(31, 31, 31), bold
-  i  Rgb(226, 192, 141) on Rgb(31, 31, 31)
-  j  Rgb(43, 43, 43) on Rgb(31, 31, 31)
-  k  Rgb(77, 170, 252) on Rgb(31, 31, 31), bold
-  l  Rgb(157, 157, 157) on Rgb(31, 31, 31)
-  m  Rgb(204, 167, 0) on Rgb(31, 31, 31), bold
-  n  Rgb(204, 167, 0) on Rgb(31, 31, 31)
-  o  Rgb(204, 204, 204) on Rgb(31, 31, 31), bold
-  p  Rgb(77, 170, 252) on Rgb(31, 31, 31)
-  q  Rgb(46, 160, 67) on Rgb(31, 31, 31), bold
-  r  Rgb(46, 160, 67) on Rgb(31, 31, 31)
-  s  Rgb(248, 81, 73) on Rgb(31, 31, 31), bold
-  t  Rgb(248, 81, 73) on Rgb(31, 31, 31)
-  u  Rgb(197, 134, 192) on Rgb(31, 31, 31)
-  v  Rgb(31, 31, 31) on Rgb(77, 170, 252), bold
-  w  Rgb(31, 31, 31) on Rgb(77, 170, 252)
-  x  Rgb(77, 170, 252) on Rgb(24, 24, 24), bold
-  y  Rgb(204, 204, 204) on Rgb(49, 49, 49), dim
-  z  Rgb(204, 204, 204) on Rgb(49, 49, 49)
+  c  Rgb(24, 24, 24) on Rgb(77, 170, 252), bold
+  d  Rgb(204, 204, 204) on Rgb(24, 24, 24), bold
+  e  Rgb(204, 204, 204) on Rgb(24, 24, 24), dim
+  f  Rgb(77, 170, 252) on Rgb(24, 24, 24)
+  g  Rgb(204, 204, 204) on Rgb(31, 31, 31)
+  h  Rgb(0, 120, 212) on Rgb(31, 31, 31)
+  i  Rgb(226, 192, 141) on Rgb(31, 31, 31), bold
+  j  Rgb(226, 192, 141) on Rgb(31, 31, 31)
+  k  Rgb(43, 43, 43) on Rgb(31, 31, 31)
+  l  Rgb(77, 170, 252) on Rgb(31, 31, 31), bold
+  m  Rgb(157, 157, 157) on Rgb(31, 31, 31)
+  n  Rgb(204, 167, 0) on Rgb(31, 31, 31), bold
+  o  Rgb(204, 167, 0) on Rgb(31, 31, 31)
+  p  Rgb(204, 204, 204) on Rgb(31, 31, 31), bold
+  q  Rgb(77, 170, 252) on Rgb(31, 31, 31)
+  r  Rgb(46, 160, 67) on Rgb(31, 31, 31), bold
+  s  Rgb(46, 160, 67) on Rgb(31, 31, 31)
+  t  Rgb(248, 81, 73) on Rgb(31, 31, 31), bold
+  u  Rgb(248, 81, 73) on Rgb(31, 31, 31)
+  v  Rgb(197, 134, 192) on Rgb(31, 31, 31)
+  w  Rgb(31, 31, 31) on Rgb(77, 170, 252), bold
+  x  Rgb(31, 31, 31) on Rgb(77, 170, 252)
+  y  Rgb(77, 170, 252) on Rgb(24, 24, 24), bold
+  z  Rgb(204, 204, 204) on Rgb(49, 49, 49), dim
+  A  Rgb(204, 204, 204) on Rgb(49, 49, 49)
 
-abaaaaaabaaaaaaaabaaaaaaaabaaaaaabaaaaabaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaccccccaaddddddddddddddddaaeeeeeeeeeeeeeeaadddddaa
-fggghhhiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiggggfjjjjjjjjjjjjjjjjhhhhhhhjjjjjjjjjjjjjjjjjf
-fgfkkffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffgfjfllllllllllmmmmfnnlllllllllllllllfffffjf
-fgfffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffgfjfllllllllllooooffllllllllllllllllllllfjf
-fgfffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffgfjfjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjfjf
-fgffflllllllllllllllllllllllllllllllllfffffffffffffffffffffffffffffffffffffffpfjflllllllllloooofffffffffffffllllllffffjf
-fgfffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffpfjfllllllllllqqqqfrrrrrrrrrrllllllllffffjf
-fgfssttttttttttttttfllffffffffffffffffffffffffffffffffffffffffffffffffttttttfpfjfjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjfjf
-fgfffllffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffpfjfllllllllllooooffllllllllllllllllllllfjf
-fgfffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffpfjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjf
-fgfkkffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffpfjjjjjjjjjjjjjjjhhhhhhhhhjjjjjjjjjjjjjjjjf
-fgfffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffpfjfuuuuuulllffffffffffffffffffffffffffffpf
-fgffflllllllllllllllllllfffffffffffffffffffffffffffffffffffffffffffffffffffffpfjfhhhhhhhhhhhhhhffrrrrrftttttffffffffffpf
-fgfffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffpfjfffllllllllllfffffffffffffffffffffffffpf
-fgfkkffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffpfjfffffllllllllfffffffffffffffffffffffffpf
-fgfffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffpfjffffffffffffffffffffffffffffffrrrffttfpf
-fgfkkffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffpfjffffffffffffffffffffffffffffffrrrffttfpf
-fgfffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffpfjfffffffffffffffffffffffffffffrrrrftttfpf
-fgfssttttttttttttttfllllllllfffffffffffffffffffffffffffffffffffttttttlllllllfpfjffffffffffffffffffffffffffffffrrrftttfjf
-fgfffllffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffpfjffflllllllffffffffffffffffffffffffffffjf
-fgfffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffpfjfffffllllllfffffffffffffffffffffffffffjf
-fgfkkffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffpfjffffffffffffffffffffffffffffffrrrffttfjf
-fgfffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffpfjffffflllllllllllffffffffffffffffffffffjf
-fgfffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffpfjffffffffffffffffffffffffffffffffrffftfjf
-fgflllllllllllllfffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffgfjffffffffffffffffffffffffffffffrrrftttfjf
-fgfffllkkkkkfppppfffffffffffffffffffpppllllllllllllllllllllllllllllllpppppppfgfjffflllllllllffffffffffffffffffffffffffjf
-fgfjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjfgfjffffflllllllllllffffffffffffffffffffffjf
-fgfvvvvvkkkwlllllllllllllllllllllllllllllllllllllllfffffffffffllllllllllllllfgfjffffffffffffffffffffffffffffffrrrffttfjf
-fgggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggfjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjf
-xxxyyyyaxzzzzzzzzaxyyyyyyyyyyyaxyyyyyyyyyaxyyyyyyyyyaxzzzzzzzzaxyyyyyyyyyyaxzzzzzzzaxzzzzzzzzzzaxzzzzzzzzzzzzaxzzzzzzzza
+abaaaaaabaaaaaaaabaaaaaaaabaaaaaabaaaaabaaaaaaaaaaaaacccccccccccccaaaaaddddddaaeeeeeeeeeeeeeeeeaaffffffffffffffaaeeeeeaa
+ghhhiiijjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjhhhhgkkkkkkkkkkkkkkkkiiiiiiikkkkkkkkkkkkkkkkkg
+ghgllgggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggghgkgmmmmmmmmmmnnnngoommmmmmmmmmmmmmmgggggkg
+ghggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggghgkgmmmmmmmmmmppppggmmmmmmmmmmmmmmmmmmmmgkg
+ghggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggghgkgkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkgkg
+ghgggmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmgggggggggggggggggggggggggggggggggggggggqgkgmmmmmmmmmmppppgggggggggggggmmmmmmggggkg
+ghgggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggqgkgmmmmmmmmmmrrrrgssssssssssmmmmmmmmggggkg
+ghgttuuuuuuuuuuuuuugmmgggggggggggggggggggggggggggggggggggggggggggggggguuuuuugqgkgkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkgkg
+ghgggmmggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggqgkgmmmmmmmmmmppppggmmmmmmmmmmmmmmmmmmmmgkg
+ghgggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggqgkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkg
+ghgllggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggqgkkkkkkkkkkkkkkkiiiiiiiiikkkkkkkkkkkkkkkkg
+ghgggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggqgkgvvvvvvmmmggggggggggggggggggggggggggggqg
+ghgggmmmmmmmmmmmmmmmmmmmgggggggggggggggggggggggggggggggggggggggggggggggggggggqgkgiiiiiiiiiiiiiiggsssssguuuuuggggggggggqg
+ghgggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggqgkgggmmmmmmmmmmgggggggggggggggggggggggggqg
+ghgllggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggqgkgggggmmmmmmmmgggggggggggggggggggggggggqg
+ghgggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggqgkggggggggggggggggggggggggggggggsssgguugqg
+ghgllggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggqgkggggggggggggggggggggggggggggggsssgguugqg
+ghgggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggqgkgggggggggggggggggggggggggggggssssguuugqg
+ghgttuuuuuuuuuuuuuugmmmmmmmmggggggggggggggggggggggggggggggggggguuuuuummmmmmmgqgkggggggggggggggggggggggggggggggsssguuugkg
+ghgggmmggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggqgkgggmmmmmmmggggggggggggggggggggggggggggkg
+ghgggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggqgkgggggmmmmmmgggggggggggggggggggggggggggkg
+ghgllggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggqgkggggggggggggggggggggggggggggggsssgguugkg
+ghgggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggqgkgggggmmmmmmmmmmmggggggggggggggggggggggkg
+ghgggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggqgkggggggggggggggggggggggggggggggggsgggugkg
+ghgmmmmmmmmmmmmmggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggghgkggggggggggggggggggggggggggggggsssguuugkg
+ghgggmmlllllgqqqqgggggggggggggggggggqqqmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmqqqqqqqghgkgggmmmmmmmmmggggggggggggggggggggggggggkg
+ghgkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkghgkgggggmmmmmmmmmmmggggggggggggggggggggggkg
+ghgwwwwwlllxmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmgggggggggggmmmmmmmmmmmmmmghgkggggggggggggggggggggggggggggggsssgguugkg
+ghhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhgkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkg
+yyyzzzzayAAAAAAAAayzzzzzzzzzzzayzzzzzzzzzayzzzzzzzzzayAAAAAAAAayzzzzzzzzzzayAAAAAAAayAAAAAAAAAAayAAAAAAAAAAAAayAAAAAAAAa

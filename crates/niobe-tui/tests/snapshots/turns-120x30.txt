@@ -1,4 +1,4 @@
- Niobe  Session  Context  Model  View  Help                            opus-5  claude · default  ○ not attached  13:41
+ Niobe  Session  Context  Model  View  Help           example-app      opus-5  claude · default  ○ not attached  13:41
  ┏━━━━━━━━━━━━━━━━━ > what does the fetcher do with a 304? ━━━━━━━━━━━━━━━━━━┓ ┌─────────────── Usage ────────────────┐
  ┃                                   ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄  ┃ │ 5h         15% ▓░░░░░░░ resets 16:40 │
  ┃                                    what does the fetcher do with a 304?   ┃ │ ──────────────────────────────────── │

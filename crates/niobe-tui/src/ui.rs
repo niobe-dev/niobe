@@ -889,8 +889,10 @@ fn draw_too_small(frame: &mut Frame, area: Rect, hint: Option<&str>, theme: &The
     );
 }
 
-/// The menu row: the menus on the left, and on the right what the session
-/// is, what it is doing and the time of day.
+/// The menu row: the menus on the left, on the right what the session is,
+/// what it is doing and the time of day, and between them the project the
+/// session runs in, centred and drawn as a block in the menus' hot colour so
+/// that it is the first thing on the row the eye finds.
 ///
 /// The theme is not named here. The View menu is where a palette is changed,
 /// and a row that says which one is on says nothing the screen does not
@@ -902,20 +904,26 @@ fn draw_menu(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let room = usize::from(area.width).saturating_sub(left.width() + MENU_GAP);
     let identity = fitted(identity_segments(app, theme), room);
 
+    let menus = u16::try_from(left.width()).unwrap_or(u16::MAX);
     frame.render_widget(Paragraph::new(left).style(bar), area);
+    let mut drawn = 0;
     if !identity.is_empty() {
         // Only the identity's own cells: a paragraph's style is laid over its
         // whole area, which over the row would repaint the menus' titles.
         let line = Line::from(segment_spans(identity));
-        let width = u16::try_from(line.width())
+        drawn = u16::try_from(line.width())
             .unwrap_or(u16::MAX)
             .min(area.width);
         let right = Rect {
-            x: area.right().saturating_sub(width),
-            width,
+            x: area.right().saturating_sub(drawn),
+            width: drawn,
             ..area
         };
         frame.render_widget(Paragraph::new(line).style(bar), right);
+    }
+    if let Some((at, label)) = project_badge(&app.repo().name, area, menus, drawn) {
+        let badge = Style::new().bg(theme.menu_hot).fg(theme.menu_bg).bold();
+        frame.render_widget(Paragraph::new(label).style(badge), at);
     }
 }
 
@@ -1090,6 +1098,40 @@ fn segments_width(segments: &[Segment]) -> usize {
     let text: usize = segments.iter().map(|s| text::width(&s.text)).sum();
     // A gap between each pair, and one column before the border.
     text + segments.len() * MENU_GAP
+}
+
+/// The fewest cells of a project's name a cut badge keeps, its ellipsis
+/// among them: three letters and a `…` say less than no badge, since the
+/// session pane's title names the project whole.
+const PROJECT_CUT_MIN: usize = 5;
+
+/// Where the menu row's project badge goes, and what it says: the name the
+/// repository's directory goes by, a column of padding either side.
+///
+/// Centred on the row, as a window's title is, where that leaves it clear of
+/// the `menus` on the left and the `identity` on the right by [`MENU_GAP`];
+/// moved toward the middle of the gap between them where it would not be;
+/// cut where the gap is narrower than the name, and left off where it is
+/// too narrow for even a cut one. The identity is measured before the badge
+/// is placed, so the model, the session's state and the clock never give
+/// way to it.
+fn project_badge(name: &str, row: Rect, menus: u16, identity: u16) -> Option<(Rect, String)> {
+    let name = name.trim();
+    let gap = u16::try_from(MENU_GAP).unwrap_or(u16::MAX);
+    let start = row.x.saturating_add(menus).saturating_add(gap);
+    let end = row.right().saturating_sub(identity.saturating_add(gap));
+    let room = usize::from(end.saturating_sub(start)).saturating_sub(2);
+    let whole = text::width(name);
+    let shown = text::truncate(name, room);
+    let kept = text::width(&shown);
+    if whole == 0 || kept < whole.min(PROJECT_CUT_MIN) {
+        return None;
+    }
+    let label = format!(" {shown} ");
+    let width = u16::try_from(text::width(&label)).ok()?;
+    let centred = row.x.saturating_add(row.width.saturating_sub(width) / 2);
+    let x = centred.min(end.saturating_sub(width)).max(start);
+    Some((Rect { x, width, ..row }, label))
 }
 
 fn segment_spans(segments: Vec<Segment>) -> Vec<Span<'static>> {
@@ -8996,6 +9038,84 @@ mod tests {
     }
 
     /// What the menu row's right-hand group reads as, segment by segment.
+    fn menu_row(width: u16) -> Rect {
+        Rect::new(0, 0, width, 1)
+    }
+
+    #[test]
+    fn the_project_is_centred_on_the_menu_row_where_the_gap_allows() {
+        let (at, label) =
+            project_badge("niobe", menu_row(120), 44, 30).expect("a 46-column gap holds the name");
+        assert_eq!(label, " niobe ");
+        assert_eq!(at, Rect::new(56, 0, 7, 1), "(120 - 7) / 2 is column 56");
+    }
+
+    #[test]
+    fn the_project_moves_off_centre_rather_than_onto_the_menus_or_the_identity() {
+        // The gap runs from column 46 to column 80 - 24 - 2 = 54: the centre,
+        // 36, is under the menus, so the badge starts where the gap does.
+        let (left, _) = project_badge("niobe", menu_row(80), 44, 24).expect("eight columns fit");
+        assert_eq!(left, Rect::new(46, 0, 7, 1));
+        // The gap runs from column 12 to column 120 - 90 - 2 = 28: the centre,
+        // 56, is under the identity, so the badge ends where the gap does.
+        let (right, _) =
+            project_badge("niobe", menu_row(120), 10, 90).expect("the gap holds the name");
+        assert_eq!(right, Rect::new(21, 0, 7, 1));
+    }
+
+    #[test]
+    fn a_project_name_too_long_for_the_gap_is_cut_and_one_with_no_room_is_left_off() {
+        // Twelve columns from 46 to 58: two of padding and ten of the name.
+        let (at, label) = project_badge("a-very-long-repository-name", menu_row(80), 44, 20)
+            .expect("twelve columns hold part of the name");
+        assert_eq!(label, " a-very-lo… ");
+        assert_eq!(at, Rect::new(46, 0, 12, 1));
+        // Cut by cells, not characters: four two-cell letters and the `…`
+        // are nine of the ten, and a fifth letter would make eleven.
+        assert_eq!(
+            project_badge("日本語プロジェクト", menu_row(80), 44, 20),
+            Some((Rect::new(46, 0, 11, 1), " 日本語プ… ".to_owned()))
+        );
+        assert_eq!(
+            project_badge("a-very-long-repository-name", menu_row(80), 44, 26),
+            None,
+            "four columns of name would keep three letters of it, which names nothing"
+        );
+        assert_eq!(
+            project_badge("app", menu_row(80), 44, 27),
+            Some((Rect::new(46, 0, 5, 1), " app ".to_owned())),
+            "a short name that fits whole is drawn in the narrowest gap that holds it"
+        );
+        assert_eq!(project_badge("", menu_row(120), 44, 30), None);
+        assert_eq!(project_badge("  ", menu_row(120), 44, 30), None);
+    }
+
+    #[test]
+    fn the_menu_row_names_the_project_highlighted_between_the_menus_and_the_model() {
+        let mut app = App::new(crate::app::Repo {
+            name: "niobe".to_owned(),
+            ..Default::default()
+        });
+        let theme = *app.theme();
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 30))
+            .expect("a test terminal");
+        terminal
+            .draw(|frame| draw(frame, &mut app))
+            .expect("drawing never fails on a test backend");
+        let buffer = terminal.backend().buffer();
+        let row: String = (0..120).map(|x| buffer[(x, 0)].symbol()).collect();
+        assert_eq!(row.find(" niobe "), Some(56), "centred on the row: {row:?}");
+        for x in 56..63 {
+            let cell = &buffer[(x, 0)];
+            assert_eq!(
+                (cell.bg, cell.fg),
+                (theme.menu_hot, theme.menu_bg),
+                "column {x}"
+            );
+            assert!(cell.modifier.contains(Modifier::BOLD), "column {x}");
+        }
+    }
+
     fn row_of(app: &App) -> Vec<String> {
         identity_segments(app, &Theme::default())
             .into_iter()

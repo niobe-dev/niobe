@@ -1,4 +1,4 @@
- Niobe  Session  Context  Model  View  Help                   ● working 1m 15s
+ Niobe  Session  Context  Model  View  Help    example-app    ● working 1m 15s
 ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━ > fix the etag test ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
 ┃                                                         ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄  ┃
 ┃                                                          fix the etag test   ┃

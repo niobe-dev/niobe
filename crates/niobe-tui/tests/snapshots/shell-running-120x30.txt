@@ -1,4 +1,4 @@
- Niobe  Session  Context  Model  View  Help                                                           ○ idle 0s  00:17
+ Niobe  Session  Context  Model  View  Help              niobe                                        ○ idle 0s  00:17
  ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ Session ─ niobe ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓ ┌─────────────── Usage ────────────────┐
  ┃   Ran 1 shell command, running cargo build…                               ┃ │ 5h   —                               │
  ┃                                                                           ┃ │ 7d   —                               │

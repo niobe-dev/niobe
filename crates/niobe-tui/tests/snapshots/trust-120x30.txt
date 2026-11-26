@@ -1,4 +1,4 @@
- Niobe  Session  Context  Model  View  Help                                                             ○ not attached
+ Niobe  Session  Context  Model  View  Help              niobe                                          ○ not attached
  ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ Session ─ niobe ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓ ┌─────────────── Usage ────────────────┐
  ┃  No backend attached. `niobe profiles` shows what is defined.             ┃ │ no tokens reported yet               │
  ┃      +  .                                                                 ┃ └──────────────────────────────────────┘

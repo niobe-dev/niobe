@@ -1,4 +1,4 @@
- Niobe  Session  Context  Model  View  Help                                                                                                            opus-5  claude · default  ○ not attached  13:51
+ Niobe  Session  Context  Model  View  Help                                                   example-app                                              opus-5  claude · default  ○ not attached  13:51
  ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ > write the six pages ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓ ┌───────────────────── Usage ──────────────────────┐
  ┃                                                                                                                        ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄  ┃ │ opus-5    100% ▓▓▓▓▓▓▓▓▓▓▓▓  369k                │
  ┃                                                                                                                         write the six pages   ┃ │ cache hit  98% ▓▓▓▓▓▓▓▓▓▓▓░  352k                │

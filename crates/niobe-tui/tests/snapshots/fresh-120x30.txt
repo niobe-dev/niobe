@@ -1,4 +1,4 @@
- Niobe  Session  Context  Model  View  Help                                                                 ○ starting
+ Niobe  Session  Context  Model  View  Help              niobe                                              ○ starting
  ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ Session ─ niobe ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓ ┌─────────────── Usage ────────────────┐
  ┃                                                                           ┃ │ 5h   —                               │
  ┃  Welcome to Niobe, the coding agent that                                  ┃ │ 7d   —                               │

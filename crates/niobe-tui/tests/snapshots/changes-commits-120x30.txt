@@ -1,4 +1,4 @@
- Niobe  Session  Context  Model  View  Help                                                      ○ not attached  13:41
+ Niobe  Session  Context  Model  View  Help              niobe                                   ○ not attached  13:41
  ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ Session ─ niobe ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓ ┌─────────────── Usage ────────────────┐
  ┃                                                                           ┃ │ no tokens reported yet               │
  ┃  Welcome to Niobe, the coding agent that                                  ┃ └──────────────────────────────────────┘

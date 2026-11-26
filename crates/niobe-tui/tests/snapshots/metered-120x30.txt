@@ -1,4 +1,4 @@
- Niobe  Session  Context  Model  View  Help                            opus-5  claude · default  ○ not attached  13:41
+ Niobe  Session  Context  Model  View  Help           example-app      opus-5  claude · default  ○ not attached  13:41
  ┏━━ > add etag support to the catalog fetcher so we stop re-downloading… ━━━┓ ┌─────────────── Usage ────────────────┐
  ┃ ◆ Reading catalog/fetch.ts and its callers first. Two call sites, one     ┃ │ session ≥~$0.07 · ≥~$2.37/h worked   │
  ┃   test file.                                                              ┃ │ ──────────────────────────────────── │
