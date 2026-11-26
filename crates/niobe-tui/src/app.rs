@@ -84,10 +84,6 @@ pub struct Repo {
     /// path the agent names it by, relative to that directory. What `@`
     /// completes a file from.
     pub files: Vec<String>,
-    /// When the read this came from began, where it came from one. What the
-    /// shell compares a turn's end with: only a read that began after the
-    /// turn ended says what the turn left behind.
-    pub began: Option<Instant>,
     /// The commits on the checked-out branch made since the session began,
     /// the newest first, as the repository names them; empty where none
     /// were, or nobody has read it.

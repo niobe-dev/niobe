@@ -16,8 +16,6 @@
 //! read that worked on screen, which is also what a read that failed or is
 //! still running looks like from here.
 
-use std::time::Instant;
-
 use crate::app::{Repo, ShownCommit};
 
 /// Where the shell gets the state of the repository it is running in.
@@ -33,18 +31,6 @@ pub trait Watch {
     /// pane catches up sooner than the next scheduled read would.
     /// Advisory: a watch that reads on its own cadence may ignore it.
     fn changed(&mut self) {}
-
-    /// When the newest read that failed began, of those [`Watch::look`] has
-    /// come across since the last call, or `None` where none has: asked after
-    /// `look`, once a tick. Never blocks.
-    ///
-    /// A failed read leaves the pane as it was, but the shell may be waiting
-    /// on a read that began after a moment — the end of a turn — and one
-    /// that failed is the answer it would otherwise never get: the next read
-    /// that works may come only after something else has changed the tree.
-    fn failed(&mut self) -> Option<Instant> {
-        None
-    }
 
     /// Asks for the commit named `id` read whole — who made it and when, its
     /// whole message and the files it changed with the lines each gained and

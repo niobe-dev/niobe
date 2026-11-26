@@ -648,9 +648,7 @@ const IDLE_SHARE: u32 = 20;
 pub struct Watcher {
     /// Reads that have finished. The thread sends only what differs from what
     /// it last sent, so a repository nobody is changing costs the loop nothing.
-    reads: Receiver<Read>,
-    /// When the newest failed read the loop has not been told of began.
-    failed: Option<Instant>,
+    reads: Receiver<Repo>,
     /// Asks for a read now. Dropping it is also how the thread is told the
     /// session is over: its wait ends disconnected and it returns.
     nudge: Sender<()>,
@@ -667,20 +665,7 @@ impl Watch for Watcher {
         // The newest, not the oldest: a tick that was slow may have several
         // reads behind it, and the older ones describe a repository that has
         // already moved on.
-        let mut newest = None;
-        for read in self.reads.try_iter() {
-            match read {
-                Read::Done(repo) => newest = Some(repo),
-                Read::Failed(began) => self.failed = Some(began),
-            }
-        }
-        newest
-    }
-
-    fn failed(&mut self) -> Option<Instant> {
-        // Gathered by `look`, which drains the channel: draining it here too
-        // would drop a read that worked for want of anywhere to hand it.
-        self.failed.take()
+        self.reads.try_iter().last()
     }
 
     fn changed(&mut self) {
@@ -728,21 +713,11 @@ pub fn watch(root: &Path, began: SystemTime) -> Watcher {
 
     Watcher {
         reads: from_reads,
-        failed: None,
         nudge,
         root,
         shown,
         read_shown,
     }
-}
-
-/// What one read of the repository came to.
-#[derive(Debug)]
-enum Read {
-    /// The repository as the read found it.
-    Done(Repo),
-    /// The read that began then failed.
-    Failed(Instant),
 }
 
 /// Reads the repository until the shell stops asking.
@@ -753,54 +728,35 @@ enum Read {
 fn keep_reading(
     root: &Path,
     (name, opened): (&str, SystemTime),
-    reads: &Sender<Read>,
+    reads: &Sender<Repo>,
     nudged: &Receiver<()>,
 ) {
     let mut last: Option<Repo> = None;
     let mut counts = Counts::default();
-    // Whether this read was asked for. One that was is sent even where the
-    // tree is as it was: the shell asked so as to know the tree as of a
-    // moment, and a read that says nothing leaves it not knowing.
-    let mut asked = false;
 
     loop {
         let began = Instant::now();
         let sent = match read(root, (name, opened), &mut counts) {
-            Ok(repo) if asked || !last.as_ref().is_some_and(|last| unchanged(last, &repo)) => {
-                let sent = reads.send(Read::Done(repo.clone()));
+            Ok(repo) if last.as_ref() != Some(&repo) => {
+                let sent = reads.send(repo.clone());
                 last = Some(repo);
                 sent
             }
-            Ok(_) => Ok(()),
-            // Said every time, whether asked for or not: the shell may be
-            // waiting on any read that began after a moment, and this one is
-            // the only word it gets of one that will not come.
-            Err(_) => reads.send(Read::Failed(began)),
+            Ok(_) | Err(_) => Ok(()),
         };
         if sent.is_err() {
             return;
         }
         let idle = REFRESH.max(began.elapsed().saturating_mul(IDLE_SHARE));
 
-        asked = match nudged.recv_timeout(idle) {
+        match nudged.recv_timeout(idle) {
             // A turn changes many files and every one of them asks; they are
             // drained into the single read that follows.
-            Ok(()) => {
-                while nudged.try_recv().is_ok() {}
-                true
-            }
-            Err(RecvTimeoutError::Timeout) => false,
+            Ok(()) => while nudged.try_recv().is_ok() {},
+            Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => return,
-        };
+        }
     }
-}
-
-/// Whether `repo` holds what `last` did, whenever each was read.
-fn unchanged(last: &Repo, repo: &Repo) -> bool {
-    Repo {
-        began: repo.began,
-        ..last.clone()
-    } == *repo
 }
 
 /// The files the working tree of the repository at `root` holds changed or
@@ -869,7 +825,6 @@ fn read(
     (name, opened): (&str, SystemTime),
     counts: &mut Counts,
 ) -> Result<Repo, String> {
-    let started = Instant::now();
     let began = SystemTime::now();
     let status = branch_status(&git(root, STATUS)?);
 
@@ -920,7 +875,6 @@ fn read(
         working,
         head: status.head,
         files,
-        began: Some(started),
         commits,
     })
 }
@@ -2743,22 +2697,6 @@ mod tests {
     }
 
     #[test]
-    fn a_read_asked_for_comes_back_dated_after_the_asking_though_nothing_changed() {
-        let dir = repository();
-        let work = dir.path().join("work");
-        let mut watching = watch(&work, SystemTime::now());
-        let first = within(&mut watching, Duration::from_secs(60)).expect("a read comes back");
-
-        let asked = Instant::now();
-        watching.changed();
-        let again = within(&mut watching, Duration::from_secs(60))
-            .expect("a read asked for comes back even where the tree is as it was");
-
-        assert!(again.began.is_some_and(|began| began >= asked), "{again:?}");
-        assert!(unchanged(&first, &again), "the tree itself did not move");
-    }
-
-    #[test]
     fn a_watch_on_a_directory_that_is_not_a_repository_hands_over_nothing() {
         let dir = tempfile::tempdir().expect("a temporary directory can be created");
 
@@ -2768,27 +2706,6 @@ mod tests {
             within(&mut watching, Duration::from_secs(1)),
             None,
             "an emptied pane and a failed read must not look the same"
-        );
-    }
-
-    #[test]
-    fn a_read_asked_for_that_fails_is_reported_dated_after_the_asking() {
-        let dir = tempfile::tempdir().expect("a temporary directory can be created");
-        let mut watching = watch(dir.path(), SystemTime::now());
-
-        let asked = Instant::now();
-        watching.changed();
-        let until = Instant::now() + Duration::from_secs(60);
-        let mut failed = None;
-        while failed.is_none_or(|began| began < asked) && Instant::now() < until {
-            assert_eq!(watching.look(), None, "a failed read hands over no tree");
-            failed = watching.failed().or(failed);
-            std::thread::sleep(Duration::from_millis(10));
-        }
-
-        assert!(
-            failed.is_some_and(|began| began >= asked),
-            "the read asked for failed and nothing said so: {failed:?}"
         );
     }
 

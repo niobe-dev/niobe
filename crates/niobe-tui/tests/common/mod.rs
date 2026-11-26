@@ -464,7 +464,6 @@ fn read_repository() -> Repo {
             .filter(|path| !path.contains(" => "))
             .collect(),
         head: None,
-        began: None,
         commits: Vec::new(),
     }
 }

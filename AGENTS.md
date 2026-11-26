@@ -530,8 +530,7 @@ reviewers that encode both, for an agent working in this tree.
   file there would leave the settings copy or an output for a commit, refused where it tracks a
   file — and
   the `git` reads of the working tree made on a thread of its own as the shell's `Watch`,
-  each dated by when it began and, where the shell asked for it, sent though nothing changed,
-  and each listing the commits on `HEAD` committed since the session began, newest first, read
+  each sent only where it differs from the last, and each listing the commits on `HEAD` committed since the session began, newest first, read
   by committer date with `git log`, whose signature check, which runs the program the config
   names, is turned off; and a commit the operator opens read with `git show` on a thread of
   its own — who made it, its whole message, and each file it changed with the lines it gained
