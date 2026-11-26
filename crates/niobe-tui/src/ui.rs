@@ -5468,21 +5468,35 @@ fn body_lines(
                 })
                 .collect()
         }
-        // Dim and slanted, as an aside: the agent saying what it is about to
-        // do, which the reply it ends with is read over.
-        EntryKind::Narration => text::wrap(entry.body.trim_end(), width)
-            .into_iter()
-            .map(|wrapped| {
-                Line::from(Span::styled(
-                    wrapped,
-                    Style::new().fg(theme.dim).add_modifier(Modifier::ITALIC),
-                ))
-            })
-            .collect(),
+        EntryKind::Narration => narration_lines(entry.body.trim_end(), width, theme),
         EntryKind::Tool | EntryKind::Failure | EntryKind::Notice => {
             plain_lines(&entry.body, width, theme.fg)
         }
     }
+}
+
+/// What opens the words of the model's thinking, upright: without it, dim
+/// slanted words under the reply's own kind of mark read as a reply drawn in
+/// another style for no reason.
+const THINKING: &str = "Thinking · ";
+
+/// The model's thinking, wrapped to `width`: dim and slanted, as an aside —
+/// the agent saying what it is about to do, which the reply it ends with is
+/// read over — after [`THINKING`], which says what it is.
+fn narration_lines(body: &str, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    let label = Style::new().fg(theme.dim);
+    let words = label.add_modifier(Modifier::ITALIC);
+    text::wrap(&format!("{THINKING}{body}"), width)
+        .into_iter()
+        .enumerate()
+        .map(|(row, wrapped)| match wrapped.strip_prefix(THINKING) {
+            Some(rest) if row == 0 => Line::from(vec![
+                Span::styled(THINKING, label),
+                Span::styled(rest.to_owned(), words),
+            ]),
+            _ => Line::from(Span::styled(wrapped, words)),
+        })
+        .collect()
 }
 
 /// Text shown as typed, wrapped to `width`, in `colour`.

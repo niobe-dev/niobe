@@ -272,7 +272,7 @@ reviewers that encode both, for an agent working in this tree.
   operator ran and a hand-off to a sub-agent, whose own words and calls are left to the view
   narrowed to it; Ctrl+O draws every call, and the session's replies and its notices carry
   their glyph and no head line naming them; what an agent says of its work as it goes — a
-  `Narration`, never its reply — is one of the things it said, drawn dim and slanted under `∴`. `bubble.rs` draws the operator's prompt as a
+  `Narration`, never its reply — is one of the things it said, drawn dim and slanted under `∴`, after an upright `Thinking ·` that says what it is. `bubble.rs` draws the operator's prompt as a
   messenger draws what one sends — on the right, in a bubble of the theme's `user_bg` with
   half-cell top and bottom and square corners, casting the theme's `shadow` a column right and
   half a row down, no name over it, what became of it under it — and so each answer the

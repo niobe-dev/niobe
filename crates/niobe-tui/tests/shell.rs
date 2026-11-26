@@ -9236,13 +9236,18 @@ fn what_the_agent_says_of_its_work_stands_between_the_calls_it_splits() {
     };
     let (before, said, after) = (
         at("Read 2 files"),
-        at("∴ Reading the scene code next"),
+        at("∴ Thinking · Reading the scene code next"),
         at("Read 1 file"),
     );
     assert!(before < said && said < after, "{frame}");
     let style = style_at(&mut app, 120, 30, "Reading the scene code").expect("it is drawn");
     assert!(style.add_modifier.contains(Modifier::ITALIC), "{style:?}");
     assert_eq!(style.fg, Some(empty_session().theme().dim), "{style:?}");
+    // What the slanted words are is said upright before them: without it
+    // they read as a reply drawn in another style for no reason.
+    let label = style_at(&mut app, 120, 30, "Thinking ·").expect("the label is drawn");
+    assert!(!label.add_modifier.contains(Modifier::ITALIC), "{label:?}");
+    assert_eq!(label.fg, Some(empty_session().theme().dim), "{label:?}");
 }
 
 /// The moment `seconds` after the epoch, as the loop hands the clock in.
