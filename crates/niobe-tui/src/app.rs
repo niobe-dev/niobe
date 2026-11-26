@@ -2495,6 +2495,11 @@ impl App {
     pub fn new(repo: Repo) -> Self {
         let theme = Theme::default();
         let mut composer = TextArea::default();
+        // No undo: the editor's would answer Ctrl+U and Ctrl+R with Shift,
+        // Cmd or Meta held, which the shell's own bindings do not catch, and
+        // its history holds every prompt and `!` command the shell emptied
+        // the composer of to send — a stray chord put one back, as a prompt.
+        composer.set_max_histories(0);
         // A prompt is prose, so it wraps rather than scrolling sideways, and a
         // path or a URL longer than the pane falls back to breaking mid-word.
         composer.set_wrap_mode(WrapMode::WordOrGlyph);
@@ -15686,6 +15691,38 @@ mod tests {
             "{:?}",
             sheet.rows
         );
+    }
+
+    /// The editor's own undo and redo answer Ctrl+U and Ctrl+R with Shift,
+    /// Cmd or Meta held too, and its history held every prompt and `!`
+    /// command the shell had emptied the composer of to send: a stray chord
+    /// put a command run hours before back in the composer, as a prompt.
+    #[test]
+    fn no_chord_brings_back_a_prompt_or_a_command_already_sent() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let held = [
+            KeyModifiers::SHIFT,
+            KeyModifiers::SUPER,
+            KeyModifiers::META,
+            KeyModifiers::HYPER,
+        ];
+        for c in ['u', 'r'] {
+            for also in held {
+                let mut app = app().attached().runs_commands();
+                app.on_paste("! gh secret set NAME");
+                app.on_key(key(KeyCode::Enter));
+                send_prompt(&mut app, "secret is set");
+
+                for _ in 0..3 {
+                    app.on_key(KeyEvent::new(
+                        KeyCode::Char(c),
+                        KeyModifiers::CONTROL | also,
+                    ));
+                }
+
+                assert_eq!(app.composed(), "", "Ctrl+{also:?}+{c}");
+            }
+        }
     }
 
     #[test]
