@@ -695,6 +695,7 @@ fn model_picker(p: &str) -> App {
             description: Some(format!("desc {p}")),
             resolves_to: Some(format!("exact{p}")),
             auto_mode: None,
+            effort_levels: None,
         }],
     });
     app.on_key(key(KeyCode::F(4)));

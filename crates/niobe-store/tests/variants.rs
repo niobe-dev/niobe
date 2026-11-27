@@ -255,6 +255,7 @@ fn one_of_each() -> Vec<Event> {
                 description: Some(text("the big one")),
                 resolves_to: Some(text("claude-opus-4-8")),
                 auto_mode: Some(false),
+                effort_levels: Some(vec![text("high")]),
             }],
         },
         Event::TurnTotalDiffers {

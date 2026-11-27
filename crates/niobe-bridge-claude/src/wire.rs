@@ -229,8 +229,9 @@ pub(crate) struct Command {
 
 /// One model the answer to `initialize` lists.
 ///
-/// Each also says which effort levels and modes it supports; only whether it
-/// runs `auto` is read, which is what a mode change is refused on.
+/// Each also says which effort levels and modes it supports; whether it runs
+/// `auto`, which is what a mode change is refused on, and the effort levels
+/// it takes, which are all the shell is offered and shown, are read.
 #[derive(Debug, Deserialize)]
 pub(crate) struct Model {
     /// What the CLI takes it by, on `--model` and `set_model` alike.
@@ -247,6 +248,13 @@ pub(crate) struct Model {
     /// the list can tell from a CLI that does not say.
     #[serde(rename = "supportsAutoMode")]
     pub(crate) supports_auto_mode: Option<bool>,
+    /// Whether the model takes an effort level at all. Like
+    /// `supportsAutoMode`, the CLI writes it only as `true`.
+    #[serde(rename = "supportsEffort")]
+    pub(crate) supports_effort: Option<bool>,
+    /// The effort levels the model takes, in the CLI's order.
+    #[serde(rename = "supportedEffortLevels")]
+    pub(crate) supported_effort_levels: Option<Vec<String>>,
 }
 
 /// What a background task has used, as the CLI counts it for the task alone.

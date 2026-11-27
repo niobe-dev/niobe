@@ -476,6 +476,21 @@ pub struct ModelOption {
     /// backend that does not say leaves it unknown, which is not a refusal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_mode: Option<bool>,
+    /// The effort levels the model takes, in the backend's words and order,
+    /// where the backend said; empty for a model it said takes none. A
+    /// backend that does not say leaves it unknown, which offers every level.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort_levels: Option<Vec<String>>,
+}
+
+impl ModelOption {
+    /// Whether the model takes the effort `level`: `false` only where the
+    /// backend listed what it takes and `level` is not among them.
+    pub fn takes_effort(&self, level: &str) -> bool {
+        self.effort_levels
+            .as_ref()
+            .is_none_or(|levels| levels.iter().any(|taken| taken == level))
+    }
 }
 
 /// A Model Context Protocol server the backend has configured for the

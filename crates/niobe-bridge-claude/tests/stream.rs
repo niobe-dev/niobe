@@ -2416,6 +2416,36 @@ fn a_model_the_cli_leaves_unmarked_among_marked_ones_cannot_run_auto() {
     );
 }
 
+/// The CLI lists the effort levels each model takes under
+/// `supportedEffortLevels`, and leaves `supportsEffort` off one that takes
+/// none — Haiku, in the recording — so a Haiku session is not shown, or sent,
+/// a level it does not run at, and Opus 4.6 is not offered `xhigh`.
+#[test]
+fn each_model_takes_the_effort_levels_the_cli_lists_and_haiku_takes_none() {
+    let state = SessionState::replay(&translate(MODELS_LISTED));
+    let levels = |id: &str| {
+        state
+            .models()
+            .iter()
+            .find(|model| model.id == id)
+            .and_then(|model| model.effort_levels.clone())
+    };
+
+    assert_eq!(levels("haiku"), Some(Vec::new()));
+    assert_eq!(
+        levels("opus"),
+        Some(
+            ["low", "medium", "high", "xhigh", "max"]
+                .map(String::from)
+                .to_vec()
+        )
+    );
+    assert_eq!(
+        levels("claude-opus-4-6"),
+        Some(["low", "medium", "high", "max"].map(String::from).to_vec())
+    );
+}
+
 const MCP_SERVERS: &str = include_str!("fixtures/mcp-servers.jsonl");
 const MCP_STATUS: &str = include_str!("fixtures/mcp-status.jsonl");
 

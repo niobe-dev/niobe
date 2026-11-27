@@ -700,16 +700,38 @@ impl EffortDial {
         (self.at != self.was).then(|| self.level()).flatten()
     }
 
-    /// One level lower, staying on the lowest; the lowest from none.
-    fn lower(&mut self) {
-        self.at = Some(self.at.map_or(0, |at| at.saturating_sub(1)));
+    /// The next level lower that `takes`, staying where none is; the lowest
+    /// it takes from none.
+    fn lower(&mut self, takes: impl Fn(&str) -> bool) {
+        let below = match self.at {
+            Some(at) => EFFORTS.iter().take(at).rposition(|level| takes(level)),
+            None => EFFORTS.iter().position(|level| takes(level)),
+        };
+        self.at = below.or(self.at);
     }
 
-    /// One level higher, staying on the highest; the lowest from none.
-    pub(crate) fn higher(&mut self) {
-        let last = EFFORTS.len().saturating_sub(1);
-        self.at = Some(self.at.map_or(0, |at| at.saturating_add(1).min(last)));
+    /// The next level higher that `takes`, staying where none is; the lowest
+    /// it takes from none.
+    pub(crate) fn higher(&mut self, takes: impl Fn(&str) -> bool) {
+        let from = self.at.map_or(0, |at| at.saturating_add(1));
+        let above =
+            (from..EFFORTS.len()).find(|&at| EFFORTS.get(at).is_some_and(|level| takes(level)));
+        self.at = above.or(self.at);
     }
+}
+
+/// The effort this shell set the backend at, which stands over the level the
+/// backend said its settings start it at.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+enum EffortSet {
+    /// Nothing set here: the level is the one the backend said.
+    #[default]
+    Nothing,
+    /// One of [`EFFORTS`], chosen here or the one the backend was started at.
+    Level(String),
+    /// Something the shell does not model, such as `/effort auto`, which
+    /// hands the level to the model's default: no level is known in force.
+    Unnamed,
 }
 
 /// One row of a [`Picker`]: what choosing it sends, and what it is called and
@@ -1941,13 +1963,13 @@ pub struct App {
     /// backend refusing one a choice not to keep: a refusal read back from a
     /// record refuses a choice made in another session.
     model_chosen_here: bool,
-    /// The effort level last chosen here, or the one the backend was started
-    /// with; the backend does not report the level in force.
-    effort: Option<String>,
-    /// The effort in force before the one just chosen, while the prompt that
-    /// chooses it has not reached the backend: one it never reaches is no
-    /// choice, and the level before it comes back.
-    effort_before_sent: Option<Option<String>>,
+    /// The effort last set here, or the level the backend was started with;
+    /// the backend reports the level in force only as it starts.
+    effort: EffortSet,
+    /// The effort set before the one just set, while the prompt that sets it
+    /// has not reached the backend: one it never reaches is no choice, and
+    /// what was set before it comes back.
+    effort_before_sent: Option<EffortSet>,
     /// Events the operator produced that have not been handed out to be kept.
     produced: Vec<Event>,
     /// The images attached to prompts, and the ones asked for.
@@ -2547,7 +2569,7 @@ impl App {
             learned: Vec::new(),
             preferred: Vec::new(),
             model_chosen_here: false,
-            effort: None,
+            effort: EffortSet::Nothing,
             effort_before_sent: None,
             produced: Vec::new(),
             images: Attachments::default(),
@@ -4995,32 +5017,46 @@ impl App {
 
     /// How hard the model works on a turn: the level chosen here or the
     /// backend was started with, or else the one the backend said its
-    /// settings start it at; `None` where nothing has said.
+    /// settings start it at; `None` where nothing has said, where something
+    /// set here named no level, and where the backend said the model in force
+    /// does not take the level.
     pub fn effort(&self) -> Option<&str> {
-        self.effort
-            .as_deref()
-            .or_else(|| self.session.configured_effort())
+        let level = match &self.effort {
+            EffortSet::Level(level) => Some(level.as_str()),
+            EffortSet::Unnamed => None,
+            EffortSet::Nothing => self.session.configured_effort(),
+        }?;
+        self.offer_in_force()
+            .is_none_or(|offer| offer.takes_effort(level))
+            .then_some(level)
     }
 
     /// Notes `effort` as the level in force, and keeps it for the next
     /// session.
     fn chose_effort(&mut self, effort: &str) {
-        let before = self.effort.replace(effort.to_owned());
-        self.effort_before_sent = Some(before);
+        self.set_effort(EffortSet::Level(effort.to_owned()));
         self.preferred.push(Preference::Effort(effort.to_owned()));
     }
 
-    /// Takes back the effort chosen with a prompt that never reached the
-    /// backend, and the preference it would have kept for the next session.
+    /// Notes `set` as the effort set here, keeping what it replaces until the
+    /// prompt that sets it reaches the backend.
+    fn set_effort(&mut self, set: EffortSet) {
+        let before = std::mem::replace(&mut self.effort, set);
+        self.effort_before_sent = Some(before);
+    }
+
+    /// Takes back the effort set with a prompt that never reached the
+    /// backend, and the preference a level kept for the next session.
     fn effort_not_sent(&mut self) {
         let Some(before) = self.effort_before_sent.take() else {
             return;
         };
-        self.effort = before;
-        if let Some(at) = self
-            .preferred
-            .iter()
-            .rposition(|preference| matches!(preference, Preference::Effort(_)))
+        let unsent = std::mem::replace(&mut self.effort, before);
+        if matches!(unsent, EffortSet::Level(_))
+            && let Some(at) = self
+                .preferred
+                .iter()
+                .rposition(|preference| matches!(preference, Preference::Effort(_)))
         {
             self.preferred.remove(at);
         }
@@ -5488,7 +5524,8 @@ impl App {
         });
     }
 
-    /// Opens the list of effort levels, where the backend takes `/effort`.
+    /// Opens the list of effort levels, where the backend takes `/effort`:
+    /// those the backend said the model in force takes, where it said.
     ///
     /// The cursor starts on the level chosen here or the backend was started
     /// with, which is marked as the one in force; where neither, on the
@@ -5498,7 +5535,20 @@ impl App {
             self.hint = Some(why);
             return;
         }
-        let options: Vec<Choice> = EFFORTS.iter().copied().map(Choice::plain).collect();
+        let offer = self.offer_in_force();
+        let options: Vec<Choice> = EFFORTS
+            .iter()
+            .copied()
+            .filter(|level| offer.is_none_or(|offer| offer.takes_effort(level)))
+            .map(Choice::plain)
+            .collect();
+        if let Some(offer) = offer.filter(|_| options.is_empty()) {
+            self.hint = Some(format!(
+                "Effort — the backend says {} takes no effort level",
+                offer.id
+            ));
+            return;
+        }
         let at = self.effort_row(&options).unwrap_or(0);
         self.picking = Some(Picker {
             purpose: Purpose::Effort,
@@ -5718,8 +5768,8 @@ impl App {
         match key.code {
             KeyCode::Up => picker.at = picker.at.saturating_sub(1),
             KeyCode::Down => picker.at = picker.at.saturating_add(1).min(last),
-            KeyCode::Left => picker.effort.iter_mut().for_each(EffortDial::lower),
-            KeyCode::Right => picker.effort.iter_mut().for_each(EffortDial::higher),
+            KeyCode::Left => self.move_effort(false),
+            KeyCode::Right => self.move_effort(true),
             KeyCode::Esc => self.picking = None,
             KeyCode::Enter => {
                 let purpose = picker.purpose;
@@ -5727,8 +5777,14 @@ impl App {
                     .options
                     .get(picker.at)
                     .map(|choice| choice.value.clone());
-                let effort = picker.effort.and_then(EffortDial::moved);
+                let dial = picker.effort;
                 self.picking = None;
+                let effort = dial.and_then(EffortDial::moved).filter(|level| {
+                    chosen
+                        .as_deref()
+                        .and_then(|model| self.offer_of(model))
+                        .is_none_or(|offer| offer.takes_effort(level))
+                });
                 if let Some(chosen) = chosen {
                     self.choose(purpose, chosen);
                 }
@@ -5737,6 +5793,30 @@ impl App {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Moves the model list's effort dial a level higher or lower, over the
+    /// levels the backend said the model under the cursor does not take.
+    fn move_effort(&mut self, higher: bool) {
+        let Some(picker) = self.picking.as_ref() else {
+            return;
+        };
+        let Some(mut dial) = picker.effort else {
+            return;
+        };
+        let offer = picker
+            .options
+            .get(picker.at)
+            .and_then(|choice| self.offer_of(&choice.value));
+        let takes = |level: &str| offer.is_none_or(|offer| offer.takes_effort(level));
+        if higher {
+            dial.higher(takes);
+        } else {
+            dial.lower(takes);
+        }
+        if let Some(picker) = self.picking.as_mut() {
+            picker.effort = Some(dial);
         }
     }
 
@@ -6960,19 +7040,25 @@ impl App {
     /// `auto` mode. Unknown — no model reported, none of the listed ones the
     /// one running, or a backend that did not say — is not a refusal.
     fn model_cannot_run_auto(&self) -> bool {
-        let Some(running) = self.session.model() else {
-            return false;
-        };
-        let offered = self.session.models();
-        offered
-            .iter()
-            .find(|offer| offer.id == running)
-            .or_else(|| {
-                offered
-                    .iter()
-                    .find(|offer| offer.resolves_to.as_deref() == Some(running))
-            })
+        self.offer_in_force()
             .is_some_and(|offer| offer.auto_mode == Some(false))
+    }
+
+    /// What the backend offered of the model this session runs on, where it
+    /// listed it.
+    fn offer_in_force(&self) -> Option<&niobe_core::event::ModelOption> {
+        self.offer_of(self.session.model()?)
+    }
+
+    /// What the backend offered of `model`, by the id it takes it by or else
+    /// by the exact model an id runs on today.
+    fn offer_of(&self, model: &str) -> Option<&niobe_core::event::ModelOption> {
+        let offered = self.session.models();
+        offered.iter().find(|offer| offer.id == model).or_else(|| {
+            offered
+                .iter()
+                .find(|offer| offer.resolves_to.as_deref() == Some(model))
+        })
     }
 
     /// The session's reply still being written, where nothing drawn since it
@@ -7133,7 +7219,7 @@ impl App {
     /// opens on and marks as the level in force.
     #[must_use]
     pub fn with_effort(mut self, effort: Option<String>) -> Self {
-        self.effort = effort;
+        self.effort = effort.map_or(EffortSet::Nothing, EffortSet::Level);
         self
     }
 
@@ -10614,12 +10700,16 @@ impl App {
         }
         let argument = argument.map(str::to_owned);
         // A level typed after `/effort` is chosen as one picked from the
-        // list is; anything else after it is the backend's to make sense of.
+        // list is; anything else after it is the backend's to make sense of,
+        // and leaves no level known in force — `auto` hands it to the model.
         if typed.action == crate::menu::Action::Effort
             && let Some(level) = argument.as_deref().map(str::trim)
-            && EFFORTS.contains(&level)
         {
-            self.chose_effort(level);
+            if EFFORTS.contains(&level) {
+                self.chose_effort(level);
+            } else {
+                self.set_effort(EffortSet::Unnamed);
+            }
         }
         let draft = self.take_composer_for_the_shell();
         match argument {
@@ -16796,6 +16886,7 @@ mod tests {
                 description: Some(description.to_owned()),
                 resolves_to: Some(resolves_to.to_owned()),
                 auto_mode: None,
+                effort_levels: None,
             }
         };
         Event::Models {
@@ -17140,6 +17231,167 @@ mod tests {
         app.on_key(key(KeyCode::Right));
         let dial = app.picking().and_then(|picker| picker.effort);
         assert_eq!(dial.and_then(|dial| dial.level()), Some("low"));
+    }
+
+    /// [`on_opus_at_high`] whose backend listed the effort levels each
+    /// model takes as the `claude` CLI does in
+    /// `niobe-bridge-claude/tests/fixtures/models-listed.jsonl`: every level
+    /// on Opus, all but `xhigh` on Opus 4.6, and none on Haiku.
+    fn offering_effort_levels() -> App {
+        let mut app = on_opus_at_high().with_profile(SelectedProfile {
+            name: "max".to_owned(),
+            backend: Backend::Claude,
+            models: Vec::new(),
+            billing: None,
+        });
+        let model = |id: &str, levels: &[&str]| niobe_core::event::ModelOption {
+            id: id.to_owned(),
+            name: None,
+            description: None,
+            resolves_to: None,
+            auto_mode: None,
+            effort_levels: Some(levels.iter().map(|level| (*level).to_owned()).collect()),
+        };
+        app.apply(&Event::Models {
+            models: vec![
+                model("opus", &EFFORTS),
+                model("claude-opus-4-6", &["low", "medium", "high", "max"]),
+                model("haiku", &[]),
+            ],
+        });
+        app
+    }
+
+    #[test]
+    fn a_model_that_takes_no_effort_is_shown_and_sent_none() {
+        use ratatui::crossterm::event::KeyCode;
+        let mut app = offering_effort_levels();
+        app.on_key(key(KeyCode::F(4)));
+        app.on_key(key(KeyCode::Right));
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Enter));
+
+        assert_eq!(
+            app.take_produced(),
+            [Event::ModelSelected {
+                model: "haiku".to_owned()
+            }],
+            "an effort was sent to a model that takes none"
+        );
+        assert_eq!(
+            app.effort(),
+            None,
+            "the row names an effort haiku runs without"
+        );
+    }
+
+    #[test]
+    fn a_level_a_model_does_not_list_is_not_sent_or_shown_in_force_on_it() {
+        use ratatui::crossterm::event::KeyCode;
+        let mut app = offering_effort_levels();
+        app.on_key(key(KeyCode::F(4)));
+        app.on_key(key(KeyCode::Right));
+        app.on_key(key(KeyCode::Enter));
+        app.apply(&Event::TurnEnded);
+        app.take_produced();
+        assert_eq!(app.effort(), Some("xhigh"));
+
+        app.on_key(key(KeyCode::F(4)));
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Enter));
+
+        assert_eq!(
+            app.take_produced(),
+            [Event::ModelSelected {
+                model: "claude-opus-4-6".to_owned()
+            }]
+        );
+        assert_eq!(app.effort(), None, "the row names a level Opus 4.6 has not");
+    }
+
+    #[test]
+    fn the_model_lists_effort_dial_steps_over_levels_the_model_under_the_cursor_does_not_take() {
+        use ratatui::crossterm::event::KeyCode;
+        let mut app = offering_effort_levels();
+        app.on_key(key(KeyCode::F(4)));
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Right));
+        let dial = app.picking().and_then(|picker| picker.effort);
+        assert_eq!(dial.and_then(|dial| dial.level()), Some("max"));
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Left));
+        let dial = app.picking().and_then(|picker| picker.effort);
+        assert_eq!(
+            dial.and_then(|dial| dial.level()),
+            Some("max"),
+            "the dial moved on a model that takes no effort"
+        );
+    }
+
+    #[test]
+    fn the_effort_list_offers_the_levels_the_model_in_force_takes_and_opens_on_none_that_takes_none()
+     {
+        let mut app = offering_effort_levels();
+        app.apply(&Event::ModelSelected {
+            model: "claude-opus-4-6".to_owned(),
+        });
+        app.perform(crate::menu::Action::Effort);
+        let offered: Vec<String> = app
+            .picking()
+            .expect("the effort list")
+            .options
+            .iter()
+            .map(|choice| choice.value.clone())
+            .collect();
+        assert_eq!(offered, ["low", "medium", "high", "max"]);
+
+        app.picking = None;
+        app.apply(&Event::ModelSelected {
+            model: "haiku".to_owned(),
+        });
+        app.perform(crate::menu::Action::Effort);
+        assert!(
+            app.picking().is_none(),
+            "a list of levels haiku does not take"
+        );
+        assert!(
+            app.hint
+                .as_deref()
+                .is_some_and(|hint| hint.contains("haiku")),
+            "{:?}",
+            app.hint
+        );
+    }
+
+    /// `/effort auto` hands the level to the model's default, which the
+    /// backend does not name: the level picked before it is no longer in
+    /// force, and neither is the one the backend's settings started at.
+    #[test]
+    fn an_effort_typed_that_is_no_level_leaves_no_level_named_in_force() {
+        use ratatui::crossterm::event::KeyCode;
+        let mut app = on_opus_at_high();
+        app.on_key(key(KeyCode::F(4)));
+        app.on_key(key(KeyCode::Right));
+        app.on_key(key(KeyCode::Right));
+        app.on_key(key(KeyCode::Enter));
+        app.apply(&Event::TurnEnded);
+        app.take_produced();
+        assert_eq!(app.effort(), Some("max"));
+
+        let sent = submitted(&mut app, "/effort auto");
+
+        assert_eq!(
+            sent,
+            [Event::UserMessage {
+                text: "/effort auto".to_owned()
+            }]
+        );
+        assert_eq!(app.effort(), None, "the row still names the level picked");
+        app.apply(&Event::TurnEnded);
+        app.on_key(key(KeyCode::F(4)));
+        let dial = app.picking().and_then(|picker| picker.effort);
+        assert_eq!(dial.and_then(|dial| dial.level()), None);
     }
 
     /// A turn that spent `input` tokens and ended.

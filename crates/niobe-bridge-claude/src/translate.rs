@@ -5358,17 +5358,22 @@ fn mcp_status(status: String) -> McpStatus {
 /// model that cannot run `auto` — Claude Code 2.1.288 lists Haiku so, in
 /// `tests/fixtures/models-listed.jsonl`. So where the list marks any model,
 /// one it leaves unmarked is one it said cannot; where it marks none, the
-/// CLI said nothing about any, which is not a refusal.
+/// CLI said nothing about any, which is not a refusal. `supportsEffort` is
+/// written the same way and read the same way: an unmarked model among marked
+/// ones takes no effort level, and a marked one takes the levels listed under
+/// `supportedEffortLevels`, where they are.
 fn offered_models(models: Vec<wire::Model>) -> Event {
     let given = |text: Option<String>| text.filter(|text| !text.trim().is_empty());
     let marks_auto = models
         .iter()
         .any(|model| model.supports_auto_mode.is_some());
+    let marks_effort = models.iter().any(|model| model.supports_effort.is_some());
     Event::Models {
         models: models
             .into_iter()
             .filter(|model| !model.value.trim().is_empty())
             .map(|model| ModelOption {
+                effort_levels: effort_levels(&model, marks_effort),
                 id: model.value,
                 name: given(model.display_name),
                 description: given(model.description),
@@ -5376,6 +5381,16 @@ fn offered_models(models: Vec<wire::Model>) -> Event {
                 auto_mode: model.supports_auto_mode.or(marks_auto.then_some(false)),
             })
             .collect(),
+    }
+}
+
+/// The effort levels `model` takes, as [`offered_models`] reads them: none
+/// where the CLI said it takes none, or left it unmarked among marked models;
+/// unknown where it takes some but did not list them, or marked no model.
+fn effort_levels(model: &wire::Model, marks_effort: bool) -> Option<Vec<String>> {
+    match model.supports_effort.or(marks_effort.then_some(false)) {
+        Some(false) => Some(Vec::new()),
+        Some(true) | None => model.supported_effort_levels.clone(),
     }
 }
 
@@ -5557,6 +5572,8 @@ mod tests {
             description: None,
             resolved_model: None,
             supports_auto_mode: supports,
+            supports_effort: None,
+            supported_effort_levels: None,
         };
 
         let offered = offered_models(vec![
@@ -5578,6 +5595,47 @@ mod tests {
         assert!(models.iter().all(|model| model.auto_mode.is_none()));
     }
 
+    #[test]
+    fn the_effort_levels_a_model_takes_are_none_where_unmarked_among_marked_ones_and_else_unknown()
+    {
+        let model = |value: &str, supports: Option<bool>, levels: Option<&[&str]>| wire::Model {
+            value: value.to_owned(),
+            display_name: None,
+            description: None,
+            resolved_model: None,
+            supports_auto_mode: None,
+            supports_effort: supports,
+            supported_effort_levels: levels
+                .map(|levels| levels.iter().map(|level| (*level).to_owned()).collect()),
+        };
+        let levels = |offered: Event| {
+            let Event::Models { models } = offered else {
+                panic!("models were offered");
+            };
+            models
+                .into_iter()
+                .map(|model| model.effort_levels)
+                .collect::<Vec<_>>()
+        };
+
+        let marked = levels(offered_models(vec![
+            model("opus", Some(true), Some(&["low", "max"])),
+            model("sonnet", Some(true), None),
+            model("haiku", None, None),
+        ]));
+        assert_eq!(
+            marked,
+            [
+                Some(vec!["low".to_owned(), "max".to_owned()]),
+                None,
+                Some(Vec::new())
+            ]
+        );
+
+        let unmarked = levels(offered_models(vec![model("opus", None, None)]));
+        assert_eq!(unmarked, [None]);
+    }
+
     /// A name, a description or a model the CLI wrote empty or blank is one
     /// it did not give, and a model with no value to ask for it by is none.
     #[test]
@@ -5588,6 +5646,8 @@ mod tests {
             description: Some(words.to_owned()),
             resolved_model: Some(words.to_owned()),
             supports_auto_mode: None,
+            supports_effort: None,
+            supported_effort_levels: None,
         };
         let offered = offered_models(vec![
             model(" ", "Opus"),
@@ -5604,6 +5664,7 @@ mod tests {
                         description: None,
                         resolves_to: None,
                         auto_mode: None,
+                        effort_levels: None,
                     })
                     .to_vec()
             }

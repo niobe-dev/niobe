@@ -9143,7 +9143,7 @@ mod tests {
             .collect();
         assert_eq!(marked, [" high "]);
 
-        dial.higher();
+        dial.higher(|_| true);
         assert_eq!(
             line_text(&effort_line(dial, 37, &theme)),
             "Effort ‹ xhigh ›"

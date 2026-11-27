@@ -4897,6 +4897,7 @@ mod tests {
             description: None,
             resolves_to: None,
             auto_mode: None,
+            effort_levels: None,
         };
         let command = SlashCommand {
             name: "review".to_owned(),
