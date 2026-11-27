@@ -268,7 +268,8 @@ const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp"];
 /// `file://` address, depending on the terminal; each is taken back to the
 /// path. Text with a space no backslash escapes is a sentence, not a path,
 /// however it ends, unless it is quoted whole or the space is one that never
-/// breaks between words; and anything with a line break in it is text.
+/// breaks between words; and anything with a line break in it is text, as
+/// is a path longer than any file has.
 pub fn image_path(pasted: &str) -> Option<String> {
     let trimmed = pasted.trim();
     if trimmed.is_empty() || trimmed.contains(['\n', '\r']) {
@@ -283,7 +284,7 @@ pub fn image_path(pasted: &str) -> Option<String> {
         Some(address) => file_address_path(address)?,
         None => unquoted,
     };
-    (is_whole(&path) && names_an_image(&path)).then_some(path)
+    (path.len() <= LONGEST_PATH && is_whole(&path) && names_an_image(&path)).then_some(path)
 }
 
 /// Whether `path` is written whole — from the root, or from the operator's
@@ -309,6 +310,11 @@ pub fn names_an_image(path: &str) -> bool {
 
 /// How a dropped file's address starts.
 const FILE_SCHEME: &str = "file://";
+
+/// The longest path, in bytes, a pasted one is read as: Linux's `PATH_MAX`,
+/// four times macOS's. No file on either has a longer one, so a paste past it
+/// is text, and the path a dropped file is named by on the bar stays short.
+const LONGEST_PATH: usize = 4096;
 
 /// `text` without the quotes around it, where it is quoted whole.
 fn quoted(text: &str) -> Option<&str> {
@@ -494,6 +500,18 @@ mod tests {
         ] {
             assert_eq!(image_path(pasted), None, "{pasted:?}");
         }
+    }
+
+    /// No system the shell runs on names a file by a longer path than
+    /// [`LONGEST_PATH`], so a paste past it is text, never a dropped file to
+    /// read and name on the bar.
+    #[test]
+    fn a_path_longer_than_any_file_has_is_text() {
+        let longest = format!("/{}.png", "a".repeat(LONGEST_PATH - 5));
+        assert_eq!(longest.len(), LONGEST_PATH);
+        assert_eq!(image_path(&longest).as_deref(), Some(longest.as_str()));
+        let longer = format!("/{}.png", "a".repeat(LONGEST_PATH - 4));
+        assert_eq!(image_path(&longer), None);
     }
 
     fn image(tag: &[u8]) -> Image {

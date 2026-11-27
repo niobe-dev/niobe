@@ -8439,9 +8439,14 @@ impl App {
         self.images.ask(source);
     }
 
-    /// Puts `text` in the composer where the cursor is, as typing would.
+    /// Puts `text` in the composer where the cursor is, as typing would, or
+    /// refuses it whole where it would take the composer past
+    /// [`COMPOSER_CAP`], the bar saying so in place of whatever it said.
     fn insert_into_composer(&mut self, text: &str) {
         self.focus = Focus::Session;
+        if !self.composer_has_room_for(text.len()) {
+            return;
+        }
         if self.composer.insert_str(text) {
             self.offer_selected = 0;
             self.reopen_offers();
@@ -9552,14 +9557,16 @@ impl App {
             self.attach_image(Source::Clipboard);
             return;
         }
-        if let Some(path) = image_path(pasted).filter(|_| !self.shell_mode) {
-            self.focus = Focus::Session;
-            self.images.remember_paste(path.clone(), text);
-            self.attach_image(Source::File(path));
+        self.focus = Focus::Session;
+        // A dropped file that is not attached goes into the prompt as it was
+        // pasted, so it is held to the cap before anything is read, as any
+        // paste is.
+        if !self.composer_has_room_for(text.len()) {
             return;
         }
-        self.focus = Focus::Session;
-        if !self.composer_has_room_for(text.len()) {
+        if let Some(path) = image_path(pasted).filter(|_| !self.shell_mode) {
+            self.images.remember_paste(path.clone(), text);
+            self.attach_image(Source::File(path));
             return;
         }
         let text = self.open_a_pasted_command(&text);
@@ -13487,6 +13494,49 @@ mod tests {
 
             assert_eq!(app.composed(), pasted);
         }
+    }
+
+    /// A path that is not attached goes into the prompt as any paste would,
+    /// so it is held to [`COMPOSER_CAP`] as any paste is: refused whole, the
+    /// bar saying so in the composer's own words, however the fetch ended.
+    #[test]
+    fn a_path_given_back_by_a_failed_attach_is_held_to_the_prompts_cap() {
+        let long = format!("/{}.png", "a".repeat(100_000));
+        let mut pasted = app();
+        pasted.on_paste(&long);
+        assert_eq!(pasted.take_image_requests(), []);
+        pasted.fetched(Fetched {
+            source: Source::File(long.clone()),
+            image: Err("too long".to_owned()),
+        });
+        assert!(pasted.composed().len() <= COMPOSER_CAP);
+        assert_eq!(pasted.hint(), Some(TOO_LONG_HINT));
+
+        // A short path dropped on a prompt with no room left for it is
+        // refused as its text would be, before anything is read.
+        let mut full = app();
+        full.on_paste(&"a".repeat(COMPOSER_CAP - 4));
+        full.on_paste("/tmp/a.png");
+        assert_eq!(full.take_image_requests(), []);
+        assert_eq!(full.composed().len(), COMPOSER_CAP - 4);
+        assert_eq!(full.hint(), Some(TOO_LONG_HINT));
+
+        // And one the prompt had room for when it was dropped, filled while
+        // the file was read, is refused when the read fails.
+        let mut filled = app();
+        filled.on_paste(&"a".repeat(COMPOSER_CAP - 20));
+        filled.on_paste("/tmp/a.png");
+        assert_eq!(
+            filled.take_image_requests(),
+            [Source::File("/tmp/a.png".to_owned())]
+        );
+        filled.on_paste(&"b".repeat(15));
+        filled.fetched(Fetched {
+            source: Source::File("/tmp/a.png".to_owned()),
+            image: Err("it does not exist".to_owned()),
+        });
+        assert_eq!(filled.composed().len(), COMPOSER_CAP - 5);
+        assert_eq!(filled.hint(), Some(TOO_LONG_HINT));
     }
 
     #[test]
