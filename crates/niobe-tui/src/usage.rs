@@ -30,15 +30,20 @@ use crate::text;
 /// An empty input, or counts that are all zero, apportion nothing: there is no
 /// share of nothing, and a row of `0%` would claim one.
 pub fn shares(counts: &[u64]) -> Vec<u64> {
-    let total: u64 = counts.iter().copied().fold(0, u64::saturating_add);
-    if total == 0 {
+    // In 128 bits: a count past a hundredth of what 64 hold would overflow
+    // when it is multiplied by a hundred, and counts that together pass what
+    // 64 hold would cap their sum, each share then taken of a total smaller
+    // than the counts and the column adding up past a hundred. Summed
+    // saturating, the counts of more than 2⁶⁴ models would be needed to cap it.
+    let total_wide: u128 = counts
+        .iter()
+        .map(|&count| u128::from(count))
+        .fold(0, u128::saturating_add);
+    if total_wide == 0 {
         return vec![0; counts.len()];
     }
 
-    // In 128 bits: a count past a hundredth of what 64 hold would overflow
-    // when it is multiplied by a hundred.
     let wide = |count: u64| u128::from(count) * 100;
-    let total_wide = u128::from(total.max(1));
     let mut apportioned: Vec<u64> = counts
         .iter()
         .map(|&count| u64::try_from(wide(count) / total_wide).unwrap_or(100))
@@ -180,10 +185,11 @@ fn shorten(id: &str) -> String {
 /// been eligible yet, and the row reads an em dash. A `0%` there would say the
 /// cache was offered the work and missed it.
 pub fn cache_hit_rate(totals: &Totals) -> Option<f64> {
-    let eligible = totals
-        .input
-        .saturating_add(totals.cache_read)
-        .saturating_add(totals.cache_write);
+    // In 128 bits, where three 64-bit counts cannot overflow: a sum capped at
+    // what 64 hold would be smaller than the reads it divides once input and
+    // reads together pass it, and read every token as a hit.
+    let eligible =
+        u128::from(totals.input) + u128::from(totals.cache_read) + u128::from(totals.cache_write);
     match eligible {
         0 => None,
         eligible => Some(totals.cache_read as f64 / eligible as f64),
@@ -218,6 +224,16 @@ mod tests {
     fn counts_past_a_hundredth_of_what_64_bits_hold_are_shared_without_overflow() {
         assert_eq!(shares(&[u64::MAX, 1]), [100, 0]);
         assert_eq!(shares(&[u64::MAX / 100 * 98, u64::MAX / 100 * 2]), [98, 2]);
+    }
+
+    /// Two models whose counts together are past what 64 bits hold — each
+    /// already held at the most a count can be — still share one hundred,
+    /// in proportion to their counts rather than each to the capped sum.
+    #[test]
+    fn counts_that_together_pass_what_64_bits_hold_still_add_up_to_a_hundred() {
+        assert_eq!(shares(&[u64::MAX, u64::MAX]), [50, 50]);
+        assert_eq!(shares(&[u64::MAX, u64::MAX / 2]), [67, 33]);
+        assert_eq!(shares(&[u64::MAX, u64::MAX, u64::MAX]), [34, 33, 33]);
     }
 
     #[test]
@@ -375,6 +391,15 @@ mod tests {
     #[test]
     fn a_cache_write_is_a_miss_and_counts_against_the_rate() {
         let totals = folded(&[prompt(0, 500, 500)]);
+        assert_eq!(cache_hit_rate(&totals), Some(0.5));
+    }
+
+    /// Input and reads that together pass what 64 bits hold are each half
+    /// of what the prompt could have cached, not a sum held at the most a
+    /// count can be, which would read every token as a hit.
+    #[test]
+    fn a_hit_rate_whose_prompts_pass_what_64_bits_hold_is_still_their_share() {
+        let totals = folded(&[prompt(u64::MAX, u64::MAX, 0)]);
         assert_eq!(cache_hit_rate(&totals), Some(0.5));
     }
 
