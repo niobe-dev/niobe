@@ -1905,7 +1905,9 @@ pub struct App {
     ask_selected: usize,
     /// Where the keyboard is while a prompt waits.
     ask_focus: AskFocus,
-    /// The answer being written in place of the numbered ones.
+    /// The answer being written in place of the numbered ones: at most
+    /// [`COMPOSER_CAP`] bytes, since it goes into the prompt if its question
+    /// is taken away.
     ask_draft: String,
     /// The notes written about the answer to the question on screen, at
     /// most [`NOTES_CHARS`] characters, handed over with whichever answer it
@@ -2328,6 +2330,11 @@ const NOT_SUSPENDED_HINT: &str =
 /// What the bar says when the question that had the keyboard was taken away
 /// rather than answered.
 const QUESTION_WITHDRAWN_HINT: &str = "The question was withdrawn before it was answered";
+
+/// What the bar says when a question was taken away while the operator wrote
+/// for it, and what they wrote would take the prompt past [`COMPOSER_CAP`].
+const WITHDRAWN_TOO_LONG_HINT: &str = "The question was withdrawn, and what was written for it \
+     is not added: a prompt holds at most 64 KB";
 
 /// What the bar says when an Enter typed on through a withdrawn question was
 /// not taken as a send.
@@ -4546,7 +4553,8 @@ impl App {
     /// type on were meant for it. The question behind it comes up as a new
     /// one does, waiting for a quiet keyboard; with none behind it, the
     /// prompt takes those keys but no Enter among them sends it, and an
-    /// answer being written is moved into an empty prompt rather than lost.
+    /// answer being written is moved into an empty prompt rather than lost,
+    /// or after what the prompt holds where the two fit under its cap.
     fn front_ask_taken_away(&mut self) {
         // Notes are the operator's words as much as an answer is, and are
         // kept the same way, after it.
@@ -4575,7 +4583,17 @@ impl App {
         }
         // Nothing the operator wrote is dropped: an answer goes into an empty
         // prompt, or after what the prompt holds on a line of its own, and
-        // waits there where another question is queued behind this one.
+        // waits there where another question is queued behind this one —
+        // unless the two would take the prompt past its cap, where it is
+        // refused whole, as a paste would be, and the bar says so.
+        let added = match self.composer.is_empty() {
+            true => draft.len(),
+            false => draft.len().saturating_add(1),
+        };
+        if !draft.is_empty() && !self.composer_has_room_for(added) {
+            self.hint = Some(WITHDRAWN_TOO_LONG_HINT.to_owned());
+            return;
+        }
         if !draft.is_empty() {
             let kept = match self.composer.is_empty() {
                 true => self.composer.insert_str(draft),
@@ -9484,9 +9502,13 @@ impl App {
         }
         if self.asking().is_some() {
             match self.ask_focus {
-                // A written answer holds lines, as the prompt does.
+                // A written answer holds lines, as the prompt does, and no
+                // more than the prompt it goes into if the question is
+                // taken away.
                 AskFocus::Writing => {
-                    self.ask_draft.push_str(&text);
+                    if self.draft_has_room_for(text.len()) {
+                        self.ask_draft.push_str(&text);
+                    }
                     return;
                 }
                 AskFocus::Noting => {
@@ -10192,7 +10214,15 @@ impl App {
             self.answer_saying(&words);
             return;
         }
-        if !edit_words(&mut self.ask_draft, key, usize::MAX) {
+        let more = match opens_a_line(key) {
+            true => 1,
+            false => typed_char(key).map_or(0, char::len_utf8),
+        };
+        let room = match self.draft_has_room_for(more) {
+            true => usize::MAX,
+            false => 0,
+        };
+        if !edit_words(&mut self.ask_draft, key, room) {
             return;
         }
         if answer_key(key) == Some(KeyCode::Esc) {
@@ -10224,6 +10254,18 @@ impl App {
         if !edit_words(&mut self.ask_notes, key, room) {
             self.hint = Some(NOTES_FULL_HINT.to_owned());
         }
+    }
+
+    /// Whether `more` bytes still fit in the answer being written under
+    /// [`COMPOSER_CAP`], the most the prompt holds, which is where the answer
+    /// goes if its question is taken away. Where they do not, the bar says
+    /// so, as it does for the prompt.
+    fn draft_has_room_for(&mut self, more: usize) -> bool {
+        let fits = self.ask_draft.len().saturating_add(more) <= COMPOSER_CAP;
+        if !fits {
+            self.hint = Some(TOO_LONG_HINT.to_owned());
+        }
+        fits
     }
 
     /// `text` added to the notes being written, as far as they have room.
@@ -20872,6 +20914,50 @@ mod tests {
         app.apply(&Event::PermissionWithdrawn { id: "q1".into() });
         assert_eq!(app.composed(), "only on main");
         assert_eq!(app.ask_notes(), "");
+    }
+
+    /// A written answer goes into the prompt when its question is taken
+    /// away, so it holds no more than the prompt does: a paste that would
+    /// take it past [`COMPOSER_CAP`] is refused whole, and so is a key.
+    #[test]
+    fn a_written_answer_holds_no_more_than_a_prompt_does() {
+        let mut app = app().attached();
+        app.apply(&questions_asked());
+        app.on_key(key(KeyCode::Tab));
+
+        app.on_paste(&"a".repeat(COMPOSER_CAP * 2));
+        assert_eq!(app.ask_draft(), "");
+        assert_eq!(app.hint(), Some(TOO_LONG_HINT));
+
+        app.on_paste(&"a".repeat(COMPOSER_CAP));
+        assert_eq!(app.ask_draft().len(), COMPOSER_CAP);
+        app.on_key(key(KeyCode::Char('b')));
+        assert_eq!(app.ask_draft().len(), COMPOSER_CAP);
+        assert_eq!(app.hint(), Some(TOO_LONG_HINT));
+
+        app.on_key(key(KeyCode::Backspace));
+        app.on_key(key(KeyCode::Char('b')));
+        assert!(app.ask_draft().ends_with("ab"));
+        app.apply(&Event::PermissionWithdrawn { id: "q1".into() });
+        assert_eq!(app.composed().len(), COMPOSER_CAP);
+    }
+
+    /// What was written for a question taken away goes after what the
+    /// prompt holds only where the two fit under [`COMPOSER_CAP`]; where they
+    /// do not, it is refused whole, as a paste is, and the bar says so.
+    #[test]
+    fn words_written_for_a_withdrawn_question_that_would_overfill_the_prompt_are_refused() {
+        let mut app = app().attached();
+        app.on_paste(&"a".repeat(COMPOSER_CAP - 4));
+        app.apply(&questions_asked());
+        app.on_key(key(KeyCode::Tab));
+        for c in "use rg".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        app.apply(&Event::PermissionWithdrawn { id: "q1".into() });
+
+        assert_eq!(app.composed(), "a".repeat(COMPOSER_CAP - 4));
+        assert_eq!(app.hint(), Some(WITHDRAWN_TOO_LONG_HINT));
     }
 
     #[test]
