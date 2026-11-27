@@ -2356,26 +2356,34 @@ fn draw_transcript(
             None => welcome_card(area, theme),
             Some(_) => None,
         };
+        let card = welcome.as_ref().map(|(_, card)| *card);
+        let below = card.map_or(0, |card| card.height);
+        let notice = (!app.is_attached() && below < area.height).then(|| {
+            let notice = unattached(theme);
+            let width = u16::try_from(notice.width())
+                .unwrap_or(u16::MAX)
+                .min(area.width);
+            (notice, Rect::new(area.x, area.y + below, width, 1))
+        });
+        // The scene is told of the notice as well as the greeting, so a
+        // portrait hangs clear of both rather than under the notice's row.
+        let over = match (card, notice.as_ref().map(|(_, row)| *row)) {
+            (Some(card), Some(row)) => card.union(row),
+            (Some(one), None) | (None, Some(one)) => one,
+            (None, None) => Rect::default(),
+        };
         crate::scene::draw(
             frame.buffer_mut(),
             area,
             app.scene_clock(),
             app.scene_seed(),
             theme,
-            welcome
-                .as_ref()
-                .map_or_else(Rect::default, |(_, card)| *card),
+            over,
         );
-        let below = welcome.map_or(0, |(lines, card)| {
+        if let Some((lines, card)) = welcome {
             draw_card(frame, card, lines, theme);
-            card.height
-        });
-        if !app.is_attached() && below < area.height {
-            let notice = unattached(theme);
-            let width = u16::try_from(notice.width())
-                .unwrap_or(u16::MAX)
-                .min(area.width);
-            let row = Rect::new(area.x, area.y + below, width, 1);
+        }
+        if let Some((notice, row)) = notice {
             // Cleared first: a style laid over a cell keeps the modifiers it
             // had, and a scene's faint glyphs are dim.
             frame.render_widget(Clear, row);

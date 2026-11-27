@@ -328,7 +328,8 @@ reviewers that encode both, for an agent working in this tree.
   craft crossing, a few cells a frame;
   `scene/portrait.rs` `classic`'s Mona Lisa in ASCII and in colour on the pane's own blue, in a
   gilt frame of `+`, `-` and `|`, hung as large as the pane allows and beside or under the
-  greeting, which `scene::draw` is told the place of, each cell the patch that covers most of
+  greeting and the row under it saying no backend is attached, which `scene::draw` is told the
+  place of, each cell the patch that covers most of
   the stretch of `scene/portrait/painting.rs` under it — forty-eight patches cut from a
   public-domain photograph of the panel, each a glyph as dense as it is light, so her dark hair
   and dress let the blue through as their shadow, and an ink in 24-bit colour and in the

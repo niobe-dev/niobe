@@ -33,7 +33,8 @@ use crate::theme::{Scene, Theme};
 /// where the scene puts nothing.
 ///
 /// `over` is the part of `area` something will be drawn over — the
-/// greeting, in the pane's top-left corner — which a scene with a subject
+/// greeting, in the pane's top-left corner, and under it the row saying no
+/// backend is attached — which a scene with a subject
 /// of its own, the portrait, hangs it clear of; a scene that fills the pane
 /// with a pattern lets it be covered. Empty where nothing will be.
 pub(crate) fn draw(

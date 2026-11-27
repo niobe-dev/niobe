@@ -12,8 +12,8 @@
 //! painting is drawn twice as many cells across, for its proportions, as
 //! the grid is patches. It hangs as large as the pane allows, a cell of the
 //! pane clear round its frame, centred; where something is laid over the
-//! pane's corner — the greeting — it hangs beside that or under it,
-//! whichever leaves it larger.
+//! pane's corner — the greeting, and the row under it saying no backend is
+//! attached — it hangs beside that or under it, whichever leaves it larger.
 //!
 //! A glint of light crosses it from the top-left corner to the bottom-right
 //! and comes round again, as on a varnished panel behind glass: on a

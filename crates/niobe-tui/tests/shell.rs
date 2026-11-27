@@ -1470,6 +1470,43 @@ fn a_new_session_greets_the_operator_over_the_scene_in_every_theme() {
     assert!(!screen(&mut app, 120, 30).contains("Welcome to Niobe"));
 }
 
+/// With no backend attached, the row saying so is laid over `classic`'s
+/// scene under the greeting, and the portrait hangs clear of it as it does
+/// of the greeting: its gilt frame drawn whole, with the notice beside it.
+#[test]
+fn the_portrait_hangs_clear_of_the_notice_that_no_backend_is_attached() {
+    for (width, height) in [(80, 24), (100, 30), (120, 30)] {
+        let mut app = empty_session().with_theme(CLASSIC);
+        let frame = screen(&mut app, width, height);
+        assert!(
+            frame.contains(" No backend attached. `niobe profiles` shows what is"),
+            "{width}x{height}\n{frame}"
+        );
+        let rows: Vec<Vec<char>> = frame.lines().map(|row| row.chars().collect()).collect();
+        let edged: Vec<(usize, usize, usize)> = rows
+            .iter()
+            .enumerate()
+            .filter_map(|(y, row)| {
+                let left = row.windows(2).position(|pair| pair == ['+', '-'])?;
+                let right = left + 1 + row[left + 1..].iter().position(|&c| c == '+')?;
+                Some((y, left, right))
+            })
+            .collect();
+        let (&(top, left, right), &(bottom, ..)) = (
+            edged.first().expect("the portrait's top edge"),
+            edged.last().expect("the portrait's bottom edge"),
+        );
+        assert!(bottom > top + 1, "{width}x{height}\n{frame}");
+        for row in &rows[top + 1..bottom] {
+            assert_eq!(
+                (row.get(left), row.get(right)),
+                (Some(&'|'), Some(&'|')),
+                "{width}x{height}\n{frame}"
+            );
+        }
+    }
+}
+
 /// A conversation started over is a new session and greets the operator as
 /// a new one does: the greeting alone over the scene, with no row saying
 /// what was cleared.
