@@ -15,7 +15,8 @@
 //! so nothing it says can land on the screen the shell draws on, and each is
 //! killed, with everything it started, if it has not finished and closed its
 //! output in [`PATIENCE`]; the fetch then fails naming it. A file a reader
-//! names is read only if it is a regular file, as a pasted path is.
+//! names is read only if it is a regular file, as a pasted path is, and a
+//! file not read in [`PATIENCE`] fails the fetch too, so that every fetch ends.
 //!
 //! An image larger than a model takes is shrunk on macOS with `sips` — to a
 //! JPEG no longer than the first of [`SHRUNK_EDGES`] on its long side that
@@ -248,7 +249,7 @@ impl Fetcher {
     fn fetch(&self, source: &Source) -> Result<Image, String> {
         let bytes = match source {
             Source::Clipboard => self.clipboard()?,
-            Source::File(path) => read_image_file(&self.resolve(path))?,
+            Source::File(path) => read_image_file(&self.resolve(path), self.patience)?,
         };
         self.image(bytes)
     }
@@ -358,7 +359,7 @@ fn read_with(reader: &Reader, patience: Duration) -> Result<Option<Vec<u8>>, Unr
             if !niobe_tui::images::names_an_image(path) {
                 return Ok(None);
             }
-            read_image_file(Path::new(path)).map_err(Unread::Refused)?
+            read_image_file(Path::new(path), patience).map_err(Unread::Refused)?
         }
     };
     Ok((!bytes.is_empty()).then_some(bytes))
@@ -499,24 +500,74 @@ fn kill_group(_leader: u32) {}
 /// there are none.
 ///
 /// Only a regular file is read, and only up to [`MOST_READ`]: a path to a
-/// pipe would wait for ever, and one to a device would never end.
-fn read_image_file(path: &Path) -> Result<Vec<u8>, String> {
-    let shown = path.display();
-    let metadata =
-        std::fs::metadata(path).map_err(|error| format!("cannot read {shown}: {error}"))?;
-    if !metadata.is_file() {
-        return Err(format!("{shown} is not a file"));
-    }
-    read_capped(path).map_err(|error| format!("cannot read {shown}: {error}"))
+/// pipe would wait for ever, and one to a device would never end. The read is
+/// given `patience`, as a program reading the clipboard is: a file on a
+/// network mount that has stopped answering never ends either, and a fetch
+/// that never ends keeps every prompt waiting on it. Such a read cannot be
+/// stopped, so it is left on its thread, which ends if the mount answers.
+fn read_image_file(path: &Path, patience: Duration) -> Result<Vec<u8>, String> {
+    let owned = path.to_path_buf();
+    let read = in_time(patience, move || {
+        let shown = owned.display();
+        match open_regular(&owned) {
+            Ok(Some(file)) => capped(file).map_err(|error| format!("cannot read {shown}: {error}")),
+            Ok(None) => Err(format!("{shown} is not a file")),
+            Err(error) => Err(format!("cannot read {shown}: {error}")),
+        }
+    });
+    read.unwrap_or_else(|| {
+        Err(format!(
+            "{} had not been read after {patience:?}, and was given up on",
+            path.display()
+        ))
+    })
 }
 
-/// Up to [`MOST_READ`] bytes of the file at `path`.
+/// What `work` gave, run on a thread of its own, or `None` where it had not
+/// finished in `patience`; it is then left to finish on that thread, with
+/// nobody waiting on what it gives.
+fn in_time<T: Send + 'static>(
+    patience: Duration,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Option<T> {
+    let (done, finished) = channel();
+    std::thread::spawn(move || {
+        // Nobody is waiting where the work ran out of patience.
+        let _ = done.send(work());
+    });
+    finished.recv_timeout(patience).ok()
+}
+
+/// Up to [`MOST_READ`] bytes of the regular file at `path`.
 fn read_capped(path: &Path) -> std::io::Result<Vec<u8>> {
+    let file = open_regular(path)?.ok_or_else(|| std::io::Error::other("not a regular file"))?;
+    capped(file)
+}
+
+/// Up to [`MOST_READ`] bytes of `file`.
+fn capped(file: std::fs::File) -> std::io::Result<Vec<u8>> {
     let mut bytes = Vec::new();
-    std::fs::File::open(path)?
-        .take(MOST_READ)
-        .read_to_end(&mut bytes)?;
+    file.take(MOST_READ).read_to_end(&mut bytes)?;
     Ok(bytes)
+}
+
+/// The file at `path` opened for reading, where it is a regular file.
+///
+/// It is opened without waiting for a writer, which opening a FIFO otherwise
+/// does, and asked what it is on the handle rather than at the path, so a
+/// file swapped for a pipe after it was looked at is refused too. On a
+/// regular file the flag changes nothing.
+fn open_regular(path: &Path) -> std::io::Result<Option<std::fs::File>> {
+    use std::os::unix::fs::OpenOptionsExt;
+    // The flag's bits are a small positive number, so they fit an `i32`; were
+    // they not to, opening without it would still refuse a FIFO afterwards,
+    // only after waiting for a writer.
+    let nonblock = i32::try_from(rustix::fs::OFlags::NONBLOCK.bits()).unwrap_or(0);
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(nonblock)
+        .open(path)?;
+    Ok(file.metadata()?.is_file().then_some(file))
 }
 
 /// A file in the temporary directory that is removed when it goes, whether or
@@ -704,11 +755,7 @@ mod tests {
     fn a_pipe_named_on_the_clipboard_is_refused_rather_than_waited_on() {
         let dir = tempfile::tempdir().expect("a scratch directory");
         let pipe = dir.path().join("copied.png");
-        let made = Command::new("mkfifo")
-            .arg(&pipe)
-            .status()
-            .expect("mkfifo runs");
-        assert!(made.success(), "the pipe is made");
+        mkfifo(&pipe);
         let fetcher = fetcher(
             dir.path(),
             vec![sh(&format!("echo '{}'", pipe.display()), Output::Path)],
@@ -718,6 +765,85 @@ mod tests {
             fetcher.fetch(&Source::Clipboard),
             Err(format!("{} is not a file", pipe.display()))
         );
+    }
+
+    /// Makes a FIFO at `path`.
+    fn mkfifo(path: &Path) {
+        let made = Command::new("mkfifo")
+            .arg(path)
+            .status()
+            .expect("mkfifo runs");
+        assert!(made.success(), "the pipe is made");
+    }
+
+    #[test]
+    fn a_file_swapped_for_a_pipe_as_it_is_read_is_refused_rather_than_waited_on() {
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicBool;
+
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let image = wrote_png(dir.path(), "image");
+        let pipe = dir.path().join("pipe");
+        mkfifo(&pipe);
+        let dropped = dir.path().join("shot.png");
+        std::fs::copy(&image, &dropped).expect("the image is dropped");
+        // The dropped path is put back as the image and as the pipe in turn,
+        // each by a rename, so a read that looked at the path once and opened
+        // it again finds the pipe where it looked at the image.
+        let stop = Arc::new(AtomicBool::new(false));
+        let swapping = {
+            let (stop, dir, dropped) =
+                (Arc::clone(&stop), dir.path().to_path_buf(), dropped.clone());
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    for (source, staged) in [(&image, "staged-image"), (&pipe, "staged-pipe")] {
+                        let staged = dir.join(staged);
+                        let _ = std::fs::remove_file(&staged);
+                        std::fs::hard_link(source, &staged).expect("the link is made");
+                        std::fs::rename(&staged, &dropped).expect("the path is swapped");
+                    }
+                }
+            })
+        };
+        let (done, finished) = channel();
+        let fetcher = fetcher(dir.path(), Vec::new());
+        std::thread::spawn(move || {
+            let started = Instant::now();
+            let mut outcomes = Vec::new();
+            while started.elapsed() < Duration::from_secs(2) {
+                outcomes.push(fetcher.fetch(&Source::File("shot.png".to_owned())));
+            }
+            let _ = done.send(outcomes);
+        });
+
+        let outcomes = finished.recv_timeout(Duration::from_secs(8));
+        stop.store(true, Ordering::Relaxed);
+        swapping.join().expect("the swapping thread ends");
+        let outcomes = outcomes.expect("no read waited on the pipe");
+        for outcome in outcomes {
+            match outcome {
+                Ok(read) => assert_eq!(read.data(), PNG),
+                Err(refused) => assert!(refused.ends_with("shot.png is not a file"), "{refused}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_read_that_does_not_end_is_given_up_on_at_its_patience() {
+        let (release, held) = channel::<()>();
+        let patience = Duration::from_millis(300);
+
+        let asked = Instant::now();
+        let given_up = in_time(patience, move || held.recv().is_ok());
+
+        assert_eq!(given_up, None);
+        assert!(
+            asked.elapsed() < patience + Duration::from_secs(5),
+            "it took {:?}",
+            asked.elapsed()
+        );
+        drop(release);
+        assert_eq!(in_time(STAND_IN_PATIENCE, || 7), Some(7));
     }
 
     /// Whether the process `pid` names is still running, waiting up to a
