@@ -5281,7 +5281,7 @@ fn entry_lines(
         EntryKind::Compacted(row) => return crate::compaction::compacted(row, width, theme),
         EntryKind::SubAgent => return crate::calls::said(entry, width, detail, theme),
         EntryKind::User => {
-            let words = body_lines(entry, crate::bubble::room(width), theme, commands);
+            let words = body_lines(entry, crate::bubble::room(width), detail, theme, commands);
             return crate::bubble::lines(&entry.head, words, &entry.meta, width, theme);
         }
         EntryKind::Agent
@@ -5296,11 +5296,12 @@ fn entry_lines(
     };
     let body_width = width.saturating_sub(GUTTER);
     // What an agent says of its work is drawn as its reply is, under its
-    // own mark and in a voice of its own, and names no one.
+    // own mark and in a voice of its own, and names no one but the sub-agent
+    // whose thinking it is: see [`narration_lines`].
     if matches!(entry.kind, EntryKind::Agent | EntryKind::Narration)
         || entry.kind == EntryKind::Notice && entry.head.is_empty()
     {
-        return reply_lines(entry, body_width, theme, commands);
+        return reply_lines(entry, body_width, detail, theme, commands);
     }
 
     let mut head = vec![
@@ -5338,7 +5339,7 @@ fn entry_lines(
 
     let mut lines = vec![Line::from(head)];
     lines.extend(
-        body_lines(entry, body_width, theme, commands)
+        body_lines(entry, body_width, detail, theme, commands)
             .into_iter()
             .map(|line| {
                 let mut spans = vec![Span::raw(" ".repeat(GUTTER))];
@@ -5405,6 +5406,7 @@ fn unmarked(line: String) -> String {
 fn reply_lines(
     entry: &Entry,
     width: usize,
+    detail: Detail,
     theme: &Theme,
     commands: &[SlashCommand],
 ) -> Vec<Line<'static>> {
@@ -5413,7 +5415,7 @@ fn reply_lines(
         Style::new().fg(entry.kind.colour(theme)).bold(),
     );
     let gutter = || Span::raw(" ".repeat(GUTTER));
-    let mut body = body_lines(entry, width, theme, commands).into_iter();
+    let mut body = body_lines(entry, width, detail, theme, commands).into_iter();
     let first = match body.next() {
         Some(line) => {
             let mut spans = vec![glyph];
@@ -5452,6 +5454,7 @@ fn reply_lines(
 fn body_lines(
     entry: &Entry,
     width: usize,
+    detail: Detail,
     theme: &Theme,
     commands: &[SlashCommand],
 ) -> Vec<Line<'static>> {
@@ -5487,7 +5490,7 @@ fn body_lines(
                 })
                 .collect()
         }
-        EntryKind::Narration => narration_lines(entry.body.trim_end(), width, theme),
+        EntryKind::Narration => narration_lines(entry, width, detail, theme),
         EntryKind::Tool | EntryKind::Failure | EntryKind::Notice => {
             plain_lines(&entry.body, width, theme.fg)
         }
@@ -5502,20 +5505,63 @@ const THINKING: &str = "Thinking · ";
 /// The model's thinking, wrapped to `width`: dim and slanted, as an aside —
 /// the agent saying what it is about to do, which the reply it ends with is
 /// read over — after [`THINKING`], which says what it is.
-fn narration_lines(body: &str, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+///
+/// A sub-agent's thinking opens with the agent's tag, as its calls and its
+/// refusals do: with every call drawn, several agents' thinking interleaves
+/// with the session's, and the mark alone would read as the session's own.
+/// Grouped by agent, the heading above names the agent instead, as it does
+/// for the calls under it.
+fn narration_lines(
+    entry: &Entry,
+    width: usize,
+    detail: Detail,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let body = entry.body.trim_end();
     let label = Style::new().fg(theme.dim);
     let words = label.add_modifier(Modifier::ITALIC);
-    text::wrap(&format!("{THINKING}{body}"), width)
+    let tag = entry
+        .agent
+        .as_deref()
+        .filter(|_| !detail.grouped)
+        .map(|agent| {
+            let room = width.saturating_sub(text::width(THINKING));
+            crate::calls::agent_tag(agent, body, room)
+        })
+        .unwrap_or_default();
+    text::wrap(&format!("{tag}{THINKING}{body}"), width)
         .into_iter()
         .enumerate()
-        .map(|(row, wrapped)| match wrapped.strip_prefix(THINKING) {
-            Some(rest) if row == 0 => Line::from(vec![
-                Span::styled(THINKING, label),
-                Span::styled(rest.to_owned(), words),
-            ]),
+        .map(|(row, wrapped)| match row {
+            0 => thinking_opening(&wrapped, &tag, theme),
             _ => Line::from(Span::styled(wrapped, words)),
         })
         .collect()
+}
+
+/// The first row of a thinking's lines: the agent's `tag` where it has one,
+/// in the colour a call's tag is drawn in, [`THINKING`] upright, and the
+/// words slanted — each piece only where the row holds it whole.
+fn thinking_opening(row: &str, tag: &str, theme: &Theme) -> Line<'static> {
+    let label = Style::new().fg(theme.dim);
+    let words = label.add_modifier(Modifier::ITALIC);
+    let mut spans = Vec::new();
+    let rest = match row.strip_prefix(tag) {
+        Some(rest) if !tag.is_empty() => {
+            spans.push(Span::styled(tag.to_owned(), Style::new().fg(theme.agent)));
+            rest
+        }
+        _ => row,
+    };
+    let rest = match rest.strip_prefix(THINKING) {
+        Some(rest) => {
+            spans.push(Span::styled(THINKING, label));
+            rest
+        }
+        None => rest,
+    };
+    spans.push(Span::styled(rest.to_owned(), words));
+    Line::from(spans)
 }
 
 /// Text shown as typed, wrapped to `width`, in `colour`.

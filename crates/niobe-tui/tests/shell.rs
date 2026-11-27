@@ -9385,6 +9385,69 @@ fn what_the_agent_says_of_its_work_stands_between_the_calls_it_splits() {
     assert_eq!(label.fg, Some(empty_session().theme().dim), "{label:?}");
 }
 
+/// With every call drawn, two sub-agents' thinking interleaves with the
+/// session's rows, and each line of it says whose it is by the tag that
+/// agent's calls and refusals are named by — once, and not at all where
+/// the rows are grouped under a heading that names the agent already.
+#[test]
+fn a_sub_agents_thinking_says_which_agent_thought_it() {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = session_with_two_agents_at_work();
+    for (agent, text) in [
+        ("toolu_cache", "Eviction next: the LRU decides it."),
+        ("toolu_fetch", "The 304 branch is the one to read."),
+    ] {
+        app.apply(&Event::Narration {
+            text: text.to_owned(),
+            agent: Some(AgentId::new(agent)),
+        });
+    }
+    app.show_every_call();
+    let row = |frame: &str, words: &str| {
+        frame
+            .lines()
+            .find(|line| line.contains(words))
+            .map(in_session)
+            .unwrap_or_else(|| panic!("{words:?} is not drawn:\n{frame}"))
+            .to_owned()
+    };
+
+    let frame = screen(&mut app, 120, 30);
+    assert!(
+        row(&frame, "Eviction next").starts_with("∴ deep2 › Thinking · Eviction next"),
+        "{frame}"
+    );
+    assert!(
+        row(&frame, "The 304 branch").starts_with("∴ deep1 › Thinking · The 304 branch"),
+        "{frame}"
+    );
+    let tag = style_at(&mut app, 120, 30, "deep2 › Thinking").expect("the tag is drawn");
+    assert_eq!(tag.fg, Some(app.theme().agent), "{tag:?}");
+
+    let press = |app: &mut App, code| app.on_key(KeyEvent::new(code, KeyModifiers::NONE));
+    press(&mut app, KeyCode::Tab);
+    press(&mut app, KeyCode::Char('a'));
+    let grouped = screen(&mut app, 120, 30);
+    assert!(grouped.contains("▾ deep2"), "{grouped}");
+    assert!(
+        row(&grouped, "Eviction next").starts_with("∴ Thinking · Eviction next"),
+        "{grouped}"
+    );
+    press(&mut app, KeyCode::Char('a'));
+
+    app.perform(niobe_tui::menu::Action::OneAgent);
+    app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    let tag = app.only_agent_tag().expect("Enter narrows the transcript");
+    let narrowed = screen(&mut app, 120, 30);
+    let said = row(&narrowed, "Thinking · ");
+    assert!(
+        said.starts_with(&format!("∴ {tag} › Thinking · ")),
+        "{narrowed}"
+    );
+    assert_eq!(said.matches(tag.as_str()).count(), 1, "{narrowed}");
+}
+
 /// The moment `seconds` after the epoch, as the loop hands the clock in.
 fn moment(seconds: u64) -> niobe_tui::clock::Stamp {
     niobe_tui::clock::Stamp::new(
