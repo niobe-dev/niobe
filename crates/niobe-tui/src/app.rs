@@ -25001,14 +25001,19 @@ mod tests {
     }
 
     /// Each frame of a scene is one the terminal repaints whole, so a scene
-    /// asks for no more of them than its motion needs: the skyline's lights
-    /// and the black hole's flowing disk read the same at ten a second, the
-    /// rest move at thirty. A session pane that shows no scene asks for none.
+    /// asks for no more of them than its motion needs: the skyline's lights,
+    /// the black hole's flowing disk and the glint on the portrait read the
+    /// same at ten a second, and the rain falls at thirty. A session pane that
+    /// shows no scene asks for none.
     #[test]
     fn a_scene_asks_to_be_drawn_only_as_often_as_its_motion_needs() {
         let frame = |theme: Theme| app().attached().with_theme(theme).scene_frame();
 
-        for theme in [crate::theme::CYBER, crate::theme::STELLAR] {
+        for theme in [
+            crate::theme::CYBER,
+            crate::theme::STELLAR,
+            crate::theme::CLASSIC,
+        ] {
             assert_eq!(
                 frame(theme),
                 Some(Duration::from_millis(100)),
@@ -25016,14 +25021,11 @@ mod tests {
                 theme.name
             );
         }
-        for theme in [crate::theme::NEO, crate::theme::CLASSIC] {
-            assert_eq!(
-                frame(theme),
-                Some(Duration::from_millis(33)),
-                "{}",
-                theme.name
-            );
-        }
+        assert_eq!(
+            frame(crate::theme::NEO),
+            Some(Duration::from_millis(33)),
+            "the rain"
+        );
 
         let mut app = app().attached();
         app.apply(&Event::UserMessage {

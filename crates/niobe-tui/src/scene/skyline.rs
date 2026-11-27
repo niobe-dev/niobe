@@ -679,7 +679,14 @@ mod tests {
     fn city(theme: &Theme, millis: u64) -> Buffer {
         let area = Rect::new(0, 0, 120, 30);
         let mut buffer = Buffer::empty(area);
-        super::super::draw(&mut buffer, area, Duration::from_millis(millis), 7, theme);
+        super::super::draw(
+            &mut buffer,
+            area,
+            Duration::from_millis(millis),
+            7,
+            theme,
+            Rect::default(),
+        );
         buffer
     }
 

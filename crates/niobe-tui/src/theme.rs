@@ -101,9 +101,10 @@ pub enum Scene {
     /// A night city at street level: two rows of towers standing still,
     /// lit windows, neon signs, blinking masts and craft crossing between.
     Skyline,
-    /// The DOS screensaver's starfield: stars flying out of the dark
-    /// towards the viewer, brightening as they come.
-    Starfield,
+    /// Leonardo's portrait of Lisa Gherardini in ASCII and in colour, hung
+    /// in a gilt frame on the pane's own colour, a glint of light crossing
+    /// it.
+    Portrait,
     /// A black hole seen from just above its accretion disk, ray traced in
     /// half-block pixels: the disk's far side bent over and under the
     /// shadow, a ring of light round it, the stars behind pulled into arcs
@@ -332,7 +333,7 @@ pub struct Theme {
 /// bright red of what has run out.
 pub const CLASSIC: Theme = Theme {
     name: "CLASSIC",
-    scene: Scene::Starfield,
+    scene: Scene::Portrait,
     border: BorderType::Plain,
     border_focus: BorderType::Double,
 

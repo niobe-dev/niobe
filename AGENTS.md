@@ -326,10 +326,14 @@ reviewers that encode both, for an agent working in this tree.
   row jumps and rewrites every cell it covers — each near tower showing the side that faces the
   pane's middle, with lit windows, flickering neon signs, blinking masts, twinkling stars and
   craft crossing, a few cells a frame;
-  `scene/starfield.rs` `classic`'s DOS screensaver starfield on black space, each star a point
-  projected by dividing by its depth, which runs down at one pace until it is born again far off
-  at a new place, drawn as a dark grey `.`, a grey `+` and a white `*` as it comes nearer and,
-  in 24-bit colour, in a few greys between; `scene/blackhole.rs` `stellar`'s black hole, seen from
+  `scene/portrait.rs` `classic`'s Mona Lisa in ASCII and in colour on the pane's own blue, in a
+  gilt frame of `+`, `-` and `|`, hung as large as the pane allows and beside or under the
+  greeting, which `scene::draw` is told the place of, each cell the patch that covers most of
+  the stretch of `scene/portrait/painting.rs` under it — forty-eight patches cut from a
+  public-domain photograph of the panel, each a glyph as dense as it is light, so her dark hair
+  and dress let the blue through as their shadow, and an ink in 24-bit colour and in the
+  sixteen names by what it is part of — with a glint of light crossing it corner to corner and
+  coming round again, which changes the inks and never a glyph; `scene/blackhole.rs` `stellar`'s black hole, seen from
   just above its accretion disk by a camera banked as the film's was, the disk rising to the
   right round a hole right of the middle — a ray from every pixel, two to a cell in half blocks, followed
   through a non-rotating hole's gravity until it falls in, meets the disk or leaves for the
@@ -341,8 +345,8 @@ reviewers that encode both, for an agent working in this tree.
   wall clock the loop last read, so two draws
   at one moment draw one frame, drawn in the theme's values or its sixteen names with no shade a
   terminal could not draw, and drawn by the loop while it shows at the frame `scene::frame` gives
-  it — 100 ms for the skyline and the black hole, whose lights and slow disk read the same at
-  ten frames a second, 33 ms for the rest — and not at all while the composer holds text, the scene held at the moment its last
+  it — 100 ms for the skyline, the black hole and the portrait, whose lights, slow disk and
+  glint read the same at ten frames a second, 33 ms for the rain — and not at all while the composer holds text, the scene held at the moment its last
   frame was drawn, since every frame is one the terminal repaints and the keys typed wait behind
   those repaints — and `spike.rs` finds a turn that spent more than three times the tokens the session's earlier
   turns averaged, which the loop, never the fold, keeps for the Usage pane to say by the turn's

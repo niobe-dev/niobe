@@ -795,6 +795,7 @@ mod tests {
             Duration::from_millis(millis),
             seed,
             theme,
+            Rect::default(),
         );
         buffer
     }

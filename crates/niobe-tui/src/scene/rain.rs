@@ -276,7 +276,14 @@ mod tests {
             scene: Scene::Rain,
             ..*theme
         };
-        super::super::draw(&mut buffer, area, Duration::from_millis(millis), 7, &theme);
+        super::super::draw(
+            &mut buffer,
+            area,
+            Duration::from_millis(millis),
+            7,
+            &theme,
+            Rect::default(),
+        );
         buffer
     }
 

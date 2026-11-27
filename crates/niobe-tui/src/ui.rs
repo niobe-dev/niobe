@@ -2349,20 +2349,27 @@ fn draw_transcript(
     if app.showing_scene() {
         app.drew_transcript(area, 0);
         app.measured(0, height);
+        // Not under the question whether to trust the repository's config:
+        // the greeting would show round its edges, and the session has not
+        // been let start yet.
+        let welcome = match app.trusting() {
+            None => welcome_card(area, theme),
+            Some(_) => None,
+        };
         crate::scene::draw(
             frame.buffer_mut(),
             area,
             app.scene_clock(),
             app.scene_seed(),
             theme,
+            welcome
+                .as_ref()
+                .map_or_else(Rect::default, |(_, card)| *card),
         );
-        // Not under the question whether to trust the repository's config:
-        // the greeting would show round its edges, and the session has not
-        // been let start yet.
-        let below = match app.trusting() {
-            None => draw_welcome(frame, area, theme),
-            Some(_) => 0,
-        };
+        let below = welcome.map_or(0, |(lines, card)| {
+            draw_card(frame, card, lines, theme);
+            card.height
+        });
         if !app.is_attached() && below < area.height {
             let notice = unattached(theme);
             let width = u16::try_from(notice.width())
@@ -4045,27 +4052,23 @@ const WELCOME: [&str; 2] = [
 /// beside it.
 const WELCOME_COLUMNS: usize = 44;
 
-/// The greeting over the scene's top-left corner, on the pane's own colour
-/// with a cell of it all round so the scene's glyphs do not run into the
-/// words, its name in the title colour. Returns the rows it took. Where the
-/// pane is too small to hold the card whole, nothing is drawn: half a card
-/// reads as a fault.
-fn draw_welcome(frame: &mut Frame, area: Rect, theme: &Theme) -> u16 {
+/// The greeting over the scene's top-left corner, wrapped to the pane, and
+/// the cells its card takes there: on the pane's own colour with a cell of
+/// it all round so the scene's glyphs do not run into the words, its name in
+/// the title colour. Where the pane is too small to hold the card whole,
+/// there is none: half a card reads as a fault.
+fn welcome_card(area: Rect, theme: &Theme) -> Option<(Vec<Line<'static>>, Rect)> {
     let columns = usize::from(area.width)
         .saturating_sub(2)
         .min(WELCOME_COLUMNS);
-    draw_card(frame, area, welcome_lines(columns, theme), theme).unwrap_or(0)
+    let lines = welcome_lines(columns, theme);
+    let card = card_cells(area, &lines)?;
+    Some((lines, card))
 }
 
-/// `lines` on the pane's own colour in `area`'s top-left corner, a cell of it
-/// all round; the rows it took, or nothing where `lines` is empty or does not
-/// fit whole.
-fn draw_card(
-    frame: &mut Frame,
-    area: Rect,
-    lines: Vec<Line<'static>>,
-    theme: &Theme,
-) -> Option<u16> {
+/// The cells `lines` take in `area`'s top-left corner with a cell all round
+/// them; `None` where `lines` is empty or does not fit whole.
+fn card_cells(area: Rect, lines: &[Line<'static>]) -> Option<Rect> {
     let widest = lines.iter().map(Line::width).max().unwrap_or(0);
     let (Ok(rows), Ok(columns)) = (u16::try_from(lines.len() + 2), u16::try_from(widest + 2))
     else {
@@ -4074,18 +4077,21 @@ fn draw_card(
     if lines.is_empty() || rows > area.height || columns > area.width {
         return None;
     }
-    let block = Rect::new(area.x, area.y, columns, rows);
+    Some(Rect::new(area.x, area.y, columns, rows))
+}
+
+/// `lines` on the pane's own colour in `card`, a cell of it all round.
+fn draw_card(frame: &mut Frame, card: Rect, lines: Vec<Line<'static>>, theme: &Theme) {
     // Cleared first: a style laid over a cell keeps the modifiers it had, and
     // a scene's faint glyphs are dim.
-    frame.render_widget(Clear, block);
+    frame.render_widget(Clear, card);
     frame.render_widget(
         Paragraph::new(lines).style(Style::new().bg(theme.pane_bg)),
-        block.inner(Margin::new(1, 1)),
+        card.inner(Margin::new(1, 1)),
     );
     frame
         .buffer_mut()
-        .set_style(block, Style::new().bg(theme.pane_bg));
-    Some(rows)
+        .set_style(card, Style::new().bg(theme.pane_bg));
 }
 
 /// The greeting wrapped to `columns`, at most [`WELCOME_COLUMNS`]; nothing
@@ -11053,7 +11059,12 @@ mod tests {
                     .expect("a test terminal");
             let mut rows = 0;
             terminal
-                .draw(|frame| rows = draw_welcome(frame, frame.area(), &theme))
+                .draw(|frame| {
+                    if let Some((lines, card)) = welcome_card(frame.area(), &theme) {
+                        draw_card(frame, card, lines, &theme);
+                        rows = card.height;
+                    }
+                })
                 .expect("drawing never fails on a test backend");
             let buffer = terminal.backend().buffer();
             let text: String = (0..height)

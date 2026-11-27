@@ -15,9 +15,9 @@
 //! that a terminal could not draw.
 
 mod blackhole;
+mod portrait;
 mod rain;
 mod skyline;
-mod starfield;
 
 use std::time::Duration;
 
@@ -31,13 +31,25 @@ use crate::theme::{Scene, Theme};
 /// moment counted from any fixed origin — the shell counts from the epoch —
 /// from `seed`. Every cell of the area is drawn, a blank on the pane's colour
 /// where the scene puts nothing.
-pub(crate) fn draw(buffer: &mut Buffer, area: Rect, clock: Duration, seed: u64, theme: &Theme) {
+///
+/// `over` is the part of `area` something will be drawn over — the
+/// greeting, in the pane's top-left corner — which a scene with a subject
+/// of its own, the portrait, hangs it clear of; a scene that fills the pane
+/// with a pattern lets it be covered. Empty where nothing will be.
+pub(crate) fn draw(
+    buffer: &mut Buffer,
+    area: Rect,
+    clock: Duration,
+    seed: u64,
+    theme: &Theme,
+    over: Rect,
+) {
     clear(buffer, area, theme);
     let millis = u64::try_from(clock.as_millis()).unwrap_or(u64::MAX);
     match theme.scene {
         Scene::Rain => rain::draw(buffer, area, millis, seed, theme),
         Scene::Skyline => skyline::draw(buffer, area, millis, seed, theme),
-        Scene::Starfield => starfield::draw(buffer, area, millis, seed, theme),
+        Scene::Portrait => portrait::draw(buffer, area, millis, seed, theme, over),
         Scene::BlackHole => blackhole::draw(buffer, area, millis, seed, theme),
     }
 }
@@ -51,12 +63,13 @@ pub(crate) fn draw(buffer: &mut Buffer, area: Rect, clock: Duration, seed: u64, 
 /// thirteen cells a second, which reads the same at ten frames; at ten,
 /// iTerm2 spent 15 to 25% on it. The black hole's disk flows a few pixels a
 /// second at its fastest and its stars twinkle every second or so, which ten
-/// frames show as well as thirty. Falling glyphs and stars racing out to the
-/// pane's edge step visibly at ten, so those keep thirty.
+/// frames show as well as thirty. The portrait moves only by a glint
+/// crossing it at a few cells a second. Falling glyphs step visibly at ten,
+/// so the rain keeps thirty.
 pub(crate) fn frame(scene: Scene) -> Duration {
     match scene {
-        Scene::Skyline | Scene::BlackHole => Duration::from_millis(100),
-        Scene::Rain | Scene::Starfield => Duration::from_millis(33),
+        Scene::Skyline | Scene::BlackHole | Scene::Portrait => Duration::from_millis(100),
+        Scene::Rain => Duration::from_millis(33),
     }
 }
 
@@ -123,6 +136,24 @@ fn darker(colour: Color) -> Color {
     }
 }
 
+/// The bright counterpart of one of the sixteen, which is what a light laid
+/// over it lifts it to when the terminal draws only those: the sixteen have
+/// no shades between.
+fn lighter(colour: Color) -> Color {
+    match colour {
+        Color::Green => Color::LightGreen,
+        Color::Blue => Color::LightBlue,
+        Color::Yellow => Color::LightYellow,
+        Color::Cyan => Color::LightCyan,
+        Color::Red => Color::LightRed,
+        Color::Magenta => Color::LightMagenta,
+        Color::Gray => Color::White,
+        Color::DarkGray => Color::Gray,
+        Color::Black => Color::DarkGray,
+        other => other,
+    }
+}
+
 /// SplitMix64's finaliser: a well-spread number from any other.
 fn mix(n: u64) -> u64 {
     let n = (n ^ (n >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
@@ -146,7 +177,14 @@ mod tests {
 
     fn drawn(theme: &Theme, area: Rect, millis: u64) -> Buffer {
         let mut buffer = Buffer::empty(area);
-        draw(&mut buffer, area, Duration::from_millis(millis), 7, theme);
+        draw(
+            &mut buffer,
+            area,
+            Duration::from_millis(millis),
+            7,
+            theme,
+            Rect::default(),
+        );
         buffer
     }
 
@@ -163,7 +201,7 @@ mod tests {
         for scene in [
             Scene::Rain,
             Scene::Skyline,
-            Scene::Starfield,
+            Scene::Portrait,
             Scene::BlackHole,
         ] {
             assert_eq!(
@@ -211,7 +249,14 @@ mod tests {
                 for cell in buffer.content.iter_mut() {
                     cell.set_char('X');
                 }
-                draw(&mut buffer, area, Duration::from_millis(millis), 7, &theme);
+                draw(
+                    &mut buffer,
+                    area,
+                    Duration::from_millis(millis),
+                    7,
+                    &theme,
+                    Rect::default(),
+                );
                 for y in whole.top()..whole.bottom() {
                     for x in whole.left()..whole.right() {
                         if !area.contains((x, y).into()) {
@@ -235,7 +280,14 @@ mod tests {
                 for millis in [0, 1_234, 40_000, 9_000_000] {
                     let mut buffer = Buffer::empty(area);
                     buffer.set_style(area, Style::new().italic());
-                    draw(&mut buffer, area, Duration::from_millis(millis), 3, &theme);
+                    draw(
+                        &mut buffer,
+                        area,
+                        Duration::from_millis(millis),
+                        3,
+                        &theme,
+                        Rect::default(),
+                    );
                     for cell in buffer.content() {
                         assert_eq!(crate::text::width(cell.symbol()), 1, "{:?}", cell.symbol());
                         assert!(!cell.modifier.contains(Modifier::ITALIC), "{}", theme.name);
