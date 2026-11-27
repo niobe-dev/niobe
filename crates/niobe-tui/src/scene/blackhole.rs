@@ -5,7 +5,9 @@
 //! happened in it: a hole seen from just above the plane of its accretion
 //! disk, the disk's far side bent up over the shadow and down under it, a
 //! thin ring of light hugging the shadow's edge, the stars behind it pulled
-//! into arcs, and the disk's gas flowing round, faster the nearer it is.
+//! aside, and the disk's gas flowing round, faster the nearer it is. The
+//! camera is banked as the film's was, so the disk rises from the pane's
+//! lower left to its upper right, round a hole that sits right of the middle.
 //!
 //! The picture is ray traced. From the camera, a ray for every pixel is
 //! followed through the hole's gravity — a non-rotating hole, whose light
@@ -29,10 +31,13 @@
 //!
 //! A pixel is half a terminal cell, the upper or lower half block, so the
 //! pixels are about square and the hole is drawn in shaded colour rather
-//! than in characters. Every light is one of a few steps, so a frame
-//! rewrites only the cells whose step changed. In the sixteen names the disk
-//! is the theme's red, darker gold, gold and white by how bright it is, and
-//! the stars white and grey.
+//! than in characters. A star is the exception: a pixel of it would be a
+//! square, or two a bar, so a cell whose pixels both see the sky draws the
+//! brighter star either sees as a point — `·`, `•` or `+` by how bright —
+//! once for each image of it the hole makes. Every light is one of a few
+//! steps, so a frame rewrites only the cells whose step changed. In the
+//! sixteen names the disk is the theme's red, darker gold, gold and white by
+//! how bright it is, and the stars white and grey.
 
 use std::cell::RefCell;
 use std::f32::consts::TAU;
@@ -53,16 +58,27 @@ const DISTANCE: f32 = 26.0;
 /// bent into a halo over and under it.
 const ELEVATION: f32 = 0.11;
 
+/// How far the camera is banked round the way it faces, in radians: about
+/// twenty degrees, turned so the disk rises to the right, as the film's
+/// camera was banked over its hole.
+const ROLL: f32 = -0.35;
+
 /// Where the disk starts and ends, in the horizon's radius: the innermost
 /// orbit gas can keep round a non-rotating hole, and out to ten.
 const INNER: f32 = 3.0;
 const OUTER: f32 = 10.0;
 
 /// How much of the scene the pane holds at the least, either side of the
-/// hole and above and below it, at the hole's distance: the disk across, and
-/// the halo its far side makes over and under the shadow.
-const HALF_WIDE: f32 = 10.6;
+/// hole and above and below it, at the hole's distance: the shadow and the
+/// halo round it whole, and the disk out to where it runs off the pane.
+const HALF_WIDE: f32 = 8.6;
 const HALF_TALL: f32 = 5.4;
+
+/// Where the hole is in the pane, as a share of its width from the left and
+/// of its height from the top: right of the middle, as the film frames it,
+/// so the disk's near side sweeps down to the lower left, away from the
+/// greeting over the pane's top left.
+const FOCUS: (f32, f32) = (0.58, 0.5);
 
 /// How far a ray goes in one step, as a share of how far it is from the
 /// hole: short steps where the light bends hard, long ones where it hardly
@@ -109,6 +125,14 @@ const RING_REACH: f32 = 2.0;
 /// How many of the sky's cells, one to a pixel, hold a star, in a thousand.
 const STARS: u64 = 14;
 
+/// How far from the point straight behind the hole, in radians, the sky
+/// holds no star. The hole spreads a star there into an arc round its
+/// shadow, or a whole ring — half the ring's radius, `√(2 / DISTANCE)`, out
+/// it is stretched to twice its length — and a terminal's pixels, too few
+/// to draw so thin an arc, catch it at a few places that read as a cluster
+/// of stars, or a circle drawn on the pane.
+const CLEAR: f32 = 0.14;
+
 type Vector = [f32; 3];
 
 fn add(a: Vector, b: Vector) -> Vector {
@@ -151,8 +175,9 @@ enum Seen {
     Hole,
     /// The sky, at the cell of it the ray left toward: one cell a pixel
     /// across, so that a star is a pixel where the light did not bend and
-    /// an arc where it did.
-    Sky { cell: (i32, i32) },
+    /// an arc where it did; `None` within [`CLEAR`] of straight behind the
+    /// hole, where no star is drawn.
+    Sky { cell: Option<(i32, i32)> },
     /// The disk.
     Disk(Gas),
     /// The photon ring: light that grazed the sphere where light can circle
@@ -197,8 +222,11 @@ impl Camera {
     fn new() -> Self {
         let at = [0.0, DISTANCE * ELEVATION.sin(), -DISTANCE * ELEVATION.cos()];
         let forward = scale(at, -1.0 / DISTANCE);
-        let right = unit(cross([0.0, 1.0, 0.0], forward));
-        let up = cross(forward, right);
+        let level = unit(cross([0.0, 1.0, 0.0], forward));
+        let upright = cross(forward, level);
+        let (sin, cos) = ROLL.sin_cos();
+        let right = add(scale(level, cos), scale(upright, sin));
+        let up = add(scale(upright, cos), scale(level, -sin));
         Self {
             at,
             forward,
@@ -314,33 +342,65 @@ fn crossing(was: Vector, now: Vector, held: Vector) -> Option<Gas> {
 }
 
 /// The cell of the sky a ray leaving along `way` ends in, `per_radian`
-/// cells to a radian: about a pixel's worth of sky each.
-fn sky_cell(way: Vector, per_radian: f32) -> (i32, i32) {
+/// cells to a radian: about a pixel's worth of sky each. `None` within
+/// [`CLEAR`] of straight behind the hole.
+fn sky_cell(way: Vector, per_radian: f32) -> Option<(i32, i32)> {
     let way = unit(way);
+    let behind = scale(Camera::new().at, -1.0 / DISTANCE);
+    if dot(way, behind) > CLEAR.cos() {
+        return None;
+    }
     let east = way[0].atan2(way[2]);
     let north = way[1].clamp(-1.0, 1.0).asin();
     // Both within a turn, times at most a few thousand pixels to a radian.
-    (
+    Some((
         (east * per_radian).floor() as i32,
         (north * per_radian).floor() as i32,
-    )
+    ))
+}
+
+/// How a pane's pixels are laid over the scene: how many pixels to the
+/// horizon's radius, at the hole's distance, and the pixel the hole is at.
+#[derive(Debug, Clone, Copy)]
+struct Frame {
+    per: f32,
+    centre: (f32, f32),
+}
+
+impl Frame {
+    /// The frame of a pane `width` columns by `height` rows, two pixels to
+    /// a cell one over the other; `None` for a pane with no pixels.
+    fn of(width: u16, height: u16) -> Option<Self> {
+        let (columns, rows) = (f32::from(width), 2.0 * f32::from(height));
+        let per = (columns / 2.0 / HALF_WIDE).min(rows / 2.0 / HALF_TALL);
+        (per > 0.0).then_some(Self {
+            per,
+            centre: (columns * FOCUS.0, rows * FOCUS.1),
+        })
+    }
+
+    /// How far across and up of the hole, in the horizon's radius at its
+    /// distance, the middle of the pixel `column` across and `row` down is.
+    fn aim(&self, column: u16, row: u16) -> (f32, f32) {
+        (
+            (f32::from(column) + 0.5 - self.centre.0) / self.per,
+            (self.centre.1 - f32::from(row) - 0.5) / self.per,
+        )
+    }
 }
 
 /// What every pixel of a pane `width` columns by `height` rows sees, two
 /// pixels to a cell one over the other, a row of pixels at a time.
 fn survey(width: u16, height: u16) -> Vec<Seen> {
-    let (columns, rows) = (f32::from(width), 2.0 * f32::from(height));
-    let per = (columns / 2.0 / HALF_WIDE).min(rows / 2.0 / HALF_TALL);
-    if per <= 0.0 {
+    let Some(frame) = Frame::of(width, height) else {
         return Vec::new();
-    }
+    };
     let camera = Camera::new();
-    let per_radian = per * DISTANCE;
+    let per_radian = frame.per * DISTANCE;
     (0..2 * height)
         .flat_map(|row| (0..width).map(move |column| (row, column)))
         .map(|(row, column)| {
-            let across = (f32::from(column) + 0.5 - columns / 2.0) / per;
-            let up = (rows / 2.0 - f32::from(row) - 0.5) / per;
+            let (across, up) = frame.aim(column, row);
             trace(camera.at, camera.way(across, up), true, per_radian)
         })
         .collect()
@@ -426,7 +486,7 @@ fn streaks(gas: &Gas, laps: f64, seed: u64) -> f32 {
             around,
         )
     };
-    0.5 * octave(0xD15C, 3.0, 4) + 0.3 * octave(0x6A5, 7.0, 9) + 0.2 * octave(0x5EED, 15.0, 19)
+    0.45 * octave(0xD15C, 1.4, 3) + 0.35 * octave(0x6A5, 2.8, 7) + 0.2 * octave(0x5EED, 5.0, 13)
 }
 
 /// The colours the hole is drawn in: values where the terminal draws them,
@@ -520,17 +580,26 @@ impl Ink {
     }
 
     /// The colour of a pixel that saw `seen`, at `laps` of the outer edge's
-    /// orbit and `millis`.
-    fn colour(&self, seen: Seen, laps: f64, millis: u64, seed: u64) -> Color {
+    /// orbit: the sky is its own colour here, its stars being glyphs a cell
+    /// holds whole ([`Ink::star`]).
+    fn colour(&self, seen: Seen, laps: f64, seed: u64) -> Color {
         match (self, seen) {
             (Self::Deep(deep), Seen::Hole) => value(deep.hole),
             (Self::Sixteen(sixteen), Seen::Hole) => sixteen.hole,
-            (_, Seen::Sky { cell }) => self.sky(cell, millis, seed),
+            (_, Seen::Sky { .. }) => self.sky(),
             (_, Seen::Ring { glow }) => self.gas(stepped(0.25 + 0.75 * glow), 0.7),
             (_, Seen::Disk(gas)) => {
                 let light = stepped(EXPOSURE * gas.shine * (0.5 + 0.7 * streaks(&gas, laps, seed)));
                 self.gas(light, stepped(gas.heat))
             }
+        }
+    }
+
+    /// The sky's own colour, with no star in it.
+    fn sky(&self) -> Color {
+        match self {
+            Self::Deep(deep) => value(deep.sky),
+            Self::Sixteen(sixteen) => sixteen.sky,
         }
     }
 
@@ -553,17 +622,13 @@ impl Ink {
         }
     }
 
-    /// The sky at `cell`: the pane's colour, or a star, a few of which
-    /// twinkle at a time.
-    fn sky(&self, cell: (i32, i32), millis: u64, seed: u64) -> Color {
+    /// The star at `cell` of the sky, if one is there, as it stands at
+    /// `millis`: a few of them twinkle at a time.
+    fn star(&self, cell: (i32, i32), millis: u64, seed: u64) -> Option<Star> {
         let n = (u64::from(cell.0 as u32) << 32) | u64::from(cell.1 as u32);
         let star = key(seed, 0x57A2, n);
-        let sky = match self {
-            Self::Deep(deep) => value(deep.sky),
-            Self::Sixteen(sixteen) => sixteen.sky,
-        };
         if star % 1000 >= STARS {
-            return sky;
+            return None;
         }
         // Each star dims for a moment now and then, on a clock of its own.
         let slot = millis.wrapping_add(star % 4_000) / 1_300;
@@ -573,7 +638,7 @@ impl Ink {
             0 => bright / 3,
             _ => bright,
         };
-        match self {
+        let colour = match self {
             Self::Deep(deep) => {
                 let tint = match (star >> 40) % 6 {
                     0 => deep.warm_star,
@@ -592,8 +657,62 @@ impl Ink {
                 b if b < 80 => Color::Gray,
                 _ => Color::White,
             },
+        };
+        let glyph = match bright {
+            b if b < 40 => '·',
+            b if b < 80 => '•',
+            _ => '+',
+        };
+        Some(Star {
+            glyph,
+            colour,
+            bright,
+        })
+    }
+
+    /// The cell whose upper pixel saw `upper` and lower one `lower`: two
+    /// pixels of colour one over the other, or, where both saw the sky, the
+    /// brighter of the stars they saw drawn as a glyph, so that a star is a
+    /// point rather than a block half a cell tall. `firsts` says of each
+    /// pixel whether its star is first seen there ([`first_sight`]).
+    fn cell(
+        &self,
+        [upper, lower]: [Seen; 2],
+        firsts: [bool; 2],
+        laps: f64,
+        millis: u64,
+        seed: u64,
+    ) -> (char, Style) {
+        if let (Seen::Sky { cell: over }, Seen::Sky { cell: under }) = (upper, lower) {
+            let star = [over, under]
+                .into_iter()
+                .zip(firsts)
+                .filter(|(_, first)| *first)
+                .filter_map(|(cell, _)| self.star(cell?, millis, seed))
+                .max_by_key(|star| star.bright);
+            return match star {
+                Some(star) => (star.glyph, Style::new().fg(star.colour).bg(self.sky())),
+                None => (' ', Style::new().bg(self.sky())),
+            };
+        }
+        let (upper, lower) = (
+            self.colour(upper, laps, seed),
+            self.colour(lower, laps, seed),
+        );
+        match upper == lower {
+            true => (' ', Style::new().bg(upper)),
+            false => ('▀', Style::new().fg(upper).bg(lower)),
         }
     }
+}
+
+/// A star as a cell draws it: a point of light, bigger the brighter it is.
+#[derive(Debug, Clone, Copy)]
+struct Star {
+    glyph: char,
+    colour: Color,
+    /// How bright, from nought to a hundred.
+    bright: u64,
 }
 
 /// The colour `heat` of the way along `ramp`, its four stops evenly spaced.
@@ -618,23 +737,42 @@ pub(super) fn draw(buffer: &mut Buffer, area: Rect, millis: u64, seed: u64, them
     let outer_lap = LAP * f64::from((OUTER / INNER).powf(1.5));
     let laps = (millis.wrapping_add(shift)) as f64 / outer_lap;
     let width = usize::from(area.width);
-    let colour = |row: usize, column: usize| {
+    let seen_at = |row: usize, column: usize| {
         seen.get(row * width + column)
-            .map_or(theme.pane_bg, |seen| ink.colour(*seen, laps, millis, seed))
+            .copied()
+            .unwrap_or(Seen::Hole)
     };
     for row in 0..area.height {
         for column in 0..area.width {
             let (y, x) = (usize::from(row) * 2, usize::from(column));
-            let (upper, lower) = (colour(y, x), colour(y + 1, x));
-            let (glyph, style) = match upper == lower {
-                true => (' ', Style::new().bg(upper)),
-                false => ('▀', Style::new().fg(upper).bg(lower)),
-            };
+            let pixels = [seen_at(y, x), seen_at(y + 1, x)];
+            let firsts = [y, y + 1].map(|y| first_sight(&seen, width, y, x));
+            let (glyph, style) = ink.cell(pixels, firsts, laps, millis, seed);
             buffer[(area.x + column, area.y + row)]
                 .set_char(glyph)
                 .set_style(style);
         }
     }
+}
+
+/// Whether the pixel `column` across and `row` down, of a survey `width`
+/// pixels wide, is where the image of the star it sees begins: no pixel
+/// before it on its row, nor one touching it on the row above, sees the same
+/// cell of the sky. The hole stretches a star near it into an arc of many
+/// pixels, which, drawn as a glyph at each, would be a line of stars where
+/// there is one.
+fn first_sight(seen: &[Seen], width: usize, row: usize, column: usize) -> bool {
+    let Some(&sky @ Seen::Sky { cell: Some(_) }) = seen.get(row * width + column) else {
+        return false;
+    };
+    let before = [(0, 1), (1, 1), (1, 0), (1, -1)];
+    !before.iter().any(|&(up, back)| {
+        let (Some(row), Some(column)) = (row.checked_sub(up), column.checked_add_signed(-back))
+        else {
+            return false;
+        };
+        column < width && seen.get(row * width + column) == Some(&sky)
+    })
 }
 
 #[cfg(test)]
@@ -672,12 +810,49 @@ mod tests {
         matches!(seen, Seen::Disk(_))
     }
 
-    /// Down the middle of the pane: the halo the disk's far side makes over
-    /// the shadow, the shadow, the near side of the disk across it, the
-    /// shadow again and the halo under it — and the stars above and below.
+    fn frame() -> Frame {
+        Frame::of(WIDTH, HEIGHT).expect("a 90 by 30 pane has pixels")
+    }
+
+    /// How far across and up the camera's banked view the point `level`
+    /// along the disk's plane, as it crosses the view, and `upright` of it
+    /// is, in the horizon's radius at the hole's distance.
+    fn banked(level: f32, upright: f32) -> (f32, f32) {
+        let (sin, cos) = ROLL.sin_cos();
+        (level * cos + upright * sin, upright * cos - level * sin)
+    }
+
+    /// The pixel the point `across` and `up` of the hole falls in, where it
+    /// is in the pane.
+    fn pixel((across, up): (f32, f32)) -> Option<(u16, u16)> {
+        let frame = frame();
+        let column = (frame.centre.0 + across * frame.per).floor();
+        let row = (frame.centre.1 - up * frame.per).floor();
+        let inside = (0.0..f32::from(WIDTH)).contains(&column)
+            && (0.0..f32::from(2 * HEIGHT)).contains(&row);
+        // Within the pane, so within a u16.
+        inside.then_some((column as u16, row as u16))
+    }
+
+    /// What is seen along a line through the hole, a pixel's length apart,
+    /// from `from` to `to` in the horizon's radius along it, `along` being
+    /// where on the banked view each distance falls.
+    fn line(from: f32, to: f32, along: impl Fn(f32) -> (f32, f32)) -> Vec<Seen> {
+        let per = frame().per;
+        // A few dozen steps: the distances are a few radii.
+        let steps = ((to - from) * per).abs().ceil() as i32;
+        (0..=steps)
+            .filter_map(|step| pixel(along(from + (to - from) * step as f32 / steps as f32)))
+            .map(|(column, row)| seen(column, row))
+            .collect()
+    }
+
+    /// Across the shadow, upright to the disk: the halo the disk's far side
+    /// makes over the shadow, the shadow, the near side of the disk across
+    /// it, the shadow again and the halo under it — and the stars beyond.
     #[test]
-    fn down_the_middle_the_disk_is_bent_over_and_under_a_dark_shadow() {
-        let middle: Vec<Seen> = (0..2 * HEIGHT).map(|row| seen(WIDTH / 2, row)).collect();
+    fn across_the_disk_it_is_bent_over_and_under_a_dark_shadow() {
+        let middle = line(HALF_TALL, -HALF_TALL, |upright| banked(0.0, upright));
         let first_dark = middle
             .iter()
             .position(|s| *s == Seen::Hole)
@@ -694,12 +869,16 @@ mod tests {
             middle[last_dark..].iter().any(|s| is_disk(*s)),
             "no halo under the shadow"
         );
+        assert!(
+            middle[first_dark..last_dark].iter().any(|s| is_disk(*s)),
+            "no near side across the shadow"
+        );
         assert!(matches!(middle[0], Seen::Sky { .. }), "{:?}", middle[0]);
         assert!(matches!(middle[middle.len() - 1], Seen::Sky { .. }));
         let shadow = last_dark - first_dark;
         assert!(
             (8..40).contains(&shadow),
-            "the shadow is {shadow} pixels tall"
+            "the shadow is {shadow} pixels across"
         );
     }
 
@@ -709,9 +888,9 @@ mod tests {
     #[test]
     fn the_halo_over_the_shadow_is_the_far_side_of_the_disk_bent_into_view() {
         let camera = Camera::new();
-        let per = (f32::from(WIDTH) / 2.0 / HALF_WIDE).min(f32::from(2 * HEIGHT) / 2.0 / HALF_TALL);
-        let (column, row) = (0..2 * HEIGHT)
-            .map(|row| (WIDTH / 2, row))
+        let frame = frame();
+        let (column, row) = (0..=60)
+            .filter_map(|step| pixel(banked(0.0, HALF_TALL - step as f32 / frame.per)))
             .find(|(column, row)| is_disk(seen(*column, *row)))
             .expect("a halo over the shadow");
         let Seen::Disk(gas) = seen(column, row) else {
@@ -719,33 +898,70 @@ mod tests {
         };
         // Behind the hole is away from the camera, which is at negative z.
         assert!((gas.turn * TAU).sin() > 0.5, "turn {}", gas.turn);
-        let across = (f32::from(column) + 0.5 - f32::from(WIDTH) / 2.0) / per;
-        let up = (f32::from(HEIGHT) - f32::from(row) - 0.5) / per;
-        let straight = trace(camera.at, camera.way(across, up), false, per * DISTANCE);
+        let (across, up) = frame.aim(column, row);
+        let straight = trace(
+            camera.at,
+            camera.way(across, up),
+            false,
+            frame.per * DISTANCE,
+        );
         assert!(matches!(straight, Seen::Sky { .. }), "{straight:?}");
     }
 
-    /// Across the middle the disk reaches well past the shadow on both
+    /// Along the disk the near side reaches well past the shadow on both
     /// sides, and the side coming toward the camera — the right, as the gas
     /// is carried — is the brighter.
     #[test]
     fn the_disk_spreads_wide_of_the_shadow_and_its_approaching_side_is_brighter() {
-        let row = HEIGHT;
-        let shine = |columns: std::ops::Range<u16>| {
-            columns
-                .filter_map(|column| match seen(column, row) {
+        let shine = |from: f32, to: f32| {
+            line(from, to, |level| banked(level, 0.0))
+                .into_iter()
+                .filter_map(|seen| match seen {
                     Seen::Disk(gas) => Some(gas.shine),
                     _ => None,
                 })
                 .fold((0.0_f32, 0_u32), |(sum, n), shine| (sum + shine, n + 1))
         };
-        let (left, on_left) = shine(0..WIDTH / 2);
-        let (right, on_right) = shine(WIDTH / 2..WIDTH);
+        let (left, on_left) = shine(-HALF_WIDE, 0.0);
+        let (right, on_right) = shine(0.0, HALF_WIDE);
         assert!(
             on_left > 20 && on_right > 20,
             "{on_left} and {on_right} pixels of disk"
         );
+        let (left, right) = (left / on_left as f32, right / on_right as f32);
         assert!(right > left * 1.3, "left {left}, right {right}");
+    }
+
+    /// The camera is banked as the film's was: the disk rises from the
+    /// pane's lower left to its upper right, round a hole that sits right of
+    /// the middle.
+    #[test]
+    fn the_disk_rises_to_the_right_round_a_hole_right_of_the_middle() {
+        let seen = chart(WIDTH, HEIGHT);
+        let frame = frame();
+        let mean = |pick: &dyn Fn(Seen, f32) -> bool, of: &dyn Fn(u16, u16) -> u16| {
+            let picked: Vec<f32> = (0..2 * HEIGHT)
+                .flat_map(|row| (0..WIDTH).map(move |column| (column, row)))
+                .filter(|&(column, row)| {
+                    let at = usize::from(row) * usize::from(WIDTH) + usize::from(column);
+                    pick(seen[at], frame.aim(column, row).0)
+                })
+                .map(|(column, row)| f32::from(of(column, row)))
+                .collect();
+            picked.iter().sum::<f32>() / picked.len().max(1) as f32
+        };
+        let row = |_: u16, row: u16| row;
+        let left = mean(&|seen, across| is_disk(seen) && across < -5.0, &row);
+        let right = mean(&|seen, across| is_disk(seen) && across > 5.0, &row);
+        assert!(
+            right + 4.0 < left,
+            "rows {left} on the left, {right} on the right"
+        );
+        let shadow = mean(&|seen, _| seen == Seen::Hole, &|column, _| column);
+        assert!(
+            shadow > f32::from(WIDTH) / 2.0 + 2.0,
+            "the shadow is about column {shadow}"
+        );
     }
 
     /// Light from the gas nearest the hole climbs out of its well, and the
@@ -753,13 +969,13 @@ mod tests {
     /// toward the camera.
     #[test]
     fn the_light_is_shifted_by_the_holes_well_and_the_gass_motion() {
-        let toward = Camera::new().way(6.0, 0.0);
-        let away = Camera::new().way(-6.0, 0.0);
-        let at = Camera::new().at;
-        let shift = |way| match trace(at, way, true, 100.0) {
+        let camera = Camera::new();
+        let way = |(across, up)| camera.way(across, up);
+        let shift = |way| match trace(camera.at, way, true, 100.0) {
             Seen::Disk(gas) => gas.shift,
             other => panic!("{other:?}"),
         };
+        let (toward, away) = (way(banked(6.0, 0.0)), way(banked(-6.0, 0.0)));
         assert!(shift(toward) > 1.0, "{}", shift(toward));
         assert!(shift(away) < 1.0, "{}", shift(away));
     }
@@ -789,15 +1005,43 @@ mod tests {
         assert_eq!(first.len(), 40 * 24);
     }
 
-    /// No character stands for a shade: every cell is a blank or the upper
-    /// half block, two pixels of colour one over the other.
+    /// No character stands for a shade: the disk and the shadow are a blank
+    /// or the upper half block, two pixels of colour one over the other, and
+    /// a star is a point of light on the sky — never a block of colour, which
+    /// a pixel half a cell tall draws as a square or, two of them, a bar.
     #[test]
-    fn the_hole_is_drawn_in_pixels_of_colour_rather_than_characters() {
+    fn the_disk_is_drawn_in_pixels_of_colour_and_a_star_as_a_point_on_the_sky() {
+        let seen = chart(WIDTH, HEIGHT);
         for theme in [STELLAR, STELLAR.at(Depth::TrueColour)] {
             let drawn = hole(&theme, 4_000, 7);
-            for cell in drawn.content() {
-                assert!([" ", "▀"].contains(&cell.symbol()), "{:?}", cell.symbol());
+            let sky = Ink::of(&theme).sky();
+            let mut stars = 0;
+            for row in 0..HEIGHT {
+                for column in 0..WIDTH {
+                    let cell = &drawn[(column, row)];
+                    let at =
+                        |y: u16| seen[usize::from(y) * usize::from(WIDTH) + usize::from(column)];
+                    let both_sky = matches!(
+                        (at(2 * row), at(2 * row + 1)),
+                        (Seen::Sky { .. }, Seen::Sky { .. })
+                    );
+                    match both_sky {
+                        true => {
+                            assert!(
+                                [" ", "·", "•", "+"].contains(&cell.symbol()),
+                                "{:?}",
+                                cell.symbol()
+                            );
+                            assert_eq!(cell.bg, sky, "{}: ({column}, {row})", theme.name);
+                            stars += usize::from(cell.symbol() != " ");
+                        }
+                        false => {
+                            assert!([" ", "▀"].contains(&cell.symbol()), "{:?}", cell.symbol())
+                        }
+                    }
+                }
             }
+            assert!(stars >= 5, "{}: {stars} stars", theme.name);
             let colours: std::collections::HashSet<Color> = drawn
                 .content()
                 .iter()
@@ -882,6 +1126,40 @@ mod tests {
                 .iter()
                 .all(|cell| matches!(cell.bg, Color::Rgb(..)))
         );
+    }
+
+    /// A star the hole stretches into an arc of touching pixels is drawn at
+    /// the arc's first pixel alone; a second image of it, apart from the
+    /// first, is drawn too.
+    #[test]
+    fn a_star_stretched_into_an_arc_is_drawn_once_for_each_image_of_it() {
+        let star = Seen::Sky { cell: Some((5, 9)) };
+        let other = Seen::Sky { cell: Some((6, 9)) };
+        let width = 5;
+        #[rustfmt::skip]
+        let seen = [
+            other, other, star,  other, other,
+            other, star,  star,  other, other,
+            star,  other, other, other, star,
+            other, other, other, other, other,
+        ];
+        let firsts: Vec<(usize, usize)> = (0..4)
+            .flat_map(|row| (0..width).map(move |column| (row, column)))
+            .filter(|&(row, column)| seen[row * width + column] == star)
+            .filter(|&(row, column)| first_sight(&seen, width, row, column))
+            .collect();
+        assert_eq!(firsts, [(0, 2), (2, 4)]);
+    }
+
+    /// The sky straight behind the hole holds no star, which the hole would
+    /// spread into a ring round its shadow; a little wider of it, it does.
+    #[test]
+    fn no_star_is_drawn_straight_behind_the_hole() {
+        let behind = scale(Camera::new().at, -1.0);
+        assert_eq!(sky_cell(behind, 100.0), None);
+        let (sin, cos) = (1.2 * CLEAR).sin_cos();
+        let wide = add(scale(unit(behind), cos), [sin, 0.0, 0.0]);
+        assert!(sky_cell(wide, 100.0).is_some());
     }
 
     #[test]

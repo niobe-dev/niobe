@@ -330,11 +330,13 @@ reviewers that encode both, for an agent working in this tree.
   projected by dividing by its depth, which runs down at one pace until it is born again far off
   at a new place, drawn as a dark grey `.`, a grey `+` and a white `*` as it comes nearer and,
   in 24-bit colour, in a few greys between; `scene/blackhole.rs` `stellar`'s black hole, seen from
-  just above its accretion disk — a ray from every pixel, two to a cell in half blocks, followed
+  just above its accretion disk by a camera banked as the film's was, the disk rising to the
+  right round a hole right of the middle — a ray from every pixel, two to a cell in half blocks, followed
   through a non-rotating hole's gravity until it falls in, meets the disk or leaves for the
   stars, where each ends worked out once for a pane's size and kept for the last few sizes —
   the disk's far side bent over and under the shadow, the photon ring round it, the stars
-  lensed into arcs, the disk's light shifted by the gas's motion and the hole's well and its
+  lensed aside, each drawn as a point — `·`, `•` or `+` — once for each image of it, and none
+  straight behind the hole, where it would ring the shadow, the disk's light shifted by the gas's motion and the hole's well and its
   streaks going round at each radius's orbital pace, each light rounded to a few steps — each worked out from a seed and the
   wall clock the loop last read, so two draws
   at one moment draw one frame, drawn in the theme's values or its sixteen names with no shade a
