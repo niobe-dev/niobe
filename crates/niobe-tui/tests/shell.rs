@@ -7305,6 +7305,99 @@ fn what_a_command_did_is_handed_to_the_agent_once_no_turn_runs() {
     assert_eq!(app.take_handed(), None, "handed once");
 }
 
+/// A turn that ended saying another follows leaves the backend about to
+/// start one of its own, on background work that ended under it: what a
+/// command did waits for that turn to end too, rather than being sent into
+/// it and opening a turn here that the backend's own is folded under.
+#[test]
+fn what_a_command_did_waits_for_the_turn_the_backend_owes_of_its_own() {
+    let mut app = session_that_runs_commands().attached();
+    app.apply(&Event::UserMessage {
+        text: "build it in the background".to_owned(),
+    });
+    app.apply(&Event::TurnFollows);
+    app.apply(&Event::TurnEnded);
+    let id = run_command(&mut app, "make check");
+    app.ran(exited(&id, "ok\n", 0));
+    assert_eq!(
+        app.take_handed(),
+        None,
+        "handed while the backend owes a turn"
+    );
+
+    app.apply(&Event::AssistantDelta {
+        text: "The build finished.".to_owned(),
+    });
+    assert!(app.session().turn_running(), "the owed turn began");
+    assert_eq!(app.take_handed(), None, "handed while the owed turn ran");
+
+    app.apply(&Event::TurnEnded);
+    let (commands, _) = app.take_handed().expect("handed once the owed turn ended");
+    assert_eq!(commands, ["make check"]);
+}
+
+/// A prompt the operator sent while a turn ran, which the backend did not
+/// take into that turn, is the turn the backend starts once it ends: what a
+/// command did waits for that one too, rather than going in behind it.
+#[test]
+fn what_a_command_did_waits_for_the_turn_of_a_prompt_queued_behind_the_last() {
+    use ratatui::crossterm::event::KeyCode;
+
+    let mut app = session_that_runs_commands().attached();
+    app.apply(&Event::UserMessage {
+        text: "deploy it".to_owned(),
+    });
+    let id = run_command(&mut app, "make check");
+    app.ran(exited(&id, "ok\n", 0));
+    type_keys(&mut app, "then tag it");
+    press(&mut app, KeyCode::Enter);
+    assert!(
+        app.entries()
+            .iter()
+            .any(|entry| entry.body == "then tag it" && entry.queued),
+        "the prompt waits behind the running turn"
+    );
+
+    app.apply(&Event::TurnEnded);
+    assert_eq!(
+        app.take_handed(),
+        None,
+        "handed ahead of the turn the queued prompt starts"
+    );
+    app.apply(&Event::PromptTaken);
+    app.apply(&Event::AssistantDelta {
+        text: "Tagged.".to_owned(),
+    });
+    assert_eq!(app.take_handed(), None, "handed while that turn ran");
+
+    app.apply(&Event::TurnEnded);
+    let (commands, _) = app
+        .take_handed()
+        .expect("handed once the queued prompt's turn ended");
+    assert_eq!(commands, ["make check"]);
+}
+
+/// A prompt the backend took into the turn it waited behind starts no turn
+/// after it: what a command did is handed as soon as that turn ends.
+#[test]
+fn what_a_command_did_is_handed_after_a_turn_that_took_its_queued_prompt_in() {
+    use ratatui::crossterm::event::KeyCode;
+
+    let mut app = session_that_runs_commands().attached();
+    app.apply(&Event::UserMessage {
+        text: "deploy it".to_owned(),
+    });
+    let id = run_command(&mut app, "make check");
+    app.ran(exited(&id, "ok\n", 0));
+    type_keys(&mut app, "then tag it");
+    press(&mut app, KeyCode::Enter);
+    app.apply(&Event::PromptTaken);
+
+    app.apply(&Event::TurnEnded);
+    let (commands, _) = app.take_handed().expect("handed once the turn ended");
+    assert_eq!(commands, ["make check"]);
+}
+
 /// A command the operator stopped, or one that could not be started, says
 /// nothing the agent was waiting on; nor is anything handed where no
 /// backend is listening.

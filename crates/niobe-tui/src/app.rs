@@ -2013,9 +2013,10 @@ pub struct App {
     /// it runs as, or the session, ends without that.
     clear_sent: bool,
     /// Where a turn the backend owes of its own stands: one a turn said
-    /// follows it, on work that ended under it that no request took in. The
-    /// backend holds what it is sent until that turn is done, so a command
-    /// waits for it as for a running turn.
+    /// follows it, on work that ended under it that no request took in, or
+    /// the one it starts on a prompt it held behind a turn that has ended.
+    /// The backend holds what it is sent until that turn is done, so a
+    /// command waits for it as for a running turn.
     owed: Owed,
     /// The prompts sent while a clear waits, oldest first, which the shell
     /// holds until it has been answered: the backend takes a prompt that
@@ -2247,7 +2248,8 @@ enum Owed {
     Nothing,
     /// A turn still running said another follows it.
     Announced,
-    /// The turn that said so has ended, and the one it owes has not begun.
+    /// The turn that said so, or that a prompt was held behind, has ended,
+    /// and the one it owes has not begun.
     Due,
 }
 
@@ -2614,9 +2616,10 @@ impl App {
     /// transcript entry it produces, if it produces one.
     pub fn apply(&mut self, event: &Event) {
         self.heard = true;
+        let held = !self.queued_prompts.is_empty();
         self.fold_event(event);
         self.clear_answered(event);
-        self.follow_owed_turn(event);
+        self.follow_owed_turn(event, held);
         // A model the backend refused is not what the next session should
         // open on: it keeps the one the backend went back to, where a change
         // it took put it there, and otherwise none, leaving the backend's own.
@@ -6002,7 +6005,7 @@ impl App {
         }
         if self.owed == Owed::Due {
             return Err(format!(
-                "/{name} waits for the turn the backend starts on work that just ended"
+                "/{name} waits for the turn the backend is about to start"
             ));
         }
         // A question can wait with no turn of this shell's running: one a
@@ -8550,12 +8553,16 @@ impl App {
     /// the words that tell the agent what they did, for the event loop to
     /// send as a turn and record as an [`Event::CommandsHanded`] once the
     /// backend has it. `None` until there is something to hand and a turn
-    /// could start now: none is running, and no clear sent from here waits
-    /// on the backend. Commands that end while a turn runs wait for it and
-    /// go together, rather than being taken in behind the operator's own
-    /// prompts.
+    /// could start now: none is running, the backend owes none of its own —
+    /// on background work that ended, or on a prompt it held behind the last
+    /// turn — and no clear sent from here waits on the backend. Commands
+    /// that end while a turn runs wait for it and go together, rather than
+    /// being taken in behind the operator's own prompts.
     pub fn take_handed(&mut self) -> Option<(Vec<String>, String)> {
-        let waits = self.session.turn_running() || self.clear_sent || !self.after_clear.is_empty();
+        let waits = self.session.turn_running()
+            || self.owed == Owed::Due
+            || self.clear_sent
+            || !self.after_clear.is_empty();
         if self.handing.is_empty() || waits || !self.attached {
             return None;
         }
@@ -10420,15 +10427,20 @@ impl App {
 
     /// Keeps where a turn the backend owes stands, as its events say:
     /// announced by a turn's word that another follows, due once that turn
-    /// has ended, and owed no longer once a turn begins, or ends, after it,
-    /// which an owed turn whose request failed does without opening, or
-    /// once the conversation or the session ends.
-    fn follow_owed_turn(&mut self, event: &Event) {
+    /// has ended — or once a turn ends with a prompt sent during it still
+    /// `held`, not taken in, which the backend starts as the turn after —
+    /// and owed no longer once a turn begins, or ends, after it, which an
+    /// owed turn whose request failed does without opening, or once the
+    /// conversation or the session ends.
+    fn follow_owed_turn(&mut self, event: &Event, held: bool) {
         self.owed = match (event, self.owed) {
             (Event::TurnFollows, _) => Owed::Announced,
             (Event::Cleared | Event::SessionLeft | Event::Error { fatal: true, .. }, _) => {
                 Owed::Nothing
             }
+            // The backend starts what it still holds once the turn it held
+            // it behind has ended.
+            (Event::TurnEnded, _) if held => Owed::Due,
             // The turn that said another follows has ended: the one it owes
             // is due from here.
             (Event::TurnEnded, Owed::Announced) => Owed::Due,
@@ -23338,6 +23350,39 @@ mod tests {
 
         app.apply(&Event::AssistantMessage {
             text: "the work is done".to_owned(),
+            agent: None,
+        });
+        app.apply(&Event::TurnEnded);
+        app.perform(crate::menu::Action::NewSession);
+        hand_on(&mut app, &mut recorded);
+        assert_eq!(
+            recorded,
+            [Event::UserMessage {
+                text: "/clear".to_owned()
+            }]
+        );
+    }
+
+    /// A prompt sent while a turn ran and not taken into it is the turn the
+    /// backend starts once that one ends: a clear sent in that gap would be
+    /// held behind it, and is refused as one sent while a turn runs.
+    #[test]
+    fn a_clear_waits_for_the_turn_of_a_prompt_held_behind_the_last() {
+        let mut app = offering(&["clear"]);
+        let mut recorded = Vec::new();
+        app.apply(&said("go"));
+        let mut app = sent(app, "and then");
+        hand_on(&mut app, &mut recorded);
+        app.apply(&Event::TurnEnded);
+
+        recorded.clear();
+        app.perform(crate::menu::Action::NewSession);
+        hand_on(&mut app, &mut recorded);
+        assert_eq!(recorded, [], "the clear went before the held prompt's turn");
+
+        app.apply(&Event::PromptTaken);
+        app.apply(&Event::AssistantMessage {
+            text: "and done".to_owned(),
             agent: None,
         });
         app.apply(&Event::TurnEnded);
