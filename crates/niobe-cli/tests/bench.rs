@@ -393,7 +393,8 @@ fn a_turn_may_edit_inside_its_copy_and_nowhere_else() {
     let ran = results(&inside.bench(&["--json"]));
     assert_eq!(ran["tasks"][0]["passed"], true, "{ran:#}");
     // The stand-in's result carries no usage, so the turn reported no spend:
-    // its report's zeros are no count of the suite's tokens.
+    // its report has no tokens, and the suite no count of them.
+    assert_eq!(ran["tasks"][0]["turn"]["tokens"], Value::Null, "{ran:#}");
     assert_eq!(ran["tasks"][0]["turn"]["models"], serde_json::json!({}));
     assert_eq!(ran["summary"]["tokens"], Value::Null, "{ran:#}");
     assert_eq!(ran["summary"]["output_tokens"], Value::Null);

@@ -29,7 +29,9 @@ use crate::summary::grouped;
 
 /// The version of the JSON's shape, which `schema/cost.schema.json` names. It
 /// moves only when a field changes meaning or goes away; one added does not.
-pub const SCHEMA_VERSION: u64 = 1;
+/// It is 2 since a session no usage record reached has null for its tokens,
+/// where version 1 wrote zeros nothing measured.
+pub const SCHEMA_VERSION: u64 = 2;
 
 /// How `niobe cost` prints.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -155,21 +157,23 @@ pub(crate) fn figures(session: &SessionState) -> Map<String, Value> {
             "older_recording": m.settlement_unrecorded(),
         })
     });
+    // A session no usage record reached measured nothing, so its tokens are
+    // null as its row in the table is a dash, not an object of zeros.
+    let tokens = (t.records > 0).then(|| {
+        json!({
+            "input": t.input,
+            "output": t.output,
+            "cache_read": t.cache_read,
+            "cache_write": t.cache_write,
+            "cache_write_1h": t.cache_write_1h,
+            "cache_write_unsplit": t.cache_write_unsplit,
+            "reasoning": t.reasoning,
+            "total": t.tokens(),
+        })
+    });
     Map::from_iter([
         ("billing".to_owned(), json!(billing(Billed::of(session)))),
-        (
-            "tokens".to_owned(),
-            json!({
-                "input": t.input,
-                "output": t.output,
-                "cache_read": t.cache_read,
-                "cache_write": t.cache_write,
-                "cache_write_1h": t.cache_write_1h,
-                "cache_write_unsplit": t.cache_write_unsplit,
-                "reasoning": t.reasoning,
-                "total": t.tokens(),
-            }),
-        ),
+        ("tokens".to_owned(), json!(tokens)),
         ("models".to_owned(), json!(t.tokens_by_model)),
         ("cost".to_owned(), json!(cost)),
     ])
@@ -555,6 +559,18 @@ mod tests {
             csv[2],
             "2,2026-09-18T12:01:40Z,unknown,0,0,0,0,0,0,0,0,,,,,"
         );
+    }
+
+    #[test]
+    fn the_json_of_a_session_that_reported_no_usage_has_no_tokens_not_zeros() {
+        let sessions = [unreported(1, 1_789_732_800), session(2, 1_789_732_900, 0)];
+        let document = document("repo", &sessions);
+        // The first measured nothing, so it has no counts to give; the second
+        // reported a record of no tokens, which is a measured zero.
+        assert_eq!(document["sessions"][0]["tokens"], Value::Null);
+        assert_eq!(document["sessions"][0]["models"], json!({}));
+        assert_eq!(document["sessions"][1]["tokens"]["total"], 0);
+        assert_eq!(document["sessions"][1]["models"], json!({"opus-5": 0}));
     }
 
     #[test]

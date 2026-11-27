@@ -35,7 +35,11 @@ use crate::signals::Stopping;
 use crate::summary::grouped;
 
 /// The version of the JSON's shape, which `schema/bench.schema.json` names.
-pub const SCHEMA_VERSION: u64 = 1;
+/// It moves only when a field changes meaning or goes away; one added does
+/// not. It is 2 since each task's `turn` is the turn's report in the shape
+/// `niobe -p --json` prints at its version 2, where a turn no usage record
+/// reached has null for its tokens.
+pub const SCHEMA_VERSION: u64 = 2;
 
 /// How long a task's turn may run when `--timeout` does not say: long
 /// enough for a task a model works through in a few minutes, short enough
@@ -607,12 +611,11 @@ fn report(ended: &Ended) -> Option<&Value> {
 
 /// A turn's report where a usage record reached it.
 ///
-/// `niobe -p --json` prints its token counts as zeros where none did, as a
-/// turn that failed before the model answered, so its counts are read only
-/// where it names a model: every usage record is counted under the model it
-/// names, so a turn with one has at least one entry, even one of no tokens.
+/// `niobe -p --json` prints null for its tokens where none did, as a turn
+/// that failed before the model answered, and counts — zeros among them —
+/// only where one did.
 fn spend(ran: &Ran) -> Option<&Value> {
-    report(&ran.ended).filter(|report| report["models"].as_object().is_some_and(|m| !m.is_empty()))
+    report(&ran.ended).filter(|report| report["tokens"].is_object())
 }
 
 /// Every token a turn spent, where it reported its spend.
@@ -951,17 +954,17 @@ mod tests {
 
     #[test]
     fn a_turn_whose_report_holds_no_usage_record_reported_no_tokens_rather_than_none() {
-        // `niobe -p --json` prints its token counts as zeros where no usage
-        // record reached the turn — a turn that failed before the model
-        // answered — and names no model; a model with a record of no tokens
-        // is a measured zero.
-        let ran = |name: &str, total: u64, models: Value| Ran {
+        // `niobe -p --json` prints null for its tokens where no usage record
+        // reached the turn — a turn that failed before the model answered —
+        // and names no model; a model with a record of no tokens is a
+        // measured zero.
+        let ran = |name: &str, total: Option<u64>, models: Value| Ran {
             name: name.to_owned(),
             passed: false,
             ended: Ended::Reported(json!({
                 "outcome": "failed",
                 "reason": "Not logged in",
-                "tokens": {"total": total, "output": total},
+                "tokens": total.map(|total| json!({"total": total, "output": total})),
                 "models": models,
                 "windows": null,
             })),
@@ -969,9 +972,9 @@ mod tests {
             kept: None,
         };
         let suite = [
-            ran("a", 1_200, json!({"claude-sonnet-5": 1_200})),
-            ran("b", 0, json!({})),
-            ran("c", 0, json!({"claude-sonnet-5": 0})),
+            ran("a", Some(1_200), json!({"claude-sonnet-5": 1_200})),
+            ran("b", None, json!({})),
+            ran("c", Some(0), json!({"claude-sonnet-5": 0})),
         ];
         let document = document("demo", SystemTime::UNIX_EPOCH, &suite, TURN_TIMEOUT);
         assert_eq!(document["summary"]["tokens"], Value::Null);

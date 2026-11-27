@@ -1336,7 +1336,10 @@ fn print_turn(
 /// A headless turn in the shape `schema/print.schema.json` publishes.
 fn print_json(turn: &headless::Turn, session: Option<i64>, terse: bool) -> serde_json::Value {
     let mut fields = serde_json::Map::from_iter([
-        ("schema_version".to_owned(), serde_json::json!(1)),
+        (
+            "schema_version".to_owned(),
+            serde_json::json!(headless::SCHEMA_VERSION),
+        ),
         ("outcome".to_owned(), serde_json::json!(turn.outcome.name())),
         (
             "reason".to_owned(),

@@ -129,7 +129,7 @@ the cost in the job summary:
   run: |
     status=0
     niobe -p "fix the failing test" --budget 2 --json > turn.json || status=$?
-    jq -r '"**niobe** \(.outcome) · \(.tokens.total) tokens · $\(.cost.reported_usd // "—")"' \
+    jq -r '"**niobe** \(.outcome) · \(.tokens.total // "—") tokens · $\(.cost.reported_usd // "—")"' \
       turn.json >> "$GITHUB_STEP_SUMMARY"
     exit $status
 ```

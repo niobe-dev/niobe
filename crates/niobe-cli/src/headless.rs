@@ -49,6 +49,13 @@ use niobe_tui::journal::Journal;
 /// tell "this cost too much" from "this did not work".
 pub const BUDGET_STOPPED: u8 = 3;
 
+/// The version of the shape `niobe -p --json` prints, which
+/// `schema/print.schema.json` names. It moves only when a field changes
+/// meaning or goes away; one added does not. It is 2 since a turn no usage
+/// record reached has null for its tokens, where version 1 wrote zeros
+/// nothing measured.
+pub const SCHEMA_VERSION: u64 = 2;
+
 /// How long a backend asked to stop the turn is given to close it before
 /// the run ends without its close. Short of the grace a job runner gives
 /// between the signal that asks and the kill — seven and a half seconds on

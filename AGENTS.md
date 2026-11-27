@@ -569,7 +569,8 @@ reviewers that encode both, for an agent working in this tree.
   session's rows add up to its total —
   or as `--json` in the shape
   `schema/cost.schema.json` publishes at the repository's root, with no money on a plan or where
-  nothing said how a session was billed and no figure priced by the table; `headless.rs` is
+  nothing said how a session was billed, no tokens where no usage record reached one, and no
+  figure priced by the table; `headless.rs` is
   `niobe -p`: one turn sent through the same `Bridge` and recorded through the same `Journal` as
   the shell's — waited past where it finished with a sub-agent or a shell command still running
   in the background, to the end of the turn the CLI starts on its own once that work ends — or

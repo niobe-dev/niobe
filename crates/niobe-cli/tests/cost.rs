@@ -123,7 +123,7 @@ fn a_session_billed_by_use_carries_the_tokens_and_money_its_records_hold() {
     let document = exported(&root);
     let metered = &document["sessions"][0];
 
-    assert_eq!(document["schema_version"], 1);
+    assert_eq!(document["schema_version"], 2);
     assert_eq!(document["repository"], "catalog");
     assert_eq!(metered["id"], 1);
     assert_eq!(metered["started_at"], "2026-09-18T12:00:00Z");
@@ -165,7 +165,7 @@ fn a_floor_an_older_recording_left_is_marked_as_one() {
 }
 
 #[test]
-fn a_plan_and_a_session_that_never_said_carry_tokens_and_no_money() {
+fn a_plan_and_a_session_that_never_said_carry_the_tokens_they_measured_and_no_money() {
     let (_dir, root) = repository();
     let document = exported(&root);
     let (plan, unsaid) = (&document["sessions"][1], &document["sessions"][2]);
@@ -176,7 +176,11 @@ fn a_plan_and_a_session_that_never_said_carry_tokens_and_no_money() {
 
     assert_eq!(unsaid["billing"], "unknown");
     assert_eq!(unsaid["cost"], Value::Null);
-    assert_eq!(unsaid["tokens"]["total"], 0);
+    // jq -s '[.[] | select(.type == "usage")] | length' producer-gaps.jsonl
+    // reads 0: no usage record reached the session, so it has no counts to
+    // give, rather than counts of zero nothing measured.
+    assert_eq!(unsaid["tokens"], Value::Null);
+    assert_eq!(unsaid["models"], json!({}));
 }
 
 #[test]

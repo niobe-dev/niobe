@@ -140,6 +140,7 @@ fn the_json_is_the_shape_the_published_schema_names() {
     let printed = json(&output);
     let refused = schema::refusals("print.schema.json", &printed);
     assert!(refused.is_empty(), "{refused:#?}\n{printed:#}");
+    assert_eq!(printed["schema_version"], 2);
     assert_eq!(printed["outcome"], "finished");
     assert_eq!(printed["reason"], Value::Null);
     assert_eq!(printed["reply"], "the test passes now");
@@ -445,7 +446,12 @@ fn a_failed_turn_exits_one_with_the_backends_reason() {
     );
     let printed = json(&output);
     assert_eq!(printed["outcome"], "failed");
-    assert!(schema::refusals("print.schema.json", &printed).is_empty());
+    // The turn failed before any usage record reached it, so it has no
+    // counts to give, rather than counts of zero nothing measured.
+    assert_eq!(printed["tokens"], Value::Null, "{printed:#}");
+    assert_eq!(printed["models"], serde_json::json!({}), "{printed:#}");
+    let refused = schema::refusals("print.schema.json", &printed);
+    assert!(refused.is_empty(), "{refused:#?}\n{printed:#}");
 }
 
 /// A `claude` whose turn launches a sub-agent in the background, hears it end

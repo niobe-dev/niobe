@@ -25,7 +25,7 @@
       "properties": {
         "schema_version": {
           "description": "The version of this shape.",
-          "const": 1
+          "const": 2
         },
         "outcome": {
           "description": "How the turn ended. Each has its own exit status: finished 0, failed 1, budget_stopped 3.",
