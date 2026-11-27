@@ -459,26 +459,31 @@ impl Sides {
     }
 }
 
-/// Every line of a change's hunks, in order.
-type Lines<'a> =
-    std::iter::FlatMap<std::slice::Iter<'a, Hunk>, &'a [DiffLine], fn(&'a Hunk) -> &'a [DiffLine]>;
-
 /// A change's lines read in order as its rows are drawn: the lines between
 /// two rows — the unchanged ones left out — read too, so what one of them
 /// opens still colours the rows after it.
+///
+/// Each hunk is read from the top, as the first is: the file's lines between
+/// two hunks are not in the change, so what one hunk's last line leaves open
+/// — a comment, a docstring — is not known to be open where the next starts.
 struct Reader<'a> {
+    language: Option<Language>,
     sides: Option<Sides>,
-    lines: Lines<'a>,
+    /// The hunks not yet begun.
+    hunks: std::slice::Iter<'a, Hunk>,
+    /// The lines of the hunk being read that are not read yet.
+    lines: std::slice::Iter<'a, DiffLine>,
     /// How many of the change's lines have been read.
     read: usize,
 }
 
 impl<'a> Reader<'a> {
     fn new(change: &'a Change) -> Self {
-        let lines: fn(&'a Hunk) -> &'a [DiffLine] = Hunk::lines;
         Self {
-            sides: change.language().map(Sides::new),
-            lines: change.hunks().iter().flat_map(lines),
+            language: change.language(),
+            sides: None,
+            hunks: change.hunks().iter(),
+            lines: [].iter(),
             read: 0,
         }
     }
@@ -487,21 +492,37 @@ impl<'a> Reader<'a> {
     /// as `text`, having read every line before it. None where the change is
     /// in no language the highlighter reads.
     fn tokens(&mut self, position: usize, text: &str) -> Vec<Token> {
-        let Some(sides) = self.sides.as_mut() else {
+        if self.language.is_none() {
             return Vec::new();
-        };
+        }
         while self.read < position {
-            let Some(line) = self.lines.next() else {
+            let Some(line) = self.next_line() else {
                 return Vec::new();
             };
-            sides.read(line, line.text());
             self.read += 1;
+            if let Some(sides) = self.sides.as_mut() {
+                sides.read(line, line.text());
+            }
         }
-        let Some(line) = self.lines.next() else {
+        let Some(line) = self.next_line() else {
             return Vec::new();
         };
         self.read += 1;
-        sides.read(line, text)
+        self.sides
+            .as_mut()
+            .map_or_else(Vec::new, |sides| sides.read(line, text))
+    }
+
+    /// The change's next line, with both sides' highlighters started afresh
+    /// where it opens a hunk.
+    fn next_line(&mut self) -> Option<&'a DiffLine> {
+        loop {
+            if let Some(line) = self.lines.next() {
+                return Some(line);
+            }
+            self.lines = self.hunks.next()?.lines().iter();
+            self.sides = self.language.map(Sides::new);
+        }
     }
 }
 
@@ -782,6 +803,89 @@ mod tests {
         assert_eq!(colour_of("still gone */"), Some(theme.syntax.comment));
         assert_eq!(colour_of("let"), Some(theme.syntax.keyword));
         assert_eq!(colour_of("fn"), Some(theme.syntax.keyword));
+    }
+
+    /// The colour each of `wanted` is first drawn in among the rows after
+    /// the first elision row, which is where a second hunk of these diffs
+    /// starts.
+    fn colours_after_the_gap(rows: &[Line<'_>], wanted: &[&str]) -> Vec<Option<Color>> {
+        let gap = rows
+            .iter()
+            .position(|row| row.spans.iter().any(|span| span.content.contains('…')))
+            .expect("the hunks are drawn apart by an elision row");
+        let drawn = words(&rows[gap + 1..], 3);
+        wanted
+            .iter()
+            .map(|word| {
+                drawn
+                    .iter()
+                    .find(|(text, _, _)| text == word)
+                    .and_then(|(_, fg, _)| *fg)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_comment_the_last_line_of_one_hunk_opens_does_not_run_on_into_the_next() {
+        let theme = crate::theme::STELLAR_TRUE;
+        let first = hunk(
+            1,
+            1,
+            vec![
+                context("function a() {"),
+                removed("  return 1;"),
+                added("  return 2;"),
+                context("}"),
+                context(""),
+                context("/**"),
+            ],
+        );
+        let second = hunk(
+            40,
+            40,
+            vec![
+                context("export const x = 1;"),
+                removed("let y = 2;"),
+                added("let y = 3;"),
+            ],
+        );
+        let diff = Change::new(vec![first, second], None, Some(Language::JavaScript));
+        let rows = lines(&diff, 60, false, &theme);
+        assert_eq!(
+            colours_after_the_gap(&rows, &["export", "const", "let"]),
+            [Some(theme.syntax.keyword); 3],
+            "the lines between two hunks are not in the change, so the second is read afresh"
+        );
+    }
+
+    #[test]
+    fn a_docstring_the_last_line_of_one_hunk_opens_does_not_run_on_into_the_next() {
+        let theme = crate::theme::STELLAR_TRUE;
+        let first = hunk(
+            1,
+            1,
+            vec![
+                removed("x = 1"),
+                added("x = 2"),
+                context("def f():"),
+                context("    \"\"\""),
+            ],
+        );
+        let second = hunk(
+            30,
+            30,
+            vec![
+                context("def g():"),
+                removed("    return 1"),
+                added("    return 2"),
+            ],
+        );
+        let diff = Change::new(vec![first, second], None, Some(Language::Python));
+        let rows = lines(&diff, 60, false, &theme);
+        assert_eq!(
+            colours_after_the_gap(&rows, &["def", "return"]),
+            [Some(theme.syntax.keyword); 2]
+        );
     }
 
     #[test]
