@@ -9,7 +9,7 @@
 //! never starts or ends inside a character.
 
 use super::spec::{Hash, Keys, Quote, Spec};
-use super::{State, Token, TokenKind, Within};
+use super::{HeredocWord, State, Token, TokenKind, Within};
 
 /// The tokens of `line` in the language `spec` describes, read from `state`,
 /// and the state the next line starts in.
@@ -21,10 +21,18 @@ pub(super) fn line(spec: &Spec, line: &str, state: State) -> (Vec<Token>, State)
         tokens: Vec::new(),
         within: state.within,
         previous_word: None,
+        heredoc: None,
+        parens: Parens::default(),
     };
     lexer.resume();
     lexer.run();
-    let within = lexer.within;
+    // A heredoc's body starts on the next line, once the rest of the line
+    // that opened it has been read as code; a line that ends inside a
+    // string goes on as that string.
+    let within = match (lexer.within, lexer.heredoc) {
+        (Within::Code, Some(heredoc)) => heredoc,
+        (within, _) => within,
+    };
     (lexer.tokens, State { within })
 }
 
@@ -38,6 +46,22 @@ struct Lexer<'a> {
     /// The word read last, where nothing but blanks came after it: what
     /// names the word after `fn` as a function.
     previous_word: Option<&'a str>,
+    /// The heredoc the line opened first, whose body the next line starts:
+    /// a second one on the line has its word read as a string, and its body
+    /// is read as the end of the first's.
+    heredoc: Option<Within>,
+    /// The `((` and `))` counted so far, which say whether a `<<` shifts.
+    parens: Parens,
+}
+
+/// The `((` and `))` a line holds before [`Parens::scanned`], counted as
+/// the lexer moves on, so that a line of many `<<`s is not read again from
+/// its start at each.
+#[derive(Default)]
+struct Parens {
+    scanned: usize,
+    opens: usize,
+    closes: usize,
 }
 
 impl<'a> Lexer<'a> {
@@ -81,6 +105,13 @@ impl<'a> Lexer<'a> {
             Within::Raw { hashes } => {
                 let (end, within) = raw_from(self.line, 0, hashes);
                 (end, within, TokenKind::String)
+            }
+            Within::Heredoc { word, tabs } => {
+                let within = match closes_heredoc(self.line, word, tabs) {
+                    true => Within::Code,
+                    false => self.within,
+                };
+                (self.line.len(), within, TokenKind::String)
             }
         };
         self.push(end, kind);
@@ -128,6 +159,15 @@ impl<'a> Lexer<'a> {
         }
         if let Some(end) = self.hash_at(rest) {
             self.push(self.at + end, TokenKind::Attribute);
+            return true;
+        }
+        if self.spec.heredocs
+            && c == '<'
+            && let Some((operator, word, heredoc)) = self.heredoc_at(rest)
+        {
+            self.at += operator;
+            self.push(self.at + word, TokenKind::String);
+            self.heredoc.get_or_insert(heredoc);
             return true;
         }
         if self.spec.lifetimes && c == '\'' {
@@ -232,6 +272,52 @@ impl<'a> Lexer<'a> {
                     .then(|| rest.len() - bracket.len() + bracket_end(bracket))
             }
         }
+    }
+
+    /// The heredoc `<<WORD`, `<<-WORD`, `<<'WORD'`, `<<"WORD"` or `<<\WORD`
+    /// at the start of `rest` opens, as how long its operator is up to the
+    /// word, how long the word is with its quotes, and what the next line
+    /// starts inside. A here-string's `<<<` opens none, nor a shift inside
+    /// `((…))`, nor a word that starts with a digit, as `<< 2`.
+    fn heredoc_at(&mut self, rest: &str) -> Option<(usize, usize, Within)> {
+        let after = rest.strip_prefix("<<")?;
+        if after.starts_with('<') || self.line[..self.at].ends_with('<') {
+            return None;
+        }
+        let (tabs, after) = match after.strip_prefix('-') {
+            Some(after) => (true, after),
+            None => (false, after),
+        };
+        let blank = after.len() - after.trim_start_matches(is_blank).len();
+        let (length, word) = heredoc_word(&after[blank..])?;
+        let word = HeredocWord::new(word)?;
+        if self.in_arithmetic() {
+            return None;
+        }
+        let operator = rest.len() - after.len() + blank;
+        Some((operator, length, Within::Heredoc { word, tabs }))
+    }
+
+    /// Whether [`Lexer::at`] is inside a `((…))` the line opened, where
+    /// `<<` shifts.
+    fn in_arithmetic(&mut self) -> bool {
+        let bytes = self.line.as_bytes();
+        let parens = &mut self.parens;
+        while parens.scanned + 2 <= self.at {
+            let pair = bytes.get(parens.scanned..parens.scanned + 2);
+            parens.scanned += match pair {
+                Some(b"((") => {
+                    parens.opens = parens.opens.saturating_add(1);
+                    2
+                }
+                Some(b"))") => {
+                    parens.closes = parens.closes.saturating_add(1);
+                    2
+                }
+                _ => 1,
+            };
+        }
+        parens.opens > parens.closes
     }
 
     /// The string a quote at the start of `rest` opens — directly or after
@@ -399,6 +485,49 @@ impl<'a> Lexer<'a> {
 /// `::`, `:/` as in `http://`, or `:=`.
 fn goes_on_from_colon(c: char) -> bool {
     matches!(c, ':' | '/' | '=')
+}
+
+/// Whether `line` closes a heredoc whose word is `word`: it is the word
+/// alone, after any blanks where the heredoc opened with `<<-`. The shell
+/// strips only tabs there, but a transcript expands a code block's tabs
+/// before it reads the line, and a body that never closes would colour the
+/// rest of the block.
+fn closes_heredoc(line: &str, word: HeredocWord, tabs: bool) -> bool {
+    let line = match tabs {
+        true => line.trim_start_matches(is_blank),
+        false => line,
+    };
+    line.as_bytes() == word.as_bytes()
+}
+
+/// The word a heredoc's operator is followed by, at the start of `text`, as
+/// how long it is with its quotes and the word the body is closed by:
+/// `'WORD'` and `"WORD"` whole, `\WORD` and `WORD` as a name.
+fn heredoc_word(text: &str) -> Option<(usize, &str)> {
+    let quote = text.chars().next()?;
+    if quote == '\'' || quote == '"' {
+        let body = &text[1..];
+        let close = body.find(quote)?;
+        return Some((close + 2, &body[..close]));
+    }
+    let escaped = usize::from(quote == '\\');
+    let name = &text[escaped..];
+    let end = match name.chars().next() {
+        Some(c) if c.is_alphabetic() || c == '_' => name
+            .char_indices()
+            .find(|(_, c)| !is_heredoc_name_char(*c))
+            .map_or(name.len(), |(at, _)| at),
+        _ => return None,
+    };
+    Some((escaped + end, &name[..end]))
+}
+
+fn is_heredoc_name_char(c: char) -> bool {
+    c.is_alphanumeric() || matches!(c, '_' | '-' | '.')
+}
+
+fn is_blank(c: char) -> bool {
+    c == ' ' || c == '\t'
 }
 
 /// A character literal: one character, or an escape, between `'`s.

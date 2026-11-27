@@ -128,6 +128,10 @@ pub(super) struct Spec {
     /// Whether `[section]` at the start of a line names a section, as in
     /// TOML and INI.
     pub(super) sections: bool,
+    /// Whether `<<WORD` opens a heredoc, whose lines up to the one that is
+    /// `WORD` alone are its body, as a shell's: without it, a `'` in the
+    /// body's prose opens a string that runs past the heredoc's end.
+    pub(super) heredocs: bool,
 }
 
 /// A language with nothing in it, which every table starts from.
@@ -157,6 +161,7 @@ const BASE: Spec = Spec {
     symbols: false,
     keys: Keys::Nothing,
     sections: false,
+    heredocs: false,
 };
 
 const SLASHES: &[&str] = &["//"];
@@ -1606,6 +1611,7 @@ pub(super) const SHELL: Spec = Spec {
     calls_are_functions: false,
     word_extra: "-.",
     sigils: "$",
+    heredocs: true,
     ..BASE
 };
 

@@ -16,7 +16,11 @@
 //! keywords, and names a word by what it is or by what is next to it — the
 //! word after `fn` is a function, a word followed by `(` is called. It does
 //! not parse, so it reads a string's interpolations as string and does not
-//! tell a regular expression's slashes from division. What it costs is a
+//! tell a regular expression's slashes from division. A shell's heredoc it
+//! does read, from `<<WORD` to the line that is `WORD` alone, as one string,
+//! since its body is prose whose apostrophes would otherwise open a string
+//! that runs past it: the first heredoc a line opens, outside a string — one
+//! inside `"$(…)"` is read as that string. What it costs is a
 //! pass over the line, with no dependency and nothing loaded first, which is
 //! what a shell that lays its transcript out again on every resize can pay.
 //!
@@ -75,8 +79,8 @@ pub struct Token {
     pub kind: TokenKind,
 }
 
-/// What a line left open for the next: the comment or string a line ended
-/// inside, or nothing.
+/// What a line left open for the next: the comment, string or heredoc a
+/// line ended inside, or nothing.
 ///
 /// Two lines that start in equal states are read the same way, which is what
 /// an editor that keeps each line's state relies on to stop reading again
@@ -101,6 +105,40 @@ enum Within {
     Raw { hashes: u8 },
     /// A markup tag, between its name and its `>`.
     Tag,
+    /// A shell heredoc's body, closed by the line that is `word` alone —
+    /// after any tabs, where `tabs` says it opened with `<<-`.
+    Heredoc { word: HeredocWord, tabs: bool },
+}
+
+/// The longest word a heredoc is closed by that a [`State`] carries, in
+/// bytes. A longer one opens no heredoc and is read as code, as it was
+/// before heredocs were read: carrying any word would make the state as long
+/// as a line.
+const MAX_HEREDOC_WORD_BYTES: usize = 32;
+
+/// The word a heredoc is closed by, held in place so that [`State`] stays
+/// `Copy` and its size fixed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+struct HeredocWord {
+    bytes: [u8; MAX_HEREDOC_WORD_BYTES],
+    len: u8,
+}
+
+impl HeredocWord {
+    /// `word`, where it is not empty and no longer than
+    /// [`MAX_HEREDOC_WORD_BYTES`].
+    fn new(word: &str) -> Option<Self> {
+        let len = u8::try_from(word.len())
+            .ok()
+            .filter(|_| !word.is_empty() && word.len() <= MAX_HEREDOC_WORD_BYTES)?;
+        let mut bytes = [0; MAX_HEREDOC_WORD_BYTES];
+        bytes[..word.len()].copy_from_slice(word.as_bytes());
+        Some(Self { bytes, len })
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        self.bytes.get(..usize::from(self.len)).unwrap_or_default()
+    }
 }
 
 /// The longest line a highlighter reads, in bytes. What comes after it in a
@@ -386,6 +424,133 @@ mod tests {
         );
     }
 
+    /// Each line of `lines` read in `language` in order, as its tokens'
+    /// text and kind, and the state the last left.
+    fn read_lines(language: Language, lines: &[&str]) -> (Vec<Vec<(String, TokenKind)>>, State) {
+        let mut highlighter = Highlighter::new(language);
+        let read = lines
+            .iter()
+            .map(|line| shown(line, &highlighter.line(line)))
+            .collect();
+        (read, highlighter.state())
+    }
+
+    fn string(text: &str) -> (String, TokenKind) {
+        (text.to_owned(), TokenKind::String)
+    }
+
+    #[test]
+    fn an_apostrophe_in_a_quoted_heredoc_does_not_open_a_string_past_its_terminator() {
+        let (lines, state) = read_lines(
+            Language::Shell,
+            &["cat > notes.md <<'EOF'", "It's done", "EOF", "cargo test"],
+        );
+        assert_eq!(lines[0], vec![string("'EOF'")]);
+        assert_eq!(lines[1], vec![string("It's done")]);
+        assert_eq!(lines[2], vec![string("EOF")]);
+        assert_eq!(
+            lines[3],
+            vec![("test".to_owned(), TokenKind::Keyword)],
+            "the line after the terminator is code"
+        );
+        assert_eq!(state, State::default());
+    }
+
+    #[test]
+    fn an_unquoted_heredoc_closes_at_its_word_alone_and_a_quote_in_it_opens_nothing() {
+        let (lines, state) = read_lines(
+            Language::Shell,
+            &[
+                "cat <<EOF > out.txt",
+                "say \"hi",
+                "EOFX",
+                " EOF",
+                "EOF",
+                "echo $HOME",
+            ],
+        );
+        assert_eq!(lines[0], vec![string("EOF")]);
+        assert_eq!(lines[1], vec![string("say \"hi")]);
+        assert_eq!(
+            lines[2],
+            vec![string("EOFX")],
+            "a longer word closes nothing"
+        );
+        assert_eq!(lines[3], vec![string(" EOF")], "nor the word after a blank");
+        assert_eq!(lines[4], vec![string("EOF")]);
+        assert_eq!(
+            lines[5],
+            vec![
+                ("echo".to_owned(), TokenKind::Keyword),
+                ("$HOME".to_owned(), TokenKind::Property)
+            ]
+        );
+        assert_eq!(state, State::default());
+    }
+
+    #[test]
+    fn a_dashed_heredoc_closes_at_its_word_after_tabs_and_a_plain_one_does_not() {
+        let (lines, dashed) = read_lines(
+            Language::Shell,
+            &["\tcat <<-\"END\"", "\t\tIt's", "\t\tEND"],
+        );
+        assert_eq!(lines[0], vec![string("\"END\"")]);
+        assert_eq!(dashed, State::default());
+        let (_, expanded) = read_lines(Language::Shell, &["cat <<- END", "It's", "        END"]);
+        assert_eq!(
+            expanded,
+            State::default(),
+            "a transcript expands the tabs before it reads the line"
+        );
+        let (lines, escaped) = read_lines(Language::Shell, &["cat <<\\END", "It's", "END"]);
+        assert_eq!(lines[0], vec![string("\\END")]);
+        assert_eq!(escaped, State::default());
+        let (lines, plain) = read_lines(Language::Shell, &["cat <<END", "It's", "\tEND"]);
+        assert_eq!(lines[2], vec![string("\tEND")]);
+        assert_ne!(
+            plain,
+            State::default(),
+            "a plain heredoc's word is not indented"
+        );
+    }
+
+    #[test]
+    fn a_here_string_and_a_shift_open_no_heredoc() {
+        let (lines, state) = read_lines(
+            Language::Shell,
+            &[
+                "cat <<<'x'",
+                "echo $((a << b)) <<< y",
+                "(( n <<= 2 ))",
+                "x=$(( 1 << 2 ))",
+                "echo ok",
+            ],
+        );
+        assert_eq!(lines[0], vec![string("'x'")]);
+        assert_eq!(lines[4], vec![("echo".to_owned(), TokenKind::Keyword)]);
+        assert_eq!(state, State::default());
+    }
+
+    #[test]
+    fn a_heredoc_left_open_at_the_end_of_a_block_stays_open() {
+        let (lines, state) = read_lines(Language::Shell, &["cat <<'EOF'", "It's", "EOF2"]);
+        assert_eq!(lines[2], vec![string("EOF2")]);
+        assert_ne!(state, State::default());
+    }
+
+    #[test]
+    fn a_heredoc_word_too_long_to_carry_opens_none() {
+        let carried = "W".repeat(MAX_HEREDOC_WORD_BYTES);
+        let (_, state) = read_lines(
+            Language::Shell,
+            &[&format!("cat <<{carried}"), "It's", &carried],
+        );
+        assert_eq!(state, State::default());
+        let long = "W".repeat(MAX_HEREDOC_WORD_BYTES + 1);
+        let (_, state) = read_lines(Language::Shell, &[&format!("cat <<{long}"), "echo"]);
+        assert_eq!(state, State::default());
+    }
+
     #[test]
     fn sql_keywords_are_read_in_any_case() {
         let tokens = read(
@@ -616,6 +781,13 @@ mod tests {
             "#!",
             ":",
             "::sym",
+            "<<",
+            "<<'",
+            "<<-",
+            "<<\\",
+            "<<é",
+            "<<'é'",
+            "<<-\t\"日本\"",
         ];
         for language in Language::ALL {
             let mut highlighter = Highlighter::new(language);

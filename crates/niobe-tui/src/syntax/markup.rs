@@ -16,11 +16,13 @@ use super::{State, Token, TokenKind, Within};
 pub(super) fn line(line: &str, state: State) -> (Vec<Token>, State) {
     let mut tokens = Vec::new();
     let mut at = 0;
-    // A string or a raw string is code's, and markup has none: a state code
-    // left is read from the top.
+    // A string, a raw string or a heredoc is code's, and markup has none: a
+    // state code left is read from the top.
     let mut within = match state.within {
         Within::Comment { .. } | Within::Tag => state.within,
-        Within::Code | Within::Quote { .. } | Within::Raw { .. } => Within::Code,
+        Within::Code | Within::Quote { .. } | Within::Raw { .. } | Within::Heredoc { .. } => {
+            Within::Code
+        }
     };
     if matches!(within, Within::Comment { .. }) {
         let end = comment_end(line, 0);
