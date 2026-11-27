@@ -3791,6 +3791,11 @@ fn scrollbar(border: Border, theme: &Theme) -> Scrollbar<'static> {
             .track_style(border.style)
             .thumb_symbol("█")
             .thumb_style(Style::new().fg(theme.scroll_thumb)),
+        // Every cell of the band on the band's colour: a terminal that
+        // spaces its lines draws a glyph short of the cell's height and fills
+        // the rest with the background, so a band on the pane's colour shows
+        // that colour between its rows. `▒` is the same checker whichever
+        // colour is its ink, and the thumb is the band's colour whole.
         Track::Shaded(colour) => {
             let raised = Style::new().fg(theme.pane_bg).bg(theme.scroll_thumb);
             bar.begin_symbol(Some("▲"))
@@ -3798,9 +3803,9 @@ fn scrollbar(border: Border, theme: &Theme) -> Scrollbar<'static> {
                 .end_symbol(Some("▼"))
                 .end_style(raised)
                 .track_symbol(Some("▒"))
-                .track_style(Style::new().fg(colour).bg(theme.pane_bg))
-                .thumb_symbol("■")
-                .thumb_style(raised)
+                .track_style(Style::new().fg(theme.pane_bg).bg(colour))
+                .thumb_symbol("█")
+                .thumb_style(Style::new().fg(theme.scroll_thumb).bg(theme.scroll_thumb))
         }
     }
 }

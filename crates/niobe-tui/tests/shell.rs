@@ -8014,8 +8014,12 @@ fn an_open_menus_hot_letter_is_never_drawn_on_its_own_colour() {
 }
 
 /// `classic` scrolls a pane as Turbo Pascal scrolled a window: down its right
-/// edge a cyan `▒` band with an arrow at either end, the thumb a blue `■` on
-/// cyan. The other themes keep the scrollbar on the border's own line.
+/// edge a cyan `▒` band with an arrow at either end, the thumb solid cyan.
+/// Every cell of the band, the thumb's and the arrows' has the cyan for its
+/// background, since a terminal that spaces its lines draws a glyph short of
+/// the cell's height and fills the rest with the background: a band whose
+/// cells were on the pane's blue would show the blue between its rows. The
+/// other themes keep the scrollbar on the border's own line.
 #[test]
 fn classic_scrolls_a_pane_on_turbo_pascals_shaded_band_and_the_others_on_the_border() {
     let mut classic = running_session()
@@ -8032,14 +8036,15 @@ fn classic_scrolls_a_pane_on_turbo_pascals_shaded_band_and_the_others_on_the_bor
     let band = edge.split('▼').next().unwrap_or_default();
     assert!(band.len() < edge.len(), "the band ends in an arrow: {edge}");
     assert!(
-        band.chars().skip(1).all(|c| matches!(c, '▒' | '■')),
+        band.chars().skip(1).all(|c| matches!(c, '▒' | '█')),
         "{edge}"
     );
-    assert!(band.contains('■') && band.contains('▒'), "{edge}");
+    assert!(band.contains('█') && band.contains('▒'), "{edge}");
 
     let raised = Style::new().fg(Color::Blue).bg(Color::Cyan);
-    let shaded = Style::new().fg(Color::Cyan).bg(Color::Blue);
-    for (glyph, style) in [("▲", raised), ("■", raised), ("▒", shaded), ("▼", raised)] {
+    let solid = Style::new().fg(Color::Cyan).bg(Color::Cyan);
+    let shaded = Style::new().fg(Color::Blue).bg(Color::Cyan);
+    for (glyph, style) in [("▲", raised), ("█", solid), ("▒", shaded), ("▼", raised)] {
         let drawn = style_at(&mut classic, 120, 30, glyph).expect("drawn");
         assert_eq!((drawn.fg, drawn.bg), (style.fg, style.bg), "{glyph}");
     }

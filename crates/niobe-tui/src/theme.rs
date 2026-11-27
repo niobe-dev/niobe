@@ -119,10 +119,12 @@ pub enum Track {
     /// something to scroll is framed as one with nothing is; the thumb is a
     /// block in [`Theme::scroll_thumb`].
     Border,
-    /// A shaded band, `▒` in this colour on the panes' background, with an
-    /// arrow at either end, as Turbo Vision drew its scroll bars: the thumb
-    /// and the arrows are cells of [`Theme::scroll_thumb`] marked in the
-    /// panes' background.
+    /// A shaded band of this colour checkered `▒` with the panes'
+    /// background, with an arrow at either end, as Turbo Vision drew its
+    /// scroll bars: the thumb is a solid run of [`Theme::scroll_thumb`] and
+    /// the arrows are cells of it marked in the panes' background. Every
+    /// cell has the band's colour, or the thumb's, behind it, so the band
+    /// runs unbroken on a terminal that spaces its lines.
     Shaded(Color),
 }
 
