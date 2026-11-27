@@ -175,23 +175,35 @@ pub struct Answered {
 /// over than answer them: the call is refused with these words, which ask
 /// the agent to find out what the operator wants to clarify before asking
 /// again, and name every question with whatever answer it was already given.
-pub fn wants_to_talk(questions: &[Question], answered: &[Answered]) -> String {
+///
+/// `notes` are what the operator wrote on the question they chose to talk
+/// over, which is the first of `questions` that `answered` holds no answer
+/// to, since questions are answered in the order asked; they go under it as
+/// notes on an answer go under the answer.
+pub fn wants_to_talk(questions: &[Question], answered: &[Answered], notes: Option<&str>) -> String {
     let mut said = String::from(
         "The operator wants to talk these questions over before answering them. \
          They may have more context, or questions of their own. Ask them what they \
          would like to clarify, take their reply into account, and ask the questions \
          again, reworded if that helps.\nThe questions asked:",
     );
+    let mut talked_over = notes;
     for question in questions {
         said.push_str(&format!("\n- \"{}\"", question.text));
         let given = answered
             .iter()
             .find(|answered| answered.question == question.text);
-        match given {
-            Some(given) => said.push_str(&format!("\n  Answer: {}", given.answer)),
-            None => said.push_str("\n  (No answer given)"),
-        }
-        if let Some(notes) = given.and_then(|given| given.notes.as_deref()) {
+        let noted = match given {
+            Some(given) => {
+                said.push_str(&format!("\n  Answer: {}", given.answer));
+                given.notes.as_deref()
+            }
+            None => {
+                said.push_str("\n  (No answer given)");
+                talked_over.take()
+            }
+        };
+        if let Some(notes) = noted {
             said.push_str(&format!("\n  Notes: {notes}"));
         }
     }
@@ -314,11 +326,33 @@ mod tests {
             answer: "No".to_owned(),
             notes: Some("after the tag".to_owned()),
         }];
-        let said = wants_to_talk(&asked, &answered);
+        let said = wants_to_talk(&asked, &answered, None);
         assert!(said.starts_with("The operator wants to talk"), "{said}");
         assert!(
             said.ends_with(
                 "- \"Cut a release?\"\n  Answer: No\n  Notes: after the tag\n\
+                 - \"Which platforms?\"\n  (No answer given)"
+            ),
+            "{said}"
+        );
+    }
+
+    #[test]
+    fn notes_on_the_question_talked_over_go_under_it_and_no_other() {
+        let Action::Questions { questions } = questions().action().clone() else {
+            unreachable!("questions() builds questions");
+        };
+        let mut asked = questions.clone();
+        asked.push(Question {
+            header: None,
+            text: "Which platforms?".to_owned(),
+            options: Vec::new(),
+            multiple: true,
+        });
+        let said = wants_to_talk(&asked, &[], Some("only on main"));
+        assert!(
+            said.ends_with(
+                "- \"Cut a release?\"\n  (No answer given)\n  Notes: only on main\n\
                  - \"Which platforms?\"\n  (No answer given)"
             ),
             "{said}"

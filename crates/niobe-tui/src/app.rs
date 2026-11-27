@@ -4857,13 +4857,18 @@ impl App {
             (_, false) => PermissionDecision::Allow,
         };
         // Refused, a question is one the operator would rather talk over:
-        // the agent is told so, and what was answered before it, rather
-        // than that its call was refused.
+        // the agent is told so, what was answered before it and the notes
+        // written on it, rather than that its call was refused.
         let message = match (answer, ask.questions()) {
-            (Answer::No, Some(questions)) => Some(niobe_core::wants_to_talk(
-                questions,
-                &std::mem::take(&mut self.ask_answers),
-            )),
+            (Answer::No, Some(questions)) => {
+                let notes = std::mem::take(&mut self.ask_notes);
+                let notes = Some(notes.trim()).filter(|notes| !notes.is_empty());
+                Some(niobe_core::wants_to_talk(
+                    questions,
+                    &std::mem::take(&mut self.ask_answers),
+                    notes,
+                ))
+            }
             (
                 Answer::Once
                 | Answer::AlwaysTool
@@ -14651,8 +14656,11 @@ mod tests {
         assert_eq!(app.ask_selected(), Answer::No);
         app.on_key(key(KeyCode::Enter));
 
-        let said =
-            niobe_core::wants_to_talk(&questions, &[answer_to("Cut a release?", "Push only")]);
+        let said = niobe_core::wants_to_talk(
+            &questions,
+            &[answer_to("Cut a release?", "Push only")],
+            None,
+        );
         assert_eq!(
             app.take_produced(),
             [Event::PermissionResponse {
@@ -14662,6 +14670,41 @@ mod tests {
                 answers: Vec::new(),
             }]
         );
+    }
+
+    /// Notes written on the question the operator would rather talk over
+    /// are what they want to talk about: they go to the agent under that
+    /// question, as notes on an answer go under the answer.
+    #[test]
+    fn notes_on_the_question_talked_over_go_with_the_refusal() {
+        use ratatui::crossterm::event::KeyCode;
+        let mut app = app().attached();
+        app.apply(&questions_asked());
+
+        app.on_key(key(KeyCode::Char('3')));
+        assert_eq!(app.ask_selected(), Answer::No);
+        app.on_key(key(KeyCode::Char('n')));
+        for c in "only on main".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        app.on_key(key(KeyCode::Enter));
+
+        let produced = app.take_produced();
+        let [
+            Event::PermissionResponse {
+                decision: PermissionDecision::Deny,
+                message: Some(said),
+                ..
+            },
+        ] = produced.as_slice()
+        else {
+            panic!("the questions are refused to talk over: {produced:?}");
+        };
+        assert!(
+            said.contains("- \"Cut a release?\"\n  (No answer given)\n  Notes: only on main"),
+            "{said}"
+        );
+        assert_eq!(app.ask_notes(), "");
     }
 
     #[test]
