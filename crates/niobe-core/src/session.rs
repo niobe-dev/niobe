@@ -1377,19 +1377,9 @@ impl SessionState {
         }
     }
 
-    /// What the session is once its conversation has been started over: a
-    /// new one, which has said and spent nothing, on the same backend.
-    ///
-    /// What stays is what the backend and the account say rather than what
-    /// the session did — the conversation's identity, the mode and model, the
-    /// plan's windows, how it is billed, the commands, models and servers on
-    /// offer — and what is in flight and cannot be forgotten without
-    /// dropping it: a question waiting on the operator, a sub-agent still
-    /// running with the calls it has running, a command the operator ran.
-    /// Each is counted as started in the conversation it goes on in, so that
-    /// its end is an end and not one without a start. The turn that typed the
-    /// clear is still open, and its end is the old conversation's.
-    /// Keeps each decision `reply` states, under the agent that stated it.
+    /// Keeps each decision the finished reply `reply` states, under the
+    /// sub-agent that stated it, or under none where the reply is the
+    /// session's own agent's.
     fn decided(&mut self, reply: &str, agent: Option<&AgentId>) {
         self.decisions
             .extend(
@@ -1462,6 +1452,18 @@ impl SessionState {
         }
     }
 
+    /// What the session is once its conversation has been started over: a
+    /// new one, which has said and spent nothing, on the same backend.
+    ///
+    /// What stays is what the backend and the account say rather than what
+    /// the session did — the conversation's identity, the mode and model, the
+    /// plan's windows, how it is billed, the commands, models and servers on
+    /// offer — and what is in flight and cannot be forgotten without
+    /// dropping it: a question waiting on the operator, a sub-agent still
+    /// running with the calls it has running, a command the operator ran.
+    /// Each is counted as started in the conversation it goes on in, so that
+    /// its end is an end and not one without a start. The turn that typed the
+    /// clear is still open, and its end is the old conversation's.
     fn started_over(&mut self) -> Self {
         let running_agents = std::mem::take(&mut self.running_agents);
         let pending_permissions = std::mem::take(&mut self.pending_permissions);
