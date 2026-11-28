@@ -773,54 +773,115 @@ pub fn failed(command: &str, output: &str, exit_code: Option<i32>) -> bool {
 pub fn failures(output: &str) -> Vec<FailedTests> {
     let output = uncoloured(output);
     let lines: Vec<&str> = output.lines().map(str::trim_end).collect();
-    (0..lines.len())
-        .filter_map(|at| failures_closed_at(&lines, at))
-        .collect()
+    let mut lists = Lists::default();
+    let mut found = Vec::new();
+    for (at, line) in lines.iter().enumerate() {
+        found.extend(lists.closed_at(&lines, at));
+        lists.read(at, line);
+    }
+    found
 }
 
-/// The failures list whose summary is `lines[at]`, where it is whole and the
-/// binary is named after it.
-fn failures_closed_at(lines: &[&str], at: usize) -> Option<FailedTests> {
-    let (before, from) = lines.split_at_checked(at)?;
-    let (closing, after) = from.split_first()?;
-    let summary = Summary::of(closing).filter(|summary| summary.failed > 0)?;
-    let (blank, list) = before.split_last()?;
-    if !blank.is_empty() {
-        return None;
-    }
-    let opened = list.iter().rposition(|line| *line == "failures:")?;
-    let tests: Vec<String> = list[opened + 1..]
-        .iter()
-        .map(|line| failing_test(line).map(str::to_owned))
-        .collect::<Option<_>>()?;
-    if tests.len() as u64 != summary.failed {
-        return None;
-    }
-    let doc_tests = tests.iter().all(|test| is_doc_test(test));
-    let binary = named_after(after, doc_tests)?;
-    Some(FailedTests {
-        binary: binary.to_owned(),
-        tests,
-    })
+/// Where the `failures:` lists of an output stand as it is read a line at a
+/// time, so that a summary finds the list it closes, and the line naming its
+/// binary, without going back over the lines before it or forward over the
+/// sets of doc-tests after it again: either made an output of many
+/// summaries take time quadratic in its length.
+#[derive(Debug, Default)]
+struct Lists<'a> {
+    /// The last `failures:` line read.
+    opened: Option<usize>,
+    /// The first line after [`Lists::opened`] that names no failing test,
+    /// once one has been read.
+    names_end: Option<usize>,
+    /// Where the last walk from a doc-tests summary to the line naming their
+    /// binary stopped, and what it found there. Every summary after the
+    /// walk's start and before that line is one it found after a `running`
+    /// line and went on from, so a walk from any of them stops there too.
+    doc_walk: Option<(usize, Option<&'a str>)>,
 }
 
-/// The arguments cargo names a binary with after its summary, which `after`
-/// follows: its first line that is not blank or rustdoc's timing line. For
-/// the doc-tests that is past the further sets of them rustdoc runs under
-/// the same header, each from its `running <n> tests` to its summary.
-fn named_after<'a>(after: &[&'a str], doc_tests: bool) -> Option<&'a str> {
-    let mut lines = after.iter();
-    while let Some(line) = lines.next() {
+impl<'a> Lists<'a> {
+    /// The failures list whose summary is `lines[at]`, where it is whole and
+    /// the binary is named after it. Asked before `lines[at]` is read.
+    fn closed_at(&mut self, lines: &[&'a str], at: usize) -> Option<FailedTests> {
+        let summary = Summary::of(lines.get(at)?).filter(|summary| summary.failed > 0)?;
+        // libtest writes a blank line between the list's names and the
+        // summary, and nothing else may come between the `failures:` line
+        // and that blank one but names.
+        let blank = at.checked_sub(1)?;
+        if !lines.get(blank)?.is_empty() || self.names_end != Some(blank) {
+            return None;
+        }
+        let tests: Vec<String> = lines
+            .get(self.opened?.checked_add(1)?..blank)?
+            .iter()
+            .map(|line| failing_test(line).map(str::to_owned))
+            .collect::<Option<_>>()?;
+        if tests.len() as u64 != summary.failed {
+            return None;
+        }
+        let doc_tests = tests.iter().all(|test| is_doc_test(test));
+        let binary = self.binary_after(lines, at, doc_tests)?;
+        Some(FailedTests {
+            binary: binary.to_owned(),
+            tests,
+        })
+    }
+
+    /// The binary named after the summary at `lines[at]`, walked to once for
+    /// every summary of doc-tests the walk goes past.
+    fn binary_after(&mut self, lines: &[&'a str], at: usize, doc_tests: bool) -> Option<&'a str> {
+        if !doc_tests {
+            return named_after(lines, at.saturating_add(1), false).0;
+        }
+        if let Some((stop, name)) = self.doc_walk
+            && at < stop
+        {
+            return name;
+        }
+        let (name, stop) = named_after(lines, at.saturating_add(1), true);
+        self.doc_walk = Some((stop, name));
+        name
+    }
+
+    /// Takes in `lines[at]`, once it has been asked whether it closes a list.
+    fn read(&mut self, at: usize, line: &str) {
+        if line == "failures:" {
+            self.opened = Some(at);
+            self.names_end = None;
+        } else if self.opened.is_some() && self.names_end.is_none() && failing_test(line).is_none()
+        {
+            self.names_end = Some(at);
+        }
+    }
+}
+
+/// The arguments cargo names a binary with after a summary, in the lines
+/// from `lines[from]` on: their first line that is not blank or rustdoc's
+/// timing line. For the doc-tests that is past the further sets of them
+/// rustdoc runs under the same header, each from its `running <n> tests` to
+/// its summary. Also says where the walk stopped: that line, or the end.
+fn named_after<'a>(lines: &[&'a str], from: usize, doc_tests: bool) -> (Option<&'a str>, usize) {
+    let mut at = from;
+    while let Some(line) = lines.get(at) {
         if line.is_empty() || is_doc_tests_timing(line) {
+            at += 1;
             continue;
         }
         if doc_tests && running(line).is_some() {
-            lines.find(|line| Summary::of(line).is_some())?;
+            let summary = lines
+                .get(at + 1..)
+                .and_then(|rest| rest.iter().position(|line| Summary::of(line).is_some()));
+            match summary {
+                Some(found) => at += found + 2,
+                None => break,
+            }
             continue;
         }
-        return rerun_as(line);
+        return (rerun_as(line), at);
     }
-    None
+    (None, lines.len())
 }
 
 /// Whether a test's name is a doc-test's, `src/lib.rs - add (line 3)`: a
@@ -2104,6 +2165,51 @@ error: doctest failed, to rerun pass `--doc`
         assert!(named.iter().all(|list| list.binary == "--doc"));
         assert_eq!(named[0].tests, ["src/lib.rs - add (line 1)"]);
         assert_eq!(named[1].tests, ["src/lib.rs - add (line 9)"]);
+    }
+
+    #[test]
+    fn doc_tests_of_two_runs_are_each_named_by_their_own_run() {
+        // `cargo test -p a --doc; cargo test -p b --doc`, both failing: what
+        // named the first run's doc-tests does not name the second's.
+        let second = DOC_FAILED
+            .replace("two (line 1)", "three (line 4)")
+            .replace("`--doc`", "`-p b --doc`");
+        let named = failures(&format!("{DOC_BLOCKS_FAILED}{second}"));
+        let binaries: Vec<&str> = named.iter().map(|list| list.binary.as_str()).collect();
+        assert_eq!(binaries, ["--doc", "--doc", "-p b --doc"]);
+        assert_eq!(named[2].tests, ["src/lib.rs - three (line 4)"]);
+    }
+
+    #[test]
+    fn a_list_is_read_up_to_the_summary_after_the_blank_line_that_ends_it() {
+        let summary = |failed: u64| {
+            format!(
+                "test result: FAILED. 0 passed; {failed} failed; 0 ignored; 0 measured; \
+                 0 filtered out; finished in 0.00s"
+            )
+        };
+        let rerun = "error: test failed, to rerun pass `--lib`";
+        // A later `failures:` line opens the list a summary closes.
+        let reopened = format!(
+            "failures:\n    a\nnoise\nfailures:\n    b\n    c\n\n{}\n{rerun}\n",
+            summary(2)
+        );
+        let named = failures(&reopened);
+        assert_eq!(named.len(), 1);
+        assert_eq!(named[0].tests, ["b", "c"]);
+        // A second summary after the same list closes nothing, and a line
+        // that is no name ends what a list can hold.
+        let twice = format!(
+            "failures:\n    a\n\n{}\n\n{}\n{rerun}\n",
+            summary(1),
+            summary(1)
+        );
+        assert_eq!(failures(&twice), []);
+        let broken = format!(
+            "failures:\n    a\nnoise\n    b\n\n{}\n{rerun}\n",
+            summary(2)
+        );
+        assert_eq!(failures(&broken), []);
     }
 
     #[test]

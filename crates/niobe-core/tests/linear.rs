@@ -19,7 +19,7 @@
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use niobe_core::test_run::is_test_run;
+use niobe_core::test_run::{failures, is_test_run};
 
 /// Held by each test while it times, so that the two never share the cores.
 static ALONE: Mutex<()> = Mutex::new(());
@@ -80,5 +80,62 @@ fn a_command_of_many_redirection_characters_is_read_in_time_linear_in_its_length
         &ampersands(2_000),
         &ampersands(8_000),
         |command| assert!(is_test_run(command)),
+    );
+}
+
+/// libtest's summary of a binary in which one test failed.
+const FAILED_SUMMARY: &str = "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; \
+                              0 filtered out; finished in 0.00s";
+
+/// `n` failing summaries, each after a blank line, with no `failures:` list
+/// before any of them.
+fn summaries(n: usize) -> String {
+    format!("\n{FAILED_SUMMARY}\n").repeat(n)
+}
+
+/// A `failures:` list of `n` names that no summary closes, and `n` failing
+/// summaries after it, each after a blank line.
+fn names_then_summaries(n: usize) -> String {
+    format!(
+        "failures:\n{}{}",
+        "    tests::wrong\n".repeat(n),
+        summaries(n)
+    )
+}
+
+/// `n` sets of doc-tests, each a whole list of one failing test that no
+/// line after the sets names a binary for.
+fn doc_test_sets(n: usize) -> String {
+    format!("running 1 test\nfailures:\n    src/lib.rs - add (line 3)\n\n{FAILED_SUMMARY}\n")
+        .repeat(n)
+}
+
+#[test]
+fn failing_summaries_with_no_list_are_read_in_time_linear_in_the_output() {
+    assert_linear(
+        "failing summaries",
+        &summaries(2_500),
+        &summaries(10_000),
+        |output| assert_eq!(failures(output), []),
+    );
+}
+
+#[test]
+fn a_long_unclosed_list_and_the_summaries_after_it_are_read_in_time_linear_in_the_output() {
+    assert_linear(
+        "a list and summaries",
+        &names_then_summaries(2_500),
+        &names_then_summaries(10_000),
+        |output| assert_eq!(failures(output), []),
+    );
+}
+
+#[test]
+fn doc_test_sets_no_binary_is_named_for_are_read_in_time_linear_in_the_output() {
+    assert_linear(
+        "doc-test sets",
+        &doc_test_sets(1_000),
+        &doc_test_sets(4_000),
+        |output| assert_eq!(failures(output), []),
     );
 }
