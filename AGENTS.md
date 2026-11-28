@@ -132,7 +132,8 @@ reviewers that encode both, for an agent working in this tree.
   mebibyte — because a repository can commit its config as a link to `/dev/zero`;
   `preferences.rs` is the theme last picked in the shell, in each repository and anywhere, the
   mode each repository's tool calls were last gated in, and
-  each profile's model and effort, kept in `choices.toml` beside the user's config — a file of
+  each profile's model and effort, none kept once `/effort auto` handed the level to the
+  model, kept in `choices.toml` beside the user's config — a file of
   Niobe's own, rewritten whole under the lock a rule is written under, its repositories newest
   first and the oldest left out past the mebibyte it is read back at, and read as nothing chosen
   where it cannot be read;
@@ -566,7 +567,8 @@ reviewers that encode both, for an agent working in this tree.
   profile, and reads them back so that a new shell opens on the theme last picked in its
   repository, or else the one last picked anywhere — over the config's, under `--theme`, and
   `cyber` where nothing names one — and starts its backend with the model and effort last picked under
-  its profile, over the profile's own flags, and a new conversation in the mode last taken in its
+  its profile, over the profile's own flags — no effort where `/effort auto` was the last word,
+  so the profile's flags decide it — and a new conversation in the mode last taken in its
   repository, `ask` or `auto`, over the profile's `--permission-mode`, or else in `auto` under it;
   `niobe -p` still starts in `ask`, since what it is not asked about no one sees;
   `rules.rs` writes a standing answer into the repository's `.niobe/config.toml`, keeping the

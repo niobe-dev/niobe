@@ -89,7 +89,10 @@ impl Preferences for ChoicesFile {
                 profile,
                 model: model.as_deref(),
             },
-            (Preference::Effort(effort), Some(profile)) => Change::Effort { profile, effort },
+            (Preference::Effort(effort), Some(profile)) => Change::Effort {
+                profile,
+                effort: effort.as_deref(),
+            },
             (Preference::Model(_) | Preference::Effort(_), None) => return Ok(()),
         };
         let path = self.path.as_deref().ok_or(NOWHERE)?;
@@ -113,7 +116,7 @@ mod tests {
         for preference in [
             Preference::Theme("neo".to_owned()),
             Preference::Model(Some("opus".to_owned())),
-            Preference::Effort("high".to_owned()),
+            Preference::Effort(Some("high".to_owned())),
             Preference::Mode(Mode::Ask),
         ] {
             max.keep(&preference).expect("kept");
@@ -134,6 +137,37 @@ mod tests {
         assert_eq!(saved.effort("work"), None);
         assert_eq!(saved.project_mode(here), Some(Mode::Ask));
         assert_eq!(saved.project_mode(there), Some(Mode::Auto));
+    }
+
+    #[test]
+    fn an_effort_handed_to_the_model_clears_the_level_kept_so_the_next_start_names_none() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be made");
+        let path = path(Some(dir.path().into()), None).expect("an absolute directory");
+        let mut max = ChoicesFile::at(Some(path.clone()), None, Some("max"));
+        for preference in [
+            Preference::Model(Some("opus".to_owned())),
+            Preference::Effort(Some("max".to_owned())),
+            Preference::Effort(None),
+        ] {
+            max.keep(&preference).expect("kept");
+        }
+
+        let text = std::fs::read_to_string(&path).expect("written");
+        assert!(!text.contains("effort ="), "{text}");
+        let config = niobe_config::Config::parse(
+            "[profiles.max]\nbackend = \"claude\"\n",
+            Path::new("/u/config.toml"),
+        )
+        .expect("parses");
+        let selected = config
+            .select(Some("max"))
+            .expect("the profile is defined")
+            .expect("a profile was selected");
+        assert_eq!(
+            crate::saved_choices(&Saved::read(&path), Some(&selected)),
+            (Some("opus".to_owned()), None),
+            "the profile's own flags decide the effort"
+        );
     }
 
     #[test]

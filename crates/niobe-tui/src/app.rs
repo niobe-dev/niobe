@@ -729,8 +729,11 @@ enum EffortSet {
     Nothing,
     /// One of [`EFFORTS`], chosen here or the one the backend was started at.
     Level(String),
-    /// Something the shell does not model, such as `/effort auto`, which
-    /// hands the level to the model's default: no level is known in force.
+    /// `/effort auto`, which hands the level to the model's default: no
+    /// level is known in force, and none is kept for the next session.
+    Auto,
+    /// Something else the shell does not model, such as a word that is no
+    /// level: no level is known in force, and what was kept stays kept.
     Unnamed,
 }
 
@@ -837,6 +840,10 @@ const REWIND_LABEL: usize = 60;
 /// level, and a list of levels with them in would read as a scale they are
 /// not on.
 pub const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+
+/// The `/effort` argument that hands the level to the model's default, as
+/// the same argument hint lists it.
+const AUTO_EFFORT: &str = "auto";
 
 /// Something the shell has to say that takes more than a line: what it is
 /// running under, the keys it answers to. It holds the keyboard until it is
@@ -5060,7 +5067,7 @@ impl App {
     pub fn effort(&self) -> Option<&str> {
         let level = match &self.effort {
             EffortSet::Level(level) => Some(level.as_str()),
-            EffortSet::Unnamed => None,
+            EffortSet::Auto | EffortSet::Unnamed => None,
             EffortSet::Nothing => self.session.configured_effort(),
         }?;
         self.offer_in_force()
@@ -5072,7 +5079,8 @@ impl App {
     /// session.
     fn chose_effort(&mut self, effort: &str) {
         self.set_effort(EffortSet::Level(effort.to_owned()));
-        self.preferred.push(Preference::Effort(effort.to_owned()));
+        self.preferred
+            .push(Preference::Effort(Some(effort.to_owned())));
     }
 
     /// Notes `set` as the effort set here, keeping what it replaces until the
@@ -5083,13 +5091,14 @@ impl App {
     }
 
     /// Takes back the effort set with a prompt that never reached the
-    /// backend, and the preference a level kept for the next session.
+    /// backend, and the preference it kept for the next session — a level,
+    /// or none after `auto` — so that a refused `auto` clears no level kept.
     fn effort_not_sent(&mut self) {
         let Some(before) = self.effort_before_sent.take() else {
             return;
         };
         let unsent = std::mem::replace(&mut self.effort, before);
-        if matches!(unsent, EffortSet::Level(_))
+        if matches!(unsent, EffortSet::Level(_) | EffortSet::Auto)
             && let Some(at) = self
                 .preferred
                 .iter()
@@ -10830,13 +10839,17 @@ impl App {
         }
         let argument = argument.map(str::to_owned);
         // A level typed after `/effort` is chosen as one picked from the
-        // list is; anything else after it is the backend's to make sense of,
-        // and leaves no level known in force — `auto` hands it to the model.
+        // list is; `auto` hands the level to the model, so the next session
+        // is started at none; anything else after it is the backend's to
+        // make sense of, and leaves no level known in force.
         if typed.action == crate::menu::Action::Effort
             && let Some(level) = argument.as_deref().map(str::trim)
         {
             if EFFORTS.contains(&level) {
                 self.chose_effort(level);
+            } else if level == AUTO_EFFORT {
+                self.set_effort(EffortSet::Auto);
+                self.preferred.push(Preference::Effort(None));
             } else {
                 self.set_effort(EffortSet::Unnamed);
             }
@@ -17444,7 +17457,7 @@ mod tests {
             app.take_preferences(),
             [
                 Preference::Model(Some("sonnet".to_owned())),
-                Preference::Effort("max".to_owned()),
+                Preference::Effort(Some("max".to_owned())),
             ]
         );
         assert_eq!(app.effort(), Some("max"));
@@ -23978,7 +23991,7 @@ mod tests {
         app.on_key(key(KeyCode::Enter));
         assert_eq!(
             app.take_preferences(),
-            [Preference::Effort("high".to_owned())]
+            [Preference::Effort(Some("high".to_owned()))]
         );
         // The list opens only between turns, and `/effort` ran as one.
         app.apply(&Event::TurnEnded);
@@ -24008,12 +24021,26 @@ mod tests {
     }
 
     #[test]
+    fn an_effort_auto_that_never_reached_the_backend_clears_no_level_kept() {
+        let mut app = offering(&["effort"]);
+        submitted(&mut app, "/effort max");
+        app.apply(&Event::TurnEnded);
+        app.take_preferences();
+
+        submitted(&mut app, "/effort auto");
+        app.not_sent("the pipe closed");
+
+        assert_eq!(app.take_preferences(), []);
+        assert_eq!(app.effort(), Some("max"), "the level in force is unchanged");
+    }
+
+    #[test]
     fn an_effort_typed_as_a_level_is_kept_and_one_typed_otherwise_is_not() {
         let mut app = offering(&["effort"]);
         submitted(&mut app, "/effort  max ");
         assert_eq!(
             app.take_preferences(),
-            [Preference::Effort("max".to_owned())]
+            [Preference::Effort(Some("max".to_owned()))]
         );
 
         for typed in ["/effort", "/effort fastest", "/effort high please"] {
@@ -24023,6 +24050,14 @@ mod tests {
             submitted(&mut app, typed);
             assert_eq!(app.take_preferences(), [], "{typed}");
         }
+
+        app.apply(&Event::TurnEnded);
+        submitted(&mut app, "/effort auto");
+        assert_eq!(
+            app.take_preferences(),
+            [Preference::Effort(None)],
+            "`auto` hands the level to the model, so none is kept over it"
+        );
 
         let mut unlisted = offering(&["model"]);
         submitted(&mut unlisted, "/effort low");

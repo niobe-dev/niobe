@@ -99,12 +99,13 @@ pub enum Change<'a> {
         /// The model, as the operator named it.
         model: Option<&'a str>,
     },
-    /// How hard `profile`'s model works on a turn.
+    /// How hard `profile`'s model works on a turn; `None` forgets the one
+    /// kept, as where the operator handed the level to the model's default.
     Effort {
         /// The profile it was chosen under.
         profile: &'a str,
         /// The level, as the backend takes it.
-        effort: &'a str,
+        effort: Option<&'a str>,
     },
 }
 
@@ -223,7 +224,7 @@ impl Saved {
             }
             Change::Effort { profile, effort } => {
                 let choices = self.profiles.entry(profile.to_owned()).or_default();
-                choices.effort = Some(effort.to_owned());
+                choices.effort = effort.map(str::to_owned);
             }
         }
         self.profiles.retain(|_, choices| !choices.is_empty());
@@ -626,7 +627,7 @@ mod tests {
             &path,
             Change::Effort {
                 profile: "max",
-                effort: "high",
+                effort: Some("high"),
             },
         )
         .expect("kept");
@@ -668,7 +669,7 @@ mod tests {
             },
             Change::Effort {
                 profile: "max",
-                effort: "low",
+                effort: Some("low"),
             },
             Change::Model {
                 profile: "work",
@@ -693,6 +694,46 @@ mod tests {
         assert_eq!(saved.model("max"), None);
         assert_eq!(saved.effort("max"), Some("low"));
         let text = std::fs::read_to_string(&path).expect("the file was written");
+        assert!(!text.contains("work"), "{text}");
+    }
+
+    #[test]
+    fn an_effort_forgotten_leaves_the_profile_s_model_and_no_effort_in_the_file() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be made");
+        let path = kept(dir.path());
+        for change in [
+            Change::Model {
+                profile: "max",
+                model: Some("opus"),
+            },
+            Change::Effort {
+                profile: "max",
+                effort: Some("max"),
+            },
+            Change::Effort {
+                profile: "work",
+                effort: Some("low"),
+            },
+        ] {
+            keep(&path, change).expect("kept");
+        }
+
+        for profile in ["max", "work"] {
+            keep(
+                &path,
+                Change::Effort {
+                    profile,
+                    effort: None,
+                },
+            )
+            .expect("kept");
+        }
+
+        let saved = Saved::read(&path);
+        assert_eq!(saved.effort("max"), None);
+        assert_eq!(saved.model("max"), Some("opus"));
+        let text = std::fs::read_to_string(&path).expect("the file was written");
+        assert!(!text.contains("effort ="), "{text}");
         assert!(!text.contains("work"), "{text}");
     }
 
@@ -732,7 +773,7 @@ mod tests {
                 &path,
                 Change::Effort {
                     profile: awkward,
-                    effort: awkward,
+                    effort: Some(awkward),
                 },
             )
             .expect("kept");

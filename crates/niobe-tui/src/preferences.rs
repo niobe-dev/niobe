@@ -27,8 +27,9 @@ pub enum Preference {
     /// kept.
     Model(Option<String>),
     /// How hard the model works on a turn, as the backend's `/effort` takes
-    /// it.
-    Effort(String),
+    /// it; `None` where the operator handed the level to the model's default
+    /// with `/effort auto`, and no level is to be started at.
+    Effort(Option<String>),
 }
 
 impl Preference {
@@ -39,7 +40,8 @@ impl Preference {
             Preference::Mode(mode) => format!("mode {mode}"),
             Preference::Model(Some(model)) => format!("model {model}"),
             Preference::Model(None) => "no model".to_owned(),
-            Preference::Effort(effort) => format!("effort {effort}"),
+            Preference::Effort(Some(effort)) => format!("effort {effort}"),
+            Preference::Effort(None) => "no effort level".to_owned(),
         }
     }
 }
