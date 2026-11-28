@@ -440,7 +440,9 @@ reviewers that encode both, for an agent working in this tree.
   own, so a CLI that is not reading never holds up the screen, answers the permission prompts the CLI
   stops turns on — an `AskUserQuestion` approved with the operator's answers under `answers`,
   where the CLI reads them, and their notes and the chosen answer's preview under `annotations` — and starts it as the leader of a process group of its own, which a closing
-  session ends whole, and so does a CLI that leaves mid-session, so nothing the CLI started
+  session ends whole, and so does a CLI that leaves mid-session — the group asked to end, looked
+  at and killed once the CLI is reaped by `group.rs`, on a thread of the session's own, never by a
+  drain on the draw path — so nothing the CLI started
   outlives it or holds the quit, or the report of its end, up on its pipes — a CLI that something
   stops with a signal between turns is reported with a notice rather than as the session's end,
   and the binary's bridge starts it again on its conversation, with `--resume`, at the next

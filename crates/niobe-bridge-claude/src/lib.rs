@@ -48,6 +48,7 @@
 mod base64;
 mod driver;
 mod goal;
+mod group;
 mod spilled;
 mod stamp;
 mod tap;
