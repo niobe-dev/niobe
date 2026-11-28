@@ -628,6 +628,12 @@ fn output_tokens(ran: &Ran) -> Option<u64> {
     spend(ran).and_then(|report| report["tokens"]["output"].as_u64())
 }
 
+/// The sum of `counts`, held at the most a counter says rather than wrapped:
+/// each turn's total is one the fold saturated, and so is the suite's.
+fn saturated(counts: &[u64]) -> u64 {
+    counts.iter().fold(0u64, |sum, &n| sum.saturating_add(n))
+}
+
 /// The sum of `of` over every turn, where every turn reported it.
 fn reported_sum(ran: &[Ran], of: impl Fn(&Ran) -> Option<u64>) -> Option<u64> {
     ran.iter()
@@ -656,7 +662,7 @@ pub fn document(suite: &str, started_at: SystemTime, ran: &[Ran], timeout: Durat
             "tasks": ran.len(),
             "passed": passed,
             "pass_rate": share(passed, ran.len()),
-            "tokens": (reported.len() == ran.len()).then(|| reported.iter().sum::<u64>()),
+            "tokens": (reported.len() == ran.len()).then(|| saturated(&reported)),
             "tokens_reported_by": reported.len(),
             "output_tokens": reported_sum(ran, output_tokens),
             "wall_ms": millis(ran.iter().map(|ran| ran.wall).sum()),
@@ -804,10 +810,10 @@ fn summary_line(ran: &[Ran]) -> String {
     let percent = share(passed, ran.len()).map_or(0.0, |share| share * 100.0);
     let reported: Vec<u64> = ran.iter().filter_map(tokens).collect();
     let tokens = match reported.len() == ran.len() {
-        true => format!("{} tokens", grouped(reported.iter().sum())),
+        true => format!("{} tokens", grouped(saturated(&reported))),
         false => format!(
             "≥{} tokens ({} of {} turns reported)",
-            grouped(reported.iter().sum()),
+            grouped(saturated(&reported)),
             reported.len(),
             ran.len()
         ),
@@ -949,6 +955,33 @@ mod tests {
             summary_line(&suite),
             "1 of 2 passed (50%) · ≥1,200 tokens (1 of 2 turns reported) · 2m 02s · \
              five-hour window 40% after the first turn, 40% after the last"
+        );
+    }
+
+    #[test]
+    fn a_suite_whose_turns_report_past_what_a_counter_holds_sums_to_the_most_it_can_say() {
+        // Each turn's total is one the fold saturated; the suite's sum of
+        // them must saturate too, never wrap to a measured-looking zero.
+        let ran = |name: &str| Ran {
+            name: name.to_owned(),
+            passed: true,
+            ended: Ended::Reported(json!({
+                "outcome": "finished",
+                "tokens": {"total": 1u64 << 63, "output": 1u64 << 63},
+                "models": {"claude-sonnet-5": 1u64 << 63},
+                "windows": null,
+            })),
+            wall: Duration::from_secs(2),
+            kept: None,
+        };
+        let suite = [ran("a"), ran("b")];
+        let document = document("demo", SystemTime::UNIX_EPOCH, &suite, TURN_TIMEOUT);
+        assert_eq!(document["summary"]["tokens"], json!(u64::MAX));
+        assert_eq!(document["summary"]["output_tokens"], json!(u64::MAX));
+        assert!(
+            summary_line(&suite).contains(&grouped(u64::MAX)),
+            "{}",
+            summary_line(&suite)
         );
     }
 
