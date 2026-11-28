@@ -363,14 +363,15 @@ fn expands_to_no_code(prefix: &str, rest: &str) -> bool {
 /// zsh 5.9 with the CLI's options and with the defaults; and bash expands
 /// braces before parameters, so `{$,}{x}` is `${x}` there — a `$` the reading
 /// in [`expands_to_no_code`] refuses already, and a brace beside any `$` is
-/// asked about rather than trusted to that reading. One that holds a brace
-/// and two dots is refused too, since a sequence makes characters the text
+/// asked about rather than trusted to that reading. One that holds two dots
+/// inside a brace is refused too, since a sequence makes characters the text
 /// never held: bash, 5.2 as much as 3.2, the Mac's `/bin/bash` and
 /// `/bin/sh`, makes `{Z..a}` of ``Z [ \ ] ^ _ ` a`` and reads what it made as
 /// shell text, so its backquotes open command substitutions; zsh makes `.` and `/` of `{-..1}`,
 /// a path the text does not show, and reads dots that quotes or a backslash
 /// separate, `{Z"..a"}` or `{Z.\.a}`, as a sequence's, so those count as two
-/// dots here. A numeric `{1..3}` makes only digits and `-`, but telling one
+/// dots here; dots outside every brace, as in git's `@{u}..HEAD`, make no
+/// sequence. A numeric `{1..3}` makes only digits and `-`, but telling one
 /// from a character range means reading the quotes inside the brace as each
 /// shell does, so every sequence is asked about. Alternatives only move what
 /// the word holds, so a brace in a word with none of those joins nothing a
@@ -396,8 +397,8 @@ fn joins_into_no_expansion(prefix: &str, rest: &str) -> bool {
             word = Word::default();
             continue;
         }
+        word.hold(c, quoting, starred);
         quoting = quoting.after(c);
-        word.hold(c, starred);
     }
     !word.may_join_into_an_expansion()
 }
@@ -455,26 +456,38 @@ struct Word {
     bracket: bool,
     brace: bool,
     dollar: bool,
-    /// Two dots with nothing but quotes and backslashes between them, which
-    /// zsh reads as the `..` of a sequence as bash reads a bare one.
+    /// Two dots inside a brace with nothing but quotes and backslashes
+    /// between them, which zsh reads as the `..` of a sequence as bash reads
+    /// a bare one.
     dots: bool,
     /// The last character that was not a quote or a backslash was a dot.
     after_a_dot: bool,
+    /// How many braces are open: every `{` opens one, quoted or not, and
+    /// only a `}` the shell reads as such closes one, so a quote read wrongly
+    /// leaves a brace open and its dots counted, which is the safe side.
+    open: usize,
 }
 
 impl Word {
-    fn hold(&mut self, c: char, starred: bool) {
+    /// Takes in `c`, read in the state `quoting`, before `c` itself is read.
+    fn hold(&mut self, c: char, quoting: Quoting, starred: bool) {
         self.starred |= starred;
         match c {
             '~' => self.tilde = true,
             '[' => self.bracket = true,
-            '{' => self.brace = true,
+            '{' => {
+                self.brace = true;
+                self.open = self.open.saturating_add(1);
+            }
+            '}' if matches!(quoting, Quoting::Unquoted | Quoting::Dollar) => {
+                self.open = self.open.saturating_sub(1);
+            }
             '$' => self.dollar = true,
             _ => {}
         }
         match c {
             '.' => {
-                self.dots |= self.after_a_dot;
+                self.dots |= self.after_a_dot && self.open > 0;
                 self.after_a_dot = true;
             }
             '\'' | '"' | '\\' => {}
@@ -964,6 +977,9 @@ mod tests {
             "git status {Z.''.a}",
             "git status {Z.\\.a}",
             "git status \"{\"Z..a}",
+            "git status {Z\"}\"..a}",
+            "git status {Z\\}..a}",
+            "git status {a,{Z..a}}",
         ] {
             assert!(!git.covers("Bash", Some(target)), "{target}");
         }
@@ -982,6 +998,20 @@ mod tests {
             "cargo test HEAD@{1}",
         ] {
             assert!(rule.covers("Bash", Some(target)), "{target}");
+        }
+
+        // git's reflog and upstream ranges hold a brace and two dots, but the
+        // dots are outside the brace, which no shell reads as a sequence.
+        let git = Rule::parse("Bash(git *)").expect("the rule is valid");
+        for target in [
+            "git log @{u}..HEAD",
+            "git diff HEAD@{1}..HEAD",
+            "git rev-list --count @{upstream}..HEAD",
+            "git log stash@{0}..",
+        ] {
+            assert!(git.covers("Bash", Some(target)), "{target}");
+            let narrower = Rule::parse(&format!("Bash({target}*)")).expect("the rule is valid");
+            assert!(git.includes(&narrower), "{target}");
         }
     }
 
