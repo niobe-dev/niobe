@@ -74,6 +74,9 @@ reviewers that encode both, for an agent working in this tree.
   exits with no spawn, a clear mid-turn, a session left and taken up again — and checks after every
   event the figures that must hold whatever arrived, against counts kept from the events alone, and
   that a conversation read back from its clear has the turns it had live;
+  `tests/linear.rs` times a shell command read for a test run against one four times as long, the
+  fastest of eleven readings of each, and holds the ratio well under the sixteen a reader that goes
+  back over what it read would take;
   `work.rs` puts each tool call under the kind of
   work it did — exploring code, editing files, building and testing, version control, the web,
   delegating, an MCP server, housekeeping — from the tool's name or, for a shell call, from the

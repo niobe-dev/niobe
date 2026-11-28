@@ -307,6 +307,17 @@ struct Split {
     /// Whether the word being read has been quoted, so that `''` is a word
     /// though nothing is in it.
     quoted: bool,
+    /// How much of the word being read, in bytes, `beyond_digits` and
+    /// `beyond_operator` have been worked out from. A word only grows until
+    /// it ends, so each `<` or `>` reads only what was added since the last
+    /// rather than the whole word, which made a run of them take time
+    /// quadratic in its length.
+    scanned: usize,
+    /// Whether the scanned part of the word holds anything but digits.
+    beyond_digits: bool,
+    /// Whether the scanned part of the word holds anything but digits and
+    /// `<`, `>` and `&`, which is all an operator still being written holds.
+    beyond_operator: bool,
     /// The delimiters of the here-documents the current line opened, and
     /// whether each strips leading tabs (`<<-`). Their bodies start on the
     /// next line and are not commands.
@@ -316,6 +327,20 @@ struct Split {
 impl Split {
     fn push(&mut self, c: char) {
         self.word.push(c);
+    }
+
+    /// Works `beyond_digits` and `beyond_operator` out for what the word
+    /// gained since they last were.
+    fn scan(&mut self) {
+        for c in self.word.get(self.scanned..).unwrap_or_default().chars() {
+            if !c.is_ascii_digit() {
+                self.beyond_digits = true;
+                if !matches!(c, '<' | '>' | '&') {
+                    self.beyond_operator = true;
+                }
+            }
+        }
+        self.scanned = self.word.len();
     }
 
     fn quoted(&mut self) {
@@ -329,6 +354,9 @@ impl Split {
                 quoted: self.quoted,
             });
             self.quoted = false;
+            self.scanned = 0;
+            self.beyond_digits = false;
+            self.beyond_operator = false;
         }
     }
 
@@ -343,13 +371,10 @@ impl Split {
     /// descriptor it sends, as in `2>`, or an operator still being written,
     /// as in `>>`, `&>` or `<<<`.
     fn redirection_starts(&mut self) {
+        self.scan();
         let operator = !self.quoted
-            && (self.word.chars().all(|c| c.is_ascii_digit())
-                || self.word.ends_with(['<', '>', '&'])
-                    && self
-                        .word
-                        .chars()
-                        .all(|c| c.is_ascii_digit() || matches!(c, '<' | '>' | '&')));
+            && (!self.beyond_digits
+                || self.word.ends_with(['<', '>', '&']) && !self.beyond_operator);
         if !operator {
             self.end_word();
         }
@@ -2245,6 +2270,28 @@ error: doctest failed, to rerun pass `--doc`
         assert_eq!(words("ls 2>err.txt"), ["ls", "2>err.txt"]);
         assert_eq!(words("echo '>'x"), ["echo", ">x"]);
         assert_eq!(words("echo a\\>b"), ["echo", "a>b"]);
+    }
+
+    #[test]
+    fn a_redirection_operator_is_read_whole_however_it_is_written() {
+        let words = |command: &str| simple_commands(command).concat();
+        assert_eq!(words("cargo test 2>&1"), ["cargo", "test", "2>&1"]);
+        assert_eq!(words("cargo test &>log"), ["cargo", "test", "&>log"]);
+        assert_eq!(words("cargo test &>>log"), ["cargo", "test", "&>>log"]);
+        assert_eq!(words("cargo test >>log"), ["cargo", "test", ">>log"]);
+        assert_eq!(words("cat <<<word"), ["cat", "<<<word"]);
+        assert_eq!(words("ls 1>/dev/null"), ["ls", "1>/dev/null"]);
+        assert_eq!(words("ls 12>x"), ["ls", "12>x"]);
+        // What follows an operator is its target, which a further `>` ends.
+        assert_eq!(words("ls 2>1>x"), ["ls", "2>1", ">x"]);
+        // A word that holds more than a descriptor's number, or was quoted,
+        // is a word of its own before the redirection.
+        assert_eq!(words("ls a2>x"), ["ls", "a2", ">x"]);
+        assert_eq!(words("ls '2'>x"), ["ls", "2", ">x"]);
+        assert_eq!(words("ls $(echo 2)>x"), ["ls", "$(echo 2)", ">x"]);
+        // Each word is read afresh: one that ended does not decide the next.
+        assert_eq!(words("ls x 2>y"), ["ls", "x", "2>y"]);
+        assert_eq!(words("ls >a b>c"), ["ls", ">a", "b", ">c"]);
     }
 
     #[test]
