@@ -863,28 +863,19 @@ impl SessionState {
     }
 
     /// Whether `event` is the first anyone hears of a turn no prompt
-    /// opened: the session's own agent answering or calling a tool while no
-    /// turn runs. The backend starts such a turn of itself when a sub-agent
-    /// or a command it left in the background ends and it is told so. Its
-    /// beginning is not marked, so the turn is counted, as one the fold never
-    /// saw begin, from where the last one ended. A sub-agent working on after
-    /// its turn ended opens nothing, and nor does the reply in the turn that
-    /// typed a clear, which is no turn of the conversation it starts. A
-    /// command the operator ran with `!` is recorded as a call of no agent's,
-    /// and is not the agent's either: the backend runs nothing of it, and
-    /// hears of it only once it has ended, in the turn an
+    /// opened: the session's own agent at work
+    /// ([`Event::is_main_agent_at_work`]) while no turn runs. The backend
+    /// starts such a turn of itself when a sub-agent or a command it left in
+    /// the background ends and it is told so. Its beginning is not marked, so
+    /// the turn is counted, as one the fold never saw begin, from where the
+    /// last one ended. A sub-agent working on after its turn ended opens
+    /// nothing, and nor does the reply in the turn that typed a clear, which
+    /// is no turn of the conversation it starts. A command the operator ran
+    /// with `!` is not the agent's either: the backend runs nothing of it,
+    /// and hears of it only once it has ended, in the turn an
     /// [`Event::CommandsHanded`] opens.
     fn opens_a_turn(&self, event: &Event) -> bool {
-        let answers = matches!(
-            event,
-            Event::AssistantDelta { .. }
-                | Event::AssistantMessage { agent: None, .. }
-                | Event::Narration { agent: None, .. }
-        ) || matches!(
-            event,
-            Event::ToolCallStart { agent: None, name, .. } if name != OPERATOR_SHELL
-        );
-        answers && !self.turn_running && !self.clear_open
+        event.is_main_agent_at_work() && !self.turn_running && !self.clear_open
     }
 
     /// Something was sent for the agent to answer: it opens a turn, or

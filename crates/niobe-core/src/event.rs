@@ -1461,6 +1461,69 @@ impl Event {
             | Event::Error { .. } => false,
         }
     }
+
+    /// Whether this is the session's own agent at work — answering, saying
+    /// what it is doing, or calling a tool — which it does only inside a
+    /// turn, so it is the first word of a turn the backend started without a
+    /// prompt. A sub-agent is not: one launched in the background works on
+    /// after the turn that launched it ended. Nor is a command the operator
+    /// ran with `!`, which is recorded as a call of no agent's.
+    ///
+    /// The one rule for it: the fold opens a turn on it, and a bridge and
+    /// `niobe -p` read a turn as under way from it, so the three agree on
+    /// when one began.
+    pub fn is_main_agent_at_work(&self) -> bool {
+        match self {
+            Event::AssistantDelta { .. } => true,
+            Event::AssistantMessage { agent, .. } | Event::Narration { agent, .. } => {
+                agent.is_none()
+            }
+            Event::ToolCallStart { agent, name, .. } => agent.is_none() && name != OPERATOR_SHELL,
+            Event::SessionMeta(_)
+            | Event::UserMessage { .. }
+            | Event::CommandsHanded { .. }
+            | Event::PromptNotSent { .. }
+            | Event::Titled { .. }
+            | Event::ToolCallEnd { .. }
+            | Event::TurnEnded
+            | Event::TurnFollows
+            | Event::PromptTaken
+            | Event::Usage(_)
+            | Event::UsageWindows(_)
+            | Event::Billing { .. }
+            | Event::Account { .. }
+            | Event::ModelConfigured { .. }
+            | Event::Context(_)
+            | Event::Cleared
+            | Event::CompactionStarted
+            | Event::CompactionEnded
+            | Event::Compacted { .. }
+            | Event::SessionLeft
+            | Event::PermissionRequest { .. }
+            | Event::PermissionResponse { .. }
+            | Event::PermissionWithdrawn { .. }
+            | Event::ModeSelected { .. }
+            | Event::ModeUnknown
+            | Event::ModelSelected { .. }
+            | Event::ModelRefused { .. }
+            | Event::FileChange { .. }
+            | Event::TestRun { .. }
+            | Event::AgentSpawn { .. }
+            | Event::AgentProgress { .. }
+            | Event::AgentExit { .. }
+            | Event::BackgroundCommandStarted { .. }
+            | Event::BackgroundCommandEnded { .. }
+            | Event::Commands { .. }
+            | Event::McpServers { .. }
+            | Event::Models { .. }
+            | Event::TurnTotalDiffers { .. }
+            | Event::Notice { .. }
+            | Event::LimitReached { .. }
+            | Event::Looked
+            | Event::Goal { .. }
+            | Event::Error { .. } => false,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2103,5 +2166,55 @@ mod tests {
             reports_as: None,
         };
         assert_eq!(server.origin(), Some("project"));
+    }
+
+    #[test]
+    fn the_main_agent_is_at_work_in_its_words_its_narration_and_its_calls_and_no_one_elses() {
+        let agent = || Some(AgentId::from("a1"));
+        let call = |name: &str, agent: Option<AgentId>| Event::ToolCallStart {
+            id: ToolCallId::new("t1"),
+            name: name.to_owned(),
+            input: String::new(),
+            summary: None,
+            agent,
+        };
+        for working in [
+            Event::AssistantDelta {
+                text: "Fix".to_owned(),
+            },
+            Event::AssistantMessage {
+                text: "Fixed.".to_owned(),
+                agent: None,
+            },
+            Event::Narration {
+                text: "Checking the tests.".to_owned(),
+                agent: None,
+            },
+            call("Read", None),
+        ] {
+            assert!(working.is_main_agent_at_work(), "{working:?}");
+        }
+        for not_working in [
+            Event::AssistantMessage {
+                text: "Fixed.".to_owned(),
+                agent: agent(),
+            },
+            Event::Narration {
+                text: "Checking the tests.".to_owned(),
+                agent: agent(),
+            },
+            call("Read", agent()),
+            call(OPERATOR_SHELL, None),
+            Event::UserMessage {
+                text: "fix it".to_owned(),
+            },
+            Event::TurnEnded,
+            Event::Error {
+                message: "overloaded".to_owned(),
+                fatal: false,
+            },
+        ] {
+            assert!(!not_working.is_main_agent_at_work(), "{not_working:?}");
+        }
     }
 }

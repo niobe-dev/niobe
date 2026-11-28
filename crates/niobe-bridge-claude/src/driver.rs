@@ -1518,9 +1518,10 @@ impl Session {
         }
         // The CLI starts a turn of its own, with no prompt, once a sub-agent
         // or a command it left in the background ends: the session's own
-        // agent answering or calling a tool is the first word of it, and its
+        // agent at work — answering, narrating or calling a tool, as the
+        // fold opens the turn on it — is the first word of it, and its
         // `result` the last. A CLI stopped in between took that turn with it.
-        if is_main_agent_at_work(event) {
+        if event.is_main_agent_at_work() {
             self.turn_open = true;
         }
         if let Event::AgentSpawn { id, .. } = event {
@@ -2024,18 +2025,6 @@ fn pass_over_line(reader: &mut impl BufRead) {
             return;
         }
     }
-}
-
-/// Whether `event` is the session's own agent answering or calling a tool,
-/// which it does only inside a turn. A sub-agent is not: one launched in the
-/// background works on after the turn that launched it has ended.
-fn is_main_agent_at_work(event: &Event) -> bool {
-    matches!(
-        event,
-        Event::AssistantDelta { .. }
-            | Event::AssistantMessage { agent: None, .. }
-            | Event::ToolCallStart { agent: None, .. }
-    )
 }
 
 /// The warning for a line of the CLI's output too long to read.
@@ -4910,6 +4899,45 @@ read -r rest
         );
         events.extend(drained_to_the_end(&mut session));
 
+        assert!(
+            matches!(events.last(), Some(Event::Error { fatal: true, message })
+                if message == "the `claude` session was stopped by SIGTERM and said nothing."),
+            "{events:#?}"
+        );
+        let mut all = vec![Event::UserMessage {
+            text: "list the files".to_owned(),
+        }];
+        all.extend(events);
+        let state = niobe_core::session::SessionState::replay(&all);
+        assert!(!state.turn_running(), "{all:#?}");
+        assert!(session.next().is_none());
+    }
+
+    /// The opening of a turn the CLI started of itself as far as the model's
+    /// narration of its work: a thinking block with words, the message the
+    /// CLI writes before the call the model is still writing.
+    #[cfg(unix)]
+    const TURN_OF_ITS_OWN_NARRATED: &str = r#"printf '%s\n' '{"type":"system","subtype":"task_notification","tool_use_id":"toolu_bg","status":"completed","summary":"fetch.py retries forever on a 404."}' '{"type":"system","subtype":"init","session_id":"s-9","model":"claude-sonnet-5","permissionMode":"default"}' '{"type":"assistant","message":{"model":"claude-sonnet-5","id":"msg_n","content":[{"type":"thinking","thinking":"Writing the fix for fetch.py next.","signature":"c2ln"}]}}'"#;
+
+    /// The narration opens the turn as the agent's reply or call does: the
+    /// fold opens it there, so a CLI stopped under it took that turn with it.
+    #[cfg(unix)]
+    #[test]
+    fn a_cli_stopped_while_a_turn_it_started_itself_has_only_narrated_ends_the_session_under_it() {
+        let (mut session, mut events, _dir) = carried_on(
+            &format!(
+                "read -r initialize\nread -r turn\n{BACKGROUND_AGENT}\n{TURN_OF_ITS_OWN_NARRATED}\nkill -TERM $$\n"
+            ),
+            true,
+        );
+        events.extend(drained_to_the_end(&mut session));
+
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, Event::Narration { agent: None, .. })),
+            "{events:#?}"
+        );
         assert!(
             matches!(events.last(), Some(Event::Error { fatal: true, message })
                 if message == "the `claude` session was stopped by SIGTERM and said nothing."),

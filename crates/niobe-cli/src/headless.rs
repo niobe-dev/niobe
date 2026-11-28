@@ -231,7 +231,10 @@ fn run_waiting(
         }
         for (at, event) in events.iter().enumerate() {
             keep(journal, &mut state, event);
-            if is_main_agent_at_work(event) {
+            // The session's own agent at work is the first word of the turn
+            // the backend said follows; a sub-agent working on in the
+            // background is not.
+            if event.is_main_agent_at_work() {
                 owed_until = None;
             }
             let ending = match event {
@@ -341,18 +344,6 @@ fn run_waiting(
 /// its own.
 fn still_working(state: &SessionState) -> bool {
     !state.running_agents().is_empty() || !state.background_commands().is_empty()
-}
-
-/// Whether `event` is the session's own agent answering or calling a tool,
-/// which it does only inside a turn: the first word of a turn the backend
-/// said follows. A sub-agent working on in the background is not.
-fn is_main_agent_at_work(event: &Event) -> bool {
-    matches!(
-        event,
-        Event::AssistantDelta { .. }
-            | Event::AssistantMessage { agent: None, .. }
-            | Event::ToolCallStart { agent: None, .. }
-    )
 }
 
 /// Records why the run is stopping and asks the backend to stop the turn,
@@ -774,6 +765,45 @@ mod tests {
         assert_eq!(turn.outcome, Outcome::Finished);
         assert_eq!(turn.reply, "the first command finished");
         assert!(waited.elapsed() >= Duration::from_millis(50));
+    }
+
+    /// Runs the batches with a grace of 50 ms for the turn the backend said
+    /// follows, each drain that finds nothing waiting 10 ms.
+    fn ran_owing(batches: Vec<Vec<Event>>) -> Turn {
+        let mut bridge = Scripted {
+            batches: batches.into(),
+            ..Scripted::default()
+        };
+        run_waiting(
+            &mut bridge,
+            &mut Kept::default(),
+            &Allowlist::new(),
+            "fix the test",
+            None,
+            Waits {
+                pause: &mut || std::thread::sleep(Duration::from_millis(10)),
+                stopping: &mut || None,
+                owed_turn: Duration::from_millis(50),
+            },
+        )
+    }
+
+    /// The turn the backend owes can open with the model's narration of its
+    /// work, a thinking block, and then say nothing while it writes a long
+    /// call: the narration is the agent heard from in that turn.
+    #[test]
+    fn a_turn_said_to_follow_that_opens_with_narration_is_waited_for_to_its_end() {
+        let mut batches = a_command_ended_under_the_turn();
+        batches.push(vec![Event::Narration {
+            text: "checking the second command".to_owned(),
+            agent: None,
+        }]);
+        batches.extend(std::iter::repeat_with(Vec::new).take(10));
+        batches.push(vec![said("the real answer"), Event::TurnEnded]);
+        let turn = ran_owing(batches);
+
+        assert_eq!(turn.outcome, Outcome::Finished);
+        assert_eq!(turn.reply, "the real answer");
     }
 
     #[test]
