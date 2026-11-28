@@ -168,8 +168,6 @@ pub struct Item {
     pub keys: &'static str,
     /// What it does.
     pub action: Action,
-    /// Whether a rule is drawn above it, closing off the group before.
-    pub rule_above: bool,
 }
 
 impl Item {
@@ -198,14 +196,6 @@ const fn item(label: &'static str, hot: usize, keys: &'static str, action: Actio
         hot,
         keys,
         action,
-        rule_above: false,
-    }
-}
-
-const fn ruled(label: &'static str, hot: usize, keys: &'static str, action: Action) -> Item {
-    Item {
-        rule_above: true,
-        ..item(label, hot, keys, action)
     }
 }
 
@@ -222,8 +212,8 @@ pub const MENUS: [Menu; 6] = [
             item("Settings", 0, "F9", Action::Settings),
             item("Permissions", 0, "", Action::Permissions),
             item("Login / Logout", 0, "", Action::SignIn),
-            ruled("Doctor", 0, "/doctor", Action::Doctor),
-            ruled("Quit", 0, "F10", Action::Quit),
+            item("Doctor", 0, "/doctor", Action::Doctor),
+            item("Quit", 0, "F10", Action::Quit),
         ],
     },
     Menu {
@@ -234,9 +224,9 @@ pub const MENUS: [Menu; 6] = [
             item("Resume…", 0, "", Action::Resume),
             item("History…", 0, "Ctrl+R", Action::History),
             item("Find in transcript", 0, "Ctrl+F", Action::Find),
-            ruled("Rewind files…", 2, "F6", Action::Rewind),
+            item("Rewind files…", 2, "F6", Action::Rewind),
             item("Stop current run", 0, "Esc", Action::Stop),
-            ruled("Export transcript", 0, "", Action::Export),
+            item("Export transcript", 0, "", Action::Export),
         ],
     },
     Menu {
@@ -244,7 +234,7 @@ pub const MENUS: [Menu; 6] = [
         items: &[
             item("Memory…", 0, "F8", Action::Memory),
             item("Add file…", 0, "@", Action::AddFile),
-            ruled("MCP servers", 1, "F7  /mcp", Action::Mcp),
+            item("MCP servers", 1, "F7  /mcp", Action::Mcp),
             item("Sub-agents", 0, "", Action::SubAgents),
             item("Hooks", 0, "", Action::Hooks),
         ],
@@ -253,9 +243,9 @@ pub const MENUS: [Menu; 6] = [
         name: "Model",
         items: &[
             item("Switch model…", 0, "F4", Action::SwitchModel),
-            ruled("Next mode", 0, "⇧Tab", Action::CycleMode),
+            item("Next mode", 0, "⇧Tab", Action::CycleMode),
             item("Effort…", 0, "/effort", Action::Effort),
-            ruled("Cost & usage", 0, "", Action::Usage),
+            item("Cost & usage", 0, "", Action::Usage),
         ],
     },
     Menu {
@@ -269,7 +259,7 @@ pub const MENUS: [Menu; 6] = [
             item("Project overview…", 0, "o", Action::Overview),
             item("Usage pane", 0, "", Action::Pane(SidePane::Usage)),
             item("Changes pane", 0, "", Action::Pane(SidePane::Changes)),
-            ruled("Theme…", 0, "", Action::Theme),
+            item("Theme…", 0, "", Action::Theme),
         ],
     },
     Menu {
@@ -277,7 +267,7 @@ pub const MENUS: [Menu; 6] = [
         items: &[
             item("Shortcuts", 0, "F1", Action::Shortcuts),
             item("Commands & skills", 0, "/", Action::Commands),
-            ruled("Release notes", 0, "", Action::ReleaseNotes),
+            item("Release notes", 0, "", Action::ReleaseNotes),
             item("Report a bug", 9, "", Action::ReportBug),
         ],
     },
