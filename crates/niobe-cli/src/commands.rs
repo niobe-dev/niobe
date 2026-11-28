@@ -11,7 +11,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use niobe_core::event::ToolCallId;
@@ -38,11 +38,27 @@ const GRACE: Duration = Duration::from_secs(2);
 /// few milliseconds, so only one that does not is waited for this long.
 const QUIT_GRACE: Duration = Duration::from_millis(500);
 
-/// How long, once `sh` has ended, what it printed is given to reach its end.
+/// How long, once `sh` has ended, its output may stay open with nothing in it
+/// before the command is called ended without what reaches it later.
 /// Something `sh` put in the background may hold its output open for as long
-/// as it runs; the command has ended all the same, and what reaches the output
-/// after this is not recorded as the command's.
+/// as it runs; the command has ended all the same.
+///
+/// It is the length of a `poll(2)` on the output begun after `sh` was reaped,
+/// when every end of it `sh` held had closed: such a wait finds the output
+/// ready at once — with what is left in it, or at its end — however late the
+/// reader is run, and waits this long only where something else holds it.
+/// Counted by the clock from `sh`'s end, it took the time a loaded machine
+/// left the reader unrun for time the output was held, and cut a command that
+/// had left nothing behind.
 const LINGER: Duration = Duration::from_millis(100);
+
+/// How long, once `sh` has ended, what it put in the background is read for
+/// while it keeps writing to the output, so that a command never runs on for
+/// as long as that does. Past this, what is in the output is still read, as
+/// much as a pipe can hold, so that a reader run this late still reaches the
+/// end of an output that closed with `sh`; and the command is then ended
+/// without the rest.
+const STILL_WRITING: Duration = Duration::from_secs(2);
 
 /// How long the lookout waits between two looks at the groups: as often as
 /// the shell's loop looks for what has ended while idle, so that a group is
@@ -78,6 +94,10 @@ pub struct Commands {
     /// Whether anyone is left in the group a leader leads: [`occupied`], but
     /// for a test.
     occupied: fn(u32) -> bool,
+    /// How long each command's output is left unread before it is first
+    /// read: none, but for a test standing in for a machine too loaded to
+    /// run the reader before the command has ended.
+    lag: Duration,
     /// What looks at the groups for having emptied, from the first drain on.
     lookout: Option<Lookout>,
 }
@@ -176,6 +196,7 @@ impl Commands {
             backend: Arc::new(Mutex::new(Vec::new())),
             backend_groups: None,
             occupied,
+            lag: Duration::ZERO,
             lookout: None,
         }
     }
@@ -272,8 +293,9 @@ impl Shell for Commands {
         let groups = Arc::clone(&self.groups);
         let reaper = self.reaper.clone();
         let occupied = self.occupied;
+        let lag = self.lag;
         std::thread::spawn(move || {
-            let ran = wait(id, &mut child, printed);
+            let ran = wait(id, &mut child, printed, lag);
             if let Ok(mut groups) = groups.lock() {
                 for group in groups.iter_mut().filter(|group| group.leader == leader) {
                     group.ended = true;
@@ -465,19 +487,22 @@ fn detached(sh: &mut Command) {
     }
 }
 
-/// Reads what the command prints while it runs, and ends once `sh` has:
-/// with everything it printed where its output closes within [`LINGER`], and
-/// with what it printed up to then where something it put in the background
-/// holds the output open.
-fn wait(id: ToolCallId, child: &mut Child, printed: Option<ChildStdout>) -> Ran {
+/// Reads what the command prints while it runs, and ends once `sh` has and
+/// its output is read: with everything it printed where the output closed
+/// with `sh`, however late the reader runs, and with what it printed up to
+/// then where something it put in the background holds the output open
+/// ([`LINGER`]) or keeps writing to it ([`STILL_WRITING`]).
+fn wait(id: ToolCallId, child: &mut Child, printed: Option<ChildStdout>, lag: Duration) -> Ran {
     let tail = Arc::new(Mutex::new(Tail::default()));
-    let (read, all_read) = channel::<()>();
+    let ended = Arc::new(OnceLock::new());
+    let (read, all_read) = channel::<bool>();
     match printed {
         Some(printed) => {
             let tail = Arc::clone(&tail);
+            let ended = Arc::clone(&ended);
             std::thread::spawn(move || {
-                read_end(printed, &tail);
-                let _ = read.send(());
+                std::thread::sleep(lag);
+                let _ = read.send(read_end(printed, &tail, &ended));
             });
         }
         None => drop(read),
@@ -486,10 +511,8 @@ fn wait(id: ToolCallId, child: &mut Child, printed: Option<ChildStdout>) -> Ran 
         Ok(status) => (status.code(), signalled(status)),
         Err(error) => (None, Some(format!("cannot wait for it: {error}"))),
     };
-    let finished = !matches!(
-        all_read.recv_timeout(LINGER),
-        Err(RecvTimeoutError::Timeout)
-    );
+    let _ = ended.set(Instant::now());
+    let finished = read_to_the_end(&all_read);
     let (kept, bytes) = tail.lock().map(|tail| tail.end()).unwrap_or_default();
     let whole = finished && u64::try_from(kept.len()).is_ok_and(|kept| kept == bytes);
     let output = String::from_utf8_lossy(&kept).into_owned();
@@ -500,6 +523,27 @@ fn wait(id: ToolCallId, child: &mut Child, printed: Option<ChildStdout>) -> Ran 
         whole,
         exit_code,
         error,
+    }
+}
+
+/// Whether the reader read the output to its end, waiting for it to say: it
+/// ends of itself once `sh` has, within [`LINGER`] where the output is held
+/// open and [`STILL_WRITING`] where it is written to. A command that printed
+/// nothing to read has nothing missing.
+#[cfg(unix)]
+fn read_to_the_end(all_read: &Receiver<bool>) -> bool {
+    all_read.recv().unwrap_or(true)
+}
+
+/// Whether the reader read the output to its end: without `poll(2)` the
+/// reader cannot tell a held output from an idle one, so it is given
+/// [`LINGER`] from `sh`'s end, and is taken to have stopped short after that.
+#[cfg(not(unix))]
+fn read_to_the_end(all_read: &Receiver<bool>) -> bool {
+    match all_read.recv_timeout(LINGER) {
+        Ok(whole) => whole,
+        Err(RecvTimeoutError::Disconnected) => true,
+        Err(RecvTimeoutError::Timeout) => false,
     }
 }
 
@@ -532,22 +576,71 @@ impl Tail {
     }
 }
 
-/// Reads `from` into `into` until it ends.
-fn read_end(mut from: impl Read, into: &Mutex<Tail>) {
+/// Reads `from` into `into` until it ends, or until what `sh` put in the
+/// background is seen holding it open or writing to it past `sh`'s end, the
+/// moment `ended` holds once there is one; and says whether it read to the
+/// end.
+fn read_end(mut from: ChildStdout, into: &Mutex<Tail>, ended: &OnceLock<Instant>) -> bool {
     let mut chunk = [0_u8; 64 * 1024];
+    let mut read_late: usize = 0;
     loop {
+        // Looked at before the wait, so that only a wait begun once `sh` had
+        // ended, with every end of the output it held closed, is taken to say
+        // that something else holds it.
+        let ended_at = ended.get().copied();
+        let late = ended_at.is_some_and(|at| at.elapsed() >= STILL_WRITING);
+        match ready(&from, if late { Duration::ZERO } else { LINGER }) {
+            Ok(true) => {}
+            Ok(false) if ended_at.is_none() => continue,
+            Ok(false) | Err(_) => return false,
+        }
         match from.read(&mut chunk) {
-            Ok(0) => break,
+            Ok(0) => return true,
             Ok(n) => {
                 let read = chunk.get(..n).unwrap_or_default();
                 if let Ok(mut tail) = into.lock() {
                     tail.add(read);
                 }
+                if late {
+                    read_late = read_late.saturating_add(n);
+                    if read_late > PIPE_HOLDS {
+                        return false;
+                    }
+                }
             }
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(_) => break,
+            Err(_) => return false,
         }
     }
+}
+
+/// More than a pipe holds unread: Linux lets one grow to a mebibyte, and
+/// macOS to 64 KiB. Once `sh` has ended, no more than this was written before
+/// it did and is still in the output.
+const PIPE_HOLDS: usize = 1024 * 1024;
+
+/// Whether `from` has something to read, or has ended, within `wait`.
+#[cfg(unix)]
+fn ready(from: &ChildStdout, wait: Duration) -> std::io::Result<bool> {
+    use rustix::event::{PollFd, PollFlags, Timespec};
+    let wait = Timespec {
+        tv_sec: wait.as_secs().try_into().unwrap_or(i64::MAX),
+        tv_nsec: wait.subsec_nanos().into(),
+    };
+    loop {
+        let mut fds = [PollFd::new(from, PollFlags::IN)];
+        match rustix::event::poll(&mut fds, Some(&wait)) {
+            Ok(found) => return Ok(found > 0),
+            Err(rustix::io::Errno::INTR) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+}
+
+/// Without `poll(2)`, a read is waited on as it is: see [`read_to_the_end`].
+#[cfg(not(unix))]
+fn ready(_from: &ChildStdout, _wait: Duration) -> std::io::Result<bool> {
+    Ok(true)
 }
 
 /// Why a command ended without an exit status of its own, where a signal
@@ -650,6 +743,13 @@ mod tests {
             self.occupied = occupied;
             self
         }
+
+        /// The same commands, each one's output first read `lag` after it
+        /// started: what a loaded machine does to the thread reading it.
+        fn read_late(mut self, lag: Duration) -> Self {
+            self.lag = lag;
+            self
+        }
     }
 
     /// Runs `command` in `cwd` and waits for it to end.
@@ -683,6 +783,80 @@ mod tests {
         assert!(ran.whole);
         assert_eq!(ran.exit_code, Some(3));
         assert_eq!(ran.error, None, "an exit of its own needs no reason");
+    }
+
+    /// Well past [`LINGER`]: a reader first run this late finds the output
+    /// already at its end where it closed with the shell.
+    const LATE: Duration = Duration::from_millis(500);
+
+    #[test]
+    fn a_command_read_late_still_ends_with_all_it_printed() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let mut commands = Commands::at(dir.path()).read_late(LATE);
+
+        let ran = ran_in(&mut commands, "echo one; echo two >&2; exit 3");
+
+        assert_eq!(ran.output, "one\ntwo\n");
+        assert_eq!(ran.bytes, 8);
+        assert!(ran.whole, "the output closed with the shell");
+        assert_eq!(ran.exit_code, Some(3));
+    }
+
+    #[test]
+    fn a_command_read_late_that_left_something_running_apart_from_its_output_ends_whole() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let marker = dir.path().join("left-running");
+        let mut commands = Commands::at(dir.path()).read_late(LATE);
+
+        let ran = ran_in(
+            &mut commands,
+            &format!(
+                "echo before; (sleep 300 >/dev/null 2>&1 & echo $! > {})",
+                marker.display()
+            ),
+        );
+
+        assert_eq!(ran.output, "before\n");
+        assert!(ran.whole, "nothing held the output open");
+        let child = pid_in(&marker);
+        drop(commands);
+        gone(child, "what the command left running outlived the session");
+    }
+
+    #[test]
+    fn a_command_read_late_whose_output_something_still_holds_ends_with_what_it_printed() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let marker = dir.path().join("left-running");
+        let mut commands = Commands::at(dir.path()).read_late(LATE);
+
+        let ran = ran_in(
+            &mut commands,
+            &format!("echo before; (sleep 300 & echo $! > {})", marker.display()),
+        );
+
+        assert_eq!(ran.output, "before\n");
+        assert!(!ran.whole, "what reaches the output later is not in it");
+        let child = pid_in(&marker);
+        drop(commands);
+        gone(child, "what the command left running outlived the session");
+    }
+
+    #[test]
+    fn a_command_whose_output_something_keeps_writing_to_still_ends() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let marker = dir.path().join("left-writing");
+        let mut commands = Commands::at(dir.path());
+
+        let ran = ran_in(
+            &mut commands,
+            &format!("echo before; (yes & echo $! > {})", marker.display()),
+        );
+
+        assert!(ran.bytes > 0, "what it printed is counted");
+        assert!(!ran.whole, "what is still being written is not all in it");
+        let child = pid_in(&marker);
+        drop(commands);
+        gone(child, "what the command left writing outlived the session");
     }
 
     /// A pager would wait for a key there is no terminal to give it.

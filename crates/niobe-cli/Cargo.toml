@@ -38,7 +38,9 @@ signal-hook.workspace = true
 # the session ends: its process group is signalled, which std cannot do. And
 # a shell whose input is piped reads its keys from its controlling terminal,
 # opened by name and made its standard input, which std cannot do either.
-rustix = { workspace = true, features = ["fs", "process", "stdio", "termios"] }
+# What a command prints is waited on with `poll(2)`, so that an output held
+# open past its shell's end is told from a reader the machine ran late.
+rustix = { workspace = true, features = ["event", "fs", "process", "stdio", "termios"] }
 
 [dev-dependencies]
 # The shell's key events are ratatui's; the tests drive the shell with them.
