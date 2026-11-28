@@ -65,12 +65,14 @@ pub const STOP_GRACE: Duration = Duration::from_secs(3);
 
 /// How long a run waits for the agent to be heard from in a turn the
 /// backend said follows the one that ended, with nothing left running in the
-/// background, before it ends with the reply it has. The backend starts that
-/// turn as soon as it has ended the one before, so this is never waited out
-/// where the turn comes; it bounds the wait where the backend took the news
-/// in after all — work that ended in the moment between a call's result
-/// going out and the backend asking the model again — and nothing follows.
-/// Long past the start of a reply, which is what clears it.
+/// background, before it ends with the reply it has — counted again from
+/// each warning the backend gives meanwhile, such as a retry of the turn's
+/// request. The backend starts that turn as soon as it has ended the one
+/// before, so this is not waited out where the turn comes and its request
+/// is answered; it bounds the wait where the backend took the news in after
+/// all — work that ended in the moment between a call's result going out and
+/// the backend asking the model again — and nothing follows. Long past the
+/// start of a reply, which is what clears it.
 pub const OWED_TURN_GRACE: Duration = Duration::from_secs(120);
 
 /// What a prompt no rule allows is refused with. The backend hands it to the
@@ -233,9 +235,15 @@ fn run_waiting(
             keep(journal, &mut state, event);
             // The session's own agent at work is the first word of the turn
             // the backend said follows; a sub-agent working on in the
-            // background is not.
+            // background is not. A warning is the backend still at work —
+            // the turn's request failing and being retried, which can take
+            // longer than the grace — but not proof the turn came, since a
+            // backend warns of other things too: the grace starts again
+            // from it rather than ending, so the wait stays bounded.
             if event.is_main_agent_at_work() {
                 owed_until = None;
+            } else if owed_until.is_some() && matches!(event, Event::Error { fatal: false, .. }) {
+                owed_until = Some(Instant::now() + owed_turn);
             }
             let ending = match event {
                 // What the backend says after the run's end is recorded, and
@@ -767,9 +775,9 @@ mod tests {
         assert!(waited.elapsed() >= Duration::from_millis(50));
     }
 
-    /// Runs the batches with a grace of 50 ms for the turn the backend said
-    /// follows, each drain that finds nothing waiting 10 ms.
-    fn ran_owing(batches: Vec<Vec<Event>>) -> Turn {
+    /// Runs the batches with `owed_turn` as the grace for the turn the
+    /// backend said follows, each drain that finds nothing waiting 10 ms.
+    fn ran_owing(batches: Vec<Vec<Event>>, owed_turn: Duration) -> Turn {
         let mut bridge = Scripted {
             batches: batches.into(),
             ..Scripted::default()
@@ -783,7 +791,7 @@ mod tests {
             Waits {
                 pause: &mut || std::thread::sleep(Duration::from_millis(10)),
                 stopping: &mut || None,
-                owed_turn: Duration::from_millis(50),
+                owed_turn,
             },
         )
     }
@@ -800,10 +808,46 @@ mod tests {
         }]);
         batches.extend(std::iter::repeat_with(Vec::new).take(10));
         batches.push(vec![said("the real answer"), Event::TurnEnded]);
-        let turn = ran_owing(batches);
+        let turn = ran_owing(batches, Duration::from_millis(50));
 
         assert_eq!(turn.outcome, Outcome::Finished);
         assert_eq!(turn.reply, "the real answer");
+    }
+
+    /// The owed turn's first request can fail and be retried for longer
+    /// than the grace, each retry said as a warning: the backend at work on
+    /// the turn, whose reply is the one the run prints.
+    #[test]
+    fn a_turn_said_to_follow_whose_request_is_retried_past_the_grace_is_waited_for_to_its_end() {
+        let mut batches = a_command_ended_under_the_turn();
+        for attempt in 1..=25 {
+            batches.push(vec![warning(&format!(
+                "a request failed (overloaded), and the CLI is retrying it: attempt {attempt} \
+                 of 25"
+            ))]);
+            batches.push(Vec::new());
+        }
+        batches.push(vec![said("the real answer"), Event::TurnEnded]);
+        let turn = ran_owing(batches, Duration::from_millis(200));
+
+        assert_eq!(turn.outcome, Outcome::Finished);
+        assert_eq!(turn.reply, "the real answer");
+    }
+
+    /// A warning is not the agent heard from: where nothing follows it, the
+    /// run waits the grace from it, 30 ms or more after the turn ended, and
+    /// ends with the reply it has.
+    #[test]
+    fn a_warning_after_a_turn_said_to_follow_waits_the_grace_again_and_no_longer() {
+        let mut batches = a_command_ended_under_the_turn();
+        batches.extend(std::iter::repeat_with(Vec::new).take(3));
+        batches.push(vec![warning("the CLI is retrying it")]);
+        let waited = Instant::now();
+        let turn = ran_owing(batches, Duration::from_millis(50));
+
+        assert_eq!(turn.outcome, Outcome::Finished);
+        assert_eq!(turn.reply, "the first command finished");
+        assert!(waited.elapsed() >= Duration::from_millis(80));
     }
 
     #[test]

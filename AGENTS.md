@@ -575,7 +575,8 @@ reviewers that encode both, for an agent working in this tree.
   the shell's — waited past where it finished with a sub-agent or a shell command still running
   in the background, to the end of the turn the CLI starts on its own once that work ends — or
   where the bridge says the CLI owes a turn for work that ended under one that did not take it in,
-  to that turn, for two minutes at most before the agent is heard from in it — whose
+  to that turn, for two minutes at most before the agent is heard from in it, counted again from
+  each warning the CLI gives meanwhile, as it does retrying the turn's request — whose
   reply is the one printed — each permission prompt answered by the standing rules — the config's, and those
   `--allow` gave for that run alone, which nothing writes down — and every other refused with
   words that tell the agent no one is there, a question the agent puts to the operator among
