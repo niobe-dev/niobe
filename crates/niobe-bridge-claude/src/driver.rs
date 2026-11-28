@@ -678,8 +678,8 @@ pub struct Session {
     /// the prompts after it alone. See [`Session::title_after_a_clear`].
     cleared: Arc<AtomicBool>,
     /// Set by the thread reading the CLI to whether the last turn's end said
-    /// a prompt is queued behind it, before that end goes out: see
-    /// [`Session::turn_open`].
+    /// another turn follows it, as [`Event::TurnFollows`] does, before that
+    /// end goes out: see [`Session::turn_open`].
     turn_follows: Arc<AtomicBool>,
     /// How many turn ends the thread reading the CLI has read, counted
     /// before the line holding each goes out: see [`Session::turn_open`].
@@ -736,12 +736,13 @@ pub struct Session {
     model_changes: Vec<ModelChange>,
     model_answers: ModelAnswers,
     /// Whether a turn was sent that the CLI has not ended, one the CLI
-    /// started from a prompt queued behind the last end, or one it started
-    /// of itself, which its agent at work says. A CLI stopped then
-    /// took the turn with it, and the session is not carried on. An end
-    /// handed on after a turn was sent leaves it open where the reader had
-    /// already read that end when the turn went out: see
-    /// [`Session::sent_after_ends`].
+    /// starts straight after the last end, which that end said follows it —
+    /// on a prompt queued or held behind it, or on background work that
+    /// ended under it — or one it started of itself, which its agent at work
+    /// says. A CLI stopped then took the turn with it, and the session is
+    /// not carried on. An end handed on after a turn was sent leaves it open
+    /// where the reader had already read that end when the turn went out:
+    /// see [`Session::sent_after_ends`].
     turn_open: bool,
     /// Whether the CLI was stopped by a signal between turns, with
     /// [`Options::carry_on`]: the session goes on, in a CLI started again.
@@ -1543,9 +1544,10 @@ impl Session {
         if matches!(event, Event::Cleared) {
             self.title_after_a_clear();
         }
-        // A prompt sent while the turn ran and still queued is the CLI's next
-        // turn, started as soon as it wrote this end: a CLI stopped now took
-        // that turn with it, and nothing will end it.
+        // A turn this end said follows — on a prompt sent while the turn ran
+        // and still queued or held, or on background work that ended under
+        // it — is the CLI's next, started as soon as it wrote this end: a CLI
+        // stopped now took that turn with it, and nothing will end it.
         // A turn sent once the reader had read this end is not one it
         // closed either: the CLI wrote the end before that prompt reached it.
         if matches!(event, Event::TurnEnded) {
@@ -5124,18 +5126,32 @@ read -r rest
     }
 
     /// A turn that launches two sub-agents in the background, the second of
-    /// which reports its end before the turn does.
+    /// which reports its end before the turn ends where `under_the_turn`,
+    /// and after it otherwise.
     #[cfg(unix)]
-    const TWO_BACKGROUND_AGENTS: &str = r#"printf '%s\n' '{"type":"system","subtype":"init","session_id":"s-9","model":"claude-sonnet-5","permissionMode":"default"}' '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_bg","name":"Agent","input":{"subagent_type":"deep-reasoner","description":"Review catalog/fetch.py","prompt":"Review it."}},{"type":"tool_use","id":"toolu_done","name":"Agent","input":{"subagent_type":"deep-reasoner","description":"Check the docs","prompt":"Check them."}}]}}' '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_bg","content":[{"type":"text","text":"Async agent launched successfully."}]},{"type":"tool_result","tool_use_id":"toolu_done","content":[{"type":"text","text":"Async agent launched successfully."}]}]},"tool_use_result":{"isAsync":true,"status":"async_launched","agentId":"a1","description":"Review"}}' '{"type":"system","subtype":"task_notification","tool_use_id":"toolu_done","status":"completed","summary":"The docs are right."}' '{"type":"result","subtype":"success","is_error":false,"session_id":"s-9"}'"#;
+    fn two_background_agents(under_the_turn: bool) -> String {
+        let opened = r#"'{"type":"system","subtype":"init","session_id":"s-9","model":"claude-sonnet-5","permissionMode":"default"}' '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_bg","name":"Agent","input":{"subagent_type":"deep-reasoner","description":"Review catalog/fetch.py","prompt":"Review it."}},{"type":"tool_use","id":"toolu_done","name":"Agent","input":{"subagent_type":"deep-reasoner","description":"Check the docs","prompt":"Check them."}}]}}' '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_bg","content":[{"type":"text","text":"Async agent launched successfully."}]},{"type":"tool_result","tool_use_id":"toolu_done","content":[{"type":"text","text":"Async agent launched successfully."}]}]},"tool_use_result":{"isAsync":true,"status":"async_launched","agentId":"a1","description":"Review"}}'"#;
+        let done = r#"'{"type":"system","subtype":"task_notification","tool_use_id":"toolu_done","status":"completed","summary":"The docs are right."}'"#;
+        let ended =
+            r#"'{"type":"result","subtype":"success","is_error":false,"session_id":"s-9"}'"#;
+        match under_the_turn {
+            true => format!("printf '%s\\n' {opened} {done} {ended}"),
+            false => format!("printf '%s\\n' {opened} {ended} {done}"),
+        }
+    }
 
     /// An agent that exited before the stop is not cancelled by it as well:
     /// its exit was already reported, and a second one would be counted
-    /// against the agents' figures.
+    /// against the agents' figures. It ends between turns, so that the stop
+    /// is one between turns too: see the test after this one.
     #[cfg(unix)]
     #[test]
     fn an_agent_that_exited_before_the_stop_is_not_cancelled_by_it() {
         let (mut session, mut events, _dir) = carried_on(
-            &format!("read -r initialize\nread -r turn\n{TWO_BACKGROUND_AGENTS}\nkill -TERM $$\n"),
+            &format!(
+                "read -r initialize\nread -r turn\n{}\nkill -TERM $$\n",
+                two_background_agents(false)
+            ),
             true,
         );
         events.extend(drained_to_the_end(&mut session));
@@ -5155,6 +5171,33 @@ read -r rest
             ],
             "{events:#?}"
         );
+        assert!(session.next().is_some());
+    }
+
+    /// An agent that ends under a turn after the turn's last request took
+    /// such news in is told of in a turn the CLI starts of itself once that
+    /// turn ends, which the end says follows: a CLI stopped before that turn
+    /// says anything took it with it, and the session ends under it, as it
+    /// does under a turn the CLI started of itself that has begun.
+    #[cfg(unix)]
+    #[test]
+    fn a_cli_stopped_before_the_turn_it_owes_on_work_that_ended_under_the_last_ends_the_session() {
+        let (mut session, mut events, _dir) = carried_on(
+            &format!(
+                "read -r initialize\nread -r turn\n{}\nkill -TERM $$\n",
+                two_background_agents(true)
+            ),
+            true,
+        );
+        events.extend(drained_to_the_end(&mut session));
+
+        assert!(events.contains(&Event::TurnFollows), "{events:#?}");
+        assert!(
+            matches!(events.last(), Some(Event::Error { fatal: true, message })
+                if message == "the `claude` session was stopped by SIGTERM and said nothing."),
+            "{events:#?}"
+        );
+        assert!(session.next().is_none());
     }
 
     /// Where the session ends instead of carrying on, its end says for itself
@@ -5238,6 +5281,61 @@ read -r rest
         assert!(
             matches!(events.last(), Some(Event::Error { fatal: true, message })
                 if message == "the `claude` session was stopped by SIGTERM (exit status 143) and said nothing."),
+            "{events:#?}"
+        );
+        assert!(session.next().is_none());
+    }
+
+    /// A prompt the CLI said it queued behind the message it is busy with is
+    /// the next turn even where the turn's `result` counts none queued, as a
+    /// compaction's does (`queued-prompts.jsonl`): the end says a turn
+    /// follows, and a CLI stopped before that turn says anything took it
+    /// with it, so the session ends under it rather than carrying on as
+    /// though the prompt had been answered.
+    #[cfg(unix)]
+    #[test]
+    fn a_cli_stopped_before_a_prompt_it_held_starts_ends_the_session_under_that_turn() {
+        let said = |id: &str, state: &str| {
+            format!(r#"{{"type":"command_lifecycle","command_uuid":"{id}","state":"{state}"}}"#)
+        };
+        let init = r#"{"type":"system","subtype":"init","session_id":"s-9","model":"claude-sonnet-5","permissionMode":"default"}"#;
+        let ended = r#"{"type":"result","subtype":"success","is_error":false,"session_id":"s-9","queued_turn_count":0}"#;
+        let (mut session, _dir) = started_with(
+            &format!(
+                "read -r initialize\nread -r first\nprintf '%s\\n' '{}' '{}' '{init}'\n\
+                 read -r second\nprintf '%s\\n' '{}' '{ended}' '{}'\nkill -TERM $$\n",
+                said("a", "queued"),
+                said("a", "started"),
+                said("p", "queued"),
+                said("a", "completed"),
+            ),
+            |options| options.carry_on = true,
+        );
+        session
+            .send("list the files", &[])
+            .expect("the turn is queued");
+        let mut events = drained_until(
+            &mut session,
+            |event| matches!(event, Event::SessionMeta(meta) if meta.backend_session.is_some()),
+        );
+        session
+            .send("plum", &[])
+            .expect("the second turn is queued");
+        events.extend(drained_to_the_end(&mut session));
+
+        let follows = events
+            .iter()
+            .position(|event| matches!(event, Event::TurnFollows));
+        let last_end = events
+            .iter()
+            .rposition(|event| matches!(event, Event::TurnEnded));
+        assert!(
+            matches!((follows, last_end), (Some(follows), Some(end)) if follows < end),
+            "{events:#?}"
+        );
+        assert!(
+            matches!(events.last(), Some(Event::Error { fatal: true, message })
+                if message == "the `claude` session was stopped by SIGTERM and said nothing."),
             "{events:#?}"
         );
         assert!(session.next().is_none());

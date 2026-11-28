@@ -675,9 +675,10 @@ pub struct Translator {
     /// the CLI sent, so a prompt in it is never put to the operator, whose
     /// approval would hand the CLI the cut arguments to run.
     cut: bool,
-    /// Whether the last turn's end said a prompt is queued behind it, which
-    /// the CLI starts as a turn straight after; `None` until a turn's end is
-    /// read, and again once taken.
+    /// Whether the last turn's end said the CLI starts another turn straight
+    /// after it — on a prompt queued behind it or held, or on background work
+    /// that ended under it — as [`Event::TurnFollows`] says; `None` until a
+    /// turn's end is read, and again once taken.
     turn_follows: Option<bool>,
     /// The operator's messages the CLI said it started and has not said it
     /// completed or cancelled, by the id each was sent with: while any is
@@ -1297,9 +1298,11 @@ impl Translator {
     }
 
     /// Whether the turn whose end was read since the last call has another
-    /// behind it: a prompt the operator sent while it ran, still in the CLI's
-    /// queue, which the CLI starts as soon as it has written the end. `None`
-    /// where no turn ended since.
+    /// behind it, which the CLI starts as soon as it has written the end: a
+    /// prompt the operator sent while it ran, still in the CLI's queue or
+    /// held behind the message it was busy with, or the news of background
+    /// work that ended under it. It is `Some(true)` exactly where that end
+    /// carried [`Event::TurnFollows`]. `None` where no turn ended since.
     ///
     /// Separate from the events for the reason [`Translator::take_asked`]
     /// is: [`Event::TurnEnded`] ends the turn the shell shows, and only
@@ -3369,15 +3372,17 @@ impl Translator {
     fn result(&mut self, outcome: wire::Outcome, out: &mut Vec<Event>) {
         self.goal_checked_at_end(out);
         let queued = outcome.queued_turn_count.unwrap_or(0) > 0;
-        self.turn_follows = Some(queued);
         self.turn_under_way = false;
         // The CLI starts a turn of its own straight after this one on work
         // that ended under it, and on a message of the operator's it still
         // holds: one it counts as queued, or one it said it queued behind
         // another and has not started — which the count leaves out where the
-        // turn ending is a compaction's (`queued-prompts.jsonl`).
+        // turn ending is a compaction's (`queued-prompts.jsonl`). The one
+        // answer is both the event and the driver's flag, so a turn the shell
+        // is told follows is one a CLI stopped now took with it.
         let owes_a_turn =
             std::mem::take(&mut self.untaken_end) || queued || !self.commands_held.is_empty();
+        self.turn_follows = Some(owes_a_turn);
         let interrupted = outcome.interrupted();
         let shown_limit = self.usage_limit.take();
         let limit_words = limit_in(&outcome, shown_limit.as_deref());
@@ -8588,6 +8593,57 @@ mod tests {
             let lines = [&held[..], &[said("b", state), result(0)]].concat();
             assert_eq!(ended(&lines), [Event::TurnEnded], "{state}");
         }
+    }
+
+    /// What the driver reads to know whether a turn is open after an end
+    /// says a turn follows exactly where that end does: on a message still
+    /// held though the count is none, on one counted queued, and on
+    /// background work that ended under the turn without being taken in.
+    #[test]
+    fn the_driver_is_told_a_turn_follows_exactly_where_the_end_says_one_does() {
+        let said = |id: &str, state: &str| {
+            format!(r#"{{"type":"command_lifecycle","command_uuid":"{id}","state":"{state}"}}"#)
+        };
+        let result = |count: u32| {
+            format!(
+                r#"{{"type":"result","subtype":"success","is_error":false,"queued_turn_count":{count}}}"#
+            )
+        };
+        let init = r#"{"type":"system","subtype":"init","session_id":"s-1"}"#.to_owned();
+        let launched = [
+            init.clone(),
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_bg","name":"Agent","input":{"subagent_type":"deep-reasoner","description":"Review fetch.py","prompt":"Review it."}}]}}"#.to_owned(),
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_bg","content":[{"type":"text","text":"Async agent launched successfully."}]}]},"tool_use_result":{"isAsync":true,"status":"async_launched","agentId":"a1","description":"Review fetch.py"}}"#.to_owned(),
+            r#"{"type":"system","subtype":"task_notification","tool_use_id":"toolu_bg","status":"completed","summary":"fetch.py is fine."}"#.to_owned(),
+        ];
+        let held = [
+            said("a", "queued"),
+            said("a", "started"),
+            init.clone(),
+            said("p", "queued"),
+        ];
+        let ended = |lines: &[String]| {
+            let mut translator = translator();
+            let mut events = Vec::new();
+            for line in lines {
+                events = translator.line(line);
+            }
+            (
+                events.contains(&Event::TurnFollows),
+                translator.take_turn_follows(),
+            )
+        };
+
+        assert_eq!(
+            ended(&[&held[..], &[result(0)]].concat()),
+            (true, Some(true))
+        );
+        assert_eq!(ended(&[init.clone(), result(1)]), (true, Some(true)));
+        assert_eq!(
+            ended(&[&launched[..], &[result(0)]].concat()),
+            (true, Some(true))
+        );
+        assert_eq!(ended(&[init, result(0)]), (false, Some(false)));
     }
 
     /// A turn the CLI starts on its own — on background work that ended
