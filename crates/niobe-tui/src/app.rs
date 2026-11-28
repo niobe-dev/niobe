@@ -9725,9 +9725,10 @@ impl App {
     /// the prompt waits for over again from it.
     ///
     /// A key comes too soon when it arrived with other keys in one read, as a
-    /// paste does, or within [`ASK_QUIET`] of the prompt coming up or of the
-    /// last key held back. Restarting the wait on each key held back is what
-    /// stops a word being typed through a prompt one key at a time.
+    /// paste does, or within [`ASK_QUIET`] of the prompt coming up, of the
+    /// last key held back or of the last key written in the notes on an
+    /// answer. Restarting the wait on each key held back is what stops a word
+    /// being typed through a prompt one key at a time.
     fn too_soon_to_answer(&mut self) -> bool {
         let Some(arrival) = self.arrival.filter(|_| self.within_the_quiet()) else {
             return false;
@@ -9739,8 +9740,9 @@ impl App {
 
     /// Whether the key being handled came before the operator could have
     /// read the front prompt — with other keys in one read, or within
-    /// [`ASK_QUIET`] of it coming up or of the last key held back — without
-    /// holding anything back, as [`App::too_soon_to_answer`] does.
+    /// [`ASK_QUIET`] of it coming up or of the last key that started its
+    /// quiet over — without holding anything back, as
+    /// [`App::too_soon_to_answer`] does.
     fn within_the_quiet(&self) -> bool {
         self.arrival.is_some_and(|arrival| {
             !arrival.alone
@@ -10177,7 +10179,8 @@ impl App {
         // it, that is. One that came before the operator could have read it
         // is a letter of what they were typing, and is typed past the
         // question below as any letter is. Opening notes starts the quiet
-        // over: a key straight after it is still the word it began.
+        // over, as each key written in them does, so the Enter that answers
+        // with them waits for a pause after the last.
         if self.ask_focus == AskFocus::Choosing
             && typed_char(key) == Some('n')
             && !self.within_the_quiet()
@@ -10323,19 +10326,15 @@ impl App {
     /// One key, on notes being written; Enter is the answer's, and Esc goes
     /// back to the answers with the notes kept.
     ///
-    /// A character that comes within the quiet of the `n` that opened them
-    /// came before the operator could have seen the field: the `n` began a
-    /// word, and the two go past the question into the prompt, as the word's
-    /// other letters will, so the Enter that ends it answers nothing.
+    /// Every key here starts the quiet over, so the Enter that answers with
+    /// the notes is held back where it comes straight after one: an `n` that
+    /// began a word the operator typed at the question opened these notes,
+    /// and the Enter that ends the word answers nothing, the rest of it kept
+    /// in them. Whatever keys arrive, and however fast, are the notes'.
     fn on_noting_key(&mut self, key: ratatui::crossterm::event::KeyEvent) {
         use ratatui::crossterm::event::KeyCode;
 
-        if let Some(typed) = typed_char(key).filter(|_| self.within_the_quiet()) {
-            self.ask_focus = AskFocus::Choosing;
-            self.type_past_the_question('n');
-            self.type_past_the_question(typed);
-            return;
-        }
+        self.ask_quiet_since = self.latest_instant();
         if answer_key(key) == Some(KeyCode::Esc) {
             self.ask_focus = AskFocus::Choosing;
             return;
@@ -10598,6 +10597,8 @@ impl App {
             (Event::Cleared | Event::SessionLeft | Event::Error { fatal: true, .. }, _) => {
                 Owed::Nothing
             }
+            // The turn that said another follows has ended: the one it owes
+            // is due from here.
             // The backend starts what it still holds once the turn it held
             // it behind has ended.
             (Event::TurnEnded, _) if held => Owed::Due,
@@ -18896,9 +18897,10 @@ mod tests {
         }
     }
 
-    /// `n` writes notes, but a word that opens with it is the operator's next
-    /// prompt as any other word is: the Enter that ends it chooses nothing,
-    /// with the rest of the word as notes or otherwise.
+    /// `n` writes notes, and a word that opens with it, typed at hand pace
+    /// after the questions' quiet, opens them: the Enter that ends the word
+    /// comes straight after its last letter and chooses nothing, the rest of
+    /// the word kept in the notes for the operator to see.
     #[test]
     fn a_word_opening_with_n_typed_at_the_agents_questions_answers_nothing_and_is_kept() {
         for text in ["no thanks", "next", "ne"] {
@@ -18912,9 +18914,15 @@ mod tests {
 
             assert_eq!(app.take_produced(), [], "{text}");
             assert!(app.asking().is_some(), "{text}");
-            assert_eq!(app.ask_notes(), "", "{text}");
-            assert_eq!(app.composed(), text, "{text}");
-            assert_eq!(app.ask_focus(), AskFocus::Deferred, "{text}");
+            assert_eq!(
+                app.question_on_screen().map(|(_, step)| step),
+                Some(0),
+                "{text}"
+            );
+            assert_eq!(app.ask_notes(), &text[1..], "{text}");
+            assert_eq!(app.composed(), "", "{text}");
+            assert_eq!(app.ask_focus(), AskFocus::Noting, "{text}");
+            assert_eq!(app.hint(), Some(TOO_SOON_HINT), "{text}");
         }
     }
 
@@ -18954,8 +18962,58 @@ mod tests {
         assert_eq!(app.ask_focus(), AskFocus::Noting);
         let every = Duration::from_millis(150);
         let last = typed_apart(&mut app, "tag", opened + ASK_QUIET, every);
-        read(&mut app, b"\r", last + every);
-        read(&mut app, b"\r", last + every + ASK_QUIET * 2);
+        read(&mut app, b"\r", last + ASK_QUIET * 2);
+        read(&mut app, b"\r", last + ASK_QUIET * 4);
+
+        let mut noted = answer_to("Cut a release?", "Push only");
+        noted.notes = Some("tag".to_owned());
+        assert_eq!(
+            app.take_produced(),
+            [Event::PermissionResponse {
+                id: "q1".into(),
+                decision: PermissionDecision::Allow,
+                message: None,
+                answers: vec![noted, answer_to("Which platforms?", "macOS")],
+            }]
+        );
+        assert_eq!(app.composed(), "");
+    }
+
+    /// Notes are words, and words may arrive in one read: two letters the
+    /// terminal read together are two more letters of the notes, never the
+    /// `n` that opened them taken back into the prompt.
+    #[test]
+    fn letters_read_together_in_notes_go_into_the_notes() {
+        let shown = Instant::now();
+        let mut app = app().attached();
+        app.tick(shown, None);
+        app.apply(&questions_asked());
+        let opened = shown + ASK_QUIET * 2;
+        read(&mut app, b"n", opened);
+        let every = Duration::from_millis(150);
+        let last = typed_apart(&mut app, "tag", opened + ASK_QUIET, every);
+        read(&mut app, b"de", last + every);
+
+        assert_eq!(app.ask_notes(), "tagde");
+        assert_eq!(app.composed(), "");
+        assert_eq!(app.ask_focus(), AskFocus::Noting);
+        assert_eq!(app.take_produced(), []);
+    }
+
+    /// A fluent typist who opens notes on purpose writes them straight away,
+    /// and the Enter they press after a pause answers with them.
+    #[test]
+    fn notes_typed_straight_after_n_answer_with_them_after_a_pause() {
+        let shown = Instant::now();
+        let mut app = app().attached();
+        app.tick(shown, None);
+        app.apply(&questions_asked());
+        let opened = shown + ASK_QUIET * 2;
+        read(&mut app, b"n", opened);
+        let last = typed_apart(&mut app, "tag", opened, Duration::from_millis(80));
+        assert_eq!(app.ask_notes(), "tag");
+        read(&mut app, b"\r", last + ASK_QUIET * 2);
+        read(&mut app, b"\r", last + ASK_QUIET * 4);
 
         let mut noted = answer_to("Cut a release?", "Push only");
         noted.notes = Some("tag".to_owned());
