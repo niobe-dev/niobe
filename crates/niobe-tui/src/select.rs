@@ -92,7 +92,9 @@ impl Selection {
     /// Each line's trailing blanks are dropped, and the indent the lines
     /// share is taken off them all: the transcript draws a gutter before every
     /// line of a message, and copied text is wanted without it. A first line
-    /// that starts part way along has no indent of its own to share.
+    /// that starts part way along has no indent of its own to share — nor
+    /// has a row going on with a line the selection leaves the start of,
+    /// whose blanks before its own text are the cut's mark and not an indent.
     ///
     /// A line that goes on with the one above — a code block's line the
     /// pane cut for room — is joined to it as the one line it was, with no
@@ -115,11 +117,12 @@ impl Selection {
                 continue;
             };
             let kept_to_its_end = kept_to_its_end(lines.peek().map(|(_, next)| next));
+            let whole = !copied.goes_on() && (line > start.line || start.column == 0);
             let goes_on = copied.goes_on() && !pieces.is_empty();
             let piece = copied.covered(from, to, kept_to_its_end);
             match (goes_on, pieces.last_mut()) {
                 (true, Some((above, _))) => above.push_str(&piece),
-                _ => pieces.push((piece, line > start.line || start.column == 0)),
+                _ => pieces.push((piece, whole)),
             }
         }
         let shares_indent = |(piece, whole): &(String, bool)| !piece.is_empty() && *whole;
@@ -760,6 +763,11 @@ mod tests {
             Selection::new(at(1, 6), at(2, 40)).text(line_at),
             "three",
             "a selection that starts on a row going on has nothing to join it to"
+        );
+        assert_eq!(
+            Selection::new(at(1, 0), at(3, 40)).text(line_at),
+            "o three\nnext",
+            "a row going on starts part way along its line, with no indent to share"
         );
         assert_eq!(
             Selection::new(at(1, 0), at(1, 40)).text(line_at),
