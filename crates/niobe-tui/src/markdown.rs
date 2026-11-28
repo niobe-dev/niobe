@@ -161,12 +161,17 @@ pub(crate) fn is_carried_mark(c: char) -> bool {
         .any(|mark| mark.starts_with(c))
 }
 
+/// Whether `c` is the mark of a code row cut for room, [`CODE_CUT`].
+pub(crate) fn is_code_cut(c: char) -> bool {
+    CODE_CUT.starts_with(c)
+}
+
 /// Whether a row whose mark in a column is `below` goes on with the block of
 /// the row above, whose mark in that column is `above`: the same mark, or a
 /// code row cut for room under any row of its block.
 pub(crate) fn carries_on(above: char, below: char) -> bool {
     let code = |c: char| CODE_GUTTER.starts_with(c) || CODE_CUT.starts_with(c);
-    (above == below && is_carried_mark(below)) || (CODE_CUT.starts_with(below) && code(above))
+    (above == below && is_carried_mark(below)) || (is_code_cut(below) && code(above))
 }
 
 /// Where a row of a code block drawn among `spans` in `theme` has its

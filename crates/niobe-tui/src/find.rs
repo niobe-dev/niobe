@@ -89,7 +89,8 @@ impl Found {
 /// in the transcript — including the break where the pane wrapped a line and
 /// the indent the next one starts with, and the quote's bar or code block's
 /// gutter that line is drawn behind again, so a phrase is found wherever it
-/// was cut.
+/// was cut. A code block's line the pane cut for room is not broken where it
+/// was cut: its rows are read as the one line, as a copy reads them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Query {
     chars: Vec<char>,
@@ -116,9 +117,10 @@ impl Query {
     /// [`Which::nth`]. The lines do not say what they were drawn from, so
     /// the rest of each [`Which`] is left to [`Found::placed`].
     ///
-    /// The lines are read as one text with a space between each, so a match
-    /// can run from one line on to the next. Lines of different entries are
-    /// never joined.
+    /// The lines are read as one text with a space between each — but a code
+    /// row cut for room, which goes on with the row above with nothing
+    /// between — so a match can run from one line on to the next. Lines of
+    /// different entries are never joined.
     ///
     /// `read` keeps that text between searches of the same lines: it is
     /// read again only where it is absent or was read for a query that
@@ -195,7 +197,10 @@ impl Query {
 
 /// One entry's lines read as one text, as a comparison sees them, with a
 /// space between each line and the next, and the marks a line carries on a
-/// block behind read as the blanks they stand in front of.
+/// block behind read as the blanks they stand in front of — but a code row
+/// cut for room, whose marks are left out and which is joined to the row
+/// above with nothing between, since the cut falls wherever the pane ran out
+/// of room, inside a word as often as not.
 ///
 /// Kept as one string and the byte each line starts at, rather than as each
 /// character beside its place, and kept with the lines it was read from
@@ -208,8 +213,14 @@ pub(crate) struct Text {
     /// Whether the case was kept, for a query with a capital in it.
     exact: bool,
     /// The byte of `text` each line starts at. The space joining a line to
-    /// the next is the byte before the next one's start.
+    /// the next is the byte before the next one's start, where the next one
+    /// is joined by a space.
     starts: Vec<usize>,
+    /// How many characters each line starts with that `text` leaves out: the
+    /// marks a code row cut for room is drawn behind, none for any other
+    /// line. A line with some left out is joined to the one before with
+    /// nothing between.
+    skipped: Vec<usize>,
 }
 
 impl Text {
@@ -221,27 +232,33 @@ impl Text {
             .fold(lines.len(), usize::saturating_add);
         let mut text = String::with_capacity(bytes);
         let mut starts = Vec::with_capacity(lines.len());
+        let mut skipped = Vec::with_capacity(lines.len());
         for (row, line) in lines.iter().enumerate() {
-            if row > 0 {
+            let lead = row
+                .checked_sub(1)
+                .and_then(|above| lines.get(above))
+                .map_or(Lead::default(), |above| carried_lead(above, line));
+            if row > 0 && !lead.cut {
                 text.push(' ');
             }
             starts.push(text.len());
-            let mut carried = row
-                .checked_sub(1)
-                .and_then(|above| lines.get(above))
-                .map_or(0, |above| carried_lead(above, line));
+            skipped.push(if lead.cut { lead.chars } else { 0 });
+            let mut carried = lead.chars;
             for span in &line.spans {
                 let content: &str = &span.content;
                 let split = content
                     .char_indices()
                     .nth(carried)
                     .map_or(content.len(), |(at, _)| at);
-                let (lead, rest) = content.split_at(split);
-                carried = carried.saturating_sub(lead.chars().count());
-                text.extend(
-                    lead.chars()
-                        .map(|c| if c.is_whitespace() { c } else { ' ' }),
-                );
+                let (marks, rest) = content.split_at(split);
+                carried = carried.saturating_sub(marks.chars().count());
+                if !lead.cut {
+                    text.extend(
+                        marks
+                            .chars()
+                            .map(|c| if c.is_whitespace() { c } else { ' ' }),
+                    );
+                }
                 push_folded(&mut text, rest, exact);
             }
         }
@@ -249,6 +266,7 @@ impl Text {
             text,
             exact,
             starts,
+            skipped,
         }
     }
 
@@ -272,7 +290,10 @@ impl Text {
             .saturating_sub(1);
         let (from, column) = match row == counted.row && counted.at <= at {
             true => (counted.at, counted.column),
-            false => (self.starts.get(row).copied().unwrap_or(at), 0),
+            false => (
+                self.starts.get(row).copied().unwrap_or(at),
+                self.skipped.get(row).copied().unwrap_or(0),
+            ),
         };
         let between = self
             .text
@@ -303,10 +324,19 @@ impl Text {
         let covered = self.text.get(from..end).unwrap_or_default();
         covered.char_indices().filter_map(move |(offset, c)| {
             let at = from + offset;
-            if self.starts.get(row + 1) == Some(&(at + 1)) {
-                row += 1;
-                column = 0;
-                return None;
+            while let Some(&next) = self.starts.get(row + 1) {
+                match self.skipped.get(row + 1).copied().unwrap_or(0) {
+                    0 if next == at + 1 => {
+                        row += 1;
+                        column = 0;
+                        return None;
+                    }
+                    skipped @ 1.. if next == at => {
+                        row += 1;
+                        column = skipped;
+                    }
+                    _ => break,
+                }
             }
             column += 1;
             Some((first.saturating_add(row), column - 1, c.is_whitespace()))
@@ -314,23 +344,44 @@ impl Text {
     }
 }
 
+/// The characters a line starts with that carry on a block from the line
+/// above: see [`carried_lead`].
+#[derive(Debug, Clone, Copy, Default)]
+struct Lead {
+    /// How many there are.
+    chars: usize,
+    /// Whether the last is a code row's mark of a cut for room, followed by
+    /// the blank the mark is drawn with: the row goes on with the line above
+    /// where the pane ran out of room, not at a break of its own.
+    cut: bool,
+}
+
 /// How many characters `line` starts with that are blank or the marks of a
 /// block it carries on from `above` — a quote's bar or a code block's gutter
 /// drawn in the same column of both, or a code row cut for room under its
-/// block — up to the last such mark: what a
-/// comparison reads as the space between the words either side of the
-/// break, as it reads an indent.
-fn carried_lead(above: &Line<'_>, line: &Line<'_>) -> usize {
+/// block — up to the last such mark: what a comparison reads as the space
+/// between the words either side of the break, as it reads an indent. Where
+/// that mark is a cut's, the blank drawn after it is the mark's too.
+fn carried_lead(above: &Line<'_>, line: &Line<'_>) -> Lead {
     let mut over = above.spans.iter().flat_map(|span| span.content.chars());
     let mut lead = 0;
-    let mut carried = 0;
+    let mut carried = Lead::default();
+    let mut after_cut = false;
     for c in line.spans.iter().flat_map(|span| span.content.chars()) {
         let above = over.next();
+        let blank_of_cut = std::mem::take(&mut after_cut) && c.is_whitespace();
         if c.is_whitespace() {
             lead += 1;
+            if blank_of_cut {
+                carried.chars = lead;
+            }
         } else if above.is_some_and(|above| crate::markdown::carries_on(above, c)) {
             lead += 1;
-            carried = lead;
+            carried = Lead {
+                chars: lead,
+                cut: crate::markdown::is_code_cut(c),
+            };
+            after_cut = carried.cut;
         } else {
             break;
         }
@@ -560,11 +611,6 @@ mod tests {
             found_in("zebra quokka", &["▎ ▎ │ a zebra", "▎ ▎ │ quokka"]),
             vec![vec![(10, 8, 5), (11, 6, 6)]]
         );
-        assert_eq!(
-            found_in("zebra quokka", &["  │ a zebra", "  ┆ quokka", "  ┆ more"]),
-            vec![vec![(10, 6, 5), (11, 4, 6)]],
-            "a code row cut for room goes on behind its own mark"
-        );
         assert!(found_in("zebra quokka", &["  ┆ a zebra", "  │ quokka"]).is_empty());
         assert!(found_in("zebra quokka", &["a zebra", "▎ quokka"]).is_empty());
         assert!(found_in("zebra quokka", &["• a zebra", "• quokka"]).is_empty());
@@ -572,6 +618,36 @@ mod tests {
             found_in("▎ zebra", &["  ▎ zebra", "  ▎ quokka"]),
             vec![vec![(10, 2, 7)]],
             "a bar no line above carries on to is the line's own text"
+        );
+    }
+
+    /// A code row cut for room goes on with the line above where the pane
+    /// ran out of room, often inside a word: it is read joined to it with
+    /// nothing between, as a copy joins it, so a path cut in two is found
+    /// whole and a space the line does not hold is not found at the cut.
+    #[test]
+    fn a_code_line_cut_for_room_is_searched_as_the_one_line_it_was() {
+        let cut = ["  │ a zebra", "  ┆ quokka", "  ┆ more"];
+        assert_eq!(
+            found_in("zebraquokkamore", &cut),
+            vec![vec![(10, 6, 5), (11, 4, 6), (12, 4, 4)]]
+        );
+        assert!(found_in("zebra quokka", &cut).is_empty());
+        assert_eq!(found_in("more", &cut), vec![vec![(12, 4, 4)]]);
+        assert_eq!(
+            found_in("zebra quokka", &["  │ a zebra ", "  ┆ quokka"]),
+            vec![vec![(10, 6, 5), (11, 4, 6)]],
+            "a blank before the cut is the line's own"
+        );
+        assert_eq!(
+            found_in("zebra quokka", &["  │ a zebra", "  ┆  quokka"]),
+            vec![vec![(10, 6, 5), (11, 5, 6)]],
+            "and so is one after it"
+        );
+        assert_eq!(
+            found_in("zebraquokka", &["▎ │ a zebra", "▎ ┆ quokka"]),
+            vec![vec![(10, 6, 5), (11, 4, 6)]],
+            "inside a quote"
         );
     }
 
