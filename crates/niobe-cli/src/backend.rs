@@ -1016,10 +1016,10 @@ impl Bridge for Claude {
         self.request(Held::Model(model.to_owned()))
     }
 
-    /// While a CLI is being started again, the turn to stop is one a held
-    /// prompt opened, which is stopped by not sending it — said as a prompt
-    /// never sent, so the turn it opened is taken back rather than ended; a
-    /// change of mode or model held with it is still made.
+    /// While a CLI is being started again, no turn runs, and what is stopped
+    /// is the prompts held for it, by not sending them — each said as a
+    /// prompt never sent; a change of mode or model held with them is still
+    /// made.
     fn interrupt(&mut self) -> Result<(), BridgeError> {
         match self.starting.as_mut() {
             Some(starting) => {

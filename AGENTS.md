@@ -167,7 +167,10 @@ reviewers that encode both, for an agent working in this tree.
   which prompts are queued — sent while a turn ran or the conversation was being compacted, and drawn
   dim, saying so, until the backend says it took one in or the turn they waited behind ends, and
   which are held behind a clear the backend has not answered yet, said on the rule above the
-  composer and sent once it has, so they are the new conversation's — `ui.rs`
+  composer and sent once it has, so they are the new conversation's, and which the backend
+  holds while it starts again, said there too and in neither the session nor its record until
+  the backend says what became of each, when each is folded in and kept as sent or as never
+  sent, after what happened while it was held, live and read back alike — `ui.rs`
   draws it, the menu row naming the project the session runs in, by its directory, centred
   between the menus and the model and drawn as a block in the menus' hot colour, cut or left
   off where the row has no room once the model and the session's state are drawn, and
@@ -192,8 +195,9 @@ reviewers that encode both, for an agent working in this tree.
   it — is drawn by no view of the shell, and `ui::draw_activity` draws it alone, `run.rs` is the event loop, `journal.rs` is the trait the loop hands the
   operator's events to and `rules.rs` the one it hands their standing answers to, `preferences.rs`
   the one it hands the theme, model and effort they pick to, kept for the next session, `bridge.rs`
-  the one it sends turns to — told by a backend that holds one which it handed on, and kept or
-  said as never sent only then — and takes events from, `watch.rs` the one it asks what the
+  the one it sends turns to — told by a backend that holds one which it handed on, and folded
+  in and kept, or said as never sent, only then, Esc asking it to drop what it holds — and takes
+  events from, `watch.rs` the one it asks what the
   repository looks like now, and for a commit read whole, and `prices.rs` the one it asks to value the tokens no reported
   cost covers yet, which it shows marked as an estimate, `quiet.rs` is the backend the shell draws
   through, which sends the terminal nothing for a frame that changed nothing — no colours reset, no

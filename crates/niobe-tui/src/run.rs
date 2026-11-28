@@ -600,14 +600,18 @@ fn close_out(
     rules: &mut dyn Rules,
 ) {
     fold_commands(app, shell, watch);
-    app.abandon_commands();
-    // Before the leaving, so that a turn only a held prompt opened is not
-    // recorded as cut short: the backend goes with the session, and what it
-    // still held never reached it.
+    // What was produced so far is kept first: the held turns are kept as
+    // they are folded in, and the record keeps everything in the order the
+    // session folded it.
+    send_produced(app, journal, backend, rules);
+    // Before the leaving, so that a turn a held prompt opened once it was
+    // handed on is cut short with the session: the backend goes with it,
+    // and what it still held never reached it.
     settle_held(app, journal, backend);
     for kept in app.held_abandoned("the session ended before the backend could take it") {
         journal.append(&kept);
     }
+    app.abandon_commands();
     if app.is_attached() {
         app.leave();
     }
@@ -806,7 +810,11 @@ fn send_produced(
                 }
                 // Kept once the backend says it handed it on, or as one that
                 // reached no backend where it says it did not.
-                Ok(Sent::Held) => app.prompt_held(text),
+                Ok(Sent::Held) => {
+                    if let Some(kept) = app.prompt_held(text) {
+                        journal.append(&kept);
+                    }
+                }
                 Err(error) => {
                     let why = error.to_string();
                     match app.not_sent(&why) {
@@ -2386,6 +2394,293 @@ mod tests {
             "{:#?}",
             journal.events
         );
+    }
+
+    /// Folds `events` into a session of its own, as a record read back is.
+    fn read_back(events: &[SessionEvent]) -> App {
+        let mut app = App::new(Repo::default()).attached();
+        for event in events {
+            app.apply(event);
+        }
+        app
+    }
+
+    /// Types `command` after `!` and hands it to `shell` to run.
+    fn ran_command(app: &mut App, shell: &mut Running, command: &str) -> ToolCallId {
+        app.on_key(KeyEvent::new(KeyCode::Char('!'), KeyModifiers::NONE));
+        typed(app, command);
+        run_commands(app, shell);
+        let (id, _) = shell.started.last().cloned().expect("the command started");
+        id
+    }
+
+    /// What is folded while a prompt is held — a mode changed — leaves it
+    /// out of the session all the same: one the backend then drops opens no
+    /// turn, and is kept and read back as one that reached none.
+    #[test]
+    fn a_prompt_held_while_the_mode_changed_and_never_handed_on_is_kept_as_one_that_reached_none() {
+        let mut app = app_with_a_sent_prompt();
+        let mut journal = Kept::default();
+        let mut backend = Attached {
+            hold: true,
+            ..Attached::default()
+        };
+        send_produced(&mut app, &mut journal, &mut backend, &mut Forgotten);
+        app.on_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+        send_produced(&mut app, &mut journal, &mut backend, &mut Forgotten);
+
+        backend.settles = vec![Err("the `claude` CLI could not be started again".to_owned())];
+        fold_backend(&mut app, &mut journal, &mut backend, &mut Unwatched);
+
+        assert!(
+            journal.events.iter().any(|event| matches!(
+                event,
+                SessionEvent::PromptNotSent { text, .. } if text == "x"
+            )),
+            "{:#?}",
+            journal.events
+        );
+        assert!(
+            !journal
+                .events
+                .iter()
+                .any(|event| matches!(event, SessionEvent::UserMessage { .. })),
+            "{:#?}",
+            journal.events
+        );
+        assert!(!app.session().turn_running(), "a turn nothing ran is open");
+        assert_eq!(app.session().user_messages(), 0);
+        assert_eq!(said(&read_back(&journal.events)), said(&app));
+    }
+
+    /// A held prompt the backend hands on is folded in and kept when it is
+    /// handed on, after what happened while it was held — a `!` command run
+    /// and ended — so the record reads back in the order the screen showed.
+    #[test]
+    fn a_held_prompt_handed_on_after_a_command_ran_is_kept_after_it_as_it_was_shown() {
+        let mut app = App::new(Repo::default()).runs_commands().attached();
+        let mut shell = Running::default();
+        let mut journal = Kept::default();
+        let mut backend = Attached {
+            hold: true,
+            ..Attached::default()
+        };
+        typed(&mut app, "two");
+        send_produced(&mut app, &mut journal, &mut backend, &mut Forgotten);
+        let id = ran_command(&mut app, &mut shell, "make check");
+        send_produced(&mut app, &mut journal, &mut backend, &mut Forgotten);
+        shell.ends.push(crate::shell::Ran {
+            id,
+            output: "ok\n".to_owned(),
+            bytes: 3,
+            whole: true,
+            exit_code: Some(0),
+            error: None,
+        });
+        fold_commands(&mut app, &mut shell, &mut Unwatched);
+        send_produced(&mut app, &mut journal, &mut backend, &mut Forgotten);
+        hand_commands(&mut app, &mut journal, &mut backend);
+        assert_eq!(
+            backend.sent,
+            ["two"],
+            "what the command did waits for the turn the held prompt opens"
+        );
+
+        backend.settles = vec![Ok(())];
+        fold_backend(&mut app, &mut journal, &mut backend, &mut Unwatched);
+
+        let order: Vec<&str> = journal
+            .events
+            .iter()
+            .map(|event| match event {
+                SessionEvent::ToolCallStart { .. } => "start",
+                SessionEvent::ToolCallEnd { .. } => "end",
+                SessionEvent::UserMessage { .. } => "prompt",
+                _ => "other",
+            })
+            .collect();
+        assert_eq!(order, ["start", "end", "prompt"], "{:#?}", journal.events);
+        assert!(app.session().turn_running(), "the turn it opened runs");
+        assert_eq!(said(&read_back(&journal.events)), said(&app));
+    }
+
+    /// A session that ends with a prompt held and a `!` command running
+    /// keeps the prompt as never sent, whatever ending the command folds.
+    #[test]
+    fn a_prompt_held_when_the_session_ends_with_a_command_running_is_kept_as_never_sent() {
+        let mut app = App::new(Repo::default()).runs_commands().attached();
+        let mut shell = Running::default();
+        let mut journal = Kept::default();
+        let mut backend = Attached {
+            hold: true,
+            ..Attached::default()
+        };
+        typed(&mut app, "two");
+        send_produced(&mut app, &mut journal, &mut backend, &mut Forgotten);
+        ran_command(&mut app, &mut shell, "sleep 9");
+        send_produced(&mut app, &mut journal, &mut backend, &mut Forgotten);
+
+        close_out(
+            &mut app,
+            &mut shell,
+            &mut Unwatched,
+            &mut journal,
+            &mut backend,
+            &mut Forgotten,
+        );
+
+        assert!(
+            journal.events.iter().any(|event| matches!(
+                event,
+                SessionEvent::PromptNotSent { text, .. } if text == "two"
+            )),
+            "{:#?}",
+            journal.events
+        );
+        assert!(
+            !journal
+                .events
+                .iter()
+                .any(|event| matches!(event, SessionEvent::UserMessage { .. })),
+            "{:#?}",
+            journal.events
+        );
+        assert_eq!(said(&read_back(&journal.events)), said(&app));
+    }
+
+    /// Esc reaches the backend while it holds a prompt, though no turn runs
+    /// in the session for it to stop: it is how a held prompt is dropped.
+    #[test]
+    fn esc_with_only_held_prompts_asks_the_backend_to_drop_them() {
+        let mut app = App::new(Repo::default()).attached();
+        let mut journal = Kept::default();
+        let mut backend = Attached {
+            hold: true,
+            ..Attached::default()
+        };
+        typed(&mut app, "two");
+        send_produced(&mut app, &mut journal, &mut backend, &mut Forgotten);
+        assert!(!app.session().turn_running(), "a held prompt opens no turn");
+
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        send_produced(&mut app, &mut journal, &mut backend, &mut Forgotten);
+        assert_eq!(backend.interrupts, 1);
+        backend.settles = vec![Err("it was stopped before it was sent".to_owned())];
+        fold_backend(&mut app, &mut journal, &mut backend, &mut Unwatched);
+
+        assert!(
+            matches!(
+                journal.events.as_slice(),
+                [SessionEvent::PromptNotSent { text, .. }] if text == "two"
+            ),
+            "{:#?}",
+            journal.events
+        );
+        assert!(!app.session().turn_running());
+    }
+
+    /// A prompt the backend holds is not in the transcript, which shows what
+    /// the backend has: the rule above the composer says it is held until
+    /// the backend says what became of it, and the bubble is drawn then.
+    #[test]
+    fn a_held_prompt_is_said_on_the_rule_until_it_is_settled_and_drawn_then() {
+        let mut app = App::new(Repo::default()).attached();
+        let mut journal = Kept::default();
+        let mut backend = Attached {
+            hold: true,
+            ..Attached::default()
+        };
+        typed(&mut app, "two");
+        send_produced(&mut app, &mut journal, &mut backend, &mut Forgotten);
+        typed(&mut app, "three");
+        send_produced(&mut app, &mut journal, &mut backend, &mut Forgotten);
+
+        assert_eq!(
+            app.held_label().as_deref(),
+            Some("2 prompts held while the CLI starts again")
+        );
+        assert_eq!(said(&app), [], "nothing is drawn of what is only held");
+        backend.settles = vec![Ok(()), Ok(())];
+        fold_backend(&mut app, &mut journal, &mut backend, &mut Unwatched);
+
+        assert_eq!(app.held_label(), None);
+        let bubbles: Vec<&str> = app
+            .entries()
+            .iter()
+            .filter(|entry| entry.kind == crate::app::EntryKind::User)
+            .map(|entry| entry.body.as_str())
+            .collect();
+        assert_eq!(bubbles, ["two", "three"]);
+        assert_eq!(app.session().user_messages(), 2);
+    }
+
+    /// An image attached to a held prompt goes to the backend with it, and
+    /// the next one attached is numbered after it, as it would be had the
+    /// backend taken the prompt at once.
+    #[test]
+    fn a_held_prompt_keeps_its_image_and_the_next_image_is_numbered_after_it() {
+        let mut app = App::new(Repo::default()).attached();
+        let mut clipboard = Clipboard {
+            image: Some(screenshot()),
+            ..Clipboard::default()
+        };
+        let mut journal = Kept::default();
+        let mut backend = Attached {
+            hold: true,
+            ..Attached::default()
+        };
+        let paste = |app: &mut App, clipboard: &mut Clipboard| {
+            app.on_key(key(KeyCode::Char('v'), KeyModifiers::CONTROL));
+            fetch_images(app, clipboard);
+            fold_images(app, clipboard);
+        };
+
+        paste(&mut app, &mut clipboard);
+        typed(&mut app, "look");
+        send_produced(&mut app, &mut journal, &mut backend, &mut Forgotten);
+        paste(&mut app, &mut clipboard);
+
+        assert_eq!(backend.sent, ["[Image #1] look"]);
+        assert_eq!(backend.images, [vec![screenshot()]]);
+        assert_eq!(app.composed(), "[Image #2] ");
+    }
+
+    /// A prompt something else was folded in after before the backend said
+    /// it held it cannot be taken back out, and is kept as sent where it was
+    /// folded, as a refused prompt then is; dropped, it is said never sent
+    /// and leaves the prompts a rewind counts as the backend counts them.
+    #[test]
+    fn a_held_prompt_folded_under_something_else_is_kept_where_it_was_folded() {
+        let mut app = App::new(Repo::default()).attached();
+        let mut journal = Kept::default();
+        let mut backend = Attached {
+            hold: true,
+            ..Attached::default()
+        };
+        typed(&mut app, "two");
+        app.on_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+        send_produced(&mut app, &mut journal, &mut backend, &mut Forgotten);
+
+        assert!(
+            matches!(
+                journal.events.as_slice(),
+                [
+                    SessionEvent::UserMessage { text },
+                    SessionEvent::ModeSelected { .. },
+                ] if text == "two"
+            ),
+            "{:#?}",
+            journal.events
+        );
+        backend.settles = vec![Err("the `claude` CLI could not be started again".to_owned())];
+        fold_backend(&mut app, &mut journal, &mut backend, &mut Unwatched);
+
+        assert_eq!(
+            app.entries().last().map(|entry| entry.head.as_str()),
+            Some("not sent")
+        );
+        app.on_key(KeyEvent::new(KeyCode::F(6), KeyModifiers::NONE));
+        assert!(app.picking().is_none(), "no prompt is offered to rewind to");
     }
 
     #[test]

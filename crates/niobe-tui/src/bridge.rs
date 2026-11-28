@@ -41,8 +41,10 @@ pub enum Sent {
     /// again, say — and [`Bridge::settled`] says later whether it did.
     ///
     /// The turn is not yet one the backend has: the shell keeps it out of
-    /// the record and out of the prompts a rewind is numbered by until it is
-    /// settled, and a turn never handed on is said as one never sent.
+    /// the session, the record and the prompts a rewind is numbered by until
+    /// it is settled, and then folds it in where it is settled, as sent or as
+    /// one never sent. [`Bridge::interrupt`] while turns are held is asked to
+    /// drop them, settled as never sent, whether or not a turn runs.
     Held,
 }
 
@@ -121,7 +123,8 @@ pub trait Bridge: std::fmt::Debug {
     }
 
     /// Asks the backend to stop the turn it is running, keeping the session
-    /// and everything said so far.
+    /// and everything said so far, or, where it holds turns
+    /// ([`Sent::Held`]), to drop them.
     ///
     /// Returns once the backend has the request; the turn's end arrives
     /// through [`Bridge::drain`] like any other. The default refuses, for the
