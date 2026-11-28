@@ -483,9 +483,9 @@ mod tests {
             &mut self,
             prompt: &str,
             _: &[niobe_core::image::Image],
-        ) -> Result<(), BridgeError> {
+        ) -> Result<niobe_tui::Sent, BridgeError> {
             self.sent.push(prompt.to_owned());
-            Ok(())
+            Ok(niobe_tui::Sent::Taken)
         }
 
         fn answer(

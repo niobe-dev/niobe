@@ -188,7 +188,8 @@ reviewers that encode both, for an agent working in this tree.
   it — is drawn by no view of the shell, and `ui::draw_activity` draws it alone, `run.rs` is the event loop, `journal.rs` is the trait the loop hands the
   operator's events to and `rules.rs` the one it hands their standing answers to, `preferences.rs`
   the one it hands the theme, model and effort they pick to, kept for the next session, `bridge.rs`
-  the one it sends turns to and takes events from, `watch.rs` the one it asks what the
+  the one it sends turns to — told by a backend that holds one which it handed on, and kept or
+  said as never sent only then — and takes events from, `watch.rs` the one it asks what the
   repository looks like now, and for a commit read whole, and `prices.rs` the one it asks to value the tokens no reported
   cost covers yet, which it shows marked as an estimate, `quiet.rs` is the backend the shell draws
   through, which sends the terminal nothing for a frame that changed nothing — no colours reset, no
@@ -434,7 +435,10 @@ reviewers that encode both, for an agent working in this tree.
   outlives it or holds the quit, or the report of its end, up on its pipes — a CLI that something
   stops with a signal between turns is reported with a notice rather than as the session's end,
   and the binary's bridge starts it again on its conversation, with `--resume`, at the next
-  prompt, on a thread of its own, holding what is asked of it meanwhile — and passes over a
+  prompt, on a thread of its own, holding what is asked of it meanwhile and saying of each held
+  prompt, once the start is over, whether the new CLI read it — one it did not, stopped with Esc or
+  lost to a start that failed, is said as a prompt never sent, and a failed start as an error that
+  does not end the session, since the next request tries again — and passes over a
   line of its output past 64 MiB with a notice rather than hold it; `tap.rs` keeps, where the binary names a directory outside the repository with
   `NIOBE_STREAM_DIR`, one file per CLI process holding its argv and every line that crossed its pipes
   in order, written on a thread of its own, so a recording needs no shim on `PATH`; `spilled.rs` reads the file the CLI saves a shell output

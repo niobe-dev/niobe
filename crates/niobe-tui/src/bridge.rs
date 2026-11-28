@@ -32,6 +32,20 @@ pub fn operator_refused(said: &str) -> String {
     format!("{OPERATOR_REFUSED}{said}")
 }
 
+/// What a backend did with a turn [`Bridge::send`] handed it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sent {
+    /// The backend has it.
+    Taken,
+    /// The backend holds it until it can hand it on — a CLI it is starting
+    /// again, say — and [`Bridge::settled`] says later whether it did.
+    ///
+    /// The turn is not yet one the backend has: the shell keeps it out of
+    /// the record and out of the prompts a rewind is numbered by until it is
+    /// settled, and a turn never handed on is said as one never sent.
+    Held,
+}
+
 /// A backend a session is attached to.
 ///
 /// `Debug` is required so that whatever holds one can derive it: the workspace
@@ -41,7 +55,23 @@ pub trait Bridge: std::fmt::Debug {
     /// Sends one turn, with the images the operator attached to it in the
     /// order they were attached. Returns once the backend has it, not once it
     /// has answered: the answer arrives through [`Bridge::drain`].
-    fn send(&mut self, prompt: &str, images: &[Image]) -> Result<(), BridgeError>;
+    ///
+    /// A backend that cannot take it yet, and does not want the shell to
+    /// wait, holds it and says [`Sent::Held`]; it never says it has a turn it
+    /// may yet fail to hand on.
+    fn send(&mut self, prompt: &str, images: &[Image]) -> Result<Sent, BridgeError>;
+
+    /// What became of each turn [`Bridge::send`] held since the last call,
+    /// in the order they were sent, as far as the backend knows: handed on,
+    /// or why not. Every held turn is answered once, by this call or a later
+    /// one, unless the session ends first.
+    ///
+    /// Called after each [`Bridge::drain`], and answered before what that
+    /// drain handed back is folded in. A backend that holds nothing answers
+    /// nothing, which is the default.
+    fn settled(&mut self) -> Vec<Result<(), BridgeError>> {
+        Vec::new()
+    }
 
     /// Answers a permission prompt the backend raised, by the id of the call
     /// it gated. Returns once the backend has the answer.
@@ -144,7 +174,7 @@ pub trait Bridge: std::fmt::Debug {
 pub struct Detached;
 
 impl Bridge for Detached {
-    fn send(&mut self, _prompt: &str, _images: &[Image]) -> Result<(), BridgeError> {
+    fn send(&mut self, _prompt: &str, _images: &[Image]) -> Result<Sent, BridgeError> {
         Err("this session is not attached to a backend".into())
     }
 

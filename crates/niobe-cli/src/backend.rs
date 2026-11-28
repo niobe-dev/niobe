@@ -18,7 +18,7 @@ use niobe_bridge_claude::{Options, Session, SpawnError, Spent};
 use niobe_config::Selected;
 use niobe_core::event::{Backend, Event, Mode, PermissionDecision, ToolCallId};
 use niobe_core::image::Image;
-use niobe_tui::bridge::{Bridge, BridgeError, Detached};
+use niobe_tui::bridge::{Bridge, BridgeError, Detached, Sent};
 
 /// What a session is attached with, beyond the profile that names the backend.
 ///
@@ -254,6 +254,7 @@ pub fn attach(
                 bridge: Box::new(Claude {
                     session,
                     starting: None,
+                    settled: Vec::new(),
                     cli_config,
                     root: root.to_path_buf(),
                     groups,
@@ -720,6 +721,9 @@ struct Claude {
     /// The CLI being started again, where one is, and what was asked of the
     /// backend while it is.
     starting: Option<Starting>,
+    /// What became of the prompts held while a CLI was started again, oldest
+    /// first, that [`Bridge::settled`] has not handed out yet.
+    settled: Vec<Result<(), String>>,
     /// The CLI's own configuration directory, under which its transcripts of
     /// `root` are where what a CLI started again will restore as spent is
     /// read from.
@@ -790,51 +794,64 @@ impl Claude {
         let Some(starting) = self.starting.as_mut() else {
             return Vec::new();
         };
-        let mut events = Vec::new();
-        if std::mem::take(&mut starting.end_owed) {
-            events.push(Event::TurnEnded);
-        }
         let started = match starting.started.try_recv() {
             Ok(started) => started,
-            Err(TryRecvError::Empty) => return events,
+            Err(TryRecvError::Empty) => return Vec::new(),
             Err(TryRecvError::Disconnected) => {
                 Err("the thread starting it ended without a word".to_owned())
             }
         };
         let held = std::mem::take(&mut starting.held);
         self.starting = None;
+        let mut events = Vec::new();
         match started {
             Ok(session) => {
                 self.session = session;
                 for request in held {
-                    if let Err(error) = request.asked_of(&mut self.session) {
-                        events.push(Event::Error {
+                    let prompt = matches!(request, Held::Send { .. });
+                    let asked = request.asked_of(&mut self.session);
+                    match (prompt, asked) {
+                        (true, asked) => self.settled.push(asked.map_err(|error| {
+                            format!("the `claude` CLI started again did not take it: {error}")
+                        })),
+                        (false, Ok(())) => {}
+                        (false, Err(error)) => events.push(Event::Error {
                             message: format!(
                                 "the `claude` CLI started again did not take what was asked \
                                  of it while it started: {error}"
                             ),
                             fatal: false,
-                        });
+                        }),
                     }
                 }
             }
-            Err(why) => events.extend(not_started(&why, &held, self.session.next())),
+            Err(why) => {
+                for request in &held {
+                    if matches!(request, Held::Send { .. }) {
+                        self.settled
+                            .push(Err("the `claude` CLI could not be started again".to_owned()));
+                    }
+                }
+                events.extend(not_started(&why, &held, self.session.next()));
+            }
         }
         events
     }
 }
 
 /// What the shell is told where a CLI could not be started again: why,
-/// once, as the end of whatever turn a prompt held for it opened, and the
-/// mode and model the session is still on where a change of either was held —
-/// those of `stopped`, what the CLI before it was left on.
+/// once, and the mode and model the session is still on where a change of
+/// either was held — those of `stopped`, what the CLI before it was left on.
+///
+/// Not the session's end: the next request starts the CLI again. A prompt
+/// held for it is said as one never sent, through [`Bridge::settled`].
 fn not_started(why: &str, held: &[Held], stopped: Option<Options>) -> Vec<Event> {
     let mut events = vec![Event::Error {
         message: format!(
             "the `claude` CLI could not be started again, so nothing asked of it while it was \
-             being started reached it: {why}"
+             being started reached it, and the next request starts it again: {why}"
         ),
-        fatal: true,
+        fatal: false,
     }];
     let Some(stopped) = stopped else {
         return events;
@@ -865,9 +882,6 @@ struct Starting {
     thread: Option<JoinHandle<()>>,
     /// What was asked of the backend since the start began, oldest first.
     held: Vec<Held>,
-    /// Whether a turn a held prompt opened was stopped, which the shell is
-    /// still to be told has ended.
-    end_owed: bool,
 }
 
 impl Starting {
@@ -901,20 +915,16 @@ impl Starting {
             started,
             thread: Some(thread),
             held: Vec::new(),
-            end_owed: false,
         })
     }
 
     /// Takes back the prompts held, which would each have started a turn,
-    /// where there are any: the turn the first opened has ended without
-    /// running, and the shell is to be told so.
-    fn stopped(&mut self) {
+    /// and hands back how many there were.
+    fn stopped(&mut self) -> usize {
         let before = self.held.len();
         self.held
             .retain(|request| !matches!(request, Held::Send { .. }));
-        if self.held.len() < before {
-            self.end_owed = true;
-        }
+        before.saturating_sub(self.held.len())
     }
 }
 
@@ -954,7 +964,11 @@ impl Held {
 }
 
 impl Bridge for Claude {
-    fn send(&mut self, prompt: &str, images: &[Image]) -> Result<(), BridgeError> {
+    /// Held, while a CLI is being started again, until it is there: the
+    /// shell is told through [`Bridge::settled`] whether it was written to
+    /// it, since a prompt the CLI never read must not be counted as one it
+    /// did — a rewind names a prompt by where it is among those it read.
+    fn send(&mut self, prompt: &str, images: &[Image]) -> Result<Sent, BridgeError> {
         // Copied only where it is held: an image can be megabytes.
         match self.carry_on()? {
             Some(starting) => {
@@ -962,10 +976,21 @@ impl Bridge for Claude {
                     prompt: prompt.to_owned(),
                     images: images.to_vec(),
                 });
-                Ok(())
+                Ok(Sent::Held)
             }
-            None => self.session.send(prompt, images).map_err(BridgeError::from),
+            None => self
+                .session
+                .send(prompt, images)
+                .map(|()| Sent::Taken)
+                .map_err(BridgeError::from),
         }
+    }
+
+    fn settled(&mut self) -> Vec<Result<(), BridgeError>> {
+        std::mem::take(&mut self.settled)
+            .into_iter()
+            .map(|outcome| outcome.map_err(BridgeError::from))
+            .collect()
     }
 
     /// Nothing can be waiting on an answer while a CLI is being started
@@ -992,12 +1017,19 @@ impl Bridge for Claude {
     }
 
     /// While a CLI is being started again, the turn to stop is one a held
-    /// prompt opened, which is stopped by not sending it; a change of mode or
-    /// model held with it is still made.
+    /// prompt opened, which is stopped by not sending it — said as a prompt
+    /// never sent, so the turn it opened is taken back rather than ended; a
+    /// change of mode or model held with it is still made.
     fn interrupt(&mut self) -> Result<(), BridgeError> {
         match self.starting.as_mut() {
             Some(starting) => {
-                starting.stopped();
+                let stopped = starting.stopped();
+                self.settled.extend(
+                    std::iter::repeat_with(|| {
+                        Err("it was stopped before the `claude` CLI was started again".to_owned())
+                    })
+                    .take(stopped),
+                );
                 Ok(())
             }
             None => self.session.interrupt().map_err(BridgeError::from),
@@ -2554,7 +2586,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_cli_that_cannot_be_started_again_is_said_once_and_what_waited_on_it_is_dropped() {
+    fn a_cli_that_cannot_be_started_again_is_said_once_and_what_waited_on_it_is_said_never_sent() {
         let dir = tempfile::tempdir().expect("a temporary directory");
         let config = stopped_after_one_turn(
             dir.path(),
@@ -2566,12 +2598,11 @@ mod tests {
         std::fs::rename(&script, &away).expect("the stand-in is taken off the PATH");
         let bridge = attachment.bridge();
 
+        let mut numbered = Numbered::default();
         bridge.set_mode(Mode::Ask).expect("the change is held");
-        bridge.send("two", &[]).expect("the turn is held");
-        bridge.send("three", &[]).expect("the turn is held");
-        let mut events = drained_until(bridge, |event| {
-            matches!(event, Event::Error { fatal: true, .. })
-        });
+        numbered.send(bridge, "two");
+        numbered.send(bridge, "three");
+        let mut events = drained_until(bridge, |event| matches!(event, Event::Error { .. }));
         let until = std::time::Instant::now() + std::time::Duration::from_millis(300);
         while std::time::Instant::now() < until {
             events.extend(bridge.drain());
@@ -2591,50 +2622,155 @@ mod tests {
             "{events:#?}"
         );
         assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Event::Error { fatal: true, .. })),
+            "the session is not over, since the next request tries again: {events:#?}"
+        );
+        assert!(
             events.contains(&Event::ModeSelected { mode: Mode::Plan }),
             "the session is still in the mode the CLI stopped in: {events:#?}"
         );
+        assert!(
+            !events.contains(&Event::TurnEnded),
+            "no turn ran to end: {events:#?}"
+        );
+        numbered.settle(bridge);
+        let unsent: Vec<&str> = numbered.unsent.iter().map(|(prompt, _)| *prompt).collect();
+        assert_eq!(unsent, ["two", "three"], "each is said never sent");
+        assert!(numbered.held.is_empty() && numbered.taken.is_empty());
 
         // The session is as it was, and the next request starts it again.
         std::fs::rename(&away, &script).expect("the stand-in is put back");
-        bridge.send("four", &[]).expect("the turn is held");
+        numbered.send(bridge, "four");
         drained_until(bridge, |event| matches!(event, Event::TurnEnded));
+        numbered.settle(bridge);
+        assert_eq!(numbered.taken, ["four"]);
         let argv = std::fs::read_to_string(dir.path().join("seen").join("1"))
             .expect("the second start recorded");
         assert!(argv.contains("--resume s-9"), "{argv}");
     }
 
+    /// Drains `bridge` until the file at `input` holds `needle`, and hands
+    /// back what it holds then.
+    fn written_until(bridge: &mut dyn Bridge, input: &Path, needle: &str) -> String {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        loop {
+            let written = std::fs::read_to_string(input).unwrap_or_default();
+            if written.contains(needle) {
+                return written;
+            }
+            assert!(
+                std::time::Instant::now() < until,
+                "{needle} never reached the CLI: {written}"
+            );
+            bridge.drain();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    /// The prompts a bridge was sent, numbered as the shell numbers those a
+    /// rewind names: each the bridge took, once it says it took it.
+    #[derive(Debug, Default)]
+    struct Numbered {
+        taken: Vec<&'static str>,
+        held: std::collections::VecDeque<&'static str>,
+        unsent: Vec<(&'static str, String)>,
+    }
+
+    impl Numbered {
+        fn send(&mut self, bridge: &mut dyn Bridge, prompt: &'static str) {
+            match bridge.send(prompt, &[]).expect("the turn is sent or held") {
+                Sent::Taken => self.taken.push(prompt),
+                Sent::Held => self.held.push_back(prompt),
+            }
+        }
+
+        /// Takes in what the bridge says became of the prompts it held.
+        fn settle(&mut self, bridge: &mut dyn Bridge) {
+            for outcome in bridge.settled() {
+                let prompt = self
+                    .held
+                    .pop_front()
+                    .expect("only a held prompt is settled");
+                match outcome {
+                    Ok(()) => self.taken.push(prompt),
+                    Err(why) => self.unsent.push((prompt, why.to_string())),
+                }
+            }
+        }
+    }
+
+    /// The id of the prompt `text` among the lines a CLI read.
+    fn prompt_id(written: &str, text: &str) -> String {
+        written
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .find(|line| line["message"]["content"] == text)
+            .and_then(|line| line["uuid"].as_str().map(str::to_owned))
+            .expect("the prompt was written with its id")
+    }
+
     #[cfg(unix)]
     #[test]
-    fn a_prompt_stopped_while_the_cli_is_started_again_is_ended_and_never_sent() {
+    fn a_prompt_stopped_while_the_cli_is_started_again_is_never_sent_nor_counted_for_a_rewind() {
         let dir = tempfile::tempdir().expect("a temporary directory");
-        let turn = dir.path().join("turn");
+        let input = dir.path().join("input");
         let config = stopped_after_one_turn(
             dir.path(),
             &format!(
-                "read -r initialize\nread -r turn\nprintf '%s\\n' \"$turn\" > {turn}\n\
-                 {ONE_TURN}\nexec sleep 30",
-                turn = turn.display()
+                "read -r initialize\n\
+                 while read -r line; do\n\
+                 printf '%s\\n' \"$line\" >> {input}\n\
+                 case \"$line\" in *'\"type\":\"user\"'*) {ONE_TURN};; esac\n\
+                 done",
+                input = input.display()
             ),
         );
         let (mut attachment, _groups) = stopped(dir.path(), &config);
         let bridge = attachment.bridge();
+        // The stopped CLI took the first.
+        let mut numbered = Numbered {
+            taken: vec!["one"],
+            ..Numbered::default()
+        };
 
-        bridge.send("two", &[]).expect("the turn is held");
+        numbered.send(bridge, "two");
         bridge.interrupt().expect("the held turn is stopped");
-        let ended = drained_until(bridge, |event| matches!(event, Event::TurnEnded));
-        bridge.send("three", &[]).expect("the turn is held");
-        drained_until(bridge, |event| matches!(event, Event::TurnEnded));
+        numbered.send(bridge, "three");
+        written_until(bridge, &input, r#""three""#);
+        numbered.settle(bridge);
+        numbered.send(bridge, "four");
+        written_until(bridge, &input, r#""four""#);
+        numbered.settle(bridge);
+        let three = numbered
+            .taken
+            .iter()
+            .position(|prompt| *prompt == "three")
+            .expect("three was taken");
+        bridge.rewind(three).expect("the rewind is asked");
+        let written = written_until(bridge, &input, "rewind_files");
 
-        assert!(
-            !ended
-                .iter()
-                .any(|event| matches!(event, Event::Error { .. })),
-            "{ended:#?}"
+        assert!(!written.contains(r#""two""#), "{written}");
+        assert_eq!(numbered.taken, ["one", "three", "four"]);
+        assert_eq!(
+            numbered.unsent,
+            [(
+                "two",
+                "it was stopped before the `claude` CLI was started again".to_owned()
+            )],
+            "the shell is told the stopped prompt was never sent"
         );
-        let sent = std::fs::read_to_string(&turn).expect("the new CLI read a turn");
-        assert!(sent.contains(r#""three""#), "{sent}");
-        assert!(!sent.contains(r#""two""#), "{sent}");
+        let rewound = written
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .find(|line| line["request"]["subtype"] == "rewind_files")
+            .expect("the rewind was written");
+        assert_eq!(
+            rewound["request"]["user_message_id"],
+            prompt_id(&written, "three"),
+            "the files go back to before the prompt chosen: {written}"
+        );
     }
 
     #[cfg(unix)]

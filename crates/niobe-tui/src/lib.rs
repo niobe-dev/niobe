@@ -85,7 +85,7 @@ pub use app::{
     Answer, App, Arrival, Ask, Call, ConfigFile, Entry, EntryKind, Picker, Places, Purpose, Repo,
     RunningShell, Section, SelectedProfile, Sheet, WorkingFile,
 };
-pub use bridge::{Bridge, BridgeError, Detached};
+pub use bridge::{Bridge, BridgeError, Detached, Sent};
 pub use desktop::{Desktop, Handoff, NoDesktop};
 pub use history::{History, NoHistory, Past, PastPrompt, PastSession, Target};
 pub use images::{Fetched, Images, NoImages, Source};

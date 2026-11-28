@@ -18,7 +18,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use niobe_core::event::Event;
 use niobe_core::image::Image;
-use niobe_tui::{Bridge, BridgeError};
+use niobe_tui::{Bridge, BridgeError, Sent};
 
 /// The longest a replay waits between two events, after the speed divided
 /// the recorded gap.
@@ -101,7 +101,7 @@ fn schedule(
 }
 
 impl Bridge for Playback {
-    fn send(&mut self, _prompt: &str, _images: &[Image]) -> Result<(), BridgeError> {
+    fn send(&mut self, _prompt: &str, _images: &[Image]) -> Result<Sent, BridgeError> {
         Err("this is a recorded log being replayed, not a session to continue".into())
     }
 

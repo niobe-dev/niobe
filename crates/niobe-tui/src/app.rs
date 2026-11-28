@@ -1437,6 +1437,27 @@ struct BeforePrompt {
     prompt_queued: bool,
 }
 
+/// A turn the backend holds ([`crate::bridge::Sent::Held`]) until it says
+/// whether it handed it on: kept out of the record, and out of the prompts a
+/// rewind is numbered by, until it does.
+#[derive(Debug)]
+enum HeldTurn {
+    /// A prompt, folded in as it was sent.
+    Prompt {
+        text: String,
+        /// How the session stood before it, where that was known as it was
+        /// sent; boxed, as the whole fold is large beside a hand-off.
+        before: Option<Box<BeforePrompt>>,
+        /// How many events had been folded in once it was: the session can
+        /// be put back to `before` only while every event folded since is a
+        /// prompt held after it.
+        folds: usize,
+    },
+    /// What the operator's commands did, not folded in until it is handed
+    /// on.
+    Handed { commands: Vec<String>, text: String },
+}
+
 /// A run of events the journal refused, which the transcript shows as one
 /// failure entry.
 #[derive(Debug, Clone, Copy)]
@@ -2151,6 +2172,11 @@ pub struct App {
     /// The session as it stood before the prompt last sent from here, while
     /// that prompt is the last thing folded in. See [`App::not_sent`].
     before_prompt: Option<BeforePrompt>,
+    /// The turns the backend holds, oldest first. See [`App::held_settled`].
+    held_turns: VecDeque<HeldTurn>,
+    /// How many events have been folded in, which says whether anything was
+    /// folded after a held prompt.
+    folds: usize,
     /// The failure entry that stands for the run of events the journal has
     /// refused since it last kept one, while it keeps refusing.
     unsaved: Option<Unsaved>,
@@ -2631,6 +2657,8 @@ impl App {
             turn_began_with: (0, 0),
             prompt_queued: false,
             before_prompt: None,
+            held_turns: VecDeque::new(),
+            folds: 0,
             turns_took: Some(Duration::ZERO),
             last_folded_at: None,
             working_since: None,
@@ -2685,6 +2713,7 @@ impl App {
     /// Folds one event in: see [`App::fold_event`].
     fn fold_one(&mut self, event: &Event) {
         self.before_prompt = None;
+        self.folds = self.folds.saturating_add(1);
         let turns = self.session.turns().len();
         let waits = matches!(event, Event::UserMessage { .. })
             && (self.session.clearing() || self.session.turn_running());
@@ -10807,29 +10836,153 @@ impl App {
     /// to the same. `false` where something was folded in after it, and the
     /// record keeps it as sent.
     pub fn not_sent(&mut self, error: &str) -> bool {
+        let taken_back = match self.before_prompt.take() {
+            Some(before) => {
+                self.put_back(before);
+                true
+            }
+            None => false,
+        };
+        self.said_not_sent(taken_back, error);
+        taken_back
+    }
+
+    /// Holds the session as it stood before a prompt again.
+    ///
+    /// A stop asked of the turn the prompt opened — a backend can hold a
+    /// prompt long enough for Esc — was for a turn that never ran, so the
+    /// next turn's stop is asked afresh.
+    fn put_back(&mut self, before: BeforePrompt) {
+        self.session = before.session;
+        self.turn_began_at = before.turn_began_at;
+        self.turn_began_with = before.turn_began_with;
+        self.prompt_queued = before.prompt_queued;
+        if !self.session.turn_running() {
+            self.stop_asked = false;
+            self.forget_stopping_hint();
+        }
+    }
+
+    /// Says a prompt did not reach the backend, the session already put back
+    /// to before it where `taken_back`: see [`App::not_sent`].
+    fn said_not_sent(&mut self, taken_back: bool, error: &str) {
         self.sent_here = false;
         // A clear that did not reach the backend will not be answered.
         self.clear_sent = false;
-        let taken_back = match self.before_prompt.take() {
-            Some(before) => {
-                self.session = before.session;
-                self.turn_began_at = before.turn_began_at;
-                self.turn_began_with = before.turn_began_with;
-                self.prompt_queued = before.prompt_queued;
-                true
-            }
-            None => {
-                if self.session.user_messages() == 1 {
-                    self.first_prompt_unsent = true;
-                }
-                false
-            }
-        };
+        if !taken_back && self.session.user_messages() == 1 {
+            self.first_prompt_unsent = true;
+        }
         self.unqueue_unsent();
         self.effort_not_sent();
         self.say_not_sent(error);
         self.scroll_to_tail();
-        taken_back
+    }
+
+    /// Records that the backend holds `text`, the prompt just sent, until it
+    /// says what became of it ([`App::held_settled`]): not kept, nor counted
+    /// among the prompts F6 offers, until then.
+    pub fn prompt_held(&mut self, text: &str) {
+        self.held_turns.push_back(HeldTurn::Prompt {
+            text: text.to_owned(),
+            before: self.before_prompt.take().map(Box::new),
+            folds: self.folds,
+        });
+    }
+
+    /// Records that the backend holds the hand-off of what `commands` did,
+    /// sent as `text`, until it says what became of it: folded in and kept
+    /// only once it is handed on, as a hand-off the backend took at once is.
+    pub fn handed_held(&mut self, commands: Vec<String>, text: String) {
+        self.held_turns
+            .push_back(HeldTurn::Handed { commands, text });
+    }
+
+    /// Settles the turns the backend held, oldest first, by what it says
+    /// became of each, and hands back what the record is to keep of them, in
+    /// that order.
+    ///
+    /// A turn handed on is kept as one the backend took at once would have
+    /// been, and counted among those F6 offers. A prompt not handed on is
+    /// said as a prompt the backend refused is ([`App::not_sent`]): where
+    /// every turn held after it went unsent too, so that nothing but they was
+    /// folded in after it, the session goes back to how it stood before it
+    /// and the record keeps it as one that reached no backend; otherwise it
+    /// is kept as sent, as `not_sent` keeps one it cannot take back.
+    pub fn held_settled(&mut self, outcomes: Vec<Result<(), String>>) -> Vec<Event> {
+        let count = outcomes.len().min(self.held_turns.len());
+        let settled: Vec<(HeldTurn, Result<(), String>)> =
+            self.held_turns.drain(..count).zip(outcomes).collect();
+        // The run of unsent turns that ends the queue: only those can be
+        // taken out of the fold together.
+        let unsent_from = match self.held_turns.is_empty() {
+            true => settled
+                .iter()
+                .rposition(|(_, outcome)| outcome.is_ok())
+                .map_or(0, |at| at.saturating_add(1)),
+            false => settled.len(),
+        };
+        let mut prompts_after: usize = settled
+            .iter()
+            .filter(|(turn, _)| matches!(turn, HeldTurn::Prompt { .. }))
+            .count();
+        let mut taken_back = false;
+        let mut kept = Vec::new();
+        for (at, (turn, outcome)) in settled.into_iter().enumerate() {
+            match (turn, outcome) {
+                (HeldTurn::Prompt { text, .. }, Ok(())) => {
+                    prompts_after = prompts_after.saturating_sub(1);
+                    self.sent_to_backend(&text);
+                    kept.push(Event::UserMessage { text });
+                }
+                (
+                    HeldTurn::Prompt {
+                        text,
+                        before,
+                        folds,
+                    },
+                    Err(why),
+                ) => {
+                    prompts_after = prompts_after.saturating_sub(1);
+                    let alone = self.folds == folds.saturating_add(prompts_after);
+                    if let Some(before) = before
+                        && !taken_back
+                        && at >= unsent_from
+                        && alone
+                    {
+                        self.put_back(*before);
+                        taken_back = true;
+                    }
+                    self.said_not_sent(taken_back, &why);
+                    kept.push(match taken_back {
+                        true => Event::PromptNotSent {
+                            text,
+                            why: Some(why),
+                        },
+                        false => Event::UserMessage { text },
+                    });
+                }
+                (HeldTurn::Handed { commands, text }, outcome) => {
+                    let said = match outcome {
+                        Ok(()) => {
+                            let first = commands.first().map(String::as_str).unwrap_or_default();
+                            self.sent_to_backend(&format!("! {first}"));
+                            Event::CommandsHanded { commands, text }
+                        }
+                        Err(why) => self.not_handed(&commands, &why),
+                    };
+                    self.apply(&said);
+                    kept.push(said);
+                }
+            }
+        }
+        kept
+    }
+
+    /// Settles every turn the backend still holds as not handed on, for
+    /// `why`: the session is ending, and the backend with it.
+    pub fn held_abandoned(&mut self, why: &str) -> Vec<Event> {
+        let outcomes = vec![Err(why.to_owned()); self.held_turns.len()];
+        self.held_settled(outcomes)
     }
 
     /// Takes the mark off the prompt just folded in, where it was drawn
