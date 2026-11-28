@@ -9,7 +9,8 @@
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
+use std::thread::JoinHandle;
 use std::time::SystemTime;
 
 use niobe_bridge_claude::transcript::{self, TranscriptError};
@@ -252,6 +253,7 @@ pub fn attach(
             Ok(Attachment {
                 bridge: Box::new(Claude {
                     session,
+                    starting: None,
                     cli_config,
                     root: root.to_path_buf(),
                     groups,
@@ -712,7 +714,12 @@ pub const CANNOT_START: &str = "cannot start this profile's backend: ";
 /// The `claude` bridge behind the trait the shell asked for.
 #[derive(Debug)]
 struct Claude {
+    /// The CLI running, or the one that was stopped while another is
+    /// [`Claude::starting`] in its place.
     session: Session,
+    /// The CLI being started again, where one is, and what was asked of the
+    /// backend while it is.
+    starting: Option<Starting>,
     /// The CLI's own configuration directory, under which its transcripts of
     /// `root` are where what a CLI started again will restore as spent is
     /// read from.
@@ -730,40 +737,240 @@ struct Claude {
 
 impl Claude {
     /// Starts the CLI again on its conversation where the one before was
-    /// stopped between turns, and does nothing otherwise.
+    /// stopped between turns, and hands back the start under way, which a
+    /// request is to wait for; nothing where the CLI running can take it.
     ///
     /// Done when the operator next asks the backend for something rather than
     /// as soon as the stop is seen: whatever stopped the CLI — a shutdown, a
     /// logout, the operator — may still be under way, and a CLI started into
-    /// it would only be stopped again. A start that fails leaves the session
-    /// as it was, to be tried again by the next request.
-    fn carry_on(&mut self) -> Result<(), BridgeError> {
-        let Some(next) = self.session.next() else {
-            return Ok(());
+    /// it would only be stopped again. Done on a thread of its own, because
+    /// the request is made on the thread that draws the screen, and the start
+    /// reads the CLI's transcript, which can run to hundreds of megabytes, and
+    /// spawns a process, which an endpoint-security agent can hold up for a
+    /// second; [`Bridge::drain`] hands the new CLI what was asked meanwhile
+    /// once it is there. A start that fails leaves the session as it was, to
+    /// be tried again by the next request.
+    fn carry_on(&mut self) -> Result<Option<&mut Starting>, BridgeError> {
+        if self.starting.is_none() {
+            let Some(next) = self.session.next() else {
+                return Ok(None);
+            };
+            let starting = Starting::spawned(
+                next,
+                self.cli_config.clone(),
+                self.root.clone(),
+                self.groups.clone(),
+            )
+            .map_err(|error| {
+                BridgeError::from(format!(
+                    "the `claude` CLI could not be started again: {error}"
+                ))
+            })?;
+            self.starting = Some(starting);
+        }
+        Ok(self.starting.as_mut())
+    }
+
+    /// Asks `held` of the CLI, or of the one being started again once it is
+    /// there.
+    fn request(&mut self, held: Held) -> Result<(), BridgeError> {
+        match self.carry_on()? {
+            Some(starting) => {
+                starting.held.push(held);
+                Ok(())
+            }
+            None => held.asked_of(&mut self.session).map_err(BridgeError::from),
+        }
+    }
+
+    /// What the start under way came to, where it has come to something: the
+    /// new CLI in place of the one stopped, handed what was asked of it
+    /// meanwhile, or why there is none.
+    fn settle_the_start(&mut self) -> Vec<Event> {
+        let Some(starting) = self.starting.as_mut() else {
+            return Vec::new();
         };
-        let transcripts = self
-            .cli_config
-            .as_deref()
-            .map(|config| transcript::directory(config, &self.root));
-        let next = carried_on(next, transcripts.as_deref());
-        let session = Session::spawn(&next).map_err(|error| {
-            BridgeError::from(format!(
-                "the `claude` CLI could not be started again: {error}"
-            ))
-        })?;
-        // Nothing may be listening: a session with no reaper.
-        let _ = self.groups.send(session.process_group());
-        self.session = session;
-        Ok(())
+        let mut events = Vec::new();
+        if std::mem::take(&mut starting.end_owed) {
+            events.push(Event::TurnEnded);
+        }
+        let started = match starting.started.try_recv() {
+            Ok(started) => started,
+            Err(TryRecvError::Empty) => return events,
+            Err(TryRecvError::Disconnected) => {
+                Err("the thread starting it ended without a word".to_owned())
+            }
+        };
+        let held = std::mem::take(&mut starting.held);
+        self.starting = None;
+        match started {
+            Ok(session) => {
+                self.session = session;
+                for request in held {
+                    if let Err(error) = request.asked_of(&mut self.session) {
+                        events.push(Event::Error {
+                            message: format!(
+                                "the `claude` CLI started again did not take what was asked \
+                                 of it while it started: {error}"
+                            ),
+                            fatal: false,
+                        });
+                    }
+                }
+            }
+            Err(why) => events.extend(not_started(&why, &held, self.session.next())),
+        }
+        events
+    }
+}
+
+/// What the shell is told where a CLI could not be started again: why,
+/// once, as the end of whatever turn a prompt held for it opened, and the
+/// mode and model the session is still on where a change of either was held —
+/// those of `stopped`, what the CLI before it was left on.
+fn not_started(why: &str, held: &[Held], stopped: Option<Options>) -> Vec<Event> {
+    let mut events = vec![Event::Error {
+        message: format!(
+            "the `claude` CLI could not be started again, so nothing asked of it while it was \
+             being started reached it: {why}"
+        ),
+        fatal: true,
+    }];
+    let Some(stopped) = stopped else {
+        return events;
+    };
+    if held.iter().any(|request| matches!(request, Held::Mode(_))) {
+        events.push(match stopped.mode_known {
+            true => Event::ModeSelected { mode: stopped.mode },
+            false => Event::ModeUnknown,
+        });
+    }
+    if held.iter().any(|request| matches!(request, Held::Model(_))) {
+        events.push(Event::ModelRefused {
+            back_to: stopped.model,
+        });
+    }
+    events
+}
+
+/// A CLI being started again on a thread of its own: see [`Claude::carry_on`].
+///
+/// Dropping it waits for the start to end and ends the CLI it started, so
+/// that nothing it started outlives the session, nor is started unknown to
+/// the reaper.
+#[derive(Debug)]
+struct Starting {
+    /// Where the thread hands the CLI it started, or why it could not.
+    started: Receiver<Result<Session, String>>,
+    thread: Option<JoinHandle<()>>,
+    /// What was asked of the backend since the start began, oldest first.
+    held: Vec<Held>,
+    /// Whether a turn a held prompt opened was stopped, which the shell is
+    /// still to be told has ended.
+    end_owed: bool,
+}
+
+impl Starting {
+    /// Starts a CLI with `next`, from what its transcripts under `cli_config`
+    /// for `root` last recorded it spending, telling `groups` of its process
+    /// group before it is handed back.
+    fn spawned(
+        next: Options,
+        cli_config: Option<PathBuf>,
+        root: PathBuf,
+        groups: Sender<u32>,
+    ) -> std::io::Result<Self> {
+        let (hand, started) = channel();
+        let thread = std::thread::Builder::new()
+            .name("claude-start".to_owned())
+            .spawn(move || {
+                let transcripts = cli_config
+                    .as_deref()
+                    .map(|config| transcript::directory(config, &root));
+                let next = carried_on(next, transcripts.as_deref());
+                let session = Session::spawn(&next).map_err(|error| error.to_string());
+                if let Ok(session) = &session {
+                    // Nothing may be listening: a session with no reaper.
+                    let _ = groups.send(session.process_group());
+                }
+                // A bridge gone by now leaves the session in the channel,
+                // which ends it as the channel is dropped.
+                let _ = hand.send(session);
+            })?;
+        Ok(Self {
+            started,
+            thread: Some(thread),
+            held: Vec::new(),
+            end_owed: false,
+        })
+    }
+
+    /// Takes back the prompts held, which would each have started a turn,
+    /// where there are any: the turn the first opened has ended without
+    /// running, and the shell is to be told so.
+    fn stopped(&mut self) {
+        let before = self.held.len();
+        self.held
+            .retain(|request| !matches!(request, Held::Send { .. }));
+        if self.held.len() < before {
+            self.end_owed = true;
+        }
+    }
+}
+
+impl Drop for Starting {
+    fn drop(&mut self) {
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+        // What the thread handed over, where nothing took it, is dropped
+        // here, and a session dropped ends its CLI.
+        while self.started.try_recv().is_ok() {}
+    }
+}
+
+/// A request made of the backend while a CLI is being started again, held
+/// to be made of that CLI once it is there.
+#[derive(Debug)]
+enum Held {
+    Send { prompt: String, images: Vec<Image> },
+    Mode(Mode),
+    Model(String),
+    Reconnect(String),
+    Rewind(usize),
+}
+
+impl Held {
+    /// Makes the request of `session`.
+    fn asked_of(self, session: &mut Session) -> std::io::Result<()> {
+        match self {
+            Held::Send { prompt, images } => session.send(&prompt, &images),
+            Held::Mode(mode) => session.set_mode(mode),
+            Held::Model(model) => session.set_model(&model),
+            Held::Reconnect(server) => session.reconnect_mcp(&server),
+            Held::Rewind(prompt) => session.rewind(prompt),
+        }
     }
 }
 
 impl Bridge for Claude {
     fn send(&mut self, prompt: &str, images: &[Image]) -> Result<(), BridgeError> {
-        self.carry_on()?;
-        self.session.send(prompt, images).map_err(BridgeError::from)
+        // Copied only where it is held: an image can be megabytes.
+        match self.carry_on()? {
+            Some(starting) => {
+                starting.held.push(Held::Send {
+                    prompt: prompt.to_owned(),
+                    images: images.to_vec(),
+                });
+                Ok(())
+            }
+            None => self.session.send(prompt, images).map_err(BridgeError::from),
+        }
     }
 
+    /// Nothing can be waiting on an answer while a CLI is being started
+    /// again, since no turn has run in it: the CLI stopped is asked, and says
+    /// so.
     fn answer(
         &mut self,
         id: &ToolCallId,
@@ -777,33 +984,38 @@ impl Bridge for Claude {
     }
 
     fn set_mode(&mut self, mode: Mode) -> Result<(), BridgeError> {
-        self.carry_on()?;
-        self.session.set_mode(mode).map_err(BridgeError::from)
+        self.request(Held::Mode(mode))
     }
 
     fn set_model(&mut self, model: &str) -> Result<(), BridgeError> {
-        self.carry_on()?;
-        self.session.set_model(model).map_err(BridgeError::from)
+        self.request(Held::Model(model.to_owned()))
     }
 
+    /// While a CLI is being started again, the turn to stop is one a held
+    /// prompt opened, which is stopped by not sending it; a change of mode or
+    /// model held with it is still made.
     fn interrupt(&mut self) -> Result<(), BridgeError> {
-        self.session.interrupt().map_err(BridgeError::from)
+        match self.starting.as_mut() {
+            Some(starting) => {
+                starting.stopped();
+                Ok(())
+            }
+            None => self.session.interrupt().map_err(BridgeError::from),
+        }
     }
 
     fn reconnect_mcp(&mut self, server: &str) -> Result<(), BridgeError> {
-        self.carry_on()?;
-        self.session
-            .reconnect_mcp(server)
-            .map_err(BridgeError::from)
+        self.request(Held::Reconnect(server.to_owned()))
     }
 
     fn rewind(&mut self, prompt: usize) -> Result<(), BridgeError> {
-        self.carry_on()?;
-        self.session.rewind(prompt).map_err(BridgeError::from)
+        self.request(Held::Rewind(prompt))
     }
 
     fn drain(&mut self) -> Vec<Event> {
-        self.session.drain()
+        let mut events = self.session.drain();
+        events.extend(self.settle_the_start());
+        events
     }
 }
 
@@ -2197,5 +2409,256 @@ mod tests {
         let relative = stream_tap(repository.path(), Some(OsString::from("taps")))
             .expect_err("a relative path depends on where niobe was started");
         assert!(relative.contains("not a whole path"), "{relative}");
+    }
+
+    /// A stand-in `claude` in `dir/bin`, behind the profile `max` of the
+    /// config handed back: started the first time, it answers one turn of
+    /// conversation `s-9` and leaves the way Node does on a SIGTERM; started
+    /// again, it runs `again`. Each start records the arguments it was given
+    /// under `dir/seen`. Only `dir/bin` and the system's own directories are
+    /// on its PATH, so no real `claude` can be reached.
+    #[cfg(unix)]
+    fn stopped_after_one_turn(dir: &Path, again: &str) -> Config {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = dir.join("bin");
+        std::fs::create_dir(&bin).expect("the stand-in's directory is made");
+        let seen = dir.join("seen");
+        std::fs::create_dir(&seen).expect("the record's directory is made");
+        let script = bin.join("claude");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\n\
+                 n=$(ls {seen} | wc -l | tr -d ' ')\n\
+                 echo \"$@\" > {seen}/$n\n\
+                 if [ \"$n\" = 0 ]; then\n\
+                 read -r initialize\n\
+                 read -r turn\n\
+                 {ONE_TURN}\n\
+                 exit 143\n\
+                 fi\n\
+                 {again}\n",
+                seen = seen.display()
+            ),
+        )
+        .expect("the stand-in is written");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+            .expect("the stand-in is made executable");
+        config(&format!(
+            "[profiles.max]\nbackend = \"claude\"\nenv = {{ PATH = \"{}:/usr/bin:/bin\" }}\n",
+            bin.display()
+        ))
+    }
+
+    /// The shell's session on the stand-in of [`stopped_after_one_turn`] in
+    /// `dir`, its CLI configuration directory `dir/cli`, once the first CLI
+    /// has answered its turn and been stopped, with where the process group
+    /// of each CLI it starts is named, the first's already taken.
+    #[cfg(unix)]
+    fn stopped(dir: &Path, config: &Config) -> (Attachment, Receiver<u32>) {
+        let selected = config
+            .select(Some("max"))
+            .expect("the profile is defined")
+            .expect("a profile was selected");
+        let mut attachment = attach(
+            dir,
+            Some(&selected),
+            &Attach::default(),
+            Some(dir.join("cli").into_os_string()),
+            NO_HOME,
+        )
+        .expect("the stand-in starts");
+        let groups = attachment.take_process_groups().expect("a CLI was started");
+        groups.try_recv().expect("the first group is named");
+        let bridge = attachment.bridge();
+        bridge.send("one", &[]).expect("the turn is sent");
+        drained_until(bridge, |event| matches!(event, Event::Notice { .. }));
+        (attachment, groups)
+    }
+
+    /// Writes, as the CLI's transcript of conversation `s-9` in `dir`, one
+    /// that takes a while to read for what it last spent — every record
+    /// names a `cost-state` and none is one — and hands back how long that
+    /// read took.
+    #[cfg(unix)]
+    fn slow_transcript(dir: &Path) -> std::time::Duration {
+        let transcripts = transcript::directory(&dir.join("cli"), dir);
+        std::fs::create_dir_all(&transcripts).expect("the project directory is made");
+        let line =
+            r#"{"type":"user","message":{"role":"user","content":"what is a cost-state record?"}}"#;
+        let text = format!("{line}\n").repeat(400_000);
+        let path = transcripts.join("s-9.jsonl");
+        std::fs::write(&path, text).expect("the transcript is written");
+        let started = std::time::Instant::now();
+        let spent = transcript::spent(&path).expect("the transcript reads");
+        let took = started.elapsed();
+        assert_eq!(spent, Spent::default(), "it records no spend");
+        took
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_prompt_that_starts_a_stopped_cli_again_is_not_held_up_reading_its_transcript() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let config = stopped_after_one_turn(
+            dir.path(),
+            &format!("read -r initialize\nread -r turn\n{ONE_TURN}\nexec sleep 30"),
+        );
+        let read = slow_transcript(dir.path());
+        let (mut attachment, _groups) = stopped(dir.path(), &config);
+        let bridge = attachment.bridge();
+
+        let started = std::time::Instant::now();
+        bridge
+            .send("two", &[])
+            .expect("the turn is taken while the CLI is started again");
+        let sent = started.elapsed();
+
+        assert!(
+            sent.saturating_mul(4) < read,
+            "the send took {sent:?}, and reading the transcript alone {read:?}"
+        );
+        drained_until(bridge, |event| matches!(event, Event::TurnEnded));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn what_is_asked_while_a_cli_is_started_again_reaches_it_in_the_order_it_was_asked() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let input = dir.path().join("input");
+        let config = stopped_after_one_turn(
+            dir.path(),
+            &format!(
+                "read -r initialize\nread -r a\nread -r b\nread -r c\n\
+                 printf '%s\\n' \"$a\" \"$b\" \"$c\" > {input}\n{ONE_TURN}\nexec sleep 30",
+                input = input.display()
+            ),
+        );
+        let (mut attachment, _groups) = stopped(dir.path(), &config);
+        let bridge = attachment.bridge();
+
+        bridge.send("two", &[]).expect("the turn is held");
+        bridge
+            .set_model("claude-haiku-5")
+            .expect("the change is held");
+        bridge.send("three", &[]).expect("the turn is held");
+        drained_until(bridge, |event| matches!(event, Event::TurnEnded));
+
+        let read = std::fs::read_to_string(&input).expect("the new CLI read three lines");
+        let lines: Vec<&str> = read.lines().collect();
+        assert_eq!(lines.len(), 3, "{read}");
+        assert!(lines[0].contains(r#""two""#), "{read}");
+        assert!(lines[1].contains(r#""set_model""#), "{read}");
+        assert!(lines[2].contains(r#""three""#), "{read}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_cli_that_cannot_be_started_again_is_said_once_and_what_waited_on_it_is_dropped() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let config = stopped_after_one_turn(
+            dir.path(),
+            &format!("read -r initialize\nread -r turn\n{ONE_TURN}\nexec sleep 30"),
+        );
+        let (mut attachment, _groups) = stopped(dir.path(), &config);
+        let script = dir.path().join("bin").join("claude");
+        let away = dir.path().join("claude.away");
+        std::fs::rename(&script, &away).expect("the stand-in is taken off the PATH");
+        let bridge = attachment.bridge();
+
+        bridge.set_mode(Mode::Ask).expect("the change is held");
+        bridge.send("two", &[]).expect("the turn is held");
+        bridge.send("three", &[]).expect("the turn is held");
+        let mut events = drained_until(bridge, |event| {
+            matches!(event, Event::Error { fatal: true, .. })
+        });
+        let until = std::time::Instant::now() + std::time::Duration::from_millis(300);
+        while std::time::Instant::now() < until {
+            events.extend(bridge.drain());
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        let errors: Vec<&str> = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Error { message, .. } => Some(message.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(errors.len(), 1, "{events:#?}");
+        assert!(
+            errors[0].contains("the `claude` CLI could not be started again"),
+            "{events:#?}"
+        );
+        assert!(
+            events.contains(&Event::ModeSelected { mode: Mode::Plan }),
+            "the session is still in the mode the CLI stopped in: {events:#?}"
+        );
+
+        // The session is as it was, and the next request starts it again.
+        std::fs::rename(&away, &script).expect("the stand-in is put back");
+        bridge.send("four", &[]).expect("the turn is held");
+        drained_until(bridge, |event| matches!(event, Event::TurnEnded));
+        let argv = std::fs::read_to_string(dir.path().join("seen").join("1"))
+            .expect("the second start recorded");
+        assert!(argv.contains("--resume s-9"), "{argv}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_prompt_stopped_while_the_cli_is_started_again_is_ended_and_never_sent() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let turn = dir.path().join("turn");
+        let config = stopped_after_one_turn(
+            dir.path(),
+            &format!(
+                "read -r initialize\nread -r turn\nprintf '%s\\n' \"$turn\" > {turn}\n\
+                 {ONE_TURN}\nexec sleep 30",
+                turn = turn.display()
+            ),
+        );
+        let (mut attachment, _groups) = stopped(dir.path(), &config);
+        let bridge = attachment.bridge();
+
+        bridge.send("two", &[]).expect("the turn is held");
+        bridge.interrupt().expect("the held turn is stopped");
+        let ended = drained_until(bridge, |event| matches!(event, Event::TurnEnded));
+        bridge.send("three", &[]).expect("the turn is held");
+        drained_until(bridge, |event| matches!(event, Event::TurnEnded));
+
+        assert!(
+            !ended
+                .iter()
+                .any(|event| matches!(event, Event::Error { .. })),
+            "{ended:#?}"
+        );
+        let sent = std::fs::read_to_string(&turn).expect("the new CLI read a turn");
+        assert!(sent.contains(r#""three""#), "{sent}");
+        assert!(!sent.contains(r#""two""#), "{sent}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_session_closed_while_its_cli_is_started_again_leaves_nothing_of_it_running() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let config = stopped_after_one_turn(dir.path(), "exec sleep 30");
+        slow_transcript(dir.path());
+        let (mut attachment, groups) = stopped(dir.path(), &config);
+        attachment
+            .bridge()
+            .send("two", &[])
+            .expect("the turn is held");
+
+        drop(attachment);
+
+        let group = groups
+            .try_recv()
+            .expect("the CLI started is named to the reaper before the session lets go");
+        let alive = std::process::Command::new("kill")
+            .args(["-0", "--", &format!("-{group}")])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("kill runs");
+        assert!(!alive.success(), "process group {group} is still running");
     }
 }
