@@ -2365,7 +2365,14 @@ const CONVERSES_ONLY_WHEN_SENT_A_TURN_CLAUDE: &str = "#!/bin/sh\n\
 #[test]
 fn a_resumed_session_with_no_conversation_of_its_own_starts_one_asked_what_a_new_one_is() {
     let repo = repo();
-    let home = stand_in(repo.path(), CONVERSES_ONLY_WHEN_SENT_A_TURN_CLAUDE);
+    put_stand_in(repo.path(), CONVERSES_ONLY_WHEN_SENT_A_TURN_CLAUDE);
+    // What a `!` command did is otherwise handed to the agent as a turn of
+    // its own once it ends, and a stand-in that answers that turn before the
+    // quit lands gives the first session a conversation after all.
+    let home = user_config(
+        "default_profile = \"max\"\nhand_commands = false\n\n\
+         [profiles.max]\nbackend = \"claude\"\n",
+    );
     {
         let (terminal, slave) = Terminal::open();
         let mut shell = shell_driving_the_stand_in(&slave, repo.path(), home.path())
