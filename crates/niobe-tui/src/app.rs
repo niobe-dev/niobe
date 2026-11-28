@@ -2077,12 +2077,14 @@ pub struct App {
     /// it is sent until that turn is done, so a command waits for it as for
     /// a running turn.
     owed: Owed,
-    /// The prompts sent while a clear waits, oldest first, which the shell
-    /// holds until it has been answered: the backend takes a prompt that
-    /// arrives behind a clear into the conversation the clear starts, and
-    /// folded and recorded before the backend says it started that one, the
-    /// prompt would go with the conversation put away.
-    after_clear: Vec<String>,
+    /// The prompts sent while a clear waits, oldest first, each with the
+    /// images it was sent with, which the shell holds until it has been
+    /// answered: the backend takes a prompt that arrives behind a clear into
+    /// the conversation the clear starts, and folded and recorded before the
+    /// backend says it started that one, the prompt would go with the
+    /// conversation put away. The images are held with it rather than handed
+    /// on, so they go to the backend with the prompt and with no other turn.
+    after_clear: Vec<(String, Vec<niobe_core::image::Image>)>,
     /// A prompt opening with a command the backend did not list, held back
     /// once: Enter on it again sends it.
     unlisted_held: Option<String>,
@@ -3096,11 +3098,9 @@ impl App {
     pub fn leave(&mut self) {
         // Held behind a clear the backend never answered, they reached no
         // backend, and the record says so rather than losing them.
-        for text in std::mem::take(&mut self.after_clear) {
-            self.produce(Event::PromptNotSent {
-                text,
-                why: Some(HELD_AT_THE_END.to_owned()),
-            });
+        for (text, images) in std::mem::take(&mut self.after_clear) {
+            let why = Some(HELD_AT_THE_END.to_owned());
+            self.produce_turn(Event::PromptNotSent { text, why }, images);
         }
         let taking_up = std::mem::take(&mut self.taken_up);
         let taken_up = taking_up && self.heard && !self.session.left();
@@ -6134,6 +6134,12 @@ impl App {
     /// and a `/clear` that lands after a turn the operator then went on
     /// steering would clear what they meant to keep. Nor while a question
     /// waits, for the same reason a prompt typed then is refused.
+    ///
+    /// Nor while a clear sent from here waits on the backend, or the backend
+    /// holds a prompt sent from here while the CLI starts again: the prompts
+    /// held behind the clear go once it is answered, and a command sent
+    /// meanwhile would go ahead of them, into the conversation the clear puts
+    /// away — the clear itself among them, where the backend holds it.
     fn can_send(&self, name: &str) -> Result<(), String> {
         if !self.attached {
             return Err(format!(
@@ -6153,6 +6159,14 @@ impl App {
         if self.owed == Owed::Due {
             return Err(format!(
                 "/{name} waits for the turn the backend is about to start"
+            ));
+        }
+        if self.clear_sent || !self.after_clear.is_empty() {
+            return Err(format!("/{name} waits for the conversation to start over"));
+        }
+        if self.holds_prompts() {
+            return Err(format!(
+                "/{name} waits for the prompts held while the CLI starts again: Esc to drop them"
             ));
         }
         // A question can wait with no turn of this shell's running: one a
@@ -6179,11 +6193,10 @@ impl App {
             Some(argument) => format!("/{name} {argument}"),
             None => format!("/{name}"),
         };
+        self.focus = Focus::Session;
         // A turn with no images of its own, so the ones attached to the prompt
         // still being written stay with it.
-        self.images.send_none();
-        self.focus = Focus::Session;
-        self.produce_prompt(text);
+        self.produce_prompt(text, Vec::new());
         self.sent_here = true;
         // The menu's New session, F3 and a typed `/clear` all send it here.
         self.clear_sent |= name == "clear";
@@ -6193,8 +6206,9 @@ impl App {
     /// Folds in `text` as a prompt for the backend, keeping how the session
     /// stood before it, so that [`App::not_sent`] can put it back where the
     /// backend does not take it: a prompt typed and a command sent from a
-    /// key alike, since either reaching no backend opens no turn.
-    fn produce_prompt(&mut self, text: String) {
+    /// key alike, since either reaching no backend opens no turn. `images`
+    /// are the prompt's own, which go to the backend with it.
+    fn produce_prompt(&mut self, text: String, images: Vec<niobe_core::image::Image>) {
         let before = BeforePrompt {
             session: self.session.clone(),
             turn_began_at: self.turn_began_at,
@@ -6204,8 +6218,18 @@ impl App {
             just_ended: self.just_ended,
             last_folded_at: self.last_folded_at,
         };
-        self.produce(Event::UserMessage { text });
+        self.produce_turn(Event::UserMessage { text }, images);
         self.before_prompt = Some(before);
+    }
+
+    /// Produces `turn`, a prompt for the backend or one said never to reach
+    /// it, with `images`, its own. The loop takes the images of every such
+    /// event as it hands it on, oldest first, so they are queued here and
+    /// nowhere else, as the event is produced: queued any earlier, a turn
+    /// produced in between would be handed them.
+    fn produce_turn(&mut self, turn: Event, images: Vec<niobe_core::image::Image>) {
+        self.images.queue(images);
+        self.produce(turn);
     }
 
     /// Sends the backend's command `name` where it lists one, and says
@@ -10647,15 +10671,15 @@ impl App {
         self.offer_closed = None;
         let draft = self.take_draft();
         let kept = kept_with(&draft, &self.drafts);
-        self.images.send(&text, &kept);
+        let images = self.images.take_sent(&text, &kept);
         self.sent_here = self.attached;
         match (
             self.attached,
             self.clear_sent || !self.after_clear.is_empty(),
         ) {
-            (true, true) => self.after_clear.push(text),
-            (true, false) => self.produce_prompt(text),
-            (false, _) => self.produce(Event::PromptNotSent { text, why: None }),
+            (true, true) => self.after_clear.push((text, images)),
+            (true, false) => self.produce_prompt(text, images),
+            (false, _) => self.produce_turn(Event::PromptNotSent { text, why: None }, images),
         }
         self.give_back(&draft);
         self.scroll_to_tail();
@@ -10719,8 +10743,8 @@ impl App {
         if self.clear_sent || self.after_clear.is_empty() {
             return;
         }
-        let text = self.after_clear.remove(0);
-        self.produce_prompt(text);
+        let (text, images) = self.after_clear.remove(0);
+        self.produce_prompt(text, images);
     }
 
     /// What the rule above the composer says while prompts are held — by
@@ -24186,6 +24210,93 @@ mod tests {
             }
             recorded.push(event);
         }
+    }
+
+    /// The turns the shell produced, each with the images the loop takes for
+    /// it as it hands it on, in the order they came.
+    fn turns_handed(app: &mut App) -> Vec<(String, Vec<niobe_core::image::Image>)> {
+        app.settle_clear();
+        let mut turns = Vec::new();
+        for event in app.take_produced() {
+            if let Event::UserMessage { text } = &event {
+                app.sent_to_backend(text);
+            }
+            if let Event::UserMessage { text } | Event::PromptNotSent { text, .. } = event {
+                turns.push((text, app.take_turn_images()));
+            }
+        }
+        turns
+    }
+
+    /// A prompt held behind a clear keeps its images with it until it is
+    /// produced: none is queued for a turn ahead of it, so nothing handed on
+    /// before it can take them.
+    #[test]
+    fn a_prompt_held_behind_a_clear_keeps_its_images_until_it_is_sent() {
+        let mut app = offering(&["clear"]);
+        app.perform(crate::menu::Action::NewSession);
+        assert_eq!(turns_handed(&mut app), [("/clear".to_owned(), vec![])]);
+        app.fetched(Fetched {
+            source: Source::Clipboard,
+            image: Ok(png(b"a")),
+        });
+        typed(&mut app, "look");
+        app.on_key(key(KeyCode::Enter));
+
+        assert_eq!(turns_handed(&mut app), []);
+        assert_eq!(app.take_turn_images(), vec![], "no turn holds its images");
+
+        app.apply(&Event::Cleared);
+        assert_eq!(
+            turns_handed(&mut app),
+            [("[Image #1] look".to_owned(), vec![png(b"a")])]
+        );
+    }
+
+    /// A command asked for while the backend holds a prompt sent from here
+    /// waits for it, as one asked for behind a clear does: the operator may
+    /// still drop the held prompt with Esc, and the command would go behind
+    /// it.
+    #[test]
+    fn a_command_waits_for_the_prompts_the_backend_holds() {
+        let mut app = offering(&["compact"]);
+        typed(&mut app, "two");
+        app.on_key(key(KeyCode::Enter));
+        app.take_produced();
+        assert_eq!(app.prompt_held("two"), None);
+
+        app.perform(crate::menu::Action::Compact);
+
+        assert_eq!(
+            app.hint(),
+            Some(
+                "/compact waits for the prompts held while the CLI starts again: Esc to drop them"
+            )
+        );
+        assert_eq!(app.take_produced(), []);
+    }
+
+    /// One the session ends with is said never to reach a backend, and its
+    /// images go with it, leaving none for a turn after.
+    #[test]
+    fn a_prompt_held_behind_a_clear_at_the_end_takes_its_images_with_it() {
+        let mut app = offering(&["clear"]);
+        app.perform(crate::menu::Action::NewSession);
+        turns_handed(&mut app);
+        app.fetched(Fetched {
+            source: Source::Clipboard,
+            image: Ok(png(b"a")),
+        });
+        typed(&mut app, "look");
+        app.on_key(key(KeyCode::Enter));
+
+        app.leave();
+
+        assert_eq!(
+            turns_handed(&mut app),
+            [("[Image #1] look".to_owned(), vec![png(b"a")])]
+        );
+        assert_eq!(app.take_turn_images(), vec![]);
     }
 
     /// A prompt sent after a clear and before the backend has started the

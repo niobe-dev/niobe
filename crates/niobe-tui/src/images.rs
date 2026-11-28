@@ -129,7 +129,7 @@ pub(crate) struct Attachments {
     /// Each pasted path asked for and not yet handed back, with the paste it
     /// was read from, oldest first.
     pasted: Vec<(String, String)>,
-    /// The images of each prompt sent and not yet handed to the backend,
+    /// The images of each turn produced and not yet handed to the backend,
     /// oldest first.
     turns: VecDeque<Vec<Image>>,
 }
@@ -204,15 +204,20 @@ impl Attachments {
         }
     }
 
-    /// Sends the prompt `text`, the composer's: the images attached to it
-    /// whose placeholders it still holds go with it, in the order they were
-    /// attached, the ones a draft in `kept` names wait on for it, and the
-    /// rest are dropped.
+    /// Takes the images of the prompt `text`, the composer's, as it is sent:
+    /// the images attached to it whose placeholders it still holds, in the
+    /// order they were attached. The ones a draft in `kept` names wait on for
+    /// it, and the rest are dropped.
+    ///
+    /// They are the prompt's from here, and are queued with it as it is
+    /// produced ([`Attachments::queue`]): a prompt the shell holds back first
+    /// keeps them with it until then, so no turn produced before it can take
+    /// them.
     ///
     /// A draft set aside to send a recalled prompt is still the operator's,
     /// and comes back to the composer after; its images come back with it,
     /// whatever the recalled prompt names.
-    pub(crate) fn send(&mut self, text: &str, kept: &[(DraftId, &str)]) {
+    pub(crate) fn take_sent(&mut self, text: &str, kept: &[(DraftId, &str)]) -> Vec<Image> {
         let sent = (self.composing, text);
         let (images, waiting) = std::mem::take(&mut self.waiting)
             .into_iter()
@@ -221,14 +226,14 @@ impl Attachments {
             })
             .partition::<Vec<_>, _>(|(draft, number, _)| named_in(&[sent], *draft, *number));
         self.waiting = waiting;
-        self.turns
-            .push_back(images.into_iter().map(|(_, _, image)| image).collect());
+        images.into_iter().map(|(_, _, image)| image).collect()
     }
 
-    /// Notes a turn sent with no images, so the ones attached to the prompt
-    /// still being written stay with it and later turns keep theirs.
-    pub(crate) fn send_none(&mut self) {
-        self.turns.push_back(Vec::new());
+    /// Notes a turn handed on with `images`, its own, behind every turn
+    /// handed on before it: called as each turn is produced, in the order
+    /// they are, so [`Attachments::take_turn`] hands each its own.
+    pub(crate) fn queue(&mut self, images: Vec<Image>) {
+        self.turns.push_back(images);
     }
 
     /// Drops what is attached to a prompt that will not be sent, keeping what
@@ -514,6 +519,12 @@ mod tests {
         assert_eq!(image_path(&longer), None);
     }
 
+    /// Sends `text` as the shell sends a prompt it hands on at once.
+    fn send(attachments: &mut Attachments, text: &str, kept: &[(DraftId, &str)]) {
+        let images = attachments.take_sent(text, kept);
+        attachments.queue(images);
+    }
+
     fn image(tag: &[u8]) -> Image {
         let mut data = b"\x89PNG\r\n\x1a\n".to_vec();
         data.extend_from_slice(tag);
@@ -532,7 +543,7 @@ mod tests {
         );
 
         // The second was deleted from the prompt before it went.
-        attachments.send(&format!("{third} after {first}"), &[]);
+        send(&mut attachments, &format!("{third} after {first}"), &[]);
 
         assert_eq!(attachments.take_turn(), vec![image(b"1"), image(b"3")]);
         assert_eq!(attachments.take_turn(), Vec::new());
@@ -542,10 +553,10 @@ mod tests {
     fn each_prompt_takes_its_own_images() {
         let mut attachments = Attachments::default();
         let first = attachments.attach(image(b"1"));
-        attachments.send(&first, &[]);
-        attachments.send("no image", &[]);
+        send(&mut attachments, &first, &[]);
+        send(&mut attachments, "no image", &[]);
         let third = attachments.attach(image(b"3"));
-        attachments.send(&third, &[]);
+        send(&mut attachments, &third, &[]);
 
         assert_eq!(attachments.take_turn(), vec![image(b"1")]);
         assert_eq!(attachments.take_turn(), Vec::new());
@@ -566,7 +577,7 @@ mod tests {
         let mut attachments = Attachments::default();
         let first = attachments.attach(image(b"1"));
         attachments.discard(&[]);
-        attachments.send(&first, &[]);
+        send(&mut attachments, &first, &[]);
         assert_eq!(attachments.take_turn(), Vec::new());
     }
 
@@ -577,11 +588,11 @@ mod tests {
         let draft = format!("{first} what is this");
         let set_aside = attachments.composing();
         attachments.compose_anew();
-        attachments.send("run the tests", &[(set_aside, &draft)]);
+        send(&mut attachments, "run the tests", &[(set_aside, &draft)]);
         attachments.compose_anew();
         attachments.discard(&[(set_aside, &draft)]);
         attachments.compose(set_aside);
-        attachments.send(&draft, &[]);
+        send(&mut attachments, &draft, &[]);
 
         assert_eq!(attachments.take_turn(), Vec::new());
         assert_eq!(attachments.take_turn(), vec![image(b"1")]);
@@ -594,9 +605,13 @@ mod tests {
         let draft = format!("look at {first}");
         let set_aside = attachments.composing();
         attachments.compose_anew();
-        attachments.send("compare [Image #1] with the mock", &[(set_aside, &draft)]);
+        send(
+            &mut attachments,
+            "compare [Image #1] with the mock",
+            &[(set_aside, &draft)],
+        );
         attachments.compose(set_aside);
-        attachments.send(&draft, &[]);
+        send(&mut attachments, &draft, &[]);
 
         assert_eq!(attachments.take_turn(), Vec::new());
         assert_eq!(attachments.take_turn(), vec![image(b"1")]);

@@ -1988,6 +1988,63 @@ mod tests {
         );
     }
 
+    /// A prompt held behind a clear the backend holds too — the CLI stopped
+    /// between turns — keeps its images until it is sent: a command asked
+    /// for in between neither goes ahead of the clear nor takes them.
+    #[test]
+    fn an_image_held_behind_a_clear_goes_with_its_prompt_and_with_no_command_asked_for_meanwhile() {
+        let mut app = App::new(Repo::default()).attached();
+        app.apply(&SessionEvent::Commands {
+            commands: ["clear", "compact"]
+                .map(|name| niobe_core::event::SlashCommand {
+                    name: name.to_owned(),
+                    description: String::new(),
+                    argument_hint: None,
+                    mid_prompt: false,
+                })
+                .to_vec(),
+        });
+        let mut journal = Kept::default();
+        let mut backend = Attached {
+            hold: true,
+            ..Attached::default()
+        };
+        let mut clipboard = Clipboard {
+            image: Some(screenshot()),
+            ..Clipboard::default()
+        };
+
+        app.perform(crate::menu::Action::NewSession);
+        send_produced(&mut app, &mut journal, &mut backend, &mut Forgotten);
+        app.on_key(key(KeyCode::Char('v'), KeyModifiers::CONTROL));
+        fetch_images(&mut app, &mut clipboard);
+        fold_images(&mut app, &mut clipboard);
+        typed(&mut app, "look at this");
+        send_produced(&mut app, &mut journal, &mut backend, &mut Forgotten);
+        app.perform(crate::menu::Action::Compact);
+        assert_eq!(
+            app.hint(),
+            Some("/compact waits for the conversation to start over")
+        );
+        send_produced(&mut app, &mut journal, &mut backend, &mut Forgotten);
+
+        backend.hold = false;
+        backend.settles = vec![Ok(()); backend.sent.len()];
+        backend.produces = vec![SessionEvent::Cleared, SessionEvent::TurnEnded];
+        fold_backend(&mut app, &mut journal, &mut backend, &mut Unwatched);
+        app.settle_clear();
+        send_produced(&mut app, &mut journal, &mut backend, &mut Forgotten);
+
+        let sent: Vec<(&str, usize)> = backend
+            .sent
+            .iter()
+            .zip(&backend.images)
+            .map(|(text, images)| (text.as_str(), images.len()))
+            .collect();
+        assert_eq!(sent, [("/clear", 0), ("[Image #1] look at this", 1)]);
+        assert_eq!(backend.images.last(), Some(&vec![screenshot()]));
+    }
+
     #[test]
     fn a_prompt_that_went_nowhere_does_not_hand_its_images_to_the_next() {
         let mut app = App::new(Repo::default());
