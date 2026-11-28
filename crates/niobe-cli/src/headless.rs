@@ -155,6 +155,7 @@ pub fn run(
         pause,
         stopping,
         owed_turn: OWED_TURN_GRACE,
+        now: &mut Instant::now,
     };
     run_waiting(bridge, journal, allowed, prompt, budget, waits)
 }
@@ -166,6 +167,10 @@ struct Waits<'a> {
     pause: &'a mut dyn FnMut(),
     stopping: &'a mut dyn FnMut() -> Option<String>,
     owed_turn: Duration,
+    /// The clock the wait for an owed turn is measured by: the machine's,
+    /// or, in a test, one its pauses move on, so that how long the run
+    /// waited does not turn on how long a loaded machine took to sleep.
+    now: &'a mut dyn FnMut() -> Instant,
 }
 
 /// [`run`], waiting as `waits` says.
@@ -181,6 +186,7 @@ fn run_waiting(
         pause,
         stopping,
         owed_turn,
+        now,
     } = waits;
     let started_at = SystemTime::now();
     let mut state = SessionState::new();
@@ -222,7 +228,7 @@ fn run_waiting(
             outcome = Some(Outcome::Stopped(why.clone()));
             break;
         }
-        if owed_until.is_some_and(|by| Instant::now() >= by) {
+        if owed_until.is_some_and(|by| now() >= by) {
             outcome = Some(Outcome::Finished);
             break;
         }
@@ -243,7 +249,7 @@ fn run_waiting(
             if event.is_main_agent_at_work() {
                 owed_until = None;
             } else if owed_until.is_some() && matches!(event, Event::Error { fatal: false, .. }) {
-                owed_until = Some(Instant::now() + owed_turn);
+                owed_until = Some(now() + owed_turn);
             }
             let ending = match event {
                 // What the backend says after the run's end is recorded, and
@@ -308,7 +314,7 @@ fn run_waiting(
                     (None, follows) => match ended(failure.take(), &state, budget) {
                         Outcome::Finished if still_working(&state) => None,
                         Outcome::Finished if follows => {
-                            owed_until = Some(Instant::now() + owed_turn);
+                            owed_until = Some(now() + owed_turn);
                             None
                         }
                         ended => Some(ended),
@@ -756,7 +762,7 @@ mod tests {
             ..Scripted::default()
         };
         let mut journal = Kept::default();
-        let waited = Instant::now();
+        let clock = Clock::new();
         let turn = run_waiting(
             &mut bridge,
             &mut journal,
@@ -764,36 +770,71 @@ mod tests {
             "fix the test",
             None,
             Waits {
-                pause: &mut || std::thread::sleep(Duration::from_millis(1)),
+                pause: &mut || clock.pause(),
                 stopping: &mut || None,
                 owed_turn: Duration::from_millis(50),
+                now: &mut || clock.now(),
             },
         );
 
         assert_eq!(turn.outcome, Outcome::Finished);
         assert_eq!(turn.reply, "the first command finished");
-        assert!(waited.elapsed() >= Duration::from_millis(50));
+        assert!(clock.elapsed() >= Duration::from_millis(50));
     }
 
     /// Runs the batches with `owed_turn` as the grace for the turn the
     /// backend said follows, each drain that finds nothing waiting 10 ms.
-    fn ran_owing(batches: Vec<Vec<Event>>, owed_turn: Duration) -> Turn {
+    fn ran_owing(batches: Vec<Vec<Event>>, owed_turn: Duration) -> (Turn, Duration) {
         let mut bridge = Scripted {
             batches: batches.into(),
             ..Scripted::default()
         };
-        run_waiting(
+        let clock = Clock::new();
+        let turn = run_waiting(
             &mut bridge,
             &mut Kept::default(),
             &Allowlist::new(),
             "fix the test",
             None,
             Waits {
-                pause: &mut || std::thread::sleep(Duration::from_millis(10)),
+                pause: &mut || clock.pause(),
                 stopping: &mut || None,
                 owed_turn,
+                now: &mut || clock.now(),
             },
-        )
+        );
+        (turn, clock.elapsed())
+    }
+
+    /// A clock that moves on [`Clock::PAUSE`] at each pause and never
+    /// otherwise, so that a test of how long a run waits counts its pauses
+    /// rather than timing a machine that may be loaded.
+    struct Clock {
+        started: Instant,
+        passed: std::cell::Cell<Duration>,
+    }
+
+    impl Clock {
+        const PAUSE: Duration = Duration::from_millis(10);
+
+        fn new() -> Self {
+            Self {
+                started: Instant::now(),
+                passed: std::cell::Cell::new(Duration::ZERO),
+            }
+        }
+
+        fn pause(&self) {
+            self.passed.set(self.passed.get() + Self::PAUSE);
+        }
+
+        fn now(&self) -> Instant {
+            self.started + self.passed.get()
+        }
+
+        fn elapsed(&self) -> Duration {
+            self.passed.get()
+        }
     }
 
     /// The turn the backend owes can open with the model's narration of its
@@ -808,7 +849,7 @@ mod tests {
         }]);
         batches.extend(std::iter::repeat_with(Vec::new).take(10));
         batches.push(vec![said("the real answer"), Event::TurnEnded]);
-        let turn = ran_owing(batches, Duration::from_millis(50));
+        let (turn, _) = ran_owing(batches, Duration::from_millis(50));
 
         assert_eq!(turn.outcome, Outcome::Finished);
         assert_eq!(turn.reply, "the real answer");
@@ -828,7 +869,7 @@ mod tests {
             batches.push(Vec::new());
         }
         batches.push(vec![said("the real answer"), Event::TurnEnded]);
-        let turn = ran_owing(batches, Duration::from_millis(200));
+        let (turn, _) = ran_owing(batches, Duration::from_millis(200));
 
         assert_eq!(turn.outcome, Outcome::Finished);
         assert_eq!(turn.reply, "the real answer");
@@ -842,12 +883,12 @@ mod tests {
         let mut batches = a_command_ended_under_the_turn();
         batches.extend(std::iter::repeat_with(Vec::new).take(3));
         batches.push(vec![warning("the CLI is retrying it")]);
-        let waited = Instant::now();
-        let turn = ran_owing(batches, Duration::from_millis(50));
+        let (turn, waited) = ran_owing(batches, Duration::from_millis(50));
 
         assert_eq!(turn.outcome, Outcome::Finished);
         assert_eq!(turn.reply, "the first command finished");
-        assert!(waited.elapsed() >= Duration::from_millis(80));
+        assert!(waited >= Duration::from_millis(80), "{waited:?}");
+        assert!(waited < Duration::from_millis(100), "{waited:?}");
     }
 
     #[test]
