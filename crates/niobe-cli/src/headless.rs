@@ -26,7 +26,9 @@
 //! ends while one of those turns is under way, and that the turn does not
 //! take in, is answered by a turn of the backend's own after it, which the
 //! backend says is coming ([`Event::TurnFollows`]) and the run waits for too
-//! — for [`OWED_TURN_GRACE`] at most before the agent is heard from again. A
+//! — for [`OWED_TURN_GRACE`] at most past the backend's last word before
+//! the agent is heard from again, each warning the backend gives meanwhile,
+//! as it does retrying the turn's request, counting as a word. A
 //! backend that leaves while the run waits takes that work with it, and the
 //! run fails on its end: the binary attaches it as a session of one turn,
 //! which no later prompt starts again.

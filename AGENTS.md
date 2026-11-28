@@ -172,7 +172,10 @@ reviewers that encode both, for an agent working in this tree.
   composer and sent once it has, so they are the new conversation's, and which the backend
   holds while it starts again, said there too and in neither the session nor its record until
   the backend says what became of each, when each is folded in and kept as sent or as never
-  sent, after what happened while it was held, live and read back alike — `ui.rs`
+  sent, after what happened while it was held, live and read back alike — but one something
+  else was folded in after before the backend held it, which is kept as sent at once and, if
+  never handed on, said not sent live and kept as sent in the record, as a prompt the backend
+  refused that cannot be taken back is — `ui.rs`
   draws it, the menu row naming the project the session runs in, by its directory, centred
   between the menus and the model and drawn as a block in the menus' hot colour, cut or left
   off where the row has no room once the model and the session's state are drawn, and

@@ -2426,9 +2426,10 @@ impl Drop for Session {
         // A CLI a drain has already reaped had its group handed to the
         // keeper then, and a session dropped after that can be dropped on
         // the thread that draws: the binary drops one stopped between turns
-        // there, at the request that started the CLI again in its place. So
-        // nothing here signals, and nothing waits but on the keeper, whose
-        // bound runs from that reap, an operator's request ago; a thread
+        // there, in the drain that hands over the CLI started again in its
+        // place. So nothing here signals, and nothing waits but on the
+        // keeper, whose bound runs from that reap, an operator's request or
+        // more ago; a thread
         // still reading by now is held by something outside the group, and
         // is left to end with it.
         if self.group_ended {

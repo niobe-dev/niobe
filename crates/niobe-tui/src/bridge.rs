@@ -43,7 +43,9 @@ pub enum Sent {
     /// The turn is not yet one the backend has: the shell keeps it out of
     /// the session, the record and the prompts a rewind is numbered by until
     /// it is settled, and then folds it in where it is settled, as sent or as
-    /// one never sent. [`Bridge::interrupt`] while turns are held is asked to
+    /// one never sent — but where something else was folded in after it
+    /// first, when it is kept as sent at once, as a refused prompt that
+    /// cannot be taken back is. [`Bridge::interrupt`] while turns are held is asked to
     /// drop them, settled as never sent, whether or not a turn runs.
     Held,
 }

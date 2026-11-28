@@ -1459,8 +1459,9 @@ struct BeforePrompt {
 
 /// A turn the backend holds ([`crate::bridge::Sent::Held`]) until it says
 /// whether it handed it on: in neither the session nor the record, nor
-/// among the prompts a rewind is numbered by, until it does. See
-/// [`App::held_settled`].
+/// among the prompts a rewind is numbered by, until it does — but a
+/// [`HeldTurn::Kept`] prompt, which could not be taken back and is kept as
+/// sent at once. See [`App::held_settled`].
 #[derive(Debug)]
 enum HeldTurn {
     /// A prompt, taken back out of the session as soon as the backend said
