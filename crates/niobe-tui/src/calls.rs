@@ -1171,12 +1171,21 @@ fn group_result(calls: &[Call], theme: &Theme) -> Vec<Span<'static>> {
 /// One side of a run's line counts, summed, and whether every call stated
 /// it.
 fn summed(sides: impl Iterator<Item = Option<u64>>) -> (u64, bool) {
-    sides.fold((0, true), |(sum, stated), side| {
-        (
-            sum.saturating_add(side.unwrap_or(0)),
-            stated && side.is_some(),
-        )
-    })
+    sides.fold(NOTHING_SUMMED, summed_with)
+}
+
+/// One side of line counts summed over no calls: nothing, and nothing
+/// left unstated.
+pub(crate) const NOTHING_SUMMED: (u64, bool) = (0, true);
+
+/// One side of line counts, summed so far and whether every call stated it,
+/// with one more call's side added: the step [`summed`] folds, which the
+/// summary line folds too so that it reads a sum as the rows do.
+pub(crate) fn summed_with((sum, stated): (u64, bool), side: Option<u64>) -> (u64, bool) {
+    (
+        sum.saturating_add(side.unwrap_or(0)),
+        stated && side.is_some(),
+    )
 }
 
 /// How long a run of calls ran: the time the clock had at least one of them

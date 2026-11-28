@@ -15,7 +15,11 @@
 //! and to the view narrowed to it.
 //!
 //! Every count is of the calls the line stands for; a figure a call did not
-//! report is left out of the line rather than read as a zero.
+//! report is left out of the line rather than read as a zero. The lines the
+//! edits added and removed are summed as the run's row sums them under
+//! Ctrl+O ([`crate::ui::count`]'s rule): a side every edit stated is the
+//! whole, `+≥6` where some edit left it unstated is at least that much, and a
+//! side no edit stated a line of is left out.
 
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -95,14 +99,27 @@ impl Tally {
 }
 
 /// The calls counted under one [`Tally`].
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct Counted<'a> {
     calls: usize,
     /// What each call was about, for the counts of distinct files. A set,
     /// since a long run edits thousands and the line is said every frame.
     what: std::collections::HashSet<&'a str>,
-    added: Option<u64>,
-    removed: Option<u64>,
+    /// The lines the calls added, summed, and whether every one stated it.
+    added: (u64, bool),
+    /// The lines the calls removed, summed, and whether every one stated it.
+    removed: (u64, bool),
+}
+
+impl Default for Counted<'_> {
+    fn default() -> Self {
+        Self {
+            calls: 0,
+            what: std::collections::HashSet::new(),
+            added: crate::calls::NOTHING_SUMMED,
+            removed: crate::calls::NOTHING_SUMMED,
+        }
+    }
 }
 
 /// What the calls of `entries` did, as the sentence their line says: each
@@ -151,21 +168,23 @@ pub(crate) fn sentence<'a>(entries: impl IntoIterator<Item = &'a Entry>) -> Stri
 /// How much of what a running call does the line names.
 const RUNNING_MOST: usize = 60;
 
+/// Counts `call` in `counted`. A call whose change was never reported states
+/// neither side, since what it changed is unknown rather than nothing.
 fn count<'a>(counted: &mut Counted<'a>, call: &'a Call) {
     counted.calls = counted.calls.saturating_add(1);
     counted.what.insert(&call.what);
-    if let Some((added, removed)) = call.lines {
-        counted.added = sum(counted.added, added);
-        counted.removed = sum(counted.removed, removed);
-    }
+    let (added, removed) = call.lines.unwrap_or((None, None));
+    counted.added = crate::calls::summed_with(counted.added, added);
+    counted.removed = crate::calls::summed_with(counted.removed, removed);
 }
 
-/// `so_far` and `more` summed, where either is known.
-fn sum(so_far: Option<u64>, more: Option<u64>) -> Option<u64> {
-    match (so_far, more) {
-        (Some(so_far), Some(more)) => Some(so_far.saturating_add(more)),
-        (so_far, None) => so_far,
-        (None, more) => more,
+/// One side of the lines edits changed, as the sentence says it after a
+/// space: [`crate::ui::count`]'s reading, but for the em dash it draws where
+/// no call stated a line of the side, which a sentence leaves out instead.
+fn lines_side(sign: char, (lines, stated): (u64, bool)) -> Option<String> {
+    match (stated, lines) {
+        (false, 0) => None,
+        (stated, lines) => Some(format!(" {}", crate::ui::count(sign, lines, stated))),
     }
 }
 
@@ -182,12 +201,8 @@ fn phrase(tally: &Tally, counted: &Counted<'_>) -> String {
         }
         Tally::Did(Deed::Edited) => {
             let mut said = format!("edited {}", plural(files, "file", "files"));
-            if let Some(added) = counted.added {
-                said.push_str(&format!(" +{added}"));
-            }
-            if let Some(removed) = counted.removed {
-                said.push_str(&format!(" −{removed}"));
-            }
+            said.extend(lines_side('+', counted.added));
+            said.extend(lines_side('−', counted.removed));
             said
         }
         Tally::Did(Deed::Fetched) => format!("fetched {}", plural(calls, "page", "pages")),
@@ -318,12 +333,58 @@ mod tests {
         let mut again = ended("fetch.py");
         again.lines = Some((Some(2), Some(1)));
         let mut other = ended("cache.py");
-        other.lines = Some((Some(30), None));
+        other.lines = Some((Some(30), Some(0)));
         let entries = [
             calls("Edit", vec![first, again]),
             calls("Write", vec![other]),
         ];
         assert_eq!(sentence(&entries), "Edited 2 files +42 −3");
+    }
+
+    /// A side one of the edits left unstated sums to at least what the
+    /// others stated, as the run's row reads it under Ctrl+O, and never as
+    /// though it were the whole.
+    #[test]
+    fn a_side_some_edit_left_unstated_sums_to_a_floor() {
+        let mut first = ended("fetch.py");
+        first.lines = Some((Some(12), Some(3)));
+        let mut other = ended("cache.py");
+        other.lines = Some((Some(30), None));
+        let entries = [calls("Edit", vec![first]), calls("Write", vec![other])];
+        assert_eq!(sentence(&entries), "Edited 2 files +42 −≥3");
+    }
+
+    /// A notebook's edit never says how many lines it changed, so beside an
+    /// edit that did, both sides are floors.
+    #[test]
+    fn a_notebook_edit_beside_an_edit_that_counted_its_lines_leaves_both_sides_floors() {
+        let mut edit = ended("fetch.py");
+        edit.lines = Some((Some(6), Some(2)));
+        let mut notebook = ended("analysis.ipynb");
+        notebook.lines = Some((None, None));
+        let entries = [
+            calls("Edit", vec![edit]),
+            calls("NotebookEdit", vec![notebook]),
+        ];
+        assert_eq!(sentence(&entries), "Edited 2 files +≥6 −≥2");
+    }
+
+    /// An edit whose change was never reported at all leaves the sum of the
+    /// others a floor too: what it changed is unknown, not nothing.
+    #[test]
+    fn an_edit_with_no_change_reported_leaves_the_others_sum_a_floor() {
+        let mut edit = ended("fetch.py");
+        edit.lines = Some((Some(6), Some(2)));
+        let entries = [calls("Edit", vec![edit, ended("cache.py")])];
+        assert_eq!(sentence(&entries), "Edited 2 files +≥6 −≥2");
+    }
+
+    #[test]
+    fn a_notebook_edit_alone_says_no_figure_for_its_lines() {
+        let mut notebook = ended("analysis.ipynb");
+        notebook.lines = Some((None, None));
+        let entries = [calls("NotebookEdit", vec![notebook])];
+        assert_eq!(sentence(&entries), "Edited 1 file");
     }
 
     #[test]
