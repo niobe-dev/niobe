@@ -15,9 +15,11 @@
 //! * `Bash(cargo test)` — that tool, called on exactly that target.
 //! * `Bash(cargo *)` — that tool, called on a target starting `cargo `,
 //!   where what follows neither starts another command (`;`, `&&`, `|`, a
-//!   redirection, a substitution or anything else in brackets) nor climbs
-//!   above the prefix with `..` — or with `%2e%2e`, which a URL parser
-//!   reads as `..`.
+//!   redirection, a backquote or anything in brackets), nor holds a `$` that
+//!   does more than name a plain parameter (`$HOME`, never `${…}`, `$'…'` or
+//!   `$[…]`, which can build a command out of text that shows none), nor
+//!   climbs above the prefix with `..` — or with `%2e%2e`, which a URL
+//!   parser reads as `..`.
 //! * `Edit(/repo/src/*)`, `Bash(cat src/*)` — a star inside a word finishes
 //!   that one word and nothing else: a name of plain characters, with no
 //!   space before a second argument and nothing a shell would expand, and one
@@ -191,11 +193,13 @@ impl Rule {
     ///
     /// A `*` covers what follows the prefix only where that is more of the
     /// same call: `Bash(cargo *)` covers `cargo test --workspace` but not
-    /// `cargo test && rm -rf ~`, and `Edit(/repo/src/*)` does not cover
-    /// `/repo/src/../../etc/passwd`. A star inside a word stands for the rest
-    /// of that word alone, so `Bash(cat src/*)` does not cover
-    /// `cat src/x ../secret`. The check reads the text, not the filesystem, so
-    /// a symbolic link under the prefix leads wherever it points.
+    /// `cargo test && rm -rf ~`, nor `cargo test ${y[$'a[\x60id\x60]']}`,
+    /// whose escapes bash makes backquotes of and runs; and
+    /// `Edit(/repo/src/*)` does not cover `/repo/src/../../etc/passwd`. A star
+    /// inside a word stands for the rest of that word alone, so
+    /// `Bash(cat src/*)` does not cover `cat src/x ../secret`. The check reads
+    /// the text, not the filesystem, so a symbolic link under the prefix leads
+    /// wherever it points.
     pub fn covers(&self, tool: &str, target: Option<&str>) -> bool {
         if self.tool != tool {
             return false;
@@ -245,7 +249,12 @@ impl Rule {
 /// CLI runs commands in where it is the login shell, as it is on a Mac, runs
 /// what `=(…)` holds and passes the name of a file of its output, with no `$`
 /// before it, so `ls =(rm -rf ~)` deletes the home directory. A bracket the
-/// shell would read as text is asked about with the rest.
+/// shell would read as text is asked about with the rest, and so is one
+/// escaped with a `\`.
+///
+/// These are the characters as written. A shell can also make them after
+/// the rule has read the text, from an expansion — `$'\x60'` is a backquote —
+/// which is why [`expands_to_no_code`] reads every `$` too.
 const COMMAND_BREAKS: [&str; 9] = [";", "&", "|", "\n", "\r", ">", "<", "`", "("];
 
 /// Characters other than letters and digits that a star inside a word may
@@ -263,13 +272,23 @@ const PLAIN_IN_A_WORD: [char; 10] = ['/', '.', '_', '-', '+', ',', '@', '=', ':'
 /// what the operator wrote, never for a way out of it: not for a second
 /// command chained after the first, not for a path that climbs back above
 /// the prefix, and, where the star sits inside a word, not for anything past
-/// that word. None of these tests knows which tools run shell commands and
-/// which take paths — a rule names a tool the backend chose — so all apply to
-/// every rule. A call they refuse is asked about rather than denied, which is
-/// why erring this way is safe: a URL with a `&` in its query is asked about,
-/// a command that deletes the home directory is not let through.
+/// that word, and not for an expansion that can build a command the text does
+/// not show ([`expands_to_no_code`]). None of these tests knows which tools
+/// run shell commands and which take paths — a rule names a tool the backend
+/// chose — so all apply to every rule. A call they refuse is asked about
+/// rather than denied, which is why erring this way is safe: a URL with a `&`
+/// in its query is asked about, a command that deletes the home directory is
+/// not let through.
+///
+/// What is read is what the shell does to the words, never what the command
+/// does with them: `Bash(git *)` covers `git -c core.pager=less log`, and a
+/// prefix naming a command that runs its arguments, such as `env` or `xargs`,
+/// covers whatever it runs.
 fn star_stands_for(prefix: &str, rest: &str) -> bool {
     if COMMAND_BREAKS.iter().any(|stop| rest.contains(stop)) {
+        return false;
+    }
+    if !expands_to_no_code(prefix, rest) {
         return false;
     }
     let word = prefix
@@ -280,6 +299,69 @@ fn star_stands_for(prefix: &str, rest: &str) -> bool {
         true => !climbs_out(rest),
         false => finishes_word(word, rest),
     }
+}
+
+/// Whether `rest`, read after the last character of `prefix`, asks a shell for
+/// no expansion that can build or run a command.
+///
+/// Every `$` must name a plain parameter — a letter or `_`, then letters,
+/// digits and `_` — with no `[` straight after it. That refuses `${…}`, in
+/// which bash evaluates an array subscript as arithmetic and runs the
+/// backquotes in it, and zsh's `${~…}` globs a value into a qualifier that
+/// runs code; `$'…'` and `$"…"`, in which `\x60` and `\x28` become a
+/// backquote and a bracket the text did not show; `$[…]`, arithmetic again;
+/// zsh's `$~`, `$=`, `$^`, `$#` and `$+`; the special parameters `$!`, `$$`,
+/// `$?`, `$-`, `$@`, `$*` and `$0`–`$9`; a bare `$`; and a zsh subscript,
+/// `$path[1]`, which is arithmetic and takes flags. Under bash 3.2, which is
+/// also the Mac's `/bin/sh`, `cargo test ${y[$'a[\x60id\x60]']}` runs `id`,
+/// and under zsh 5.9 `git status ${~z::=$'*\x28e:id:\x29'}` does.
+///
+/// zsh's dynamic named directory, `~[…]`, is refused too: zsh hands what the
+/// brackets hold to whatever `zsh_directory_name` the operator's setup
+/// defines.
+///
+/// A plain `$HOME` is left covered: its value is the environment's, not the
+/// agent's, and neither shell reads a value it substitutes as a command —
+/// zsh's `$HOME:s/…/…/` included, even with `GLOB_SUBST` on — unless a
+/// bracket or a backquote of its own makes it one. So are quotes, a
+/// backslash, braces, a tilde, `=cmd` and `!`, which a shell that is not
+/// interactive does not read as history: none of them made anything run
+/// under bash, sh, dash or zsh. The last character of the prefix is read
+/// before `rest` because a star finishes the `$` or `~` a prefix ends on.
+fn expands_to_no_code(prefix: &str, rest: &str) -> bool {
+    let mut chars = prefix
+        .chars()
+        .next_back()
+        .into_iter()
+        .chain(rest.chars())
+        .peekable();
+    while let Some(c) = chars.next() {
+        let refused = match c {
+            '$' => !names_a_plain_parameter(&mut chars),
+            '~' => chars.peek() == Some(&'['),
+            _ => false,
+        };
+        if refused {
+            return false;
+        }
+    }
+    true
+}
+
+/// Reads the name a `$` was followed by off `chars`, and says whether it was
+/// a plain parameter's with no subscript after it.
+fn names_a_plain_parameter(chars: &mut std::iter::Peekable<impl Iterator<Item = char>>) -> bool {
+    if chars
+        .next_if(|&c| c.is_ascii_alphabetic() || c == '_')
+        .is_none()
+    {
+        return false;
+    }
+    while chars
+        .next_if(|&c| c.is_ascii_alphanumeric() || c == '_')
+        .is_some()
+    {}
+    chars.peek() != Some(&'[')
 }
 
 /// Whether `rest` finishes `word`, the last word of a prefix, as one name
@@ -603,6 +685,116 @@ mod tests {
                     &Rule::parse("Bash(ls =(id) *)").expect("the text in this test is valid")
                 )
         );
+    }
+
+    #[test]
+    fn a_star_does_not_cover_an_expansion_that_builds_a_command_out_of_escapes() {
+        // `$'…'` turns `\x60` into a backquote and `\x28` into a bracket after
+        // the rule has read the text; bash then runs the backquotes when it
+        // evaluates an array subscript, and zsh's `${~…}` globs the bracket
+        // into an `e:` qualifier that runs its code. Each of these created
+        // the file under the real shell.
+        let cargo = Rule::parse("Bash(cargo *)").expect("the rule is valid");
+        for target in [
+            r"cargo test ${y[$'a[\x60touch /tmp/pwn\x60]']}",
+            r"cargo test ${x:=$'a[\x60touch /tmp/pwn\x60]'} ${y[x]}",
+            r"cargo test ${x=$'a[\x60touch /tmp/pwn\x60]'} ${y[x]}",
+            r"cargo test $[a[$'\x60touch /tmp/pwn\x60']]",
+            r"cargo test ${x=$'a[\x60touch /tmp/pwn\x60]'} ${!x}",
+        ] {
+            assert!(!cargo.covers("Bash", Some(target)), "{target}");
+        }
+
+        let git = Rule::parse("Bash(git *)").expect("the rule is valid");
+        for target in [
+            r"git status ${~z::=$'*\x28e:touch /tmp/pwn:\x29'}",
+            r"git status ${~z::=$'*\x28e:\x3e/tmp/f:\x29'}",
+        ] {
+            assert!(!git.covers("Bash", Some(target)), "{target}");
+        }
+    }
+
+    #[test]
+    fn a_star_covers_a_dollar_only_where_it_names_a_plain_parameter() {
+        let rule = Rule::parse("Bash(cargo *)").expect("the rule is valid");
+
+        for target in [
+            "cargo test ${HOME}",
+            "cargo test $'x'",
+            "cargo test $\"x\"",
+            "cargo test $[1]",
+            "cargo test $~HOME",
+            "cargo test $=HOME",
+            "cargo test $^path",
+            "cargo test $#path",
+            "cargo test $+HOME",
+            "cargo test $!",
+            "cargo test $$",
+            "cargo test $?",
+            "cargo test $-",
+            "cargo test $@",
+            "cargo test $*",
+            "cargo test $0",
+            "cargo test $9",
+            "cargo test a$",
+            "cargo test \"$\"",
+            // A zsh subscript is read as arithmetic and takes flags.
+            "cargo test $path[1]",
+            // zsh hands what `~[…]` holds to the operator's own
+            // `zsh_directory_name`, whatever that does with it.
+            "cargo test ~[name]/x",
+        ] {
+            assert!(!rule.covers("Bash", Some(target)), "{target}");
+        }
+
+        // A `$` the operator ends a prefix on is finished by the star, and
+        // what it finishes is held to the same reading.
+        let rule = Rule::parse("Bash(echo $*)").expect("the rule is valid");
+        assert!(!rule.covers("Bash", Some("echo $=x")));
+        assert!(!rule.covers("Bash", Some("echo $1")));
+        assert!(rule.covers("Bash", Some("echo $HOME")));
+        assert!(rule.covers("Bash", Some("echo $HOME/x")));
+        let rule = Rule::parse("Bash(ls ~*)").expect("the rule is valid");
+        assert!(rule.covers("Bash", Some("ls ~/x")));
+    }
+
+    #[test]
+    fn a_star_still_covers_arguments_a_shell_expands_into_no_code() {
+        // Each of these ran nothing under bash, sh, dash and zsh, with zsh's
+        // GLOB_SUBST, EXTENDED_GLOB and SH_WORD_SPLIT on too.
+        let rule = Rule::parse("Bash(cargo *)").expect("the rule is valid");
+
+        for target in [
+            "cargo test $HOME",
+            "cargo test \"$HOME\" $_ $PWD/x $IFS",
+            "cargo test $HOME:h:t $HOME:s/x/y/",
+            "cargo test 'single quoted' \"double quoted\" back\\ slash",
+            "cargo test {a,b} {1..3} $HOME{a,b}",
+            "cargo test ~/x ~+ =ls !! !-1",
+            "cargo test 'a[\\x60touch /tmp/pwn\\x60]'",
+            "cargo test -p niobe-core -- --nocapture",
+            "cargo test --manifest-path crates/niobe-core/Cargo.toml",
+            "cargo test a=b @a +x ,y %1 ^a",
+        ] {
+            assert!(rule.covers("Bash", Some(target)), "{target}");
+        }
+    }
+
+    #[test]
+    fn a_prefix_does_not_include_one_that_starts_an_expansion_it_would_refuse() {
+        let outer = Rule::parse("Bash(cargo *)").expect("the rule is valid");
+
+        for inner in [
+            "Bash(cargo test ${y[*)",
+            "Bash(cargo test $*)",
+            "Bash(cargo test ~[*)",
+        ] {
+            let inner = Rule::parse(inner).expect("the text in this test is valid");
+            assert!(!outer.includes(&inner), "{inner}");
+        }
+        assert!(outer.includes(
+            &Rule::parse("Bash(cargo run -- \"$HOME\" *)").expect("the text in this test is valid")
+        ));
     }
 
     #[test]

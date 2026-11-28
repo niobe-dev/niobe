@@ -2674,8 +2674,10 @@ PERMISSIONS:
     target alone. A target ending in * matches by prefix — Bash(cargo *) — and
     only you write one: Niobe stores the target as it stood, never a guess at
     what else you meant. The * never covers a second command chained after
-    the first (;, &&, |, a redirection, a substitution or a bracket) or a path
-    that climbs above the prefix with ..; a * inside a word, as in
+    the first (;, &&, |, a redirection, a backquote or a bracket), a $ that
+    does more than name a variable ($HOME, but not ${{...}}, $'...' or $[...],
+    which can build a command the text does not show) or a path that climbs
+    above the prefix with ..; a * inside a word, as in
     Bash(cat src/*), finishes that word and covers no argument after it. Such
     a call is asked about.
     Paths are read as written: a link under the prefix leads where it points.
