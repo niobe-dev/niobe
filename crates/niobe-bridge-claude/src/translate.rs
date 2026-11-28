@@ -676,10 +676,12 @@ pub struct Translator {
     turn_follows: Option<bool>,
     /// The operator's messages the CLI said it started and has not said it
     /// completed or cancelled, by the id each was sent with: while any is
-    /// here, the CLI is busy, and a message it queues waits.
+    /// here, or a turn is under way, the CLI is busy, and a message it queues
+    /// waits.
     commands_started: BTreeSet<String>,
-    /// The operator's messages the CLI queued while it was busy with another
-    /// and has not started: each is [`Event::PromptTaken`] when it does.
+    /// The operator's messages the CLI queued while it was busy, with
+    /// another or with a turn, and has not started: each is
+    /// [`Event::PromptTaken`] when it does.
     commands_held: BTreeSet<String>,
     /// Whether a turn of the session's own agent is under way: from the
     /// `init` the CLI starts each turn with, or the agent's first message
@@ -1254,19 +1256,22 @@ impl Translator {
     /// things: when the CLI takes in a message it held, and whether a turn
     /// ends with one still held, which the CLI starts as the turn after.
     ///
-    /// A message is held where the CLI queued it while it was busy with
-    /// another — one it had started and not completed — and taken in where
+    /// A message is held where the CLI queued it while it was busy — with
+    /// another message, one it had started and not completed, or with a
+    /// turn, which may be one it started on its own on background work that
+    /// ended, with no message of the operator's started — and taken in where
     /// it then starts it: inside the running turn, beside a call's result,
     /// or as the turn after the one it waited behind. Recorded from 2.1.323
     /// (`queued-prompts.jsonl`): a message sent while the CLI is idle is
-    /// queued and started on consecutive lines with nothing started before
-    /// it, and is never held.
+    /// queued and started on consecutive lines before the turn's `init`,
+    /// with nothing started before it, and is never held.
     fn lifecycle(&mut self, lifecycle: wire::Lifecycle, out: &mut Vec<Event>) {
         let (Some(id), Some(state)) = (lifecycle.command_uuid, lifecycle.state) else {
             return;
         };
+        let busy = !self.commands_started.is_empty() || self.turn_under_way;
         match state.as_str() {
-            "queued" if !self.commands_started.is_empty() => {
+            "queued" if busy => {
                 self.commands_held.insert(id);
             }
             "started" => {
@@ -7702,14 +7707,15 @@ mod tests {
         }
     }
 
-    /// Only a message queued while another was started and not finished is
-    /// held. One the CLI cancels while it waits is never taken in, nor is
-    /// one queued once the message before it has completed or was cancelled
-    /// as it ran, as an interrupt cancels it; a line naming no message, as
-    /// the hand-written shape before 2.1.323 did, says nothing.
+    /// Between turns, only a message queued while another was started and
+    /// not finished is held. One the CLI cancels while it waits is never
+    /// taken in, nor is one queued once the message before it has completed
+    /// or was cancelled as it ran, as an interrupt cancels it; a line naming
+    /// no message, as the hand-written shape before 2.1.323 did, says
+    /// nothing.
     #[test]
     fn only_a_message_queued_behind_one_still_running_is_taken_in_when_started() {
-        let mut translator = translator();
+        let mut translator = Translator::new("max");
         let mut taken = |line: &str| {
             translator
                 .line(line)
@@ -8490,6 +8496,71 @@ mod tests {
             let lines = [&held[..], &[said("b", state), result(0)]].concat();
             assert_eq!(ended(&lines), [Event::TurnEnded], "{state}");
         }
+    }
+
+    /// A turn the CLI starts on its own — on background work that ended
+    /// under the turn before — is one it is busy with though no message of
+    /// the operator's is started: a message queued during it is held, taken
+    /// in where the CLI starts it, and followed by a turn of its own where
+    /// the turn ends with it still held. One sent once that turn has ended
+    /// is queued and started before the next turn's `init`, and is never
+    /// held.
+    #[test]
+    fn a_message_queued_in_a_turn_the_cli_started_on_its_own_is_held() {
+        let said = |id: &str, state: &str| {
+            format!(r#"{{"type":"command_lifecycle","command_uuid":"{id}","state":"{state}"}}"#)
+        };
+        let init = r#"{"type":"system","subtype":"init","session_id":"s-1"}"#.to_owned();
+        let result =
+            r#"{"type":"result","subtype":"success","is_error":false,"queued_turn_count":0}"#
+                .to_owned();
+        let own_turn = [
+            said("a", "queued"),
+            said("a", "started"),
+            init.clone(),
+            result.clone(),
+            said("a", "completed"),
+            init.clone(),
+            said("p", "queued"),
+        ];
+        let events_of = |lines: &[String]| -> Vec<Vec<Event>> {
+            let mut translator = Translator::new("max");
+            lines.iter().map(|line| translator.line(line)).collect()
+        };
+
+        let held = events_of(&[&own_turn[..], std::slice::from_ref(&result)].concat());
+        assert_eq!(
+            held.last().map(Vec::as_slice),
+            Some(&[Event::TurnFollows, Event::TurnEnded][..])
+        );
+
+        let taken = events_of(&[&own_turn[..], &[said("p", "started"), result.clone()]].concat());
+        assert_eq!(taken[own_turn.len()], [Event::PromptTaken]);
+        assert_eq!(taken[own_turn.len() + 1], [Event::TurnEnded]);
+
+        let idle = [
+            &own_turn[..],
+            &[
+                said("p", "started"),
+                result.clone(),
+                said("p", "completed"),
+                said("q", "queued"),
+                said("q", "started"),
+                init,
+                result,
+            ],
+        ]
+        .concat();
+        let idle = events_of(&idle);
+        let after = own_turn.len() + 3;
+        assert!(
+            idle[after..]
+                .iter()
+                .flatten()
+                .all(|event| !matches!(event, Event::PromptTaken | Event::TurnFollows)),
+            "{:?}",
+            &idle[after..]
+        );
     }
 
     #[test]

@@ -1481,7 +1481,9 @@ taken more than four seconds) or `done`. The lines follow the shapes in the
 CLI's own source, which also adds an `agent_id` to the second inside a
 sub-agent. Two live runs under the driver's flags (`--input-format
 stream-json`, `--permission-prompt-tool stdio`) sent neither, so a recording
-is still wanted.
+is still wanted. The message is `queued` and `started` before the turn's
+`init`, as `queued-prompts.jsonl` recorded a message sent while the CLI is
+idle: one queued once a turn is under way is held behind it.
 
 `tests/stream.rs` folds it and asserts the session says nothing about either
 shape and still holds the one `Bash` call between them; `tests/conformance.rs`
