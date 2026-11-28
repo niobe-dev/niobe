@@ -7703,20 +7703,16 @@ fn directory_row(
     }
     let added = count('+', dir.added.0, dir.added.1);
     let removed = count('−', dir.removed.0, dir.removed.1);
-    // The marker goes with the indent, which the row never cuts: the name
-    // loses its front for room, and the marker is what says the row is
-    // folded, as an open directory's keeps its own.
-    let marked = format!("{indent}▸ ");
     let name = format!("{}  {}", dir.name, files_said(dir.files));
     let mut row = counted_row(
-        &marked,
+        (&indent, "▸ "),
         &name,
         (Tag::None, &added, &removed),
         columns,
         width,
         theme,
     );
-    for span in row.spans.iter_mut().take(2) {
+    if let Some(span) = row.spans.get_mut(1) {
         span.style = style;
     }
     row
@@ -7764,7 +7760,7 @@ fn working_file_row(
         false => file.path.get(under..).unwrap_or(&file.path),
     };
     counted_row(
-        &tree_indent(depth),
+        (&tree_indent(depth), ""),
         name,
         (tag, &measured('+', file.added), &removed_of(file)),
         columns,
@@ -8094,9 +8090,13 @@ impl Columns {
 ///
 /// The name loses its front rather than its tail: a path cut at the front
 /// still names the file, and a count cut anywhere is a different number. The
-/// tag keeps its place beside the counts for the same reason.
+/// tag keeps its place beside the counts for the same reason, and so does a
+/// marker before the name, such as a folded directory's `▸`, which says what
+/// the row is: it is drawn whole at the front of the name's span, which is
+/// the span the section cursor reverses, while the indent stays a blank span
+/// of its own.
 fn counted_row(
-    indent: &str,
+    (indent, marker): (&str, &str),
     name: &str,
     (tag, added, removed): (Tag, &str, &str),
     columns: Columns,
@@ -8107,8 +8107,8 @@ fn counted_row(
     // whole, which is the narrower misalignment of the two.
     let columns = columns.widened(tag, added, removed);
     let counts = columns.width();
-    let room = width.saturating_sub(text::width(indent) + counts + 1);
-    let name = text::truncate_start(name, room);
+    let room = width.saturating_sub(text::width(indent) + text::width(marker) + counts + 1);
+    let name = format!("{marker}{}", text::truncate_start(name, room));
     let gap = width
         .saturating_sub(text::width(indent) + counts)
         .saturating_sub(text::width(&name));
@@ -9706,7 +9706,7 @@ mod tests {
     /// What one row of the working tree reads as, counts and all.
     fn row(path: &str, added: Option<u64>, removed: Option<u64>, width: usize) -> String {
         counted_row(
-            ROW_INDENT,
+            (ROW_INDENT, ""),
             path,
             (Tag::None, &measured('+', added), &measured('−', removed)),
             Columns::default(),

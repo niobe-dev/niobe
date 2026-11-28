@@ -9343,6 +9343,22 @@ fn a_directory_of_the_working_tree_folds_under_the_cursor() {
     );
     assert_snapshot("changes-directory-folded-200x60", &folded);
 
+    // The cursor is still on the folded node, and it marks the node's marker
+    // and name as it marks an open one's, never the indent before them.
+    use ratatui::style::Modifier;
+    for marked in ["▸ cache/", "cache/  2 files"] {
+        let style = style_at(&mut app, 200, 60, marked).expect("the folded node is drawn");
+        assert!(
+            style.add_modifier.contains(Modifier::REVERSED),
+            "{marked:?} is under the cursor: {style:?}"
+        );
+    }
+    let indent = style_at(&mut app, 200, 60, " ▸ cache/").expect("the node is indented");
+    assert!(
+        !indent.add_modifier.contains(Modifier::REVERSED),
+        "the indent is not the cursor: {indent:?}"
+    );
+
     press(&mut app, KeyCode::Enter);
     assert!(screen(&mut app, 200, 60).contains("lru.ts"));
 }
