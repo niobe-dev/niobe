@@ -2567,8 +2567,9 @@ fn mark_found(
 /// on every frame is what a long session's redraw would otherwise spend its
 /// time on. An entry is drawn again when its text, the pane's width or the
 /// theme changes, runs of calls are folded or opened, or — for an entry with
-/// a diff longer than it draws unopened — the diffs are opened or cut, which
-/// is everything its lines depend on.
+/// a diff longer than it draws unopened, a change to the agent's own notes or
+/// a shell command — the diffs are opened or cut, which is everything its
+/// lines depend on.
 #[derive(Debug, Default)]
 pub struct DrawnEntries {
     drawn: Vec<Drawn>,
@@ -3650,8 +3651,9 @@ fn is_row(entry: &Entry) -> bool {
 /// What an entry's lines are drawn from, as one number.
 ///
 /// Whether the diffs are open goes in only for an entry that holds a diff it
-/// would cut or hide, or a shell command whose whole text it would draw, so
-/// opening them lays out again those entries and no other; the
+/// would cut, a change to one of the agent's own notes, which it names
+/// otherwise while they are shut, or a shell command whose whole text it
+/// would draw, so opening them lays out again those entries and no other; the
 /// clock goes in only for one holding a test run still going.
 ///
 /// The body goes in whole only while the entry is streaming. A finished
@@ -3682,7 +3684,7 @@ fn drawn_from(entry: &Entry, width: usize, detail: Detail, theme: &Theme, named:
     width.hash(&mut hasher);
     detail.columns.hash(&mut hasher);
     detail.grouped.hash(&mut hasher);
-    if holds_a_cut_diff(entry) || holds_a_hidden_diff(entry) || ran_a_command(entry) {
+    if holds_a_cut_diff(entry) || changed_a_note(entry) || ran_a_command(entry) {
         detail.diffs_open.hash(&mut hasher);
     }
     testing_for(entry, detail.now).hash(&mut hasher);
@@ -3736,12 +3738,10 @@ fn ran_a_command(entry: &Entry) -> bool {
 }
 
 /// Whether any call of `entry` changed one of the agent's own notes, whose
-/// lines are drawn only while the diffs are open.
-fn holds_a_hidden_diff(entry: &Entry) -> bool {
-    entry
-        .calls
-        .iter()
-        .any(|call| call.memory && call.change.is_some())
+/// row says it updated the agent's memory, and hides the lines it changed,
+/// only while the diffs are shut — whether or not the backend sent any lines.
+fn changed_a_note(entry: &Entry) -> bool {
+    entry.calls.iter().any(|call| call.memory)
 }
 
 /// Whether any call of `entry` changed more rows than a diff draws unopened.
@@ -11979,6 +11979,80 @@ mod tests {
             .position(holds_a_cut_diff)
             .expect("the long write is cut");
         assert_eq!(changed, vec![long]);
+    }
+
+    /// An edit to one of the agent's own notes the backend sent no lines of
+    /// — a sub-agent's edit, or a `replace_all` with no patch — still reads
+    /// `updated memory` only while the diffs are shut, so Ctrl+T draws it
+    /// again, both ways, as a shell that opened on that switch draws it.
+    #[test]
+    fn opening_the_diffs_draws_again_a_note_edited_with_no_lines_both_ways() {
+        use niobe_core::event::{ChangeScope, Event, ToolOutcome};
+        let note = "/home/me/.claude/projects/-w-app/memory/notes.md";
+        let session = |diffs_open: bool| {
+            let mut app = App::new(crate::app::Repo::default());
+            app.show_every_call();
+            if diffs_open {
+                app.open_diffs();
+            }
+            app.apply(&Event::ToolCallStart {
+                id: "n1".into(),
+                name: "Edit".to_owned(),
+                input: String::new(),
+                summary: Some(note.to_owned()),
+                agent: None,
+            });
+            app.apply(&Event::ToolCallEnd {
+                id: "n1".into(),
+                name: "Edit".to_owned(),
+                input: String::new(),
+                output: String::new(),
+                bytes: 64,
+                outcome: ToolOutcome::Ok,
+                summary: Some(note.to_owned()),
+                exit_code: None,
+                error: None,
+                command: None,
+                untrimmed: None,
+            });
+            app.apply(&Event::FileChange {
+                path: note.to_owned(),
+                added: Some(1),
+                removed: Some(0),
+                hunks: Vec::new(),
+                scope: ChangeScope::AgentMemory,
+            });
+            app
+        };
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 30))
+            .expect("a test terminal");
+        let mut frame_of = |app: &mut App| -> String {
+            terminal
+                .draw(|frame| draw(frame, app))
+                .expect("drawing never fails on a test backend");
+            let buffer = terminal.backend().buffer();
+            (0..buffer.area.height)
+                .map(|y| {
+                    (0..buffer.area.width)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        for from_open in [false, true] {
+            let mut app = session(from_open);
+            let before = frame_of(&mut app);
+            app.open_diffs();
+            let switched = frame_of(&mut app);
+            let fresh = frame_of(&mut session(!from_open));
+            assert_ne!(before, fresh, "the switch changes how the note reads");
+            assert_eq!(
+                switched, fresh,
+                "Ctrl+T from diffs open = {from_open} left the note as it was"
+            );
+        }
     }
 
     /// A metered session that spent `cost` over one turn of `seconds`.
