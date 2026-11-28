@@ -1085,7 +1085,7 @@ impl Session {
         // The CLI sets the effort for its own process only, so one started
         // again on the conversation is started at the effort chosen here.
         if let Some(level) = effort_set_by(prompt) {
-            self.next.effort = Some(level.to_owned());
+            self.next.effort = level.map(str::to_owned);
         }
         self.turn_open = true;
         self.sent_after_ends = ends_before;
@@ -2477,16 +2477,25 @@ fn add_saturating(counter: &AtomicU64, by: u64) {
 /// The levels the CLI's `/effort` command and its `--effort` flag take.
 const EFFORT_LEVELS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 
-/// The level `prompt` sets the effort to, where it is the CLI's `/effort`
-/// command with one of [`EFFORT_LEVELS`] and nothing else: anything else
-/// typed after it is no level the CLI would start at.
-fn effort_set_by(prompt: &str) -> Option<&str> {
+/// The word the CLI's `/effort` command takes to put the effort back on the
+/// model's own default, which its `--effort` flag does not take.
+const EFFORT_DEFAULT: &str = "auto";
+
+/// What `prompt` sets the effort to, where it is the CLI's `/effort` command
+/// with one word the CLI takes and nothing else: one of [`EFFORT_LEVELS`],
+/// or `None` for [`EFFORT_DEFAULT`], which a CLI started again is given no
+/// `--effort` for. Anything else is no change: the CLI refuses a word it
+/// does not know as an invalid effort level, and leaves the effort as it was.
+fn effort_set_by(prompt: &str) -> Option<Option<&str>> {
     let mut words = prompt.split_whitespace();
     let level = match (words.next(), words.next(), words.next()) {
         (Some("/effort"), Some(level), None) => level,
         _ => return None,
     };
-    EFFORT_LEVELS.contains(&level).then_some(level)
+    if level == EFFORT_DEFAULT {
+        return Some(None);
+    }
+    EFFORT_LEVELS.contains(&level).then_some(Some(level))
 }
 
 #[cfg(test)]
@@ -4735,11 +4744,38 @@ read -r rest
         assert_eq!(next.effort.as_deref(), Some("low"));
     }
 
+    /// `/effort auto` puts the CLI back on the model's own default, which
+    /// no `--effort` names: a CLI started again after it is started with
+    /// none, rather than at the level picked before it.
+    #[cfg(unix)]
+    #[test]
+    fn an_effort_put_back_on_auto_is_not_the_one_a_cli_started_again_starts_at() {
+        let (mut session, _, _dir) = carried_on(
+            &format!(
+                "read -r initialize\nread -r turn\n{ONE_TURN}\nread -r effort\n{ONE_TURN}\nread -r effort\n{ONE_TURN}\nexit 143\n"
+            ),
+            true,
+        );
+        session
+            .send("/effort max", &[])
+            .expect("the line is queued");
+        drained_until(&mut session, |event| matches!(event, Event::TurnEnded));
+        session
+            .send("/effort auto", &[])
+            .expect("the line is queued");
+        drained_to_the_end(&mut session);
+
+        let next = session.next().expect("the session can carry on");
+        assert_eq!(next.effort, None);
+        assert_eq!(taken(&next.argv(), "--effort"), None);
+    }
+
     #[test]
     fn only_an_effort_the_cli_takes_is_kept_for_a_cli_started_again() {
         for (prompt, kept) in [
-            ("/effort max", Some("max")),
-            ("  /effort xhigh  ", Some("xhigh")),
+            ("/effort max", Some(Some("max"))),
+            ("  /effort xhigh  ", Some(Some("xhigh"))),
+            ("/effort auto", Some(None)),
             ("/effort", None),
             ("/effort fast", None),
             ("/effort low please", None),
