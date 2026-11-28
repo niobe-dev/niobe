@@ -348,8 +348,10 @@ pub struct Options {
     pub ask_title: bool,
     /// The prompts of the conversation its title is made from, oldest first:
     /// its first and its newest few, each on one line and cut as
-    /// [`TITLE_PROMPT`] says. Kept by the session as it sends them, so a CLI
-    /// started again on the conversation titles it from them all.
+    /// [`TITLE_PROMPT`] says. Kept by the session as it sends them, and
+    /// emptied when the conversation is started over with `/clear`, so a CLI
+    /// started again on the conversation titles it from them all and from
+    /// nothing before the clear.
     pub titled_from: Vec<String>,
     /// A directory to keep a copy of what crosses the CLI's pipes in, one
     /// file per process, where one is asked for; see [`crate::tap`]. The file
@@ -649,7 +651,7 @@ pub struct Session {
     usage_wanted: Arc<AtomicBool>,
     /// Set by the thread reading the CLI when it reports the conversation
     /// started over, which is a session with no title yet: it is titled from
-    /// the prompts after it alone.
+    /// the prompts after it alone. See [`Session::title_after_a_clear`].
     cleared: Arc<AtomicBool>,
     /// Set by the thread reading the CLI to whether the last turn's end said
     /// a prompt is queued behind it, before that end goes out: see
@@ -1106,9 +1108,7 @@ impl Session {
     /// conversation started over with `/clear` is a session of its own, and
     /// is titled from the prompts after the clear alone.
     fn ask_for_title(&mut self, prompt: &str) -> std::io::Result<()> {
-        if self.cleared.swap(false, Ordering::AcqRel) {
-            self.next.titled_from.clear();
-        }
+        self.title_after_a_clear();
         if !self.next.ask_title {
             return Ok(());
         }
@@ -1129,6 +1129,19 @@ impl Session {
                 "persist": first,
             }),
         ))
+    }
+
+    /// Forgets the prompts the title is made from where the reader has heard
+    /// the conversation start over since the last look, so that the one after
+    /// the clear — in this CLI, or in one started again on it — is titled from
+    /// its own prompts alone, its first title kept by the CLI. Looked at as a
+    /// prompt is sent, since the reader can hear the clear before a drain hands
+    /// it on, and as the drain does, since no prompt may follow before the CLI
+    /// is started again.
+    fn title_after_a_clear(&mut self) {
+        if self.cleared.swap(false, Ordering::AcqRel) {
+            self.next.titled_from.clear();
+        }
     }
 
     /// Answers a permission prompt the CLI is waiting on.
@@ -1488,7 +1501,8 @@ impl Session {
     }
 
     /// Keeps what `event` says the CLI is now in — its conversation, its mode,
-    /// its model, a turn ended — for a CLI started after it to be in too.
+    /// its model, a turn ended, a conversation started over — for a CLI
+    /// started after it to be in too.
     fn heard(&mut self, event: &Event) {
         if let Event::SessionMeta(meta) = event
             && let Some(conversation) = &meta.backend_session
@@ -1501,6 +1515,9 @@ impl Session {
         }
         if matches!(event, Event::ModeUnknown) {
             self.next.mode_known = false;
+        }
+        if matches!(event, Event::Cleared) {
+            self.title_after_a_clear();
         }
         // A prompt sent while the turn ran and still queued is the CLI's next
         // turn, started as soon as it wrote this end: a CLI stopped now took
@@ -3395,6 +3412,40 @@ mod tests {
     /// A conversation started over is a session with no title, so the CLI is
     /// asked for one again from the prompts after the clear alone, and keeps
     /// the first of them.
+    /// A conversation started over with `/clear` and then stopped between
+    /// turns is carried on as the conversation after the clear: the CLI
+    /// started again titles it from the prompts after it alone, and keeps
+    /// that first title, rather than titling it from the conversation the
+    /// clear ended.
+    #[cfg(unix)]
+    #[test]
+    fn a_cli_started_again_after_a_clear_titles_the_conversation_from_after_it() {
+        let reset =
+            r#"{"type":"conversation_reset","new_conversation_id":"s-2","trigger":"clear"}"#;
+        let (mut session, _dir) = started_with(
+            &format!(
+                "read -r init\nread -r one\nread -r title_one\n{ONE_TURN}\n\
+                 read -r clear\nprintf '%s\\n' '{reset}'\n{ONE_TURN}\nexit 143\n"
+            ),
+            |options| {
+                options.ask_title = true;
+                options.carry_on = true;
+            },
+        );
+        session
+            .send("add etag support", &[])
+            .expect("the stand-in is reading");
+        drained_until(&mut session, |event| matches!(event, Event::TurnEnded));
+        session
+            .send("/clear", &[])
+            .expect("the stand-in is reading");
+        let events = drained_to_the_end(&mut session);
+
+        assert!(events.contains(&Event::Cleared), "{events:#?}");
+        let next = session.next().expect("the session can carry on");
+        assert!(next.titled_from.is_empty(), "{:?}", next.titled_from);
+    }
+
     #[cfg(unix)]
     #[test]
     fn the_cli_is_asked_for_a_title_again_after_a_clear() {
