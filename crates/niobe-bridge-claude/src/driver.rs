@@ -2270,7 +2270,7 @@ fn annotation(input: &serde_json::Value, answered: &Answered) -> Option<serde_js
 /// Written as its own function because it is the half of answering that can be
 /// checked without a subprocess: what reaches the CLI's standard input is the
 /// whole of the protocol on this side.
-fn control_response(
+pub(crate) fn control_response(
     request_id: &str,
     input: &serde_json::Value,
     decision: PermissionDecision,

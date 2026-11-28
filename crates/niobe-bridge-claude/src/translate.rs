@@ -670,6 +670,11 @@ pub struct Translator {
     /// The call each permission prompt the CLI has asked is about, by the
     /// id the CLI asked it under, so that a prompt it withdraws is known.
     open_requests: BTreeMap<String, ToolCallId>,
+    /// Whether the line being read is one read again with what it nested
+    /// too deep cut out (see [`wire::shallow`]): what it carries is not all
+    /// the CLI sent, so a prompt in it is never put to the operator, whose
+    /// approval would hand the CLI the cut arguments to run.
+    cut: bool,
     /// Whether the last turn's end said a prompt is queued behind it, which
     /// the CLI starts as a turn straight after; `None` until a turn's end is
     /// read, and again once taken.
@@ -841,6 +846,7 @@ impl Translator {
             unread_said: BTreeSet::new(),
             short: BTreeSet::new(),
             open_requests: BTreeMap::new(),
+            cut: false,
             turn_follows: None,
             commands_started: BTreeSet::new(),
             commands_held: BTreeSet::new(),
@@ -1386,9 +1392,25 @@ impl Translator {
                     out.extend(self.read(&mended, false));
                     out
                 }
-                None => self.without_figures(line, &error),
+                None => match wire::shallow(line) {
+                    Some(cut) => self.read_cut(&cut),
+                    None => self.without_figures(line, &error),
+                },
             },
         }
+    }
+
+    /// The events of a line serde_json refused for nesting too deep, read
+    /// again as `cut`, with what it nested deepest left out.
+    ///
+    /// A line cut so nests less deeply than serde_json reads, so reading it
+    /// again never comes back here.
+    fn read_cut(&mut self, cut: &str) -> Vec<Event> {
+        let mut out = vec![warn(TOO_DEEP.to_owned())];
+        let was = std::mem::replace(&mut self.cut, true);
+        out.extend(self.read(cut, false));
+        self.cut = was;
+        out
     }
 
     /// A line that did not read as a message, read again without its token
@@ -3162,6 +3184,12 @@ impl Translator {
             !self.open_requests.contains_key(request_id)
                 && !self.open_requests.values().any(|open| open == &id)
         });
+        if self.cut {
+            let tool = body.tool_name.unwrap_or_default();
+            let input = body.input.as_ref().map(render).unwrap_or_default();
+            self.refuse_unseen(id, request_id, (tool, input), agent, out);
+            return;
+        }
         if let Some(request_id) = request_id {
             self.open_requests.insert(request_id.clone(), id.clone());
             self.asked.push(Asked {
@@ -3188,6 +3216,59 @@ impl Translator {
             proposal,
             reason,
             agent,
+        });
+    }
+
+    /// Refuses, here and at once, the prompt `id` the CLI asked by
+    /// `request_id` about a call of `tool` with arguments that nested too
+    /// deep to read whole, `input` being what was left of them.
+    ///
+    /// Shown to the operator, the question would be about arguments nobody
+    /// can see, and an approval hands the CLI back the arguments as read, so
+    /// it would run the cut ones; a standing rule for the whole tool would
+    /// approve it unasked. Refused, the agent reads why and can call again,
+    /// and the CLI is not left waiting on an answer. The prompt and its
+    /// refusal go out together, as a refusal the CLI made by itself does, so
+    /// that nothing answers it a second time.
+    fn refuse_unseen(
+        &mut self,
+        id: ToolCallId,
+        request_id: Option<String>,
+        (tool, input): (String, String),
+        agent: Option<AgentId>,
+        out: &mut Vec<Event>,
+    ) {
+        if let Some(request_id) = request_id {
+            self.requests.push(
+                crate::driver::control_response(
+                    &request_id,
+                    &serde_json::Value::Null,
+                    PermissionDecision::Deny,
+                    Some(UNSEEN),
+                    &[],
+                )
+                .to_string(),
+            );
+        }
+        self.denied.insert(id.as_str().to_owned(), None);
+        out.push(Event::PermissionRequest {
+            id: id.clone(),
+            tool,
+            input,
+            target: None,
+            proposal: None,
+            reason: Some(
+                "its arguments nest too deep for Niobe to read and show whole, so Niobe \
+                 refused it without asking"
+                    .to_owned(),
+            ),
+            agent,
+        });
+        out.push(Event::PermissionResponse {
+            id,
+            decision: PermissionDecision::Deny,
+            message: Some(UNSEEN.to_owned()),
+            answers: Vec::new(),
         });
     }
 
@@ -4216,6 +4297,17 @@ fn compaction(metadata: wire::CompactMetadata) -> Event {
         after: metadata.post_tokens,
     }
 }
+
+/// The warning for a line of the CLI's nested deeper than serde_json reads,
+/// read again with what it nested deepest left out: see [`wire::shallow`].
+pub(crate) const TOO_DEEP: &str = "the CLI sent a line nested deeper than Niobe reads; what it \
+    held deepest is shown as nothing, and the rest of it was read.";
+
+/// What the agent is told of a call refused because its arguments nested
+/// too deep to be shown to the operator.
+const UNSEEN: &str = "Niobe refused this call without asking the operator: its arguments nest \
+    too deep for Niobe to read and show them, so nobody could see what it would do. Call it \
+    again with arguments nested less deeply.";
 
 /// The warning for a line of the CLI's that held half of a character, which
 /// is shown as U+FFFD, as a byte of a line that is not UTF-8 is.
@@ -12735,6 +12827,130 @@ error: could not compile `demo` (lib test) due to 1 previous error";
                 ..UsageWindows::default()
             })),
             "a reset that is no moment leaves the level"
+        );
+    }
+
+    /// Arguments nested `levels` deep: past 127, serde_json refuses the
+    /// whole line they are in.
+    fn nested(levels: usize) -> String {
+        format!(r#"{{"a":{}{}}}"#, "[".repeat(levels), "]".repeat(levels))
+    }
+
+    #[test]
+    fn a_prompt_whose_arguments_nest_past_what_is_read_is_refused_rather_than_left_waiting() {
+        let mut translator = translator();
+        let input = nested(130);
+
+        let events = translator.line(&format!(
+            r#"{{"type":"control_request","request_id":"r1","request":{{"subtype":"can_use_tool","tool_name":"mcp__x__y","tool_use_id":"t1","input":{input}}}}}"#
+        ));
+
+        let asked = events.iter().find_map(|event| match event {
+            Event::PermissionRequest {
+                id,
+                target,
+                proposal,
+                ..
+            } => Some((id.as_str(), target.clone(), proposal.clone())),
+            _ => None,
+        });
+        assert_eq!(asked, Some(("t1", None, None)), "{events:?}");
+        let refused = events.iter().find_map(|event| match event {
+            Event::PermissionResponse {
+                id,
+                decision,
+                message,
+                ..
+            } => Some((id.as_str(), *decision, message.clone())),
+            _ => None,
+        });
+        let Some(("t1", PermissionDecision::Deny, Some(message))) = refused else {
+            panic!("refused here, with words for the agent: {events:?}");
+        };
+        assert!(message.contains("nest"), "{message}");
+        assert!(
+            translator.take_asked().is_empty(),
+            "an answer the operator gave would approve arguments nobody was shown"
+        );
+        let answers: Vec<serde_json::Value> = translator
+            .take_requests()
+            .iter()
+            .map(|line| serde_json::from_str(line).expect("the answer is JSON"))
+            .collect();
+        assert_eq!(
+            answers,
+            [serde_json::json!({
+                "type": "control_response",
+                "response": {
+                    "subtype": "success",
+                    "request_id": "r1",
+                    "response": {"behavior": "deny", "message": message},
+                },
+            })],
+            "the CLI would wait on the prompt for ever"
+        );
+    }
+
+    #[test]
+    fn a_prompt_nested_as_deep_as_is_read_is_asked_as_ever() {
+        let mut translator = translator();
+        let input = nested(100);
+
+        let events = translator.line(&format!(
+            r#"{{"type":"control_request","request_id":"r1","request":{{"subtype":"can_use_tool","tool_name":"mcp__x__y","tool_use_id":"t1","input":{input}}}}}"#
+        ));
+
+        assert!(
+            matches!(events.as_slice(), [Event::PermissionRequest { .. }]),
+            "{events:?}"
+        );
+        assert_eq!(translator.take_asked().len(), 1);
+        assert!(translator.take_requests().is_empty());
+    }
+
+    #[test]
+    fn a_turn_whose_refused_call_nested_past_what_is_read_still_ends() {
+        let mut translator = translator();
+        let input = nested(130);
+
+        let events = translator.line(&format!(
+            r#"{{"type":"result","subtype":"success","usage":{{"input_tokens":3,"output_tokens":5}},"permission_denials":[{{"tool_name":"mcp__x__y","tool_use_id":"t1","tool_input":{input}}}]}}"#
+        ));
+
+        assert_eq!(events.last(), Some(&Event::TurnEnded), "{events:?}");
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                Event::PermissionResponse { id, decision: PermissionDecision::Deny, .. }
+                    if id.as_str() == "t1"
+            )),
+            "{events:?}"
+        );
+    }
+
+    #[test]
+    fn a_call_whose_arguments_and_result_nest_past_what_is_read_still_starts_and_ends() {
+        let mut translator = translator();
+        let deep = nested(130);
+
+        let started = translator.line(&format!(
+            r#"{{"type":"assistant","message":{{"role":"assistant","content":[{{"type":"tool_use","id":"t1","name":"mcp__x__y","input":{deep}}}]}}}}"#
+        ));
+        let ended = translator.line(&format!(
+            r#"{{"type":"user","message":{{"content":[{{"type":"tool_result","tool_use_id":"t1","content":"done"}}]}},"tool_use_result":{deep}}}"#
+        ));
+
+        assert!(
+            started.iter().any(
+                |event| matches!(event, Event::ToolCallStart { id, .. } if id.as_str() == "t1")
+            ),
+            "{started:?}"
+        );
+        assert!(
+            ended
+                .iter()
+                .any(|event| matches!(event, Event::ToolCallEnd { id, .. } if id.as_str() == "t1")),
+            "{ended:?}"
         );
     }
 }

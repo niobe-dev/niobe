@@ -777,7 +777,7 @@ impl Record<'_> {
             },
             Err(error) => Parsed {
                 record: Err(error),
-                mended: false,
+                mended: wire::Mended::default(),
             },
         }
     }
@@ -786,9 +786,11 @@ impl Record<'_> {
 /// One record of a transcript, read.
 struct Parsed {
     record: Result<Line, serde_json::Error>,
-    /// Whether the record read only once each half of a surrogate pair it
-    /// held alone was read as U+FFFD, which is said where it is folded.
-    mended: bool,
+    /// What the record read only once it was mended of — each half of a
+    /// surrogate pair it held alone read as U+FFFD, or what it nested
+    /// deeper than serde_json reads left out — which is said where it is
+    /// folded.
+    mended: wire::Mended,
 }
 
 /// Every record of the transcript `text`, in the order it holds them.
@@ -1396,11 +1398,15 @@ impl Fold {
     /// folds to at the moment `at` names.
     ///
     /// A record that read only once a half of a surrogate pair in it was read
-    /// as U+FFFD is said to have, with the warning the live stream gives.
+    /// as U+FFFD, or once what it nested too deep was left out, is said to
+    /// have, with the warning the live stream gives.
     fn record(&mut self, record: &Record<'_>, parsed: Parsed, agent: Option<&str>) {
         let start = self.out.len();
-        if parsed.mended {
+        if parsed.mended.halves {
             self.unread_record(|| translate::warn(translate::HALF_A_CHARACTER.to_owned()));
+        }
+        if parsed.mended.cut {
+            self.unread_record(|| translate::warn(translate::TOO_DEEP.to_owned()));
         }
         let at = record.at.as_deref().and_then(stamp::parse);
         self.at = at;
@@ -3269,7 +3275,7 @@ mod tests {
             let record = Record { line, at: None };
             let parsed = Parsed {
                 record: serde_json::from_str::<Line>(line),
-                mended: false,
+                mended: wire::Mended::default(),
             };
             fold.record(&record, parsed, None);
         }
@@ -5133,5 +5139,48 @@ mod tests {
             !events.iter().any(|event| matches!(event, Event::Error { message, .. } if message.contains("could not read"))),
             "{events:?}"
         );
+    }
+
+    #[test]
+    fn records_nested_past_what_is_read_read_as_the_live_stream_reads_them() {
+        // An MCP tool's free-form arguments and structured result, nested
+        // past the 127 levels serde_json reads, in the records holding them.
+        let deep = format!("{}{}", "[".repeat(130), "]".repeat(130));
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let session = dir.path().join("s.jsonl");
+        std::fs::write(
+            &session,
+            [
+                format!(
+                    r#"{{"type":"assistant","timestamp":"2026-10-25T10:00:00.000Z","message":{{"model":"claude-opus-5","id":"m1","content":[{{"type":"tool_use","id":"t1","name":"mcp__x__y","input":{{"a":{deep}}}}}],"usage":{{"input_tokens":3,"output_tokens":5}}}}}}"#
+                ),
+                format!(
+                    r#"{{"type":"user","timestamp":"2026-10-25T10:00:01.000Z","message":{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"t1","content":"ok"}}]}},"toolUseResult":{deep}}}"#
+                ),
+            ]
+            .join("\n")
+                + "\n",
+        )
+        .expect("the temporary directory is writable");
+
+        let events = events(&session, "max", dir.path()).expect("the transcript reads");
+
+        assert!(
+            events.iter().any(
+                |event| matches!(event, Event::ToolCallStart { id, .. } if id.as_str() == "t1")
+            ),
+            "{events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, Event::ToolCallEnd { id, .. } if id.as_str() == "t1")),
+            "{events:?}"
+        );
+        let cut = events
+            .iter()
+            .filter(|event| matches!(event, Event::Error { message, fatal: false } if message.contains("nested deeper")))
+            .count();
+        assert_eq!(cut, 2, "{events:?}");
     }
 }

@@ -617,6 +617,52 @@ fn a_call_the_cli_refused_by_itself_is_not_answered_and_the_turn_still_finishes(
     }
 }
 
+/// A `claude` that asks to call an MCP tool with arguments nested past the
+/// 127 levels serde_json reads, as a model may after a prompt injection,
+/// writes down the answer it gets and ends the turn — or, never answered,
+/// ends itself after twenty seconds, so that a run left waiting fails
+/// rather than hang the test.
+fn asks_too_deep_claude() -> String {
+    let deep = format!("{}{}", "[".repeat(130), "]".repeat(130));
+    let request = format!(
+        r#"{{"type":"control_request","request_id":"req_1","request":{{"subtype":"can_use_tool","tool_name":"mcp__x__y","input":{{"a":{deep}}},"tool_use_id":"toolu_1"}}}}"#
+    );
+    format!(
+        "#!/bin/sh\n\
+         (sleep 20; kill $$) </dev/null >/dev/null 2>&1 &\n\
+         read -r first\n\
+         read -r turn\n\
+         printf '%s\\n' '{request}'\n\
+         while read -r answer; do\n\
+         case \"$answer\" in *'\"req_1\"'*) printf '%s\\n' \"$answer\" > answer.json; break ;; esac\n\
+         done\n\
+         printf '%s\\n' '{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"refused\"}}'\n\
+         while read -r line; do :; done\n"
+    )
+}
+
+#[test]
+fn a_prompt_nested_too_deep_to_read_is_refused_whatever_rule_names_its_tool() {
+    // A rule for the whole tool: read as a prompt like any other, the call
+    // would be approved with arguments nobody saw.
+    let setup = Setup::new(&asks_too_deep_claude(), METERED);
+    let output = setup.run(&["-p", "look it up", "--allow", "mcp__x__y"]);
+
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+    let answer = std::fs::read_to_string(setup.repo().join("answer.json"))
+        .expect("the stand-in was answered rather than left waiting");
+    let answer: Value = serde_json::from_str(&answer).expect("the answer is one JSON line");
+    assert_eq!(answer["response"]["request_id"], "req_1", "{answer}");
+    assert_eq!(
+        answer["response"]["response"]["behavior"], "deny",
+        "{answer}"
+    );
+    let said = answer["response"]["response"]["message"]
+        .as_str()
+        .expect("a refusal carries its words");
+    assert!(said.contains("nest"), "{said}");
+}
+
 /// A `claude` that, once the turn reaches it, starts a process that outlives
 /// it unless something ends it — as a call to `Bash` running a server or a
 /// watcher does — writes that process's id to `tool.pid` and waits.

@@ -1418,26 +1418,54 @@ pub(crate) fn without_lone_surrogates(line: &str) -> Option<String> {
 /// November 2026, held fewer than 25,000, counted as [`values_past`] counts.
 pub(crate) const VALUES: usize = 250_000;
 
-/// `line` read as a `T`, and whether it read only once each half of a
-/// surrogate pair it holds alone was written as U+FFFD: see
-/// [`without_lone_surrogates`]. The error is the one `line` gave as written,
-/// or that it holds more than [`VALUES`] values, which it is not read past.
+/// What a line read by [`from_line`] had done to it before it read.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Mended {
+    /// Each half of a surrogate pair it held alone was written as U+FFFD:
+    /// see [`without_lone_surrogates`].
+    pub(crate) halves: bool,
+    /// What it nested deeper than serde_json reads was left out: see
+    /// [`shallow`].
+    pub(crate) cut: bool,
+}
+
+/// `line` read as a `T`, and what it read only once it was mended of. The
+/// error is the one `line` gave as written, or that it holds more than
+/// [`VALUES`] values, which it is not read past.
 pub(crate) fn from_line<T: serde::de::DeserializeOwned>(
     line: &str,
-) -> Result<(T, bool), serde_json::Error> {
+) -> Result<(T, Mended), serde_json::Error> {
     if values_past(line, VALUES) {
         return Err(<serde_json::Error as serde::de::Error>::custom(format!(
             "it holds more than {VALUES} values, more than any record the CLI writes"
         )));
     }
-    match serde_json::from_str(line) {
-        Ok(read) => Ok((read, false)),
-        Err(error) => match without_lone_surrogates(line)
-            .and_then(|mended| serde_json::from_str(&mended).ok())
-        {
-            Some(read) => Ok((read, true)),
-            None => Err(error),
-        },
+    let error = match serde_json::from_str(line) {
+        Ok(read) => return Ok((read, Mended::default())),
+        Err(error) => error,
+    };
+    let halves = without_lone_surrogates(line);
+    let whole = halves.as_deref().unwrap_or(line);
+    if halves.is_some()
+        && let Ok(read) = serde_json::from_str(whole)
+    {
+        return Ok((
+            read,
+            Mended {
+                halves: true,
+                cut: false,
+            },
+        ));
+    }
+    match shallow(whole).and_then(|cut| serde_json::from_str(&cut).ok()) {
+        Some(read) => Ok((
+            read,
+            Mended {
+                halves: halves.is_some(),
+                cut: true,
+            },
+        )),
+        None => Err(error),
     }
 }
 
@@ -1465,9 +1493,166 @@ fn values_past(line: &str, most: usize) -> bool {
     false
 }
 
+/// How deeply serde_json reads arrays and objects nested in one another: the
+/// container that would be the 128th open at once refuses the whole line.
+const DEPTH_READ: usize = 128;
+
+/// How deeply a line read again by [`shallow`] nests at most, well inside
+/// [`DEPTH_READ`] so that what the line is read into can nest a few levels of
+/// its own. No message the CLI writes comes near it.
+pub(crate) const DEPTH_KEPT: usize = 64;
+
+/// `line` with every array or object at [`DEPTH_KEPT`] that holds another
+/// written as `null`, so that it nests less deeply than that, or `None` where
+/// the line is one serde_json reads as it is, nesting less than
+/// [`DEPTH_READ`] deep.
+///
+/// The nesting is free-form wherever the CLI passes on what it did not
+/// write — a tool's arguments, the structured result an MCP server returned
+/// — and serde_json refuses a line nested too deep whole: a message read
+/// into a type tagged by its `type` holds every field before it reads any,
+/// so a field nothing reads still loses the line, and with it a permission
+/// prompt the CLI waits on for ever or the `result` that ends the turn. Read
+/// again with the depths cut, its `type`, its ids and its figures, which sit
+/// near the top, read as they were.
+///
+/// The container holding the one too deep is what is cut, not that one, so
+/// that what is written is never longer than the line: a container that
+/// holds another is at least the four bytes of `null`. One pass, holding
+/// nothing but the copy, following the strings and their escapes as
+/// [`values_past`] does, so a bracket inside a string is text.
+pub(crate) fn shallow(line: &str) -> Option<String> {
+    let mut kept = String::new();
+    let mut depth = 0usize;
+    let mut deepest = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut copied = 0;
+    let mut cutting = false;
+    let mut opened = 0;
+    for (at, byte) in line.bytes().enumerate() {
+        match (in_string, escaped, byte) {
+            (true, true, _) => escaped = false,
+            (true, false, b'\\') => escaped = true,
+            (true, false, b'"') | (false, _, b'"') => in_string = !in_string,
+            (false, _, b'[' | b'{') => {
+                depth = depth.saturating_add(1);
+                deepest = deepest.max(depth);
+                if depth == DEPTH_KEPT && !cutting {
+                    opened = at;
+                } else if depth > DEPTH_KEPT && !cutting {
+                    // Held only once there is something to cut, so a line
+                    // that fails to read for another reason costs no copy.
+                    kept.reserve(line.len().saturating_sub(kept.len()));
+                    kept.push_str(line.get(copied..opened)?);
+                    kept.push_str("null");
+                    cutting = true;
+                }
+            }
+            (false, _, b']' | b'}') => {
+                if cutting && depth == DEPTH_KEPT {
+                    cutting = false;
+                    copied = at + 1;
+                }
+                depth = depth.saturating_sub(1);
+            }
+            (true, false, _) | (false, _, _) => {}
+        }
+    }
+    if deepest < DEPTH_READ {
+        return None;
+    }
+    if !cutting {
+        kept.push_str(line.get(copied..)?);
+    }
+    Some(kept)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// How deeply `json` nests its arrays and objects, as serde_json counts.
+    fn depth_of(json: &str) -> usize {
+        let value: serde_json::Value = serde_json::from_str(json).expect("the line reads");
+        let mut deepest = 0;
+        let mut open = vec![(&value, 0)];
+        while let Some((value, depth)) = open.pop() {
+            let inner: Vec<&serde_json::Value> = match value {
+                serde_json::Value::Array(items) => items.iter().collect(),
+                serde_json::Value::Object(fields) => fields.values().collect(),
+                _ => continue,
+            };
+            deepest = deepest.max(depth + 1);
+            open.extend(inner.into_iter().map(|inner| (inner, depth + 1)));
+        }
+        deepest
+    }
+
+    fn tower(levels: usize) -> String {
+        format!("{}{}", "[".repeat(levels), "]".repeat(levels))
+    }
+
+    #[test]
+    fn a_line_nested_past_what_is_read_is_read_again_cut_where_it_nests_too_deep() {
+        let line = format!(
+            r#"{{"type":"x","deep":{},"beside":[1,{{"b":"]]}}\"[["}}],"also":{},"id":"t1"}}"#,
+            tower(200),
+            tower(DEPTH_READ),
+        );
+        assert!(serde_json::from_str::<serde_json::Value>(&line).is_err());
+
+        let kept = shallow(&line).expect("the line nests past what is read");
+
+        let read: serde_json::Value = serde_json::from_str(&kept).expect("the cut line reads");
+        assert_eq!(read["type"], "x");
+        assert_eq!(read["id"], "t1", "what follows a cut is kept");
+        assert_eq!(
+            read["beside"],
+            serde_json::json!([1, {"b": "]]}\"[["}]),
+            "brackets in a string are text"
+        );
+        assert_eq!(depth_of(&kept), DEPTH_KEPT - 1);
+        assert!(kept.len() <= line.len());
+    }
+
+    #[test]
+    fn a_line_serde_reads_as_it_is_is_not_cut() {
+        let line = tower(DEPTH_READ - 1);
+        assert!(serde_json::from_str::<serde_json::Value>(&line).is_ok());
+        assert!(serde_json::from_str::<serde_json::Value>(&tower(DEPTH_READ)).is_err());
+
+        assert_eq!(shallow(&line), None);
+        assert_eq!(shallow(r#"{"a":"[[[[","b":1}"#), None);
+    }
+
+    #[test]
+    fn a_cut_line_is_never_longer_than_the_line() {
+        // A thousand of the smallest containers that hold another, each at
+        // the depth kept, beside the one that nests past what is read.
+        let line = format!(
+            "{}{}{}{}",
+            "[".repeat(DEPTH_KEPT - 1),
+            "[[]],".repeat(1_000),
+            tower(DEPTH_READ),
+            "]".repeat(DEPTH_KEPT - 1)
+        );
+
+        let kept = shallow(&line).expect("the line nests past what is read");
+
+        assert!(kept.len() <= line.len(), "{} > {}", kept.len(), line.len());
+        assert_eq!(depth_of(&kept), DEPTH_KEPT - 1);
+    }
+
+    #[test]
+    fn a_line_left_open_past_the_depth_is_cut_and_still_fails_to_read() {
+        let line = format!(r#"{{"type":"x","a":{}"#, "[".repeat(300));
+
+        let kept = shallow(&line).expect("the line nests past what is read");
+
+        assert!(kept.len() <= line.len());
+        assert!(serde_json::from_str::<serde_json::Value>(&kept).is_err());
+    }
 
     #[test]
     fn a_line_of_more_values_than_any_record_holds_is_not_read() {

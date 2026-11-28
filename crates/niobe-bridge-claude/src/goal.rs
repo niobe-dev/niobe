@@ -308,4 +308,18 @@ mod tests {
             None
         );
     }
+
+    #[test]
+    fn a_goal_record_beside_fields_nested_past_what_serde_reads_still_reads() {
+        // A record is read into plain structs, whose fields nothing names are
+        // passed over without counting how deep they nest.
+        let deep = format!("{}{}", "[".repeat(200), "]".repeat(200));
+        let line = format!(
+            r#"{{"type":"attachment","toolUseResult":{deep},"attachment":{{"type":"goal_status","met":false,"sentinel":true,"condition":"two replies","extra":{deep}}}}}"#
+        );
+        assert_eq!(
+            pursued(transcript(&[&line]).path()).as_deref(),
+            Some("two replies")
+        );
+    }
 }
