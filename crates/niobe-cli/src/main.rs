@@ -2035,12 +2035,18 @@ fn replay(log: &Path, speed: Option<playback::Speed>, asked: &Asked) -> Result<(
     // on, they are folded here at once.
     let at_speed = speed.filter(|_| terminal);
     if at_speed.is_none() {
-        for (event, at) in &events {
-            match at {
-                Some(at) => app.apply_at(event, clock.at(*at)),
-                None => app.apply(event),
+        app.reading_back(|app| {
+            for (event, at) in &events {
+                match at {
+                    Some(at) => app.apply_at(event, clock.at(*at)),
+                    None => app.apply(event),
+                }
             }
-        }
+        });
+        // Read back from a record as a resumed session is from the store's:
+        // any plan windows it holds are a reading from when they were
+        // recorded, and are dated.
+        app.resumed();
     }
     let elapsed = started.elapsed();
 
