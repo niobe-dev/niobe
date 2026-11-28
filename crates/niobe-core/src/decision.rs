@@ -12,12 +12,23 @@
 //! have wrong. Everything that shows a decision says so; nothing here or
 //! downstream counts one as a fact about the code.
 //!
-//! A line inside a fenced code block is code, not a statement, and is never
-//! read: a reply that shows a log or a script holding the marker has decided
-//! nothing by it, whether the block stands alone or inside a quote or a list
-//! item, where its fences are written behind the `>` or the bullet. A marker the model dressed in markdown — a list bullet, or
-//! bold around the word — is read past, since the request cannot stop a model
-//! from formatting it.
+//! A line of a code block is code, not a statement, and is never read: a
+//! reply that shows a log or a script holding the marker has decided nothing
+//! by it. That is a fenced block, whether it stands alone or inside a quote or
+//! a list item, where its fences are written behind the `>` or the bullet; and
+//! an indented one, as CommonMark and the transcript read it: a line indented
+//! four columns or more past the content of the list item it is in, or of its
+//! quote where it is in none — a tab reaching the next stop of four — where no
+//! paragraph is open, which is at the reply's start and after a blank line, a
+//! heading, a rule or a fence. An indented line straight after a paragraph's
+//! goes on with that paragraph, as does one outside the paragraph's quote or
+//! list item, lazily, and is read. The lines are read by the quotes and the
+//! list items they sit in rather than parsed as a whole document, so a block
+//! that is not followed, such as an HTML block, reads as text.
+//!
+//! A marker the model dressed in markdown — a list bullet, or bold around the
+//! word — is read past, since the request cannot stop a model from
+//! formatting it.
 
 /// The word a reply's line opens with to state a decision, colon included.
 pub const MARKER: &str = "DECISION:";
@@ -30,23 +41,161 @@ pub const LONGEST: usize = 300;
 /// Every decision `reply` states, in the order it states them.
 pub fn decisions(reply: &str) -> Vec<String> {
     let mut fence: Option<Fence> = None;
+    let mut blocks = Blocks::default();
     let mut found = Vec::new();
     for line in reply.lines() {
         let held = Held::of(line);
         // Where the quote or the list item the fence was opened in has
         // ended, the fence has with it, and the line is read as any other.
         if let Some(open) = fence.take_if(|open| open.goes_on(line, &held)) {
-            if !open.closed_by(&held) {
-                fence = Some(open);
+            match open.closed_by(&held) {
+                true => blocks.fence_closed(),
+                false => fence = Some(open),
             }
             continue;
         }
-        fence = Fence::opened(&held);
+        let opens = Fence::opened(&held);
+        if blocks.code(&held, opens.is_some()) {
+            continue;
+        }
+        fence = opens;
         if fence.is_none() {
             found.extend(stated(line.trim()));
         }
     }
     found
+}
+
+/// What the lines before a line outside a fence leave open for it: the
+/// paragraph an indented line goes on with, and the list items whose content
+/// its indent is measured from.
+#[derive(Debug, Default)]
+struct Blocks {
+    /// How many quotes the last line was in. The list items are those
+    /// opened inside as many.
+    quotes: usize,
+    /// Whether the last line was a paragraph's, which an indented line goes
+    /// on with rather than starting code.
+    paragraph: bool,
+    /// The column each list item open inside the quotes has its content at,
+    /// the outermost first.
+    items: Vec<usize>,
+}
+
+impl Blocks {
+    /// Reads `held`, and says whether it is a line of an indented code
+    /// block: indented four columns or more past the content of the list
+    /// item it is in, or of the quote where it is in none, where no
+    /// paragraph is open, as CommonMark reads one. `fenced` says whether the
+    /// line opens a fence, which ends a paragraph and starts none.
+    fn code(&mut self, held: &Held, fenced: bool) -> bool {
+        if held.body.is_empty() {
+            self.paragraph = false;
+            self.contain(held.quotes);
+            return false;
+        }
+        // The content of the deepest list item the line is indented into,
+        // in the quotes it is in.
+        let same = held.quotes == self.quotes;
+        let base = match same {
+            true => self
+                .items
+                .iter()
+                .rev()
+                .copied()
+                .find(|&content| content <= held.lead),
+            false => None,
+        }
+        .unwrap_or(0);
+        let indented = held.lead >= base.saturating_add(4);
+        if self.paragraph && held.quotes <= self.quotes && (indented || !interrupts(held, fenced)) {
+            // The paragraph's own text, or text that goes on with it lazily
+            // from outside its quote or its list item, which leaves both
+            // open and cannot be its heading's underline.
+            let lazy = !same || base < self.base();
+            if !indented && !lazy && underline(held.body) {
+                self.paragraph = false;
+            }
+            return false;
+        }
+        self.contain(held.quotes);
+        self.items.retain(|&content| content <= held.lead);
+        if indented {
+            self.paragraph = false;
+            return true;
+        }
+        if held.listed && !thematic_break(held.body) {
+            self.items.push(held.indent);
+        }
+        self.paragraph = opens_a_paragraph(held, fenced);
+        false
+    }
+
+    /// The column the content of the list item the next line may be in
+    /// starts at: the innermost open, or the quote's edge.
+    fn base(&self) -> usize {
+        self.items.last().copied().unwrap_or(0)
+    }
+
+    /// Moves into `quotes` quotes, where the list items open in others are
+    /// not.
+    fn contain(&mut self, quotes: usize) {
+        if quotes != self.quotes {
+            self.quotes = quotes;
+            self.items.clear();
+        }
+    }
+
+    /// A fenced block ended, which no paragraph goes on past.
+    fn fence_closed(&mut self) {
+        self.paragraph = false;
+    }
+}
+
+/// Whether `held`, a line that is not blank, starts a block of its own even
+/// where a paragraph is open: a list item, a heading, a thematic break or,
+/// where `fenced` says it opens one, a fence.
+fn interrupts(held: &Held, fenced: bool) -> bool {
+    fenced || held.listed || heading(held.content) || rule(held)
+}
+
+/// Whether `held`, a line that is not blank and starts a block, starts a
+/// paragraph: text, not a heading, a rule or a fence, nor a list marker
+/// with nothing after it; `fenced` says whether it opens a fence.
+fn opens_a_paragraph(held: &Held, fenced: bool) -> bool {
+    !(fenced || held.content.is_empty() || heading(held.content) || rule(held))
+}
+
+/// Whether `held` is a thematic break, or a list item holding one.
+fn rule(held: &Held) -> bool {
+    thematic_break(held.body) || thematic_break(held.content)
+}
+
+/// `#` to `######` and a blank or nothing after it.
+fn heading(text: &str) -> bool {
+    let hashes = text.bytes().take_while(|b| *b == b'#').count();
+    (1..=6).contains(&hashes)
+        && text
+            .get(hashes..)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with([' ', '\t']))
+}
+
+/// Three or more of `-`, `*` or `_`, one of them alone, with blanks between.
+fn thematic_break(text: &str) -> bool {
+    let mut marks = text.chars().filter(|c| !matches!(c, ' ' | '\t'));
+    let Some(mark) = marks.next().filter(|c| matches!(c, '-' | '*' | '_')) else {
+        return false;
+    };
+    marks
+        .try_fold(1usize, |count, c| (c == mark).then_some(count + 1))
+        .is_some_and(|count| count >= 3)
+}
+
+/// A run of `=` or of `-` alone, which makes the paragraph above it a
+/// heading.
+fn underline(body: &str) -> bool {
+    let marks = body.trim_end();
+    marks.bytes().all(|b| b == b'=') || marks.bytes().all(|b| b == b'-')
 }
 
 /// A fenced code block that is open: what closes it, and the quote and the
@@ -134,6 +283,9 @@ struct Held<'a> {
     listed: bool,
     /// The column the content starts at inside the quotes.
     indent: usize,
+    /// The line inside the quotes from its first character that is not
+    /// blank, list marker and all.
+    body: &'a str,
     content: &'a str,
 }
 
@@ -141,18 +293,38 @@ impl<'a> Held<'a> {
     fn of(line: &'a str) -> Self {
         let mut rest = line;
         let mut quotes = 0;
+        // The column the quotes' content starts at, and how much of a tab
+        // straight after the last `>` is the blank the `>` takes with it:
+        // a tab is as wide as the columns to the next stop of four from
+        // where it is, which inside a quote is not where the quote starts.
+        let mut edge = 0;
+        let mut taken = 0;
         while let Some(inside) = rest.trim_start().strip_prefix('>') {
             quotes += 1;
-            rest = inside.strip_prefix(' ').unwrap_or(inside);
+            edge = past(edge, &rest[..rest.len() - rest.trim_start().len()]) + 1;
+            taken = 0;
+            rest = match inside.strip_prefix(' ') {
+                Some(after) => {
+                    edge += 1;
+                    after
+                }
+                None => {
+                    taken = usize::from(inside.starts_with('\t'));
+                    inside
+                }
+            };
         }
+        let inside = |column: usize| column.saturating_sub(edge).saturating_sub(taken);
         let body = rest.trim_start();
-        let lead = columns(&rest[..rest.len() - body.len()]);
+        let start = past(edge, &rest[..rest.len() - body.len()]);
+        let lead = inside(start);
         let Some((marker, item)) = list_marker(body) else {
             return Self {
                 quotes,
                 lead,
                 listed: false,
                 indent: lead,
+                body,
                 content: body,
             };
         };
@@ -161,7 +333,8 @@ impl<'a> Held<'a> {
             quotes,
             lead,
             listed: true,
-            indent: lead + marker + columns(&item[..item.len() - content.len()]),
+            indent: inside(past(start + marker, &item[..item.len() - content.len()])),
+            body,
             content,
         }
     }
@@ -188,9 +361,10 @@ fn list_marker(body: &str) -> Option<(usize, &str)> {
     item.starts_with([' ', '\t']).then_some((marker, item))
 }
 
-/// The columns `blank` takes, a tab moving to the next stop of four.
-fn columns(blank: &str) -> usize {
-    blank.chars().fold(0, |column, c| match c {
+/// The column `blank`, written from `column`, ends at, a tab moving to the
+/// next stop of four.
+fn past(column: usize, blank: &str) -> usize {
+    blank.chars().fold(column, |column, c| match c {
         '\t' => column + 4 - column % 4,
         _ => column + 1,
     })
@@ -297,6 +471,91 @@ mod tests {
 
         let not_a_fence = "```js` is how it is written\nDECISION: read";
         assert_eq!(decisions(not_a_fence), ["read"]);
+    }
+
+    /// As CommonMark reads an indented code block, and as the transcript
+    /// draws one: a line indented four columns or more past its container
+    /// that does not go on with a paragraph.
+    #[test]
+    fn a_marker_in_an_indented_code_block_is_code_and_not_a_decision() {
+        let after_a_blank = "The log said:\n\n    DECISION: from the fixture\n";
+        assert_eq!(decisions(after_a_blank), [] as [&str; 0]);
+
+        let tabbed = "The log said:\n\n\tDECISION: from the fixture\n\nDECISION: after";
+        assert_eq!(decisions(tabbed), ["after"]);
+
+        let first = "    DECISION: the reply opens with code\nDECISION: after";
+        assert_eq!(decisions(first), ["after"]);
+
+        let after_a_heading = "## Log\n    DECISION: code under a heading\n";
+        assert_eq!(decisions(after_a_heading), [] as [&str; 0]);
+
+        let after_a_fence = "```\nx\n```\n    DECISION: code after a fence\n";
+        assert_eq!(decisions(after_a_fence), [] as [&str; 0]);
+
+        let quoted = "> The log said:\n>\n>     DECISION: quoted code\n";
+        assert_eq!(decisions(quoted), [] as [&str; 0]);
+
+        // A tab after a quote's `>` reaches the next stop of four from
+        // where it is, which is two columns past the quote's own blank.
+        let tab_in_a_quote = "> The log said:\n>\n> \tDECISION: two columns in\n";
+        assert_eq!(decisions(tab_in_a_quote), ["two columns in"]);
+
+        let after_a_rule = "---\n    DECISION: code after a rule\n";
+        assert_eq!(decisions(after_a_rule), [] as [&str; 0]);
+
+        let after_an_underline = "Title\n===\n    DECISION: code under a heading\n";
+        assert_eq!(decisions(after_an_underline), [] as [&str; 0]);
+
+        // Blank lines inside the block are the block's; a line indented
+        // less ends it.
+        let long = "\n    one\n\n    DECISION: still code\nDECISION: after";
+        assert_eq!(decisions(long), ["after"]);
+    }
+
+    /// A list item's content starts past its marker, so code in it is
+    /// indented four further than that, and a line indented as far as the
+    /// content is the item's text.
+    #[test]
+    fn code_in_a_list_item_is_indented_four_past_the_items_content() {
+        let in_an_item = "- Run it:\n\n      DECISION: code in the item\n\nDECISION: after";
+        assert_eq!(decisions(in_an_item), ["after"]);
+
+        let item_text = "- Ran it.\n\n    DECISION: the item's own text\n";
+        assert_eq!(decisions(item_text), ["the item's own text"]);
+
+        let numbered = "1. Ran it.\n\n     DECISION: the item's own text\n";
+        assert_eq!(decisions(numbered), ["the item's own text"]);
+
+        // Out of a nested item, the outer item's content is what the indent
+        // is measured from.
+        let nested = "- a\n  - b\n\n  text of a\n\n    DECISION: still a's text\n";
+        assert_eq!(decisions(nested), ["still a's text"]);
+
+        let after_the_list = "- a\n\nText.\n\n    DECISION: code after the list\n";
+        assert_eq!(decisions(after_the_list), [] as [&str; 0]);
+    }
+
+    /// An indented line cannot start code where a paragraph is open: it goes
+    /// on with the paragraph, however far it is indented.
+    #[test]
+    fn an_indented_line_that_goes_on_with_a_paragraph_is_read() {
+        let continued = "work\n    DECISION: kept the flag\n";
+        assert_eq!(decisions(continued), ["kept the flag"]);
+
+        let in_an_item = "- work\n      DECISION: kept the flag\n";
+        assert_eq!(decisions(in_an_item), ["kept the flag"]);
+
+        let lazy = "> quoted work\n    DECISION: kept the flag\n";
+        assert_eq!(decisions(lazy), ["kept the flag"]);
+
+        // A line that goes on lazily is text, never the underline that
+        // would make the paragraph a heading and end it.
+        let lazy_underline = "> quoted work\n===\n    DECISION: kept the flag\n";
+        assert_eq!(decisions(lazy_underline), ["kept the flag"]);
+
+        let indented_rule = "work\n    ---\n    DECISION: kept the flag\n";
+        assert_eq!(decisions(indented_rule), ["kept the flag"]);
     }
 
     #[test]

@@ -88,7 +88,7 @@ reviewers that encode both, for an agent working in this tree.
   went; `attention.rs` is how much an event asks of the operator — it needs them, it is notable,
   or it is routine — read from the event alone, never by a model, so the shell's transcript can
   leave the routine out and a session read back reads as it did live. `decision.rs` reads the
-  decisions a reply states — each line that opens `DECISION:`, outside fenced code — which
+  decisions a reply states — each line that opens `DECISION:`, outside fenced or indented code — which
   the binary asks the agent for and the fold keeps as the agent's own account, never as a
   fact it checked. `goal.rs` is the goal the operator set the agent with `/goal` — set, each check
   the backend ran on it and why it found it not met, met, or cleared — as the backend reported it,
