@@ -20,8 +20,10 @@
 //!   `$[…]`, which can build a command out of text that shows none), nor
 //!   holds in one word the pieces a shell can join into such an expansion
 //!   after reading it (a `~` and a `[`, which zsh can make `~[…]` of, or a
-//!   brace beside a `$`, a `~` or a `[`), nor climbs above the prefix with
-//!   `..` — or with `%2e%2e`, which a URL parser reads as `..`.
+//!   brace beside a `$`, a `~`, a `[` or the `..` of a sequence such as
+//!   `{Z..a}`, which makes characters the text never held), nor climbs above
+//!   the prefix with `..` — or with `%2e%2e`, which a URL parser reads as
+//!   `..`.
 //! * `Edit(/repo/src/*)`, `Bash(cat src/*)` — a star inside a word finishes
 //!   that one word and nothing else: a name of plain characters, with no
 //!   space before a second argument and nothing a shell would expand, and one
@@ -197,7 +199,9 @@ impl Rule {
     /// same call: `Bash(cargo *)` covers `cargo test --workspace` but not
     /// `cargo test && rm -rf ~`, nor `cargo test ${y[$'a[\x60id\x60]']}`,
     /// whose escapes bash makes backquotes of and runs, nor
-    /// `git status {x,~}[x]`, whose braces zsh joins into `~[x]`; and
+    /// `git status {x,~}[x]`, whose braces zsh joins into `~[x]`, nor
+    /// `git status {Z..a}id{Z..a}`, whose sequences bash makes backquotes of;
+    /// and
     /// `Edit(/repo/src/*)` does not cover `/repo/src/../../etc/passwd`. A star
     /// inside a word stands for the rest of that word alone, so
     /// `Bash(cat src/*)` does not cover `cat src/x ../secret`. The check reads
@@ -326,10 +330,11 @@ fn star_stands_for(prefix: &str, rest: &str) -> bool {
 /// agent's, and neither shell reads a value it substitutes as a command —
 /// zsh's `$HOME:s/…/…/` included, even with `GLOB_SUBST` on — unless a
 /// bracket or a backquote of its own makes it one. So are quotes, a
-/// backslash, braces in a word of their own, a tilde, `=cmd` and `!`, which a
-/// shell that is not interactive does not read as history: none of them made
-/// anything run under bash, sh, dash or zsh. The last character of the prefix
-/// is read before `rest` because a star finishes the `$` a prefix ends on.
+/// backslash, braces that list alternatives in a word of their own, a tilde,
+/// `=cmd` and `!`, which a shell that is not interactive does not read as
+/// history: none of them made anything run under bash, sh, dash or zsh. The
+/// last character of the prefix is read before `rest` because a star
+/// finishes the `$` a prefix ends on.
 fn expands_to_no_code(prefix: &str, rest: &str) -> bool {
     let mut chars = prefix
         .chars()
@@ -358,13 +363,22 @@ fn expands_to_no_code(prefix: &str, rest: &str) -> bool {
 /// zsh 5.9 with the CLI's options and with the defaults; and bash expands
 /// braces before parameters, so `{$,}{x}` is `${x}` there — a `$` the reading
 /// in [`expands_to_no_code`] refuses already, and a brace beside any `$` is
-/// asked about rather than trusted to that reading. Braces only move
-/// what the word holds, so a brace in a word with none of those three joins
-/// nothing a shell expands further: `{a,b}` stays covered. A `=` beside a
-/// brace stays covered as well, since zsh's `=cmd` expands to a path and
-/// nothing else, and a star inside a word may stand for a `=`, so refusing it
-/// here would leave a rule that ends inside such a word including a call the
-/// wider rule refuses. A `~`, `[` or `$` that quotes make literal is counted
+/// asked about rather than trusted to that reading. One that holds a brace
+/// and two dots is refused too, since a sequence makes characters the text
+/// never held: bash, 5.2 as much as 3.2, the Mac's `/bin/bash` and
+/// `/bin/sh`, makes `{Z..a}` of ``Z [ \ ] ^ _ ` a`` and reads what it made as
+/// shell text, so its backquotes open command substitutions; zsh makes `.` and `/` of `{-..1}`,
+/// a path the text does not show, and reads dots that quotes or a backslash
+/// separate, `{Z"..a"}` or `{Z.\.a}`, as a sequence's, so those count as two
+/// dots here. A numeric `{1..3}` makes only digits and `-`, but telling one
+/// from a character range means reading the quotes inside the brace as each
+/// shell does, so every sequence is asked about. Alternatives only move what
+/// the word holds, so a brace in a word with none of those joins nothing a
+/// shell expands further: `{a,b}` stays covered. A `=` beside a brace stays
+/// covered as well, since zsh's `=cmd` expands to a path and nothing else,
+/// and a star inside a word may stand for a `=`, so refusing it here would
+/// leave a rule that ends inside such a word including a call the wider rule
+/// refuses. A brace, `~`, `[`, `$` or dot that quotes make literal is counted
 /// all the same: a word that holds one beside the rest is asked about, which
 /// is the safe side of reading a quote wrongly.
 fn joins_into_no_expansion(prefix: &str, rest: &str) -> bool {
@@ -441,6 +455,11 @@ struct Word {
     bracket: bool,
     brace: bool,
     dollar: bool,
+    /// Two dots with nothing but quotes and backslashes between them, which
+    /// zsh reads as the `..` of a sequence as bash reads a bare one.
+    dots: bool,
+    /// The last character that was not a quote or a backslash was a dot.
+    after_a_dot: bool,
 }
 
 impl Word {
@@ -453,12 +472,20 @@ impl Word {
             '$' => self.dollar = true,
             _ => {}
         }
+        match c {
+            '.' => {
+                self.dots |= self.after_a_dot;
+                self.after_a_dot = true;
+            }
+            '\'' | '"' | '\\' => {}
+            _ => self.after_a_dot = false,
+        }
     }
 
     fn may_join_into_an_expansion(&self) -> bool {
         self.starred
             && ((self.tilde && self.bracket)
-                || (self.brace && (self.dollar || self.tilde || self.bracket)))
+                || (self.brace && (self.dollar || self.tilde || self.bracket || self.dots)))
     }
 }
 
@@ -917,6 +944,48 @@ mod tests {
     }
 
     #[test]
+    fn a_star_does_not_cover_a_brace_sequence_which_makes_characters_the_text_never_held() {
+        // bash, 3.2 and 5.2 alike, makes `{Z..a}` of ``Z [ \ ] ^ _ ` a`` and
+        // reads what it made as shell text, so the
+        // backquotes it makes open command substitutions; zsh makes `.` and
+        // `/` of `{-..1}`, and makes a range of dots that quotes separate.
+        let git = Rule::parse("Bash(git *)").expect("the rule is valid");
+        let cargo = Rule::parse("Bash(cargo *)").expect("the rule is valid");
+
+        for target in [
+            "git status {Z..a}id{Z..a}",
+            "git status {a..Z}",
+            "git status {1..3}",
+            "git status {-..1}{-..1}x",
+            "git status {Z..a..6}",
+            "git status x{Z\"..a\"}",
+            "git status {Z\\..a}",
+            "git status {Z''..a}",
+            "git status {Z.''.a}",
+            "git status {Z.\\.a}",
+            "git status \"{\"Z..a}",
+        ] {
+            assert!(!git.covers("Bash", Some(target)), "{target}");
+        }
+        assert!(!cargo.covers("Bash", Some("cargo test {a..z}")));
+    }
+
+    #[test]
+    fn a_star_still_covers_dots_and_braces_that_make_no_sequence() {
+        let rule = Rule::parse("Bash(cargo *)").expect("the rule is valid");
+
+        for target in [
+            "cargo test {a,b} {x,y}/z",
+            "cargo test src/{a,b}.rs ../x.rs.bak",
+            "cargo test {a,b}.x.y",
+            "cargo test a..b {a,b}",
+            "cargo test HEAD@{1}",
+        ] {
+            assert!(rule.covers("Bash", Some(target)), "{target}");
+        }
+    }
+
+    #[test]
     fn a_star_still_covers_arguments_a_shell_expands_into_no_code() {
         // Each of these ran nothing under bash, sh, dash and zsh, with zsh's
         // GLOB_SUBST, EXTENDED_GLOB and SH_WORD_SPLIT on too.
@@ -927,7 +996,7 @@ mod tests {
             "cargo test \"$HOME\" $_ $PWD/x $IFS",
             "cargo test $HOME:h:t $HOME:s/x/y/",
             "cargo test 'single quoted' \"double quoted\" back\\ slash",
-            "cargo test {a,b} {1..3} $HOME {x,y}/z",
+            "cargo test {a,b} $HOME {x,y}/z",
             "cargo test ~/x ~+ =ls !! !-1",
             // A `~`, a brace and a bracket in words of their own are not
             // joined: a blank no quote holds ends a word.
@@ -952,6 +1021,8 @@ mod tests {
             "Bash(cargo test ~[*)",
             "Bash(cargo test {x,~}[*)",
             "Bash(cargo test ~\"\"[*)",
+            "Bash(cargo test {Z..a}*)",
+            "Bash(cargo test {Z..a} *)",
         ] {
             let inner = Rule::parse(inner).expect("the text in this test is valid");
             assert!(!outer.includes(&inner), "{inner}");
@@ -966,6 +1037,14 @@ mod tests {
         assert!(outer.includes(&inner));
         assert!(inner.covers("Bash", Some("cargo test {a,b}=x")));
         assert!(outer.covers("Bash", Some("cargo test {a,b}=x")));
+
+        // A star inside a word may stand for a `.`, and both rules refuse the
+        // sequence it would finish, so each covers what the other does.
+        let inner = Rule::parse("Bash(cargo test {Z.*)").expect("the rule is valid");
+        assert!(outer.includes(&inner));
+        assert!(!inner.covers("Bash", Some("cargo test {Z..a}")));
+        assert!(!outer.covers("Bash", Some("cargo test {Z..a}")));
+        assert!(inner.covers("Bash", Some("cargo test {Z.a")));
     }
 
     #[test]

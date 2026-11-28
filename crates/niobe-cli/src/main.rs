@@ -2679,10 +2679,11 @@ PERMISSIONS:
     the first (;, &&, |, a redirection, a backquote or a bracket), a $ that
     does more than name a variable ($HOME, but not ${{...}}, $'...' or $[...],
     which can build a command the text does not show), a word holding a ~
-    and a [ or a brace and a $, ~ or [, which a shell can join into one, or a
-    path that climbs above the prefix with ..; a * inside a word, as in
-    Bash(cat src/*), finishes that word and covers no argument after it. Such
-    a call is asked about.
+    and a [ or a brace and a $, ~ or [, which a shell can join into one, a
+    brace sequence such as {{a..z}} or {{1..3}}, which makes characters the
+    text never held, or a path that climbs above the prefix with ..; a *
+    inside a word, as in Bash(cat src/*), finishes that word and covers no
+    argument after it. Such a call is asked about.
     Paths are read as written: a link under the prefix leads where it points.
     The user's config and the repository's both apply; a rule in either allows
     the call.
