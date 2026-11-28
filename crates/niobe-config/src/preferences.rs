@@ -696,23 +696,78 @@ mod tests {
         assert!(!text.contains("work"), "{text}");
     }
 
+    /// Names a profile may have and a repository's path may hold — a config
+    /// may call a profile `"a\nb"`, and on Unix a directory's name may hold
+    /// any byte but `/` and NUL — each of which a basic string must escape.
+    const AWKWARD: [&str; 9] = [
+        "my \"work\" profile.x",
+        "odd\\model\"\nwith a break\u{7}",
+        "line\nbreak",
+        "carriage\rreturn",
+        "tab\there",
+        "escape \u{1b}[31m red",
+        "delete\u{7f}",
+        "\\\"\\\\\"",
+        "naïve ünïcode 日本 🦀",
+    ];
+
     #[test]
     fn names_and_values_toml_would_misread_are_written_so_they_read_back_as_chosen() {
+        for awkward in AWKWARD {
+            let dir = tempfile::tempdir().expect("a temporary directory can be made");
+            let path = kept(dir.path());
+            let root = Path::new(awkward);
+
+            keep(&path, mode_in(root, Mode::Ask)).expect("kept");
+            keep(&path, theme_in(root, awkward)).expect("kept");
+            keep(
+                &path,
+                Change::Model {
+                    profile: awkward,
+                    model: Some(awkward),
+                },
+            )
+            .expect("kept");
+            keep(
+                &path,
+                Change::Effort {
+                    profile: awkward,
+                    effort: awkward,
+                },
+            )
+            .expect("kept");
+
+            let saved = Saved::read(&path);
+            assert_eq!(saved.model(awkward), Some(awkward), "{awkward:?}");
+            assert_eq!(saved.effort(awkward), Some(awkward), "{awkward:?}");
+            assert_eq!(saved.project_mode(root), Some(Mode::Ask), "{awkward:?}");
+            assert_eq!(saved.project_theme(root), Some(awkward), "{awkward:?}");
+            assert_eq!(saved.last_theme(), Some(awkward), "{awkward:?}");
+        }
+    }
+
+    /// The file is every repository's and every profile's: a name written so
+    /// that it does not read back would leave the whole file read as nothing
+    /// chosen, and the next choice rewrite it from nothing.
+    #[test]
+    fn a_profile_named_with_a_line_break_keeps_what_every_other_repository_chose() {
         let dir = tempfile::tempdir().expect("a temporary directory can be made");
         let path = kept(dir.path());
-        let profile = "my \"work\" profile.x";
-        let model = "odd\\model\"\nwith a break\u{7}";
+        let a = Path::new("/work/a");
 
+        keep(&path, mode_in(a, Mode::Ask)).expect("kept");
         keep(
             &path,
             Change::Model {
-                profile,
-                model: Some(model),
+                profile: "a\nb",
+                model: Some("opus"),
             },
         )
         .expect("kept");
 
-        assert_eq!(Saved::read(&path).model(profile), Some(model));
+        let saved = Saved::read(&path);
+        assert_eq!(saved.project_mode(a), Some(Mode::Ask));
+        assert_eq!(saved.model("a\nb"), Some("opus"));
     }
 
     #[test]

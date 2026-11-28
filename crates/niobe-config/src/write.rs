@@ -385,15 +385,18 @@ fn array(rules: &[&str]) -> String {
     out
 }
 
-/// A rule as a TOML basic string.
+/// `text` as a TOML basic string, the one way this crate writes a string,
+/// a key's included.
 ///
-/// A target is whatever a call acts on, so it can hold a quote, a backslash or
-/// a newline; every one of those is escaped here, because a rule that was
-/// written unescaped would be a config file the next session cannot read.
-pub(crate) fn quoted(rule: &str) -> String {
-    let mut out = String::with_capacity(rule.len() + 2);
+/// A rule's target is whatever a call acts on, and a profile's name or a
+/// repository's path whatever the operator called it, so any of them can hold
+/// a quote, a backslash, a newline or another control character; every one of
+/// those is escaped here, because a string written unescaped would be a file
+/// the next session cannot read.
+pub(crate) fn quoted(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
     out.push('"');
-    for c in rule.chars() {
+    for c in text.chars() {
         match c {
             '"' => out.push_str("\\\""),
             '\\' => out.push_str("\\\\"),

@@ -537,7 +537,9 @@ pub(crate) fn env_key(profile: &str, name: &str) -> String {
         .0
 }
 
-/// A key as TOML would need it written: bare when it can be, quoted when not.
+/// A key as TOML would need it written: bare when it can be, and otherwise
+/// the basic string every value is written as, since a name may hold a line
+/// break or another control character that a basic string must escape.
 pub(crate) fn quoted(name: &str) -> String {
     let bare = !name.is_empty()
         && name
@@ -546,8 +548,7 @@ pub(crate) fn quoted(name: &str) -> String {
     if bare {
         return name.to_owned();
     }
-    let escaped = name.replace('\\', "\\\\").replace('"', "\\\"");
-    format!("\"{escaped}\"")
+    crate::write::quoted(name)
 }
 
 /// A table's entries in the order they appear in the file. The parsed table is
@@ -595,6 +596,7 @@ mod tests {
         assert_eq!(quoted("a.b"), "\"a.b\"");
         assert_eq!(quoted(""), "\"\"");
         assert_eq!(quoted("say \"hi\""), "\"say \\\"hi\\\"\"");
+        assert_eq!(quoted("a\nb\u{1b}\u{7f}"), "\"a\\nb\\u001B\\u007F\"");
     }
 
     #[test]
