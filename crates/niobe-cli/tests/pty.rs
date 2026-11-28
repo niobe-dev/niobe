@@ -2606,6 +2606,39 @@ fn a_replayed_log_draws_the_windows_it_holds_as_of_when_they_were_recorded() {
     );
 }
 
+/// A log whose lines carry no times still holds the windows it recorded:
+/// a replay draws them, as an earlier session's reading with no date on it,
+/// rather than as a current one or not at all.
+#[test]
+fn a_replayed_log_with_no_times_draws_the_windows_it_holds_as_recorded() {
+    let repo = repo();
+    let log = repo.path().join("windows.jsonl");
+    std::fs::write(
+        &log,
+        "{\"type\":\"user_message\",\"text\":\"go\"}\n\
+         {\"type\":\"usage_windows\",\"five_hour\":{\"utilization\":0.83,\"resets_at\":4000000000},\
+         \"seven_day\":{\"utilization\":0.4,\"resets_at\":4000000000},\"using_overage\":false}\n",
+    )
+    .expect("the log is written");
+    let (terminal, slave) = Terminal::open();
+    rustix::termios::tcsetwinsize(&slave, WIDE).expect("the pty can be resized");
+    let mut shell = shell_command(&slave, repo.path())
+        .arg("replay")
+        .arg(&log)
+        .spawn()
+        .expect("the niobe binary runs");
+
+    terminal.shows("83%");
+    terminal.typed(CTRL_Q);
+    let (_, status) = ended(&mut shell);
+    let (drawn, _) = released(terminal, slave);
+    assert!(status.success(), "the replay ended with {status}: {drawn}");
+    assert!(
+        drawn.contains("as of an earlier session"),
+        "the log's windows were not marked as recorded: {drawn}"
+    );
+}
+
 /// Choosing an earlier session in the history dialog ends the one open and
 /// opens the chosen one in the same terminal, its CLI carrying on the
 /// conversation that session recorded, as `niobe --resume` would.

@@ -378,8 +378,10 @@ pub enum PlanWindows {
     Carried {
         /// The levels, with every window that has reset since unmeasured.
         windows: UsageWindows,
-        /// When they were recorded.
-        at: Stamp,
+        /// When they were recorded, where the record says: a log whose
+        /// events carry no times holds levels from a moment nothing names,
+        /// which are still a reading from before this session.
+        at: Option<Stamp>,
     },
     /// Nothing reported and nothing recorded, on a session whose first turn
     /// has not ended: a backend that can be asked for the windows as it
@@ -3124,8 +3126,10 @@ impl App {
     /// Records that everything folded in so far was read back from this
     /// session's record, and that what follows is this process's own: the
     /// plan windows the record holds are drawn as a reading from when they
-    /// were recorded, dated and put back where their reset has come around,
-    /// until the backend reports again. See [`App::plan_windows`].
+    /// were recorded — dated where the record says when, and as an earlier
+    /// session's where it holds no times — and put back where their reset
+    /// has come around, until the backend reports again. See
+    /// [`App::plan_windows`].
     pub fn resumed(&mut self) {
         self.windows_recorded = self.session.usage_windows().is_some();
         // The process that owed a turn of its own is gone with the record;
@@ -7241,7 +7245,8 @@ impl App {
     /// session hears no more from its backend, so the draw clock is what ends
     /// a level. Before then, the newer of what
     /// an earlier session recorded and what this session's own record held
-    /// under the profile it is taken up under, dated, with each window whose reset has come around since holding a
+    /// under the profile it is taken up under, dated where the record says
+    /// when and said to be an earlier session's where it does not, with each window whose reset has come around since holding a
     /// level nothing measured and its next reset where the window has a fixed
     /// one; or,
     /// where nothing was ever recorded and the first reply has not come in,
@@ -7253,7 +7258,9 @@ impl App {
             (Some(windows), false) => {
                 return PlanWindows::Reported(since_reset(windows, self.read_at()));
             }
-            (Some(windows), true) => self.windows_at.map(|at| (windows, at)),
+            // A record with no times still recorded the levels; that nothing
+            // says when is no reason to draw them as now's, or not at all.
+            (Some(windows), true) => Some((windows, self.windows_at)),
             (None, _) => None,
         };
         let metered = |billing: Option<Billing>| billing == Some(Billing::Metered);
@@ -7267,10 +7274,17 @@ impl App {
                 Some(clock) => clock.at(at),
                 None => Stamp::new(at, None),
             };
-            (windows, at)
+            (windows, Some(at))
         });
+        // An undated record is not known to be older than anything, so the
+        // record's own levels stand unless an earlier session's are known
+        // to be newer.
+        let newer = |carried: Option<Stamp>, recorded: Option<Stamp>| match (carried, recorded) {
+            (Some(carried), Some(recorded)) => carried.at() > recorded.at(),
+            _ => false,
+        };
         let newest = match (recorded, carried) {
-            (Some(recorded), Some(carried)) if carried.1.at() > recorded.1.at() => Some(carried),
+            (Some(recorded), Some(carried)) if newer(carried.1, recorded.1) => Some(carried),
             (Some(recorded), _) => Some(recorded),
             (None, carried) => carried,
         };

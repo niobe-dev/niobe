@@ -5771,9 +5771,13 @@ const AWAITED: [&str; 2] = ["5h", "7d"];
 const AWAITED_SAID: &str = "asked of the backend";
 
 /// The line under windows carried over from an earlier session: when they
-/// were recorded, since they are not a measurement of now.
-fn carried_said(app: &App, at: Stamp) -> String {
-    match app.stamp().and_then(|now| clock::past(now, at)) {
+/// were recorded, since they are not a measurement of now, and that they are
+/// an earlier session's where nothing says when.
+fn carried_said(app: &App, at: Option<Stamp>) -> String {
+    match at
+        .zip(app.stamp())
+        .and_then(|(at, now)| clock::past(now, at))
+    {
         Some(when) => format!("as of {when}, before this session"),
         None => "as of an earlier session".to_owned(),
     }
@@ -10532,6 +10536,40 @@ mod tests {
             ]
         );
         assert_eq!(window_rows(&app), 3);
+    }
+
+    /// A record whose events carry no times, as a log replayed on a terminal
+    /// may, still holds the windows it recorded: they are drawn, and marked
+    /// as an earlier session's reading, with no date and no reset to name,
+    /// since nothing says when they were read.
+    #[test]
+    fn an_undated_record_read_back_draws_its_windows_as_recorded_with_no_date() {
+        let mut app = App::new(crate::app::Repo {
+            name: "niobe".to_owned(),
+            branch: None,
+            ..Default::default()
+        });
+        app.apply(&niobe_core::event::Event::UsageWindows(UsageWindows {
+            five_hour: Some(window(0.83, Some(4_000_000_000))),
+            seven_day: None,
+            using_overage: false,
+            overage: niobe_core::event::Overage::Unreported,
+        }));
+        app.resumed();
+
+        assert!(
+            matches!(app.plan_windows(), PlanWindows::Carried { at: None, .. }),
+            "{:?}",
+            app.plan_windows()
+        );
+        assert_eq!(
+            rows_of(&app, 66),
+            vec![
+                "5h  83% ▓▓▓▓▓▓▓▓▓▓░░".to_owned(),
+                "as of an earlier session".to_owned(),
+            ]
+        );
+        assert_eq!(window_rows(&app), 2);
     }
 
     /// Once the resumed session's own backend reports, its figures are the
