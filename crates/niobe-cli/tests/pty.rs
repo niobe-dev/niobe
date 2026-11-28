@@ -324,6 +324,13 @@ impl Terminal {
             .len()
     }
 
+    /// Where the first `wanted` the shell drew after `from` starts, a place
+    /// to read on from; `from` itself where it drew none.
+    fn found_since(&self, from: usize, wanted: &str) -> usize {
+        let drawn = self.drawn.lock().expect("the reader thread did not panic");
+        drawn[from..].find(wanted).map_or(from, |at| from + at)
+    }
+
     /// Waits until the shell has drawn `wanted` after `from`, a [`Self::mark`].
     fn shows_since(&self, from: usize, wanted: &str) {
         let deadline = Instant::now() + PATIENCE;
@@ -3789,7 +3796,18 @@ fn answering_the_trust_question(
 fn trusting_from_the_question() -> (tempfile::TempDir, tempfile::TempDir, Terminal, File, Reaped) {
     let (repo, home, terminal, slave, shell) = answering_the_trust_question(b"1");
     std::thread::sleep(PAST_THE_QUIET);
+    let answered = terminal.mark();
     terminal.typed(ENTER);
+    // The session's shell takes the terminal only once the backend has
+    // started, and between the question's shell handing the terminal back
+    // and this one taking it the pty is cooked: a Ctrl+Q typed there is the
+    // line discipline's XON and never reaches niobe. The question's frame
+    // draws the opening frame's composer too, so only what this shell draws
+    // after entering the alternate screen, which it does once raw, says it
+    // is the one reading the keys.
+    terminal.shows_since(answered, ENTER_ALTERNATE_SCREEN);
+    let entered = terminal.found_since(answered, ENTER_ALTERNATE_SCREEN);
+    terminal.shows_since(entered, OPENING_FRAME);
     (repo, home, terminal, slave, shell)
 }
 
