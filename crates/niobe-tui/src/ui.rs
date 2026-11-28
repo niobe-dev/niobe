@@ -7703,16 +7703,20 @@ fn directory_row(
     }
     let added = count('+', dir.added.0, dir.added.1);
     let removed = count('−', dir.removed.0, dir.removed.1);
-    let name = format!("▸ {}  {}", dir.name, files_said(dir.files));
+    // The marker goes with the indent, which the row never cuts: the name
+    // loses its front for room, and the marker is what says the row is
+    // folded, as an open directory's keeps its own.
+    let marked = format!("{indent}▸ ");
+    let name = format!("{}  {}", dir.name, files_said(dir.files));
     let mut row = counted_row(
-        &indent,
+        &marked,
         &name,
         (Tag::None, &added, &removed),
         columns,
         width,
         theme,
     );
-    if let Some(span) = row.spans.get_mut(1) {
+    for span in row.spans.iter_mut().take(2) {
         span.style = style;
     }
     row
@@ -8567,6 +8571,39 @@ pub(crate) fn compact(n: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A folded directory's row keeps the marker that says it is folded
+    /// however little room its name has, as an open one keeps its own: the
+    /// name is cut at its front after the marker, never through it.
+    #[test]
+    fn a_folded_directory_cut_for_room_keeps_its_fold_marker() {
+        let dir = tree::Dir {
+            path: "crates/niobe-bridge-claude/src/".to_owned(),
+            name: "niobe-bridge-claude/src/".to_owned(),
+            depth: 1,
+            end: 3,
+            files: 2,
+            added: (13, true),
+            removed: (4, true),
+        };
+        let columns = Columns {
+            tag: 0,
+            added: 4,
+            removed: 3,
+        };
+        for width in [20, 24, 36] {
+            let row = directory_row(&dir, true, columns, width, &crate::theme::NEO);
+            let drawn: String = row.spans.iter().map(|span| span.content.as_ref()).collect();
+            assert!(
+                drawn.trim_start().starts_with("▸ "),
+                "at {width} the folded row reads {drawn:?}"
+            );
+            if width >= 24 {
+                assert!(drawn.contains("2 files"), "at {width}: {drawn:?}");
+            }
+            assert!(text::width(&drawn) <= width, "at {width}: {drawn:?}");
+        }
+    }
 
     /// Scrolled back, the pane's last row is under the way back down, and a
     /// row of the question there is not read; following the newest line,
