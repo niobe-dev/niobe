@@ -59,7 +59,7 @@ pub mod conformance;
 pub mod memory;
 pub mod transcript;
 
-pub use driver::{BINARY, Options, Session, SpawnError};
+pub use driver::{BINARY, Effort, Options, Session, SpawnError};
 pub use translate::{Asked, Spent, Translator};
 
 #[cfg(test)]

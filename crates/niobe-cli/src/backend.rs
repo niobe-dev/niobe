@@ -14,7 +14,7 @@ use std::thread::JoinHandle;
 use std::time::SystemTime;
 
 use niobe_bridge_claude::transcript::{self, TranscriptError};
-use niobe_bridge_claude::{Options, Session, SpawnError, Spent};
+use niobe_bridge_claude::{Effort, Options, Session, SpawnError, Spent};
 use niobe_config::Selected;
 use niobe_core::event::{Backend, Event, Mode, PermissionDecision, ToolCallId};
 use niobe_core::image::Image;
@@ -656,7 +656,7 @@ fn claude_options(
     }
     options.resume = with.resume.clone();
     options.model = with.model.clone();
-    options.effort = with.effort.clone();
+    options.effort = with.effort.clone().map(Effort::Level);
     options.budget_usd = with.budget_usd;
     options.tap = with.tap.clone();
     // A resumed session that recorded no mode Niobe models was in the one

@@ -279,7 +279,7 @@ pub struct Options {
     /// Arguments appended after the ones this bridge passes, so that a profile
     /// can reach a flag Niobe does not model. A `--model` among them is left
     /// out where [`Options::model`] names one, an `--effort` where
-    /// [`Options::effort`] does, and a `--permission-mode` where
+    /// [`Options::effort`] holds one, and a `--permission-mode` where
     /// [`Options::mode_known`] says [`Options::mode`] is the session's own:
     /// those are the session's, which the profile's would undo.
     pub args: Vec<String>,
@@ -290,9 +290,9 @@ pub struct Options {
     pub billing: Option<Billing>,
     /// The model to ask for. `None` leaves the choice to the CLI.
     pub model: Option<String>,
-    /// How hard the model works on a turn, as the CLI's `--effort` takes it.
-    /// `None` leaves the choice to the CLI.
-    pub effort: Option<String>,
+    /// How hard the model works on a turn. `None` leaves the choice to the
+    /// profile's own `--effort`, and past it to the CLI.
+    pub effort: Option<Effort>,
     /// How tool calls are gated.
     pub mode: Mode,
     /// Whether [`Options::mode`] is the session's own — the mode the
@@ -368,6 +368,28 @@ pub struct Options {
     /// as it sends them, so a CLI started again on the conversation can still
     /// be asked to go back before one.
     pub sent: Vec<Sent>,
+}
+
+/// The effort a session starts the CLI at, over a profile's own `--effort`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Effort {
+    /// A level, as the CLI's `--effort` takes it.
+    Level(String),
+    /// The model's own default, which `/effort auto` puts the CLI back on.
+    /// The CLI's `--effort` does not take `auto`, so the CLI is started with
+    /// no `--effort` at all — not even the profile's.
+    ModelDefault,
+}
+
+impl Effort {
+    /// The value the CLI's `--effort` is given for this, where it is given
+    /// one.
+    fn flag(&self) -> Option<&str> {
+        match self {
+            Self::Level(level) => Some(level),
+            Self::ModelDefault => None,
+        }
+    }
 }
 
 /// A prompt sent to the CLI: the id it was sent with and how it is named to
@@ -449,14 +471,14 @@ impl Options {
             argv.push("stdio".to_owned());
         }
         for (flag, value) in [
-            ("--model", &self.model),
-            ("--effort", &self.effort),
-            ("--resume", &self.resume),
-            ("--settings", &self.settings),
+            ("--model", self.model.as_deref()),
+            ("--effort", self.effort.as_ref().and_then(Effort::flag)),
+            ("--resume", self.resume.as_deref()),
+            ("--settings", self.settings.as_deref()),
         ] {
             if let Some(value) = value {
                 argv.push(flag.to_owned());
-                argv.push(value.clone());
+                argv.push(value.to_owned());
             }
         }
         argv.extend(self.own_args());
@@ -471,7 +493,9 @@ impl Options {
     /// otherwise undo what the operator chose: a model, an effort or a mode
     /// picked in the shell, or a mode a conversation carried on was left in —
     /// plan undone into a mode that edits without asking, after the CLI is
-    /// started again on the conversation. Where the session holds nothing of
+    /// started again on the conversation. An effort put back on the model's
+    /// default leaves the profile's `--effort` out too, with none in its
+    /// place. Where the session holds nothing of
     /// its own, or does not know the mode the conversation is in, the
     /// profile's flag is the one the CLI starts with.
     fn own_args(&self) -> Vec<String> {
@@ -1086,8 +1110,8 @@ impl Session {
         });
         // The CLI sets the effort for its own process only, so one started
         // again on the conversation is started at the effort chosen here.
-        if let Some(level) = effort_set_by(prompt) {
-            self.next.effort = level.map(str::to_owned);
+        if let Some(effort) = effort_set_by(prompt) {
+            self.next.effort = Some(effort);
         }
         self.turn_open = true;
         self.sent_after_ends = ends_before;
@@ -2500,19 +2524,22 @@ const EFFORT_DEFAULT: &str = "auto";
 
 /// What `prompt` sets the effort to, where it is the CLI's `/effort` command
 /// with one word the CLI takes and nothing else: one of [`EFFORT_LEVELS`],
-/// or `None` for [`EFFORT_DEFAULT`], which a CLI started again is given no
-/// `--effort` for. Anything else is no change: the CLI refuses a word it
-/// does not know as an invalid effort level, and leaves the effort as it was.
-fn effort_set_by(prompt: &str) -> Option<Option<&str>> {
+/// or [`Effort::ModelDefault`] for [`EFFORT_DEFAULT`], which a CLI started
+/// again is given no `--effort` for. Anything else is no change: the CLI
+/// refuses a word it does not know as an invalid effort level, and leaves the
+/// effort as it was.
+fn effort_set_by(prompt: &str) -> Option<Effort> {
     let mut words = prompt.split_whitespace();
     let level = match (words.next(), words.next(), words.next()) {
         (Some("/effort"), Some(level), None) => level,
         _ => return None,
     };
     if level == EFFORT_DEFAULT {
-        return Some(None);
+        return Some(Effort::ModelDefault);
     }
-    EFFORT_LEVELS.contains(&level).then_some(Some(level))
+    EFFORT_LEVELS
+        .contains(&level)
+        .then(|| Effort::Level(level.to_owned()))
 }
 
 #[cfg(test)]
@@ -2663,7 +2690,7 @@ mod tests {
             .to_vec();
         assert_eq!(taken(&options.argv(), "--effort"), Some("low"));
 
-        options.effort = Some("xhigh".to_owned());
+        options.effort = Some(Effort::Level("xhigh".to_owned()));
         let argv = options.argv();
 
         assert_eq!(taken(&argv, "--effort"), Some("xhigh"), "{argv:?}");
@@ -4700,6 +4727,16 @@ read -r rest
     /// between turns, sends it a turn, and drains it until the turn has ended.
     #[cfg(unix)]
     fn carried_on(body: &str, carry_on: bool) -> (Session, Vec<Event>, tempfile::TempDir) {
+        carried_on_under(body, carry_on, &[])
+    }
+
+    /// [`carried_on`], under a profile that passes the CLI `args`.
+    #[cfg(unix)]
+    fn carried_on_under(
+        body: &str,
+        carry_on: bool,
+        args: &[&str],
+    ) -> (Session, Vec<Event>, tempfile::TempDir) {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().expect("a scratch directory");
         let script = dir.path().join("claude");
@@ -4710,6 +4747,7 @@ read -r rest
         options.binary = script;
         options.cwd = dir.path().to_path_buf();
         options.carry_on = carry_on;
+        options.args = args.iter().map(|arg| (*arg).to_owned()).collect();
         let mut session = spawn_written(&options);
         session
             .send("list the files", &[])
@@ -4792,7 +4830,7 @@ read -r rest
         drained_to_the_end(&mut session);
 
         let next = session.next().expect("the session can carry on");
-        assert_eq!(next.effort.as_deref(), Some("low"));
+        assert_eq!(next.effort, Some(Effort::Level("low".to_owned())));
     }
 
     /// `/effort auto` puts the CLI back on the model's own default, which
@@ -4817,16 +4855,65 @@ read -r rest
         drained_to_the_end(&mut session);
 
         let next = session.next().expect("the session can carry on");
-        assert_eq!(next.effort, None);
+        assert_eq!(next.effort, Some(Effort::ModelDefault));
         assert_eq!(taken(&next.argv(), "--effort"), None);
+    }
+
+    /// The profile's own `--effort` is not the model's default either: a CLI
+    /// started again after `/effort auto` is started with neither the level
+    /// picked before it nor the one the profile names.
+    #[cfg(unix)]
+    #[test]
+    fn an_effort_put_back_on_auto_is_not_the_profiles_either() {
+        let (mut session, _, _dir) = carried_on_under(
+            &format!(
+                "read -r initialize\nread -r turn\n{ONE_TURN}\nread -r effort\n{ONE_TURN}\nread -r effort\n{ONE_TURN}\nexit 143\n"
+            ),
+            true,
+            &["--effort", "high", "--add-dir", "/other"],
+        );
+        session
+            .send("/effort max", &[])
+            .expect("the line is queued");
+        drained_until(&mut session, |event| matches!(event, Event::TurnEnded));
+        session
+            .send("/effort auto", &[])
+            .expect("the line is queued");
+        drained_to_the_end(&mut session);
+
+        let argv = session.next().expect("the session can carry on").argv();
+        assert_eq!(taken(&argv, "--effort"), None, "{argv:?}");
+        assert_eq!(&argv[argv.len() - 2..], ["--add-dir", "/other"]);
+    }
+
+    /// A level picked in the session is passed over the profile's, which is
+    /// left out.
+    #[cfg(unix)]
+    #[test]
+    fn an_effort_chosen_in_the_session_is_started_at_over_the_profiles() {
+        let (mut session, _, _dir) = carried_on_under(
+            &format!(
+                "read -r initialize\nread -r turn\n{ONE_TURN}\nread -r effort\n{ONE_TURN}\nexit 143\n"
+            ),
+            true,
+            &["--effort", "high"],
+        );
+        session
+            .send("/effort max", &[])
+            .expect("the line is queued");
+        drained_to_the_end(&mut session);
+
+        let argv = session.next().expect("the session can carry on").argv();
+        assert_eq!(taken(&argv, "--effort"), Some("max"), "{argv:?}");
+        assert_eq!(argv.iter().filter(|arg| *arg == "--effort").count(), 1);
     }
 
     #[test]
     fn only_an_effort_the_cli_takes_is_kept_for_a_cli_started_again() {
         for (prompt, kept) in [
-            ("/effort max", Some(Some("max"))),
-            ("  /effort xhigh  ", Some(Some("xhigh"))),
-            ("/effort auto", Some(None)),
+            ("/effort max", Some(Effort::Level("max".to_owned()))),
+            ("  /effort xhigh  ", Some(Effort::Level("xhigh".to_owned()))),
+            ("/effort auto", Some(Effort::ModelDefault)),
             ("/effort", None),
             ("/effort fast", None),
             ("/effort low please", None),
