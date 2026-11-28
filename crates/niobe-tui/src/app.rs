@@ -5907,11 +5907,7 @@ impl App {
     /// is no session yet to lose, and the question takes every key, so it
     /// quits at once.
     fn ask_to_quit(&mut self) {
-        let asking = self
-            .picking
-            .as_ref()
-            .is_some_and(|picker| picker.purpose == Purpose::Quit);
-        if asking || self.trusting.is_some() {
+        if self.asking_to_quit() || self.trusting.is_some() {
             self.picking = None;
             self.quit();
             return;
@@ -5931,6 +5927,13 @@ impl App {
             more: 0,
             effort: None,
         });
+    }
+
+    /// Whether the list open is the question whether to quit.
+    fn asking_to_quit(&self) -> bool {
+        self.picking
+            .as_ref()
+            .is_some_and(|picker| picker.purpose == Purpose::Quit)
     }
 
     /// The menu that is open, and the item its cursor is on.
@@ -6998,16 +7001,21 @@ impl App {
     /// `/clear` sent from a menu would go out under a question.
     ///
     /// The model's key over a list only closes it, as it always has: it is
-    /// the key that opened the model list.
+    /// the key that opened the model list. Quit over the question whether to
+    /// quit leaves that question open, so that [`App::ask_to_quit`] finds it
+    /// asked again while it asks and quits, as F10 twice does.
     fn press_over(&mut self, action: Option<crate::menu::Action>) {
         let a_list = self.picking.is_some();
+        let quit_asked_again = action == Some(crate::menu::Action::Quit) && self.asking_to_quit();
         self.menu = None;
         self.sheet = None;
         self.memory = None;
         self.mcp = None;
         self.detail = None;
         self.browser = None;
-        self.picking = None;
+        if !quit_asked_again {
+            self.picking = None;
+        }
         match action {
             Some(crate::menu::Action::SwitchModel) if a_list => {}
             Some(action) => self.perform_clicked(action),
@@ -22264,6 +22272,44 @@ mod tests {
         let mut chord = app();
         chord.on_key(ctrl('q'));
         assert!(chord.should_quit(), "Ctrl+Q quits at once");
+    }
+
+    /// A click on the bar's Quit lands over the list it opened, and what is
+    /// open closes before the clicked key is done: the second click is still
+    /// the Quit asked again while it asks, as F10 twice is.
+    #[test]
+    fn a_second_click_on_the_bars_quit_quits() {
+        let mut app = app();
+        app.drew_bars(Rect::new(0, 0, 120, 1), Rect::new(0, 29, 120, 1));
+        let widths = crate::menu::fkey_widths(120);
+        let quit = crate::menu::stop_columns() + widths[..9].iter().sum::<u16>() + 2;
+
+        app.on_mouse(click_at(quit, 29));
+        assert!(!app.should_quit(), "it asks first");
+        app.on_mouse(click_at(quit, 29));
+
+        assert!(app.should_quit(), "Quit clicked again quits");
+    }
+
+    /// Another key over the quit question closes it and is that key, never a
+    /// quit: only Quit asked again answers it.
+    #[test]
+    fn another_key_over_the_quit_question_closes_it_and_does_not_quit() {
+        let mut app = app();
+        app.drew_bars(Rect::new(0, 0, 120, 1), Rect::new(0, 29, 120, 1));
+        let widths = crate::menu::fkey_widths(120);
+        let quit = crate::menu::stop_columns() + widths[..9].iter().sum::<u16>() + 2;
+        let help = crate::menu::stop_columns() + 2;
+
+        app.on_mouse(click_at(quit, 29));
+        app.on_mouse(click_at(help, 29));
+
+        assert!(!app.should_quit());
+        assert!(
+            app.picking()
+                .is_none_or(|picker| picker.purpose != Purpose::Quit),
+            "the quit question closed"
+        );
     }
 
     /// Whether anything that takes keys of its own, or answers for the
