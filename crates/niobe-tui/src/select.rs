@@ -114,7 +114,7 @@ impl Selection {
             let Some((from, to)) = self.columns_on(line) else {
                 continue;
             };
-            let kept_to_its_end = lines.peek().is_some_and(|(_, next)| next.goes_on());
+            let kept_to_its_end = kept_to_its_end(lines.peek().map(|(_, next)| next));
             let goes_on = copied.goes_on() && !pieces.is_empty();
             let piece = copied.covered(from, to, kept_to_its_end);
             match (goes_on, pieces.last_mut()) {
@@ -196,24 +196,16 @@ impl CopiedLine {
         matches!(self.read, Reading::GoesOn { .. })
     }
 
-    /// The whole line, as a copy of all of it reads: as drawn, or its
-    /// drawing read as the gutter.
-    pub(crate) fn into_text(self) -> String {
+    /// The whole row, as a copy of all of it reads: as drawn, or its
+    /// drawing read as the gutter, or where it goes on with the row above,
+    /// its own text past its mark — without trailing blanks, unless
+    /// `to_its_end` keeps them for a row the next goes on from.
+    fn whole(self, to_its_end: bool) -> String {
         match self.read {
             Reading::AsDrawn => self.text,
-            Reading::Behind { .. } | Reading::GoesOn { .. } => self.covered(0, usize::MAX, false),
-        }
-    }
-
-    /// Adds the whole line to `lines`, a copy of whole lines in order: as a
-    /// line of its own, or where it goes on with the one above, onto the end
-    /// of that one as the one line it was.
-    pub(crate) fn onto(self, lines: &mut Vec<String>) {
-        match (self.read, lines.last_mut()) {
-            (Reading::GoesOn { from }, Some(above)) => {
-                above.push_str(&covered(self.text, from, usize::MAX, false));
+            Reading::Behind { .. } | Reading::GoesOn { .. } => {
+                self.covered(0, usize::MAX, to_its_end)
             }
-            _ => lines.push(self.into_text()),
         }
     }
 
@@ -235,6 +227,30 @@ impl CopiedLine {
             Reading::AsDrawn | Reading::Behind { .. } => covered(self.text, from, to, to_its_end),
         }
     }
+}
+
+/// Whole rows, in order, as a copy of all of them reads: each a line of its
+/// own, or where it goes on with the one above, joined onto the end of that
+/// one as the one line it was.
+pub(crate) fn whole_lines(rows: impl IntoIterator<Item = CopiedLine>) -> Vec<String> {
+    let mut rows = rows.into_iter().peekable();
+    let mut lines: Vec<String> = Vec::new();
+    while let Some(row) = rows.next() {
+        let goes_on = row.goes_on();
+        let text = row.whole(kept_to_its_end(rows.peek()));
+        match (goes_on, lines.last_mut()) {
+            (true, Some(above)) => above.push_str(&text),
+            _ => lines.push(text),
+        }
+    }
+    lines
+}
+
+/// Whether a row keeps its trailing blanks, read before `next`: where `next`
+/// goes on with it, they are blanks inside the line the pane cut, and the
+/// line's own, on whichever of its rows the cut fell.
+fn kept_to_its_end(next: Option<&CopiedLine>) -> bool {
+    next.is_some_and(CopiedLine::goes_on)
 }
 
 impl From<String> for CopiedLine {
@@ -698,8 +714,8 @@ mod tests {
         assert_eq!(row(0, 13), "  wor");
         assert_eq!(row(0, 17), "  words 漢", "a wide character in either cell");
         assert_eq!(
-            CopiedLine::behind(" ".repeat(10), 10, 2).into_text(),
-            "",
+            whole_lines([CopiedLine::behind(" ".repeat(10), 10, 2)]),
+            [""],
             "a row of nothing but drawing"
         );
     }
@@ -751,11 +767,25 @@ mod tests {
             "the mark before a row's own text is not copied"
         );
 
-        let mut whole = Vec::new();
-        for row in cut_rows() {
-            row.onto(&mut whole);
-        }
-        assert_eq!(whole, ["    one two three", "    next"]);
+        assert_eq!(whole_lines(cut_rows()), ["    one two three", "    next"]);
+    }
+
+    /// The blanks at a cut are the line's own, on whichever row of it the
+    /// cut falls, and the blanks that end the line are not.
+    #[test]
+    fn a_whole_copy_keeps_the_blanks_at_every_cut_of_a_line() {
+        let rows = vec![
+            CopiedLine::from("    one t".to_owned()),
+            CopiedLine::going_on("    wo ".to_owned(), 4),
+            CopiedLine::going_on("    three".to_owned(), 4),
+            CopiedLine::from("    four ".to_owned()),
+            CopiedLine::going_on("    five ".to_owned(), 4),
+            CopiedLine::from("    next".to_owned()),
+        ];
+        assert_eq!(
+            whole_lines(rows),
+            ["    one two three", "    four five", "    next"]
+        );
     }
 
     #[test]

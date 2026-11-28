@@ -6440,15 +6440,12 @@ impl App {
             self.hint = Some("There is no transcript to export yet".to_owned());
             return;
         }
-        let mut text = Vec::new();
-        for copied in self
-            .drawn
-            .copied_lines_from(0, |_| false, &self.theme)
-            .take(lines)
-            .flatten()
-        {
-            copied.onto(&mut text);
-        }
+        let text = crate::select::whole_lines(
+            self.drawn
+                .copied_lines_from(0, |_| false, &self.theme)
+                .take(lines)
+                .flatten(),
+        );
         self.handoffs
             .push(crate::desktop::Handoff::Copy(text.join("\n")));
     }
@@ -24170,8 +24167,8 @@ mod tests {
                     .copied_lines_from(line, |_| false, &app.theme)
                     .next()
                     .flatten()
-                    .map(crate::select::CopiedLine::into_text)
             })
+            .flat_map(|row| crate::select::whole_lines([row]))
             .collect();
 
         app.perform(crate::menu::Action::Export);
