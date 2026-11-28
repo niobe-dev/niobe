@@ -866,6 +866,85 @@ fn a_claude_session_read_in_is_a_niobe_session_from_then_on() {
     assert!(out.contains("1 changed — +3 −1"), "{out}");
 }
 
+/// A `claude` that lists `/clear` among its commands, and answers a `/clear`
+/// as the CLI does: the conversation reset, and a new one under `s-2`.
+const CLEARS_CLAUDE: &str = "#!/bin/sh\n\
+    read -r first\n\
+    id=$(printf '%s' \"$first\" | sed 's/.*\"request_id\":\"\\([^\"]*\\)\".*/\\1/')\n\
+    printf '{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"%s\",\"response\":{\"commands\":[{\"name\":\"clear\"}]}}}\\n' \"$id\"\n\
+    while read -r line; do\n\
+    case \"$line\" in\n\
+    *'\"type\":\"control_request\"'*) continue ;;\n\
+    */clear*)\n\
+    printf '%s\\n' '{\"type\":\"conversation_reset\",\"new_conversation_id\":\"s-2\",\"trigger\":\"clear\"}'\n\
+    printf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s-2\",\"model\":\"claude-opus-5\",\"permissionMode\":\"default\"}'\n\
+    printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"num_turns\":0,\"result\":\"\"}' ;;\n\
+    esac\n\
+    done\n";
+
+/// A session read in and then cleared is still the session the read made:
+/// the line the shell closes on names that one for the CLI's id, as
+/// `niobe --resume <id>` reaches it, and says where the conversation started
+/// over, rather than naming the cleared one for both.
+#[test]
+fn a_claude_session_read_in_and_then_cleared_is_named_as_the_session_the_read_made() {
+    let repo = repo();
+    let home = stand_in(repo.path(), CLEARS_CLAUDE);
+    let claude = claude_config_with_the_transcript(repo.path());
+    let (terminal, slave) = Terminal::open();
+    let mut shell = shell_driving_the_stand_in(&slave, repo.path(), home.path())
+        .env("CLAUDE_CONFIG_DIR", claude.path())
+        .args(["--resume", TRANSCRIPT_SESSION])
+        .spawn()
+        .expect("the niobe binary runs");
+
+    terminal.shows("Done: the catalog response carries an etag.");
+    recorded(repo.path(), 13);
+    // The shell sends `/clear` only once the CLI's list of its commands has
+    // been folded, which can land after the history is drawn: an Enter that
+    // comes first is refused with the text kept, so it is pressed again until
+    // the clear has opened the next session.
+    terminal.typed(b"/clear");
+    let db = repo.path().join(".niobe").join("sessions.db");
+    let second: SessionId = "2".parse().expect("2 is a session id");
+    let deadline = Instant::now() + PATIENCE;
+    while !Store::open(&db)
+        .ok()
+        .and_then(|store| store.has_session(second).ok())
+        .unwrap_or(false)
+    {
+        assert!(Instant::now() < deadline, "the clear opened no session 2");
+        terminal.typed(b"\r");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    terminal.typed(CTRL_Q);
+
+    let (_, status) = ended(&mut shell);
+    let (drawn, _) = released(terminal, slave);
+    assert!(status.success(), "the imported session ended with {status}");
+    assert!(
+        drawn.contains(&format!(
+            "claude session {TRANSCRIPT_SESSION} is niobe session 1 in "
+        )) && drawn.contains("`niobe --resume 1` continues it"),
+        "the shell did not name the session the read made:\n{drawn}"
+    );
+    assert!(
+        drawn.contains("started over in session 2")
+            && drawn.contains("`niobe --resume 2` continues that"),
+        "the shell did not say where the conversation started over:\n{drawn}"
+    );
+    // What the line names is what the CLI's id reaches.
+    let reached = Command::new(env!("CARGO_BIN_EXE_niobe"))
+        .current_dir(repo.path())
+        .env("XDG_CONFIG_HOME", home.path())
+        .env("CLAUDE_CONFIG_DIR", claude.path())
+        .args(["--resume", TRANSCRIPT_SESSION])
+        .output()
+        .expect("the niobe binary runs");
+    let reached = String::from_utf8(reached.stdout).expect("stdout is UTF-8");
+    assert!(reached.starts_with("session 1 · "), "{reached}");
+}
+
 /// A session read in shows the bill its stored copy does once resumed: the
 /// `cost-state` that closes the fixture's process carries no stamp, and is
 /// stored beside the records around it, so it is folded there too.

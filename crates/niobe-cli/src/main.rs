@@ -1141,6 +1141,10 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<Option<
     // operator's, not the agent's.
     let mut app = app.runs_commands().remembers();
 
+    // The session the CLI's id is carried in from here on, which is the one
+    // `niobe --resume <id>` reaches: a `/clear` moves the journal on to a
+    // session of its own, and the transcript did not go into that one.
+    let imported = recorder.session();
     let mut journal = StoreJournal::open(recorder);
     journal.keep_taking_up(&mut app);
     let mut rules = ConfigRules::at(&root).withheld(loaded.untrusted.is_some());
@@ -1177,12 +1181,19 @@ fn import(session: &str, profile: Option<&str>, asked: &Asked) -> Result<Option<
     };
     let finished = journal.finish();
     say_unsaved(&finished);
-    if let Some(recorded) = finished.session {
+    let newest = finished.session;
+    if let Some(recorded) = imported.or(newest) {
         say!(
             "claude session {session} is niobe session {recorded} in {} — \
              `niobe --resume {recorded}` continues it",
             repo::store_path(&root).display()
         );
+        if let Some(cleared) = newest.filter(|newest| *newest != recorded) {
+            say!(
+                "the conversation started over in session {cleared} — \
+                 `niobe --resume {cleared}` continues that one"
+            );
+        }
     }
     Ok(next)
 }
