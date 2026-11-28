@@ -3368,6 +3368,180 @@ mod tests {
         assert_eq!(chosen.kept, []);
     }
 
+    /// A shell attached to a backend that lists `/effort`.
+    fn app_offering_effort() -> App {
+        let mut app = App::new(Repo::default()).attached();
+        app.apply(&SessionEvent::Commands {
+            commands: vec![niobe_core::event::SlashCommand {
+                name: "effort".to_owned(),
+                description: String::new(),
+                argument_hint: None,
+                mid_prompt: false,
+            }],
+        });
+        app
+    }
+
+    /// The efforts `chosen` was handed, oldest first.
+    fn efforts_kept(chosen: &Chosen) -> Vec<Option<String>> {
+        chosen
+            .kept
+            .iter()
+            .filter_map(|preference| match preference {
+                crate::preferences::Preference::Effort(level) => Some(level.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// `/effort max` sent and taken, its turn ended, then `held` typed while
+    /// the backend holds what it is sent, as one starting its CLI again does.
+    fn an_effort_held_after_max_was_taken(held: &str) -> (App, Kept, Attached, Chosen) {
+        let mut app = app_offering_effort();
+        let mut journal = Kept::default();
+        let mut backend = Attached::default();
+        let mut chosen = Chosen::default();
+        typed(&mut app, "/effort max");
+        send_produced(&mut app, &mut journal, &mut backend, &mut Forgotten);
+        keep_preferences(&mut app, &mut chosen);
+        app.apply(&SessionEvent::TurnEnded);
+        backend.hold = true;
+        typed(&mut app, held);
+        send_produced(&mut app, &mut journal, &mut backend, &mut Forgotten);
+        keep_preferences(&mut app, &mut chosen);
+        (app, journal, backend, chosen)
+    }
+
+    /// An effort sent while the backend holds turns is no choice until the
+    /// backend hands it on: one dropped with Esc puts back the level taken
+    /// before it, and the next session is not started at an effort that
+    /// never reached the backend.
+    #[test]
+    fn a_held_effort_that_is_dropped_keeps_the_level_taken_before_it() {
+        for held in ["/effort auto", "/effort low"] {
+            let (mut app, mut journal, mut backend, mut chosen) =
+                an_effort_held_after_max_was_taken(held);
+
+            app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+            send_produced(&mut app, &mut journal, &mut backend, &mut Forgotten);
+            assert_eq!(backend.interrupts, 1, "{held}");
+            backend.settles = vec![Err("it was stopped before it was sent".to_owned())];
+            fold_backend(&mut app, &mut journal, &mut backend, &mut Unwatched);
+            keep_preferences(&mut app, &mut chosen);
+
+            assert_eq!(app.effort(), Some("max"), "{held}");
+            assert_eq!(
+                efforts_kept(&chosen),
+                [Some("max".to_owned())],
+                "{held} never reached the backend"
+            );
+        }
+    }
+
+    /// A held effort the backend hands on is the next session's once it is.
+    #[test]
+    fn a_held_effort_that_is_handed_on_is_kept_once_it_is() {
+        let (mut app, mut journal, mut backend, mut chosen) =
+            an_effort_held_after_max_was_taken("/effort low");
+        assert_eq!(efforts_kept(&chosen), [Some("max".to_owned())]);
+
+        backend.settles = vec![Ok(())];
+        fold_backend(&mut app, &mut journal, &mut backend, &mut Unwatched);
+        keep_preferences(&mut app, &mut chosen);
+
+        assert_eq!(app.effort(), Some("low"));
+        assert_eq!(
+            efforts_kept(&chosen),
+            [Some("max".to_owned()), Some("low".to_owned())]
+        );
+    }
+
+    /// Two efforts held and both dropped put back the level before the
+    /// first, not the one the first would have set.
+    #[test]
+    fn two_held_efforts_dropped_together_put_back_the_level_before_both() {
+        let (mut app, mut journal, mut backend, mut chosen) =
+            an_effort_held_after_max_was_taken("/effort low");
+        typed(&mut app, "/effort high");
+        send_produced(&mut app, &mut journal, &mut backend, &mut Forgotten);
+        keep_preferences(&mut app, &mut chosen);
+
+        backend.settles = vec![
+            Err("the `claude` CLI could not be started again".to_owned()),
+            Err("the `claude` CLI could not be started again".to_owned()),
+        ];
+        fold_backend(&mut app, &mut journal, &mut backend, &mut Unwatched);
+        keep_preferences(&mut app, &mut chosen);
+
+        assert_eq!(app.effort(), Some("max"));
+        assert_eq!(efforts_kept(&chosen), [Some("max".to_owned())]);
+    }
+
+    /// Of two held efforts, the first handed on and the second dropped, the
+    /// first is what is in force and what is kept.
+    #[test]
+    fn a_held_effort_handed_on_before_one_dropped_is_the_one_kept() {
+        let (mut app, mut journal, mut backend, mut chosen) =
+            an_effort_held_after_max_was_taken("/effort low");
+        typed(&mut app, "/effort high");
+        send_produced(&mut app, &mut journal, &mut backend, &mut Forgotten);
+        keep_preferences(&mut app, &mut chosen);
+
+        backend.settles = vec![
+            Ok(()),
+            Err("the `claude` CLI started again did not take it".to_owned()),
+        ];
+        fold_backend(&mut app, &mut journal, &mut backend, &mut Unwatched);
+        keep_preferences(&mut app, &mut chosen);
+
+        assert_eq!(app.effort(), Some("low"));
+        assert_eq!(
+            efforts_kept(&chosen),
+            [Some("max".to_owned()), Some("low".to_owned())]
+        );
+    }
+
+    /// A mode change the backend took the request for and then put back — a
+    /// CLI being started again that could not be — leaves the next session
+    /// in the mode the backend says this one is still in; the reports every
+    /// turn repeats keep nothing again, and a session nobody moved here keeps
+    /// nothing the backend reports.
+    #[test]
+    fn a_mode_change_the_backend_puts_back_keeps_the_mode_it_is_still_in() {
+        use crate::preferences::Preference;
+        let mut app = App::new(Repo::default()).attached();
+        let mut journal = Kept::default();
+        let mut backend = Attached::default();
+        let mut chosen = Chosen::default();
+        app.apply(&SessionEvent::ModeSelected { mode: Mode::Ask });
+        app.apply(&SessionEvent::ModeSelected { mode: Mode::Auto });
+        app.apply(&SessionEvent::ModeSelected { mode: Mode::Ask });
+        keep_preferences(&mut app, &mut chosen);
+        assert_eq!(chosen.kept, [], "nobody moved the mode here");
+
+        app.on_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+        send_produced(&mut app, &mut journal, &mut backend, &mut Forgotten);
+        keep_preferences(&mut app, &mut chosen);
+        backend.produces = vec![
+            SessionEvent::Error {
+                message: "the `claude` CLI could not be started again".to_owned(),
+                fatal: false,
+            },
+            SessionEvent::ModeSelected { mode: Mode::Ask },
+        ];
+        fold_backend(&mut app, &mut journal, &mut backend, &mut Unwatched);
+        keep_preferences(&mut app, &mut chosen);
+        app.apply(&SessionEvent::ModeSelected { mode: Mode::Ask });
+        app.apply(&SessionEvent::ModeSelected { mode: Mode::Plan });
+        keep_preferences(&mut app, &mut chosen);
+
+        assert_eq!(app.session().mode(), Some(Mode::Plan));
+        assert_eq!(
+            chosen.kept,
+            [Preference::Mode(Mode::Auto), Preference::Mode(Mode::Ask)]
+        );
+    }
+
     #[test]
     fn a_tick_that_drained_nothing_is_not_a_backend_producing() {
         let mut app = App::new(Repo::default()).attached();

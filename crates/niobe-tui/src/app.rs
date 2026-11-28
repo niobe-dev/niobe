@@ -1465,14 +1465,33 @@ struct BeforePrompt {
 enum HeldTurn {
     /// A prompt, taken back out of the session as soon as the backend said
     /// it held it, and drawn on the rule above the composer meanwhile.
-    Prompt(String),
+    Prompt {
+        text: String,
+        effort: Option<HeldEffort>,
+    },
     /// A prompt that could not be taken back out, as something else had been
     /// folded in after it by the time the backend said it held it: kept as
     /// sent then, as a refused prompt that cannot be taken back is, and
     /// counted among the prompts sent at `sent_at`.
-    Kept { sent_at: usize },
+    Kept {
+        sent_at: usize,
+        effort: Option<HeldEffort>,
+    },
     /// What the operator's commands did.
     Handed { commands: Vec<String>, text: String },
+}
+
+/// The effort a held prompt set, which is no choice until the backend hands
+/// the prompt on.
+#[derive(Debug)]
+struct HeldEffort {
+    /// The effort set before it, which comes back where the prompt is never
+    /// handed on — unless a later held prompt sets one too, which then goes
+    /// back to it instead.
+    before: EffortSet,
+    /// What it keeps for the next session once it is handed on: a level, or
+    /// none after `auto`; nothing for a word that is no level.
+    kept: Option<Preference>,
 }
 
 /// A run of events the journal refused, which the transcript shows as one
@@ -2012,7 +2031,8 @@ pub struct App {
     effort: EffortSet,
     /// The effort set before the one just set, while the prompt that sets it
     /// has not reached the backend: one it never reaches is no choice, and
-    /// what was set before it comes back.
+    /// what was set before it comes back. A prompt the backend holds takes it
+    /// with it ([`App::prompt_held`]).
     effort_before_sent: Option<EffortSet>,
     /// Events the operator produced that have not been handed out to be kept.
     produced: Vec<Event>,
@@ -2141,6 +2161,12 @@ pub struct App {
     /// the session goes back to if the backend will not take the change, and
     /// the mode it moved to, which is kept for the next session once taken.
     modes_before: VecDeque<(Option<Mode>, Mode)>,
+    /// The mode last kept for the next session from here, if one was. Once
+    /// one was, a mode the backend says the session is in is kept where it
+    /// differs: a change it took the request for and then put back, or
+    /// refused on its own stream, leaves the session in the mode it says,
+    /// and that is the one the next session is to open in.
+    mode_kept: Option<Mode>,
     /// The mode the backend was started in, which is where a session no
     /// backend has reported a mode for still is.
     started_in: Mode,
@@ -2658,6 +2684,7 @@ impl App {
             spike: None,
             attached: false,
             modes_before: VecDeque::new(),
+            mode_kept: None,
             started_in: Mode::Ask,
             sent_here: false,
             first_prompt_unsent: false,
@@ -2702,6 +2729,15 @@ impl App {
         // it took put it there, and otherwise none, leaving the backend's own.
         if let Event::ModelRefused { back_to } = event {
             self.model_refused(back_to);
+        }
+        // A mode change the backend took the request for can still be put
+        // back — refused on its stream, or never made by a CLI that could not
+        // be started again — and the mode it says the session is in then is
+        // the one the next session is to open in, once one was kept here.
+        if let Event::ModeSelected { mode } = event
+            && self.mode_kept.is_some()
+        {
+            self.keep_mode(*mode);
         }
     }
 
@@ -5238,13 +5274,25 @@ impl App {
     /// are how the operator wants the project's calls gated, where `plan` is
     /// a step on the way to a change, and a session that opened in it would
     /// change nothing until it was moved off it.
+    ///
+    /// What the backend says afterwards stands over it ([`App::apply`]).
     pub fn mode_taken(&mut self) {
         let Some((_, mode)) = self.modes_before.pop_front() else {
             return;
         };
+        self.keep_mode(mode);
+    }
+
+    /// Keeps `mode` for the next session where it is `ask` or `auto` and not
+    /// the one last kept from here: the report every turn repeats keeps
+    /// nothing again.
+    fn keep_mode(&mut self, mode: Mode) {
         match mode {
-            Mode::Ask | Mode::Auto => self.preferred.push(Preference::Mode(mode)),
-            Mode::Plan => {}
+            Mode::Ask | Mode::Auto if self.mode_kept != Some(mode) => {
+                self.mode_kept = Some(mode);
+                self.preferred.push(Preference::Mode(mode));
+            }
+            Mode::Ask | Mode::Auto | Mode::Plan => {}
         }
     }
 
@@ -10777,7 +10825,7 @@ impl App {
         let by_backend = self
             .held_turns
             .iter()
-            .filter(|turn| matches!(turn, HeldTurn::Prompt(_)))
+            .filter(|turn| matches!(turn, HeldTurn::Prompt { .. }))
             .count();
         let by_backend = match by_backend {
             0 => None,
@@ -10976,17 +11024,25 @@ impl App {
     /// and the rule above the composer says it is held. Where something
     /// else was folded in after it first, it is kept as sent, as a prompt
     /// the backend refused then is ([`App::not_sent`]).
+    ///
+    /// The effort it set goes with it, and is kept for the next session
+    /// only once it is handed on.
     pub fn prompt_held(&mut self, text: &str) -> Option<Event> {
+        let effort = self.hold_effort();
         match self.before_prompt.take() {
             Some(before) => {
                 self.take_out(before);
-                self.held_turns.push_back(HeldTurn::Prompt(text.to_owned()));
+                self.held_turns.push_back(HeldTurn::Prompt {
+                    text: text.to_owned(),
+                    effort,
+                });
                 None
             }
             None => {
                 let sent_at = self.sent.len();
                 self.sent_to_backend(text);
-                self.held_turns.push_back(HeldTurn::Kept { sent_at });
+                self.held_turns
+                    .push_back(HeldTurn::Kept { sent_at, effort });
                 Some(Event::UserMessage {
                     text: text.to_owned(),
                 })
@@ -11024,7 +11080,7 @@ impl App {
     fn holds_prompts(&self) -> bool {
         self.held_turns
             .iter()
-            .any(|turn| matches!(turn, HeldTurn::Prompt(_) | HeldTurn::Kept { .. }))
+            .any(|turn| matches!(turn, HeldTurn::Prompt { .. } | HeldTurn::Kept { .. }))
     }
 
     /// Asks the backend to drop the prompts it holds, which it says through
@@ -11048,19 +11104,21 @@ impl App {
     /// that reached no backend ([`Event::PromptNotSent`]), opening nothing.
     pub fn held_settled(&mut self, outcomes: Vec<Result<(), String>>) -> Vec<Event> {
         let count = outcomes.len().min(self.held_turns.len());
-        let settled: Vec<(HeldTurn, Result<(), String>)> =
+        let mut settled: VecDeque<(HeldTurn, Result<(), String>)> =
             self.held_turns.drain(..count).zip(outcomes).collect();
         let mut kept = Vec::new();
-        for (turn, outcome) in settled {
+        while let Some((turn, outcome)) = settled.pop_front() {
             match (turn, outcome) {
-                (HeldTurn::Prompt(text), Ok(())) => {
+                (HeldTurn::Prompt { text, effort }, Ok(())) => {
                     self.sent_to_backend(&text);
+                    self.effort_handed_on(effort);
                     let said = Event::UserMessage { text };
                     self.fold_event(&said);
                     kept.push(said);
                 }
-                (HeldTurn::Prompt(text), Err(why)) => {
+                (HeldTurn::Prompt { text, effort }, Err(why)) => {
                     self.held_not_sent(&text);
+                    self.effort_dropped(effort, &mut settled);
                     let said = Event::PromptNotSent {
                         text,
                         why: Some(why),
@@ -11068,14 +11126,15 @@ impl App {
                     self.fold_event(&said);
                     kept.push(said);
                 }
-                (HeldTurn::Kept { .. }, Ok(())) => {}
-                (HeldTurn::Kept { sent_at }, Err(why)) => {
+                (HeldTurn::Kept { effort, .. }, Ok(())) => self.effort_handed_on(effort),
+                (HeldTurn::Kept { sent_at, effort }, Err(why)) => {
                     // The backend never read it, and numbers the prompts it
                     // did read without it.
                     if sent_at < self.sent.len() {
                         self.sent.remove(sent_at);
                     }
                     self.said_not_sent(false, &why);
+                    self.effort_dropped(effort, &mut settled);
                 }
                 (HeldTurn::Handed { commands, text }, outcome) => {
                     let said = match outcome {
@@ -11100,14 +11159,70 @@ impl App {
         kept
     }
 
-    /// Takes back what a held prompt that never reached the backend set
-    /// going: the clear it was, which nothing will answer now, and the
-    /// effort set with it.
+    /// Takes back the clear a held prompt that never reached the backend
+    /// was, which nothing will answer now.
     fn held_not_sent(&mut self, text: &str) {
         if crate::menu::typed_command(text).is_some_and(|(typed, _)| typed.name == "clear") {
             self.clear_sent = false;
         }
-        self.effort_not_sent();
+    }
+
+    /// Takes the effort the prompt just held set out of what is kept for the
+    /// next session, to go with the prompt until the backend says whether it
+    /// handed it on; nothing where the prompt set none.
+    fn hold_effort(&mut self) -> Option<HeldEffort> {
+        let before = self.effort_before_sent.take()?;
+        let kept = match self.effort {
+            EffortSet::Level(_) | EffortSet::Auto => self
+                .preferred
+                .iter()
+                .rposition(|preference| matches!(preference, Preference::Effort(_)))
+                .map(|at| self.preferred.remove(at)),
+            EffortSet::Nothing | EffortSet::Unnamed => None,
+        };
+        Some(HeldEffort { before, kept })
+    }
+
+    /// Keeps for the next session the effort a held prompt set, now that the
+    /// backend has handed it on.
+    fn effort_handed_on(&mut self, effort: Option<HeldEffort>) {
+        if let Some(kept) = effort.and_then(|effort| effort.kept) {
+            self.preferred.push(kept);
+        }
+    }
+
+    /// Puts back the effort set before the one a held prompt that never
+    /// reached the backend set, keeping nothing of it. Where a later held
+    /// prompt sets an effort too, the session is left on that one, and this
+    /// one's `before` becomes that one's, as a refused mode change hands its
+    /// own on ([`App::mode_not_taken`]).
+    fn effort_dropped(
+        &mut self,
+        effort: Option<HeldEffort>,
+        settled: &mut VecDeque<(HeldTurn, Result<(), String>)>,
+    ) {
+        let Some(dropped) = effort else {
+            return;
+        };
+        let later = settled
+            .iter_mut()
+            .map(|(turn, _)| turn)
+            .chain(self.held_turns.iter_mut())
+            .find_map(|turn| match turn {
+                HeldTurn::Prompt {
+                    effort: Some(later),
+                    ..
+                }
+                | HeldTurn::Kept {
+                    effort: Some(later),
+                    ..
+                } => Some(later),
+                HeldTurn::Prompt { .. } | HeldTurn::Kept { .. } | HeldTurn::Handed { .. } => None,
+            });
+        match later {
+            Some(later) => later.before = dropped.before,
+            None => self.effort = dropped.before,
+        }
     }
 
     /// Settles every turn the backend still holds as not handed on, for
