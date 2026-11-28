@@ -29,6 +29,7 @@ The gate has to be green on your machine. In order:
 cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+cargo test --release -p niobe-core --test linear
 cargo test --release -p niobe-tui --test frame_budget
 cargo test --release -p niobe-store --test replay_budget
 cargo test --release -p niobe-cli --test replay_budget

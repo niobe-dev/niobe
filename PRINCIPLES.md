@@ -297,8 +297,8 @@ Tests that draw use `enter_screen_only`, never `enter`.
 
 ### 7.4 Timing tests are timed in release, on a binary of their own (MUST)
 
-The frame and replay budgets assert the median (or fastest) of 31 runs in `--release`; the debug
-suite reports them ignored. A timing test that shares a binary with drawing tests is timing them.
+The frame and replay budgets assert the median (or fastest) of 31 runs in `--release`, and the
+readers' linear-time ratios the fastest of 11; the debug suite reports them ignored. A timing test that shares a binary with drawing tests is timing them.
 
 ### 7.5 Error paths and hostile inputs are tests, not comments (MUST)
 

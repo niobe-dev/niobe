@@ -76,7 +76,8 @@ reviewers that encode both, for an agent working in this tree.
   that a conversation read back from its clear has the turns it had live;
   `tests/linear.rs` times a shell command read for a test run, and an output read for its failing
   tests, against one four times as long, the fastest of eleven readings of each, and holds the
-  ratio well under the sixteen a reader that goes back over what it read would take;
+  ratio well under the sixteen a reader that goes back over what it read would take, timed in
+  an optimised build only (§6);
   `work.rs` puts each tool call under the kind of
   work it did — exploring code, editing files, building and testing, version control, the web,
   delegating, an MCP server, housekeeping — from the tool's name or, for a shell call, from the
@@ -909,6 +910,11 @@ Where tests live:
     Each is against 50 ms, a binary of its own, and timed only in an optimised build
     (`cargo test --release -p niobe-store --test replay_budget`, and the same for `niobe-cli`):
     in the debug suite under other builds' load they took from 20 ms to over a second.
+  - `niobe-core/tests/linear.rs` (§1) times each reader of a shell command and of its output on
+    an input four times as long as another and holds the ratio under 8. It is a binary of its
+    own and timed only in an optimised build, `cargo test --release -p niobe-core --test
+    linear`, since a ratio taken in the debug suite measures the binaries built and run beside
+    it; `cargo test --workspace` reports it ignored.
   - `niobe-core/tests/work.rs` reads shell commands and tool names that are easy to misread as
     the program that did the work and the kind of work it was.
   - `niobe-store/tests/store.rs` runs the session store against a real SQLite file, a restart
@@ -946,6 +952,7 @@ Run all of it, in this order, and report exact pass/fail counts — never infer 
 cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+cargo test --release -p niobe-core --test linear
 cargo test --release -p niobe-tui --test frame_budget
 cargo test --release -p niobe-store --test replay_budget
 cargo test --release -p niobe-cli --test replay_budget

@@ -22,7 +22,8 @@ Run in order, stopping on the first hard failure, and **read the actual output**
 2. `cargo clippy --workspace --all-targets -- -D warnings` — expect clean.
 3. `cargo test --workspace` — capture exact `passed / failed / ignored` per test binary and in
    total. The timed budgets report ignored here; that is expected.
-4. `cargo test --release -p niobe-tui --test frame_budget`, then
+4. `cargo test --release -p niobe-core --test linear`, then
+   `cargo test --release -p niobe-tui --test frame_budget`, then
    `cargo test --release -p niobe-store --test replay_budget`, then
    `cargo test --release -p niobe-cli --test replay_budget` — one at a time, nothing else running;
    they are timing tests. A failure on a loaded machine is re-run once before it is reported as a

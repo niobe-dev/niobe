@@ -128,6 +128,7 @@ fn ci() -> Result<(), String> {
             &[]
         }
         _ => &[
+            ("niobe-core", "linear"),
             ("niobe-tui", "frame_budget"),
             ("niobe-store", "replay_budget"),
             ("niobe-cli", "replay_budget"),

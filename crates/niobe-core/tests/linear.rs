@@ -15,6 +15,12 @@
 //! adds time, so the fastest is the reading it touched least, and reading
 //! the two in turn puts a burst of load on both. The tests take turns on a
 //! lock so that neither times the other.
+//!
+//! They are timed only in an optimised build,
+//! `cargo test --release -p niobe-core --test linear`, which the gate runs
+//! as it runs the frame and replay budgets: the debug suite reports them
+//! ignored, since there they time the other test binaries building and
+//! running beside them as much as the readers.
 
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -67,6 +73,7 @@ fn redirections(n: usize) -> String {
 }
 
 #[test]
+#[cfg_attr(debug_assertions, ignore = "a reader is timed in an optimised build")]
 fn a_command_of_many_redirection_characters_is_read_in_time_linear_in_its_length() {
     assert_linear(
         "a run of `>`",
@@ -111,6 +118,7 @@ fn doc_test_sets(n: usize) -> String {
 }
 
 #[test]
+#[cfg_attr(debug_assertions, ignore = "a reader is timed in an optimised build")]
 fn failing_summaries_with_no_list_are_read_in_time_linear_in_the_output() {
     assert_linear(
         "failing summaries",
@@ -121,6 +129,7 @@ fn failing_summaries_with_no_list_are_read_in_time_linear_in_the_output() {
 }
 
 #[test]
+#[cfg_attr(debug_assertions, ignore = "a reader is timed in an optimised build")]
 fn a_long_unclosed_list_and_the_summaries_after_it_are_read_in_time_linear_in_the_output() {
     assert_linear(
         "a list and summaries",
@@ -131,6 +140,7 @@ fn a_long_unclosed_list_and_the_summaries_after_it_are_read_in_time_linear_in_th
 }
 
 #[test]
+#[cfg_attr(debug_assertions, ignore = "a reader is timed in an optimised build")]
 fn doc_test_sets_no_binary_is_named_for_are_read_in_time_linear_in_the_output() {
     assert_linear(
         "doc-test sets",
