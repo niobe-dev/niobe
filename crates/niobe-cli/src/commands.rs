@@ -1012,10 +1012,14 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temporary directory can be created");
         let marker = dir.path().join("left-running");
         let mut commands = Commands::at(dir.path());
+        // The subshell lets go of the output before it starts the sleep, so
+        // nothing holds it once sh ends: a `sleep 300 >/dev/null &` instead
+        // holds it from its fork until its own redirection, which a loaded
+        // machine can put past the wait for the output to close.
         let ran = ran_in(
             &mut commands,
             &format!(
-                "(sleep 300 >/dev/null 2>&1 & echo $! > {})",
+                "(exec >/dev/null 2>&1; sleep 300 & echo $! > {})",
                 marker.display()
             ),
         );
