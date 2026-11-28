@@ -18,8 +18,10 @@
 //!   redirection, a backquote or anything in brackets), nor holds a `$` that
 //!   does more than name a plain parameter (`$HOME`, never `${…}`, `$'…'` or
 //!   `$[…]`, which can build a command out of text that shows none), nor
-//!   climbs above the prefix with `..` — or with `%2e%2e`, which a URL
-//!   parser reads as `..`.
+//!   holds in one word the pieces a shell can join into such an expansion
+//!   after reading it (a `~` and a `[`, which zsh can make `~[…]` of, or a
+//!   brace beside a `$`, a `~` or a `[`), nor climbs above the prefix with
+//!   `..` — or with `%2e%2e`, which a URL parser reads as `..`.
 //! * `Edit(/repo/src/*)`, `Bash(cat src/*)` — a star inside a word finishes
 //!   that one word and nothing else: a name of plain characters, with no
 //!   space before a second argument and nothing a shell would expand, and one
@@ -194,7 +196,8 @@ impl Rule {
     /// A `*` covers what follows the prefix only where that is more of the
     /// same call: `Bash(cargo *)` covers `cargo test --workspace` but not
     /// `cargo test && rm -rf ~`, nor `cargo test ${y[$'a[\x60id\x60]']}`,
-    /// whose escapes bash makes backquotes of and runs; and
+    /// whose escapes bash makes backquotes of and runs, nor
+    /// `git status {x,~}[x]`, whose braces zsh joins into `~[x]`; and
     /// `Edit(/repo/src/*)` does not cover `/repo/src/../../etc/passwd`. A star
     /// inside a word stands for the rest of that word alone, so
     /// `Bash(cat src/*)` does not cover `cat src/x ../secret`. The check reads
@@ -316,18 +319,17 @@ fn star_stands_for(prefix: &str, rest: &str) -> bool {
 /// also the Mac's `/bin/sh`, `cargo test ${y[$'a[\x60id\x60]']}` runs `id`,
 /// and under zsh 5.9 `git status ${~z::=$'*\x28e:id:\x29'}` does.
 ///
-/// zsh's dynamic named directory, `~[…]`, is refused too: zsh hands what the
-/// brackets hold to whatever `zsh_directory_name` the operator's setup
-/// defines.
+/// zsh's dynamic named directory, `~[…]`, is refused too, and so is every word
+/// a shell could join one out of, which [`joins_into_no_expansion`] reads.
 ///
 /// A plain `$HOME` is left covered: its value is the environment's, not the
 /// agent's, and neither shell reads a value it substitutes as a command —
 /// zsh's `$HOME:s/…/…/` included, even with `GLOB_SUBST` on — unless a
 /// bracket or a backquote of its own makes it one. So are quotes, a
-/// backslash, braces, a tilde, `=cmd` and `!`, which a shell that is not
-/// interactive does not read as history: none of them made anything run
-/// under bash, sh, dash or zsh. The last character of the prefix is read
-/// before `rest` because a star finishes the `$` or `~` a prefix ends on.
+/// backslash, braces in a word of their own, a tilde, `=cmd` and `!`, which a
+/// shell that is not interactive does not read as history: none of them made
+/// anything run under bash, sh, dash or zsh. The last character of the prefix
+/// is read before `rest` because a star finishes the `$` a prefix ends on.
 fn expands_to_no_code(prefix: &str, rest: &str) -> bool {
     let mut chars = prefix
         .chars()
@@ -336,16 +338,128 @@ fn expands_to_no_code(prefix: &str, rest: &str) -> bool {
         .chain(rest.chars())
         .peekable();
     while let Some(c) = chars.next() {
-        let refused = match c {
-            '$' => !names_a_plain_parameter(&mut chars),
-            '~' => chars.peek() == Some(&'['),
-            _ => false,
-        };
-        if refused {
+        if c == '$' && !names_a_plain_parameter(&mut chars) {
             return false;
         }
     }
-    true
+    joins_into_no_expansion(prefix, rest)
+}
+
+/// Whether no word that `rest` is part of, read on from `prefix`, holds the
+/// pieces of an expansion a shell could join after the rule has read the
+/// text.
+///
+/// A word is what lies between blanks no quote or backslash holds. One that
+/// holds a `~` and a `[` anywhere is refused: zsh removes an empty pair of
+/// quotes before it expands a tilde, so `~""[x]` is the dynamic named
+/// directory `~[x]`. One that holds a brace and any of `$`, `~` or `[` is
+/// refused: zsh expands braces before tildes, so `{x,~}[x]` and `~{[,}x]`
+/// are `~[x]` too, each of which ran the operator's `zsh_directory_name` under
+/// zsh 5.9 with the CLI's options and with the defaults; and bash expands
+/// braces before parameters, so `{$,}{x}` is `${x}` there — a `$` the reading
+/// in [`expands_to_no_code`] refuses already, and a brace beside any `$` is
+/// asked about rather than trusted to that reading. Braces only move
+/// what the word holds, so a brace in a word with none of those three joins
+/// nothing a shell expands further: `{a,b}` stays covered. A `=` beside a
+/// brace stays covered as well, since zsh's `=cmd` expands to a path and
+/// nothing else, and a star inside a word may stand for a `=`, so refusing it
+/// here would leave a rule that ends inside such a word including a call the
+/// wider rule refuses. A `~`, `[` or `$` that quotes make literal is counted
+/// all the same: a word that holds one beside the rest is asked about, which
+/// is the safe side of reading a quote wrongly.
+fn joins_into_no_expansion(prefix: &str, rest: &str) -> bool {
+    let text = prefix
+        .chars()
+        .map(|c| (c, false))
+        .chain(rest.chars().map(|c| (c, true)));
+    let mut quoting = Quoting::Unquoted;
+    let mut word = Word::default();
+    for (c, starred) in text {
+        if quoting.ends_a_word_at(c) {
+            if word.may_join_into_an_expansion() {
+                return false;
+            }
+            word = Word::default();
+            continue;
+        }
+        quoting = quoting.after(c);
+        word.hold(c, starred);
+    }
+    !word.may_join_into_an_expansion()
+}
+
+/// How the next character of a shell word is quoted, as POSIX sh, bash and
+/// zsh read it.
+#[derive(Clone, Copy)]
+enum Quoting {
+    Unquoted,
+    /// Straight after an unquoted `$`, where a `'` opens `$'…'`.
+    Dollar,
+    /// After an unquoted `\`, which makes the next character literal.
+    Escaped,
+    Single,
+    Double,
+    /// After a `\` inside double quotes.
+    DoubleEscaped,
+    /// Inside `$'…'`, where a `\` escapes a quote.
+    Ansi,
+    /// After a `\` inside `$'…'`.
+    AnsiEscaped,
+}
+
+impl Quoting {
+    /// Whether `c`, read in this state, is a blank that ends a word.
+    fn ends_a_word_at(self, c: char) -> bool {
+        matches!(self, Self::Unquoted | Self::Dollar) && matches!(c, ' ' | '\t')
+    }
+
+    /// The state after reading `c` in this one.
+    fn after(self, c: char) -> Self {
+        match (self, c) {
+            (Self::Unquoted | Self::Dollar, '\\') => Self::Escaped,
+            (Self::Unquoted | Self::Dollar, '$') => Self::Dollar,
+            (Self::Dollar, '\'') => Self::Ansi,
+            (Self::Unquoted, '\'') => Self::Single,
+            (Self::Unquoted | Self::Dollar, '"') => Self::Double,
+            (Self::Unquoted | Self::Dollar | Self::Escaped, _) => Self::Unquoted,
+            (Self::Single, '\'') | (Self::Double, '"') | (Self::Ansi, '\'') => Self::Unquoted,
+            (Self::Single, _) => Self::Single,
+            (Self::Double, '\\') => Self::DoubleEscaped,
+            (Self::Double | Self::DoubleEscaped, _) => Self::Double,
+            (Self::Ansi, '\\') => Self::AnsiEscaped,
+            (Self::Ansi | Self::AnsiEscaped, _) => Self::Ansi,
+        }
+    }
+}
+
+/// What one shell word holds of the pieces [`joins_into_no_expansion`]
+/// refuses together, and whether any of it is the star's.
+#[derive(Default)]
+struct Word {
+    starred: bool,
+    tilde: bool,
+    bracket: bool,
+    brace: bool,
+    dollar: bool,
+}
+
+impl Word {
+    fn hold(&mut self, c: char, starred: bool) {
+        self.starred |= starred;
+        match c {
+            '~' => self.tilde = true,
+            '[' => self.bracket = true,
+            '{' => self.brace = true,
+            '$' => self.dollar = true,
+            _ => {}
+        }
+    }
+
+    fn may_join_into_an_expansion(&self) -> bool {
+        self.starred
+            && ((self.tilde && self.bracket)
+                || (self.brace && (self.dollar || self.tilde || self.bracket)))
+    }
 }
 
 /// Reads the name a `$` was followed by off `chars`, and says whether it was
@@ -759,6 +873,50 @@ mod tests {
     }
 
     #[test]
+    fn a_star_does_not_cover_a_word_braces_or_empty_quotes_join_into_a_dynamic_named_directory() {
+        // zsh expands braces before tildes and removes empty quotes before
+        // them too, so each of these hands `x` to the operator's
+        // `zsh_directory_name` though no `[` follows the `~` as written.
+        // Each created the file under zsh 5.9 with the CLI's own options and
+        // with the defaults; the `--x=` forms under MAGIC_EQUAL_SUBST.
+        let git = Rule::parse("Bash(git *)").expect("the rule is valid");
+
+        for target in [
+            "git status {x,~}[x]",
+            "git status ~{[,}x]",
+            "git status ~{[,[}x]",
+            "git status ~\"\"[x]",
+            "git status ~''[x]",
+            "git status --x={,~}[x]",
+            "git status --x=~\"\"[x]",
+        ] {
+            assert!(!git.covers("Bash", Some(target)), "{target}");
+        }
+    }
+
+    #[test]
+    fn a_star_does_not_cover_a_brace_in_a_word_whose_pieces_it_could_join_into_an_expansion() {
+        // bash expands braces before parameters, so `{$,}{x}` is `${x}` there;
+        // a word that holds a brace and a `$`, a `~` or a `[` is asked about,
+        // whatever its quotes say.
+        let rule = Rule::parse("Bash(cargo *)").expect("the rule is valid");
+
+        for target in [
+            "cargo test $HOME{a,b}",
+            "cargo test {a,$HOME}",
+            "cargo test {x,~}",
+            "cargo test {a,b}[c]",
+            "cargo test \"{\"~[x]",
+            "cargo test '~'{[,}x]",
+            "cargo test a\\ b{x,~}[x]",
+            // A quoted blank does not end the word.
+            "cargo test ~\" \"[x]",
+        ] {
+            assert!(!rule.covers("Bash", Some(target)), "{target}");
+        }
+    }
+
+    #[test]
     fn a_star_still_covers_arguments_a_shell_expands_into_no_code() {
         // Each of these ran nothing under bash, sh, dash and zsh, with zsh's
         // GLOB_SUBST, EXTENDED_GLOB and SH_WORD_SPLIT on too.
@@ -769,8 +927,12 @@ mod tests {
             "cargo test \"$HOME\" $_ $PWD/x $IFS",
             "cargo test $HOME:h:t $HOME:s/x/y/",
             "cargo test 'single quoted' \"double quoted\" back\\ slash",
-            "cargo test {a,b} {1..3} $HOME{a,b}",
+            "cargo test {a,b} {1..3} $HOME {x,y}/z",
             "cargo test ~/x ~+ =ls !! !-1",
+            // A `~`, a brace and a bracket in words of their own are not
+            // joined: a blank no quote holds ends a word.
+            "cargo test ~/x {a,b} [ab] ~+ $HOME",
+            "cargo test \"a b\" ~/x 'c d' {e,f}",
             "cargo test 'a[\\x60touch /tmp/pwn\\x60]'",
             "cargo test -p niobe-core -- --nocapture",
             "cargo test --manifest-path crates/niobe-core/Cargo.toml",
@@ -788,6 +950,8 @@ mod tests {
             "Bash(cargo test ${y[*)",
             "Bash(cargo test $*)",
             "Bash(cargo test ~[*)",
+            "Bash(cargo test {x,~}[*)",
+            "Bash(cargo test ~\"\"[*)",
         ] {
             let inner = Rule::parse(inner).expect("the text in this test is valid");
             assert!(!outer.includes(&inner), "{inner}");
@@ -795,6 +959,13 @@ mod tests {
         assert!(outer.includes(
             &Rule::parse("Bash(cargo run -- \"$HOME\" *)").expect("the text in this test is valid")
         ));
+
+        // A star inside a word may stand for a `=`, so a brace beside one is
+        // covered by both rules alike.
+        let inner = Rule::parse("Bash(cargo test {a,b}*)").expect("the rule is valid");
+        assert!(outer.includes(&inner));
+        assert!(inner.covers("Bash", Some("cargo test {a,b}=x")));
+        assert!(outer.covers("Bash", Some("cargo test {a,b}=x")));
     }
 
     #[test]
