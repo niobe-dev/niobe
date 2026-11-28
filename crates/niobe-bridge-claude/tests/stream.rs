@@ -2071,6 +2071,10 @@ fn a_prompt_the_cli_held_is_taken_in_where_it_says_it_started_it() {
         ends[1] < taken[1] && taken[1] < replied("plum")[0],
         "the prompt sent while compacting is taken after it: {events:#?}"
     );
+    // The compaction's turn ends with that prompt still held, though its
+    // `queued_turn_count` is 0: only that end says another turn follows it.
+    let follows = at(&|event| matches!(event, Event::TurnFollows));
+    assert_eq!(follows, [ends[1] - 1], "{events:#?}");
 }
 
 fn interrupted() -> Vec<Event> {

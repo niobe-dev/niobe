@@ -905,11 +905,13 @@ pub enum Event {
     /// has ended: work it ran in the background — a sub-agent, a shell
     /// command — ended while that turn was under way, after the turn last
     /// took such news in, and the backend answers it in a turn rather than in
-    /// the one ending. Arrives just before that turn's [`Event::TurnEnded`].
+    /// the one ending; or a prompt the operator sent while it was busy is
+    /// still held, not taken in, and the backend starts it as the turn
+    /// after. Arrives just before that turn's [`Event::TurnEnded`].
     ///
-    /// The background work has ended, so nothing still running says another
-    /// turn is coming; this does. It says nothing of how the session stands,
-    /// which the turn that follows shows.
+    /// The background work has ended, and a held prompt is no turn yet, so
+    /// nothing still running says another turn is coming; this does. It says
+    /// nothing of how the session stands, which the turn that follows shows.
     TurnFollows,
 
     /// The backend took in a prompt the operator sent while it was busy with

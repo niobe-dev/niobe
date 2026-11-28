@@ -2038,9 +2038,9 @@ pub struct App {
     clear_sent: bool,
     /// Where a turn the backend owes of its own stands: one a turn said
     /// follows it, on work that ended under it that no request took in, or
-    /// the one it starts on a prompt it held behind a turn that has ended.
-    /// The backend holds what it is sent until that turn is done, so a
-    /// command waits for it as for a running turn.
+    /// on a prompt it still held as that turn ended. The backend holds what
+    /// it is sent until that turn is done, so a command waits for it as for
+    /// a running turn.
     owed: Owed,
     /// The prompts sent while a clear waits, oldest first, which the shell
     /// holds until it has been answered: the backend takes a prompt that
@@ -2272,8 +2272,7 @@ enum Owed {
     Nothing,
     /// A turn still running said another follows it.
     Announced,
-    /// The turn that said so, or that a prompt was held behind, has ended,
-    /// and the one it owes has not begun.
+    /// The turn that said so has ended, and the one it owes has not begun.
     Due,
 }
 
@@ -2645,10 +2644,9 @@ impl App {
     /// transcript entry it produces, if it produces one.
     pub fn apply(&mut self, event: &Event) {
         self.heard = true;
-        let held = !self.queued_prompts.is_empty();
         self.fold_event(event);
         self.clear_answered(event);
-        self.follow_owed_turn(event, held);
+        self.follow_owed_turn(event);
         // A model the backend refused is not what the next session should
         // open on: it keeps the one the backend went back to, where a change
         // it took put it there, and otherwise none, leaving the backend's own.
@@ -10585,23 +10583,22 @@ impl App {
     }
 
     /// Keeps where a turn the backend owes stands, as its events say:
-    /// announced by a turn's word that another follows, due once that turn
-    /// has ended — or once a turn ends with a prompt sent during it still
-    /// `held`, not taken in, which the backend starts as the turn after —
-    /// and owed no longer once a turn begins, or ends, after it, which an
-    /// owed turn whose request failed does without opening, or once the
-    /// conversation or the session ends.
-    fn follow_owed_turn(&mut self, event: &Event, held: bool) {
+    /// announced by a turn's word that another follows — on work that ended
+    /// under it, or on a prompt sent during it that the backend still holds
+    /// — due once that turn has ended, and owed no longer once a turn
+    /// begins, or ends, after it, which an owed turn whose request failed
+    /// does without opening, or once the conversation or the session ends.
+    ///
+    /// Only the backend's word makes a turn owed. The prompts the shell
+    /// draws as queued are its own marks, which come off where the backend
+    /// says it took one in, and a prompt it took in without saying so, or
+    /// dropped, would leave every command refused until the next prompt.
+    fn follow_owed_turn(&mut self, event: &Event) {
         self.owed = match (event, self.owed) {
             (Event::TurnFollows, _) => Owed::Announced,
             (Event::Cleared | Event::SessionLeft | Event::Error { fatal: true, .. }, _) => {
                 Owed::Nothing
             }
-            // The turn that said another follows has ended: the one it owes
-            // is due from here.
-            // The backend starts what it still holds once the turn it held
-            // it behind has ended.
-            (Event::TurnEnded, _) if held => Owed::Due,
             // The turn that said another follows has ended: the one it owes
             // is due from here.
             (Event::TurnEnded, Owed::Announced) => Owed::Due,
@@ -23971,8 +23968,9 @@ mod tests {
     }
 
     /// A prompt sent while a turn ran and not taken into it is the turn the
-    /// backend starts once that one ends: a clear sent in that gap would be
-    /// held behind it, and is refused as one sent while a turn runs.
+    /// backend starts once that one ends, which the backend says as that
+    /// turn ends: a clear sent in that gap would be held behind it, and is
+    /// refused as one sent while a turn runs.
     #[test]
     fn a_clear_waits_for_the_turn_of_a_prompt_held_behind_the_last() {
         let mut app = offering(&["clear"]);
@@ -23980,6 +23978,7 @@ mod tests {
         app.apply(&said("go"));
         let mut app = sent(app, "and then");
         hand_on(&mut app, &mut recorded);
+        app.apply(&Event::TurnFollows);
         app.apply(&Event::TurnEnded);
 
         recorded.clear();
@@ -23993,6 +23992,32 @@ mod tests {
             agent: None,
         });
         app.apply(&Event::TurnEnded);
+        app.perform(crate::menu::Action::NewSession);
+        hand_on(&mut app, &mut recorded);
+        assert_eq!(
+            recorded,
+            [Event::UserMessage {
+                text: "/clear".to_owned()
+            }]
+        );
+    }
+
+    /// A prompt drawn as queued that the backend never said it took in — one
+    /// it took in beside a call in a turn it started on its own, or one it
+    /// dropped — is no turn the backend owes where its turn ends without
+    /// saying another follows: what the shell marked is not what the backend
+    /// holds, and a clear goes straight out.
+    #[test]
+    fn a_prompt_still_marked_queued_owes_no_turn_the_backend_did_not_announce() {
+        let mut app = offering(&["clear"]);
+        let mut recorded = Vec::new();
+        app.apply(&said("go"));
+        let mut app = sent(app, "and then");
+        hand_on(&mut app, &mut recorded);
+        app.apply(&Event::TurnEnded);
+
+        assert_eq!(app.can_send("clear"), Ok(()));
+        recorded.clear();
         app.perform(crate::menu::Action::NewSession);
         hand_on(&mut app, &mut recorded);
         assert_eq!(

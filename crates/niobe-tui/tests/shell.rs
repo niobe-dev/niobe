@@ -7339,8 +7339,9 @@ fn what_a_command_did_waits_for_the_turn_the_backend_owes_of_its_own() {
 }
 
 /// A prompt the operator sent while a turn ran, which the backend did not
-/// take into that turn, is the turn the backend starts once it ends: what a
-/// command did waits for that one too, rather than going in behind it.
+/// take into that turn, is the turn the backend starts once it ends, as the
+/// backend says before that turn's end: what a command did waits for that
+/// one too, rather than going in behind it.
 #[test]
 fn what_a_command_did_waits_for_the_turn_of_a_prompt_queued_behind_the_last() {
     use ratatui::crossterm::event::KeyCode;
@@ -7360,6 +7361,7 @@ fn what_a_command_did_waits_for_the_turn_of_a_prompt_queued_behind_the_last() {
         "the prompt waits behind the running turn"
     );
 
+    app.apply(&Event::TurnFollows);
     app.apply(&Event::TurnEnded);
     assert_eq!(
         app.take_handed(),
@@ -7376,6 +7378,28 @@ fn what_a_command_did_waits_for_the_turn_of_a_prompt_queued_behind_the_last() {
     let (commands, _) = app
         .take_handed()
         .expect("handed once the queued prompt's turn ended");
+    assert_eq!(commands, ["make check"]);
+}
+
+/// A prompt still drawn as queued when a turn ends without the backend
+/// saying another follows — taken in beside a call where the backend said
+/// nothing of it, or dropped — holds nothing up: what a command did is
+/// handed as soon as that turn ends.
+#[test]
+fn what_a_command_did_is_handed_after_a_turn_no_other_follows_whatever_is_marked_queued() {
+    use ratatui::crossterm::event::KeyCode;
+
+    let mut app = session_that_runs_commands().attached();
+    app.apply(&Event::UserMessage {
+        text: "deploy it".to_owned(),
+    });
+    let id = run_command(&mut app, "make check");
+    app.ran(exited(&id, "ok\n", 0));
+    type_keys(&mut app, "then tag it");
+    press(&mut app, KeyCode::Enter);
+
+    app.apply(&Event::TurnEnded);
+    let (commands, _) = app.take_handed().expect("handed once the turn ended");
     assert_eq!(commands, ["make check"]);
 }
 

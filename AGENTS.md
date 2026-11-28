@@ -386,7 +386,8 @@ reviewers that encode both, for an agent working in this tree.
   In the Claude bridge: `wire.rs` is the CLI's stream-json protocol and is private to the crate,
   `translate.rs` turns one message of it into events and owns no process — and reads, off the
   CLI's `command_lifecycle` lines, when it takes in a prompt it held because it was busy with
-  another, as `PromptTaken` — and reads the words of a thinking block, where the CLI carries
+  another, as `PromptTaken`, and a turn that ends with one still held, or with the CLI counting
+  one still queued, as a turn that says another follows — and reads the words of a thinking block, where the CLI carries
   any, as the model's `Narration` of what it is doing, which the CLI shows and which is not its
   reply, said before the call it led to — and reads the CLI's
   own mark of a call it did not run for want of permission, beside the result live and as the

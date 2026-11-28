@@ -1250,8 +1250,9 @@ impl Translator {
         std::mem::take(&mut self.asked)
     }
 
-    /// Where one of the operator's messages stands, which is read for one
-    /// thing: when the CLI takes in a message it held.
+    /// Where one of the operator's messages stands, which is read for two
+    /// things: when the CLI takes in a message it held, and whether a turn
+    /// ends with one still held, which the CLI starts as the turn after.
     ///
     /// A message is held where the CLI queued it while it was busy with
     /// another — one it had started and not completed — and taken in where
@@ -1274,7 +1275,9 @@ impl Translator {
                 }
                 self.commands_started.insert(id);
             }
-            "completed" | "cancelled" => {
+            // A message the CLI discarded or refused while it waited is
+            // never started: it is held no longer, and no turn follows on it.
+            "completed" | "cancelled" | "discarded" | "refused" => {
                 self.commands_started.remove(&id);
                 self.commands_held.remove(&id);
             }
@@ -3279,9 +3282,16 @@ impl Translator {
 
     fn result(&mut self, outcome: wire::Outcome, out: &mut Vec<Event>) {
         self.goal_checked_at_end(out);
-        self.turn_follows = Some(outcome.queued_turn_count.unwrap_or(0) > 0);
+        let queued = outcome.queued_turn_count.unwrap_or(0) > 0;
+        self.turn_follows = Some(queued);
         self.turn_under_way = false;
-        let owes_a_turn = std::mem::take(&mut self.untaken_end);
+        // The CLI starts a turn of its own straight after this one on work
+        // that ended under it, and on a message of the operator's it still
+        // holds: one it counts as queued, or one it said it queued behind
+        // another and has not started — which the count leaves out where the
+        // turn ending is a compaction's (`queued-prompts.jsonl`).
+        let owes_a_turn =
+            std::mem::take(&mut self.untaken_end) || queued || !self.commands_held.is_empty();
         let interrupted = outcome.interrupted();
         let shown_limit = self.usage_limit.take();
         let limit_words = limit_in(&outcome, shown_limit.as_deref());
@@ -8441,6 +8451,44 @@ mod tests {
                 None,
                 "{tool} {input}"
             );
+        }
+    }
+
+    /// A turn that ends with one of the operator's messages still held, or
+    /// with the CLI counting one still queued, is followed by the turn the
+    /// CLI starts on it, and says so before it ends. One the CLI took in,
+    /// cancelled, discarded or refused while it waited starts none.
+    #[test]
+    fn a_turn_ending_with_a_message_still_held_says_another_follows() {
+        let said = |id: &str, state: &str| {
+            format!(r#"{{"type":"command_lifecycle","command_uuid":"{id}","state":"{state}"}}"#)
+        };
+        let result = |count: u32| {
+            format!(
+                r#"{{"type":"result","subtype":"success","is_error":false,"queued_turn_count":{count}}}"#
+            )
+        };
+        let ended = |lines: &[String]| {
+            let mut translator = translator();
+            let mut events = Vec::new();
+            for line in lines {
+                events = translator.line(line);
+            }
+            events
+        };
+        let follows = [Event::TurnFollows, Event::TurnEnded];
+
+        let held = [
+            said("a", "queued"),
+            said("a", "started"),
+            said("b", "queued"),
+        ];
+        assert_eq!(ended(&[&held[..], &[result(0)]].concat()), follows);
+        assert_eq!(ended(&[result(1)]), follows);
+        assert_eq!(ended(&[result(0)]), [Event::TurnEnded]);
+        for state in ["started", "cancelled", "discarded", "refused"] {
+            let lines = [&held[..], &[said("b", state), result(0)]].concat();
+            assert_eq!(ended(&lines), [Event::TurnEnded], "{state}");
         }
     }
 
