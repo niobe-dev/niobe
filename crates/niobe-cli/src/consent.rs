@@ -30,7 +30,8 @@ pub fn question(untrusted: &Untrusted) -> Question {
 
 /// What `config`, read whole, sets that takes effect only once it is trusted:
 /// its `[permissions]` rules, its `default_profile`, a `titles = "model"`
-/// that has the model title each new session, and for each profile what
+/// that has the model title each new session, a `hand_commands = true` that
+/// sends the agent what the operator's `!` commands did, and for each profile what
 /// it starts the backend with, how it says the account is billed, and whether
 /// it replaces one of `replaces`, the user's profiles. Under a profile's
 /// `settings` row go what the file `attached` holds that is put in front of the
@@ -49,8 +50,9 @@ fn grants(config: &Config, replaces: &[String], attached: &[Attached]) -> Vec<(S
         rows.push(row("permissions", format!("allow {}", rules.join(", "))));
     }
     // What the file names as the default, and whether it turns the model's
-    // titles on, read the way the file's own withholding reads them, so that
-    // the two cannot disagree on what is withheld.
+    // titles or the handing of commands on, read the way the file's own
+    // withholding reads them, so that the two cannot disagree on what is
+    // withheld.
     let withheld = config.clone().untrusted();
     if let Some((name, _)) = withheld.withheld_default() {
         rows.push(row("default_profile", name.to_owned()));
@@ -59,6 +61,12 @@ fn grants(config: &Config, replaces: &[String], attached: &[Attached]) -> Vec<(S
         rows.push(row(
             "titles",
             "model, which spends tokens titling every new session".to_owned(),
+        ));
+    }
+    if withheld.withholds_hand_commands() {
+        rows.push(row(
+            "hand_commands",
+            "true, which sends the agent what your ! commands print".to_owned(),
         ));
     }
     for (name, profile) in config.profiles() {
@@ -540,6 +548,136 @@ backend = "claude"
         };
 
         assert!(question(&untrusted).grants.is_empty());
+    }
+
+    /// Trusted, the file's `true` replaces the operator's `false`, and what
+    /// their `!` commands print goes to the agent: the question that puts it
+    /// in force shows it, beside whatever else it asks about.
+    #[test]
+    fn a_file_that_hands_commands_to_the_agent_says_so_in_the_question_and_the_listing() {
+        let untrusted = untrusted_text(
+            "hand_commands = true\n[profiles.p]\nbackend = \"claude\"\nenv = { A = \"1\" }\n",
+        );
+
+        assert_eq!(
+            question(&untrusted).grants,
+            [
+                (
+                    "hand_commands".to_owned(),
+                    "true, which sends the agent what your ! commands print".to_owned()
+                ),
+                ("p".to_owned(), "env A=1".to_owned()),
+            ]
+        );
+
+        let alone = untrusted_text("hand_commands = true\n");
+        assert_eq!(
+            listing(&alone),
+            [
+                "/r/.niobe/config.toml puts in force once trusted:",
+                "  hand_commands  true, which sends the agent what your ! commands print",
+            ]
+        );
+        assert!(
+            question(&untrusted_text("hand_commands = false\n"))
+                .grants
+                .is_empty()
+        );
+    }
+
+    /// A file for each key a config may hold and each value of it that
+    /// matters to trust, each beside the key it sets.
+    const ONE_SETTING: [(&str, &str); 25] = [
+        ("default_profile", "default_profile = \"p\"\n"),
+        ("theme", "theme = \"neo\"\n"),
+        ("titles", "titles = \"model\"\n"),
+        ("titles", "titles = \"first-prompt\"\n"),
+        ("terse", "terse = true\n"),
+        ("terse", "terse = false\n"),
+        ("decisions", "decisions = true\n"),
+        ("decisions", "decisions = false\n"),
+        ("hand_commands", "hand_commands = true\n"),
+        ("hand_commands", "hand_commands = false\n"),
+        ("trim", "trim = true\n"),
+        ("trim", "trim = false\n"),
+        ("permissions", "[permissions]\nallow = [\"Edit\"]\n"),
+        ("keys", "[keys]\nmcp = \"F11\"\n"),
+        ("notify", "[notify]\nbell = true\nnotification = true\n"),
+        ("notify", "[notify]\nbell = false\nnotification = false\n"),
+        ("profiles", "[profiles.p]\nbackend = \"claude\"\n"),
+        ("backend", "[profiles.p]\nbackend = \"codex\"\n"),
+        (
+            "env",
+            "[profiles.p]\nbackend = \"claude\"\nenv = { A = \"1\" }\n",
+        ),
+        (
+            "args",
+            "[profiles.p]\nbackend = \"claude\"\nargs = [\"--x\"]\n",
+        ),
+        (
+            "models",
+            "[profiles.p]\nbackend = \"claude\"\nmodels = [\"opus\"]\n",
+        ),
+        (
+            "billing",
+            "[profiles.p]\nbackend = \"claude\"\nbilling = \"plan\"\n",
+        ),
+        (
+            "billing",
+            "[profiles.p]\nbackend = \"claude\"\nbilling = \"metered\"\n",
+        ),
+        (
+            "settings",
+            "[profiles.p]\nbackend = \"claude\"\nsettings = \"s.json\"\n",
+        ),
+        (
+            "auth_refresh",
+            "[profiles.p]\nbackend = \"claude\"\nauth_refresh = \"login\"\n",
+        ),
+    ];
+
+    /// The keys the error for `text` says are expected, in backticks.
+    fn expected_keys(text: &str) -> Vec<String> {
+        let error = Config::parse(text, &PathBuf::from("/r/.niobe/config.toml"))
+            .expect_err("the key is unknown")
+            .to_string();
+        let (_, expected) = error
+            .split_once("expected")
+            .expect("the error lists the keys");
+        expected
+            .split('`')
+            .skip(1)
+            .step_by(2)
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// Whatever a file holds that takes effect only once it is trusted is a
+    /// row of the question that trusts it: a key the question left out would
+    /// be put in force by an answer given without seeing it, and a file
+    /// holding only that key would never be asked about at all.
+    #[test]
+    fn the_question_has_a_row_exactly_where_the_file_needs_trust() {
+        let named = [
+            expected_keys("nope = 1\n"),
+            expected_keys("[profiles.p]\nbackend = \"claude\"\nnope = 1\n"),
+        ];
+        for key in named.iter().flatten() {
+            assert!(
+                ONE_SETTING.iter().any(|(set, _)| set == key),
+                "no file in the list sets `{key}`, which a config may hold"
+            );
+        }
+
+        for (key, text) in ONE_SETTING {
+            let untrusted = untrusted_text(text);
+            assert_eq!(
+                !question(&untrusted).grants.is_empty(),
+                untrusted.config.needs_trust(),
+                "`{key}` in {text:?}: {:?}",
+                question(&untrusted).grants
+            );
+        }
     }
 
     fn untrusted_text(text: &str) -> Untrusted {

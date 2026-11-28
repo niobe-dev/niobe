@@ -471,6 +471,9 @@ pub struct Config {
     /// Whether a file that has not been trusted says `titles = "model"`,
     /// which is not in force.
     withheld_model_titles: bool,
+    /// Whether a file that has not been trusted says `hand_commands = true`,
+    /// which is not in force.
+    withheld_hand_commands: bool,
     /// The file this config's `[permissions]` rules were read from, where it
     /// is one file that has some, which is what a withheld rule is named by.
     rules_from: Option<PathBuf>,
@@ -643,6 +646,7 @@ impl Config {
             self.withheld_rules = over.withheld_rules;
         }
         self.withheld_model_titles |= over.withheld_model_titles;
+        self.withheld_hand_commands |= over.withheld_hand_commands;
         self.rules_from = None;
         if over.theme.is_some() {
             self.theme = over.theme;
@@ -681,7 +685,8 @@ impl Config {
     /// loses its `env`, its `args`, its `settings`, its `auth_refresh` and
     /// what it says about billing; the `default_profile` is not in force;
     /// its `[permissions]` rules answer no prompt; a `titles = "model"` does
-    /// not turn the model's titles on; and laid over another
+    /// not turn the model's titles on; a `hand_commands = true` does not send
+    /// the agent what the operator's `!` commands did; and laid over another
     /// config it adds profiles without replacing any (see [`trust`] and
     /// [`Config::overlay`]).
     ///
@@ -715,6 +720,7 @@ impl Config {
         // their leave; a file nobody has read may take it back, not give it.
         if self.hand_commands == Some(true) {
             self.hand_commands = None;
+            self.withheld_hand_commands = true;
         }
         self.untrusted = true;
         self
@@ -734,6 +740,8 @@ impl Config {
             || self.withheld_rules.is_some()
             || self.titles == Some(Titles::Model)
             || self.withheld_model_titles
+            || self.hand_commands == Some(true)
+            || self.withheld_hand_commands
     }
 
     /// Whether this config says anything about which profile a session runs
@@ -754,6 +762,13 @@ impl Config {
     /// tokens on every new session.
     pub fn withholds_model_titles(&self) -> bool {
         self.withheld_model_titles
+    }
+
+    /// Whether a file that has not been trusted says `hand_commands = true`,
+    /// which it may not turn on: what the operator's `!` commands print can be
+    /// anything they can read, and it would reach a model.
+    pub fn withholds_hand_commands(&self) -> bool {
+        self.withheld_hand_commands
     }
 
     /// Whether `over` defines a profile this config defines too, which it
@@ -1821,6 +1836,30 @@ backend = "codex"
         assert!(!parsed("").overlay(stops).hand_commands());
     }
 
+    /// Trusted, the file's `true` replaces the operator's `false`, so the
+    /// file is one to ask about, as a `titles = "model"` is.
+    #[test]
+    fn a_file_that_hands_commands_to_the_agent_is_one_to_trust_and_says_so() {
+        let hands = Config::parse("hand_commands = true\n", &path("repo"))
+            .expect("the text in this test is valid");
+        assert!(
+            hands.needs_trust(),
+            "read whole, it would send what `!` printed"
+        );
+
+        assert!(!hands.withholds_hand_commands());
+
+        let withheld = hands.untrusted();
+        assert!(withheld.needs_trust(), "still asked about once withheld");
+        assert!(withheld.withholds_hand_commands());
+
+        let stops = Config::parse("hand_commands = false\n", &path("repo"))
+            .expect("the text in this test is valid")
+            .untrusted();
+        assert!(!stops.needs_trust(), "turning it off is not gated");
+        assert!(!stops.withholds_hand_commands());
+    }
+
     #[test]
     fn a_file_nobody_trusted_may_stop_titles_costing_tokens_and_may_not_start_them() {
         let user = parsed("titles = \"first-prompt\"\n");
@@ -1863,6 +1902,110 @@ backend = "codex"
             .untrusted();
         assert!(!saves.needs_trust(), "turning titles off is not gated");
         assert!(!saves.withholds_model_titles());
+    }
+
+    /// A file for each key a config may hold and each value of it that
+    /// matters to trust, each beside the key it sets: the top-level key, or
+    /// for a profile's, the profile's key.
+    const ONE_SETTING: [(&str, &str); 26] = [
+        ("default_profile", "default_profile = \"p\"\n"),
+        ("theme", "theme = \"neo\"\n"),
+        ("titles", "titles = \"model\"\n"),
+        ("titles", "titles = \"first-prompt\"\n"),
+        ("terse", "terse = true\n"),
+        ("terse", "terse = false\n"),
+        ("decisions", "decisions = true\n"),
+        ("decisions", "decisions = false\n"),
+        ("hand_commands", "hand_commands = true\n"),
+        ("hand_commands", "hand_commands = false\n"),
+        ("trim", "trim = true\n"),
+        ("trim", "trim = false\n"),
+        ("permissions", "[permissions]\nallow = [\"Edit\"]\n"),
+        ("keys", "[keys]\nmcp = \"F11\"\n"),
+        ("notify", "[notify]\nbell = true\nnotification = true\n"),
+        ("notify", "[notify]\nbell = false\nnotification = false\n"),
+        ("profiles", "[profiles.p]\nbackend = \"claude\"\n"),
+        ("backend", "[profiles.p]\nbackend = \"codex\"\n"),
+        (
+            "env",
+            "[profiles.p]\nbackend = \"claude\"\nenv = { A = \"1\" }\n",
+        ),
+        (
+            "args",
+            "[profiles.p]\nbackend = \"claude\"\nargs = [\"--x\"]\n",
+        ),
+        (
+            "models",
+            "[profiles.p]\nbackend = \"claude\"\nmodels = [\"opus\"]\n",
+        ),
+        (
+            "billing",
+            "[profiles.p]\nbackend = \"claude\"\nbilling = \"plan\"\n",
+        ),
+        (
+            "billing",
+            "[profiles.p]\nbackend = \"claude\"\nbilling = \"metered\"\n",
+        ),
+        (
+            "settings",
+            "[profiles.p]\nbackend = \"claude\"\nsettings = \"s.json\"\n",
+        ),
+        (
+            "auth_refresh",
+            "[profiles.p]\nbackend = \"claude\"\nauth_refresh = \"login\"\n",
+        ),
+        ("env", "[profiles.p]\nbackend = \"claude\"\nenv = {}\n"),
+    ];
+
+    /// The keys an unknown key's error says are expected, in backticks.
+    fn expected_keys(error: &str) -> Vec<String> {
+        let (_, expected) = error
+            .split_once("expected")
+            .expect("the error lists the keys");
+        expected
+            .split('`')
+            .skip(1)
+            .step_by(2)
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// What [`Config::untrusted`] withholds is what [`Config::needs_trust`]
+    /// asks about: a key withheld and not asked about would be put in force by
+    /// a trust the question never showed it to, and one asked about and not
+    /// withheld would be in force before anyone agreed.
+    #[test]
+    fn a_file_needs_trust_exactly_where_untrusted_withholds_something_from_it() {
+        let named = [
+            invalid("nope = 1\n"),
+            invalid("[profiles.p]\nbackend = \"claude\"\nnope = 1\n"),
+        ];
+        for key in named.iter().flat_map(|error| expected_keys(error)) {
+            assert!(
+                ONE_SETTING.iter().any(|(set, _)| *set == key),
+                "no file in the list sets `{key}`, which a config may hold"
+            );
+        }
+
+        for (key, text) in ONE_SETTING {
+            let whole = Config::parse(text, &path("repo")).expect("the text in this test is valid");
+            let withheld = whole.clone().untrusted();
+            let withholds = withheld
+                != Config {
+                    untrusted: true,
+                    ..whole.clone()
+                };
+            assert_eq!(
+                whole.needs_trust(),
+                withholds,
+                "`{key}` in {text:?}, read whole"
+            );
+            assert_eq!(
+                withheld.needs_trust(),
+                withholds,
+                "`{key}` in {text:?}, withheld"
+            );
+        }
     }
 
     #[test]

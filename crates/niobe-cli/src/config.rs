@@ -2162,6 +2162,29 @@ mod tests {
         assert_eq!(untrusted.path, config);
     }
 
+    /// A repository file that says only `hand_commands = true` would, trusted,
+    /// send the agent what the operator's `!` commands print; so it is offered
+    /// for trust, and until then the operator's own switch holds.
+    #[test]
+    fn a_repository_file_that_only_hands_commands_to_the_agent_is_untrusted() {
+        let dir = tempfile::tempdir().expect("a temporary directory can be created");
+        let user = dir.path().join("user.toml");
+        std::fs::write(&user, "hand_commands = false\n")
+            .expect("the temporary directory is writable");
+        let root = dir.path().join("repo");
+        let config = repo::config_path(&root);
+        std::fs::create_dir_all(config.parent().expect("a directory"))
+            .expect("the temporary directory is writable");
+        std::fs::write(&config, "hand_commands = true\n")
+            .expect("the temporary directory is writable");
+
+        let loaded = load_from(Some(user), &root).expect("both configs load");
+
+        assert!(!loaded.config.hand_commands());
+        let untrusted = loaded.untrusted.expect("the file is named as untrusted");
+        assert_eq!(untrusted.path, config);
+    }
+
     /// A repository whose config names `settings` as a profile's settings
     /// file and `args`, trusted under a record of the test's own.
     struct Cloned {

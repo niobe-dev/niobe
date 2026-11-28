@@ -1853,8 +1853,8 @@ fn trust(yes: bool) -> Result<(), String> {
     say!(
         "the profiles it defines are in force here as it defines them, env, args, settings, \
          auth_refresh and billing included, and so are its default_profile, its \
-         permissions and its titles; `niobe profiles` lists them, and editing the file asks \
-         again"
+         permissions, its titles and its hand_commands; `niobe profiles` lists them, and \
+         editing the file asks again"
     );
     Ok(())
 }
@@ -1900,8 +1900,9 @@ fn untrust() -> Result<(), String> {
     }
     say!(
         "{} is no longer trusted; the env, args, settings, auth_refresh and billing of the \
-         profiles it defines are not in force, nor its default_profile, nor a titles = \
-         \"model\", nor a profile it names like one of yours",
+         profiles it defines are not in force, nor its default_profile, nor its permissions, \
+         nor a titles = \"model\", nor a hand_commands = true, nor a profile it names like \
+         one of yours",
         path.display()
     );
     Ok(())
@@ -2548,7 +2549,8 @@ IN THE SHELL:
     it ended and the last {handed} bytes of what it printed, as a turn of its
     own, and carries on from there; one that ends while a turn runs waits for
     it. A command stopped, or one that could not start, is sent to nobody,
-    and hand_commands = false, at the top of a config, sends none.
+    and hand_commands = false, at the top of a config, sends none; a
+    repository's config nobody has trusted can turn it off and not on.
     Esc, Ctrl+C            While a turn runs, stop it: the call it is running
                            or the reply it is writing is cut off, and the
                            session stays for the next prompt. Ctrl+C closes

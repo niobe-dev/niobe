@@ -134,7 +134,8 @@ reviewers that encode both, for an agent working in this tree.
   where it cannot be read;
   `trust.rs` records which config files may put an `env`, `args`, a `settings` file or an
   `auth_refresh` in front of a backend — or say how a profile is billed, choose the default
-  profile, allow tool calls without asking, or replace one of the user's — as each file's SHA-256 under the user's own config
+  profile, allow tool calls without asking, turn the model's titles or the handing of `!`
+  commands to the agent on, or replace one of the user's — as each file's SHA-256 under the user's own config
   directory, because a repository's file arrives with the clone — never written past the mebibyte
   it is read back at, and no config's files given more than a quarter of it, since every repository
   shares it; `error.rs` names the file in
@@ -685,9 +686,9 @@ These hold for every change. Breaking one is a bug even when the feature ships g
    spoofing — this is the line the whole bridge-first design stands on. A repository's config
    is not where that line is crossed either: a profile it defines does not set an `env`, pass
    `args`, name a `settings` file, run an `auth_refresh` or say how the account is billed, the
-   file does not choose the default profile, its `[permissions]` rules answer no prompt, and it
-   does not replace a profile the user's file defines, until the operator has trusted that
-   file's contents.
+   file does not choose the default profile, its `[permissions]` rules answer no prompt, its
+   `titles = "model"` and `hand_commands = true` turn nothing on, and it does not replace a
+   profile the user's file defines, until the operator has trusted that file's contents.
 2. **No telemetry.** Network calls go only to configured providers and the CLIs. `cargo xtask
    layering` checks names and text, not behaviour. It reads the tree of crates the product is
    built from — every workspace member's normal and build dependencies, with every feature on
